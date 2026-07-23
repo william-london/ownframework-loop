@@ -1,6 +1,6 @@
 # Native Claude Permission Profile
 
-> The OwnFramework Loop V1 supervised-local-only pilot REQUIRES Claude
+> The OwnFramework Loop V2 supervised-local-only pilot REQUIRES Claude
 > permission rules to be active in any session that runs an active loop.
 > The plugin hooks are a contextual guard; native Claude permissions are a
 > structural one. Both must be present.

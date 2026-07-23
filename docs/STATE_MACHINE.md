@@ -1,6 +1,6 @@
 # State Machine
 
-OwnFramework Loop V1 uses exactly **nine** states. Any state transition
+OwnFramework Loop V2 uses exactly **nine** states. Any state transition
 not listed in the allowed map is rejected by `lib/ownframework_loop/transitions.py`.
 
 ## States
@@ -48,7 +48,7 @@ CHANGES_REQUESTED -> STOPPED
 ```
 
 `APPROVED`, `BLOCKED`, and `STOPPED` are terminal. Reopening a terminal
-state is not in V1 and would require explicit operator action plus an
+state is not in V2 and would require explicit operator action plus an
 auditable event.
 
 ## Concurrency
@@ -93,6 +93,6 @@ post-pass validation.
 - Test infrastructure failure.
 - Ambiguous product decision.
 - Missing irreducible access.
-- Runtime deployment required (out of scope for V1).
+- Runtime deployment required (out of scope for V2).
 - Authority outside the packet (e.g., attempting to push to a remote).
 - Budget or runtime limit.

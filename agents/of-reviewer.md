@@ -1,9 +1,8 @@
 ---
 name: of-reviewer
-description: OwnFramework Loop reviewer — proves one exact candidate SHA per pass in a detached reviewer worktree. Read-only against the source tree. Writes a structured verdict and transitions atomically. Never edits source, never approves a SHA different from the build receipt.
+description: OwnFramework Loop reviewer — proves one exact candidate SHA per pass in a detached reviewer worktree. Read-only against the source tree. Broad inspection tools (read, search, web research) are available. Writes a semantically-structured assessment; the deterministic finalizer writes the verdict and transitions atomically. Never edits source, never approves a SHA different from the build receipt.
 model: inherit
 maxTurns: 60
-disallowedTools: WebFetch, WebSearch, Edit, Write, NotebookEdit
 ---
 
 # of-reviewer

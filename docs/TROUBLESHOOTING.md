@@ -20,9 +20,9 @@ Inside the Claude session, run `/reload-plugins`.
 1. Identify the hook output (Claude Code prints the block reason).
 2. Run the command through `ofloop` first. The CLI uses the same
    guards as the hooks, so what passes the CLI passes the hooks.
-3. V1 has NO operator escape hatch and no model-controllable bypass.
+3. V2 has NO operator escape hatch and no model-controllable bypass.
    Any future emergency override must be human-operated, out-of-band,
-   and outside V1. Push, merge, deploy, and remote creation are
+   and outside V2. Push, merge, deploy, and remote creation are
    forbidden structurally — there is no way to opt in.
 
 ## State transitions fail with "invalid transition"

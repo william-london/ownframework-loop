@@ -205,3 +205,65 @@ def stderr(msg: str) -> None:
     """Write a message to stderr."""
     sys.stderr.write(msg + "\n")
     sys.stderr.flush()
+
+
+# Work-class-aware budget recommendations. These are starting ranges, not
+# hard caps; the packet's exact risk_budget overrides them. William approves
+# the packet's budget, so any reasonable mission-appropriate funding is
+# acceptable. The blanket V1 400-line / 12-file cap is removed.
+WORK_CLASS_BUDGET_RECOMMENDATIONS: dict[str, dict[str, int]] = {
+    # Small: bug / doc / test / CI repair
+    "BUG":            {"max_files_changed": 25, "max_diff_lines": 1000, "max_repair_rounds": 4},
+    "DOCUMENTATION":  {"max_files_changed": 20, "max_diff_lines": 800,  "max_repair_rounds": 3},
+    "TESTING":        {"max_files_changed": 25, "max_diff_lines": 1000, "max_repair_rounds": 4},
+    "CI_REPAIR":      {"max_files_changed": 12, "max_diff_lines": 600,  "max_repair_rounds": 3},
+    # Medium: feature / debug / hardening
+    "FEATURE":        {"max_files_changed": 60, "max_diff_lines": 3000, "max_repair_rounds": 5},
+    "DEBUG":          {"max_files_changed": 40, "max_diff_lines": 2000, "max_repair_rounds": 4},
+    "HARDENING":      {"max_files_changed": 50, "max_diff_lines": 2500, "max_repair_rounds": 5},
+    # Large bounded: refactor / tracked contract / new repo
+    "REFACTOR":       {"max_files_changed": 150, "max_diff_lines": 8000, "max_repair_rounds": 6},
+    "TRACKED_CONTRACT": {"max_files_changed": 80, "max_diff_lines": 4000, "max_repair_rounds": 5},
+    "NEW_REPOSITORY": {"max_files_changed": 100, "max_diff_lines": 5000, "max_repair_rounds": 5},
+    # Research / runtime
+    "RESEARCH_SPIKE": {"max_files_changed": 30, "max_diff_lines": 1500, "max_repair_rounds": 3},
+    "RUNTIME_CANDIDATE": {"max_files_changed": 60, "max_diff_lines": 3000, "max_repair_rounds": 5},
+}
+
+# Generous runaway ceiling — past this requires packet-level elevation.
+ABSOLUTE_BUDGET_CEILING: dict[str, int] = {
+    "max_files_changed": 500,
+    "max_diff_lines": 30000,
+    "max_repair_rounds": 12,
+    "max_build_passes": 16,
+    "max_review_passes": 16,
+}
+
+
+def recommended_budget_adjustment(work_class: str) -> dict[str, int]:
+    """Return the recommended budget values for a work class.
+
+    These are defaults; the spec skill may use them to propose a packet
+    budget, and the packet-approved budget always wins.
+    """
+    return dict(WORK_CLASS_BUDGET_RECOMMENDATIONS.get(work_class, {
+        "max_files_changed": 25,
+        "max_diff_lines": 1000,
+        "max_repair_rounds": 4,
+    }))
+
+
+def budget_within_ceiling(budget: dict[str, int]) -> tuple[bool, list[str]]:
+    """Return (ok, list_of_violations). Refuses unbounded fields."""
+    violations: list[str] = []
+    for k, ceiling in ABSOLUTE_BUDGET_CEILING.items():
+        v = budget.get(k)
+        if v is None:
+            continue
+        if int(v) > ceiling:
+            violations.append(f"{k}={v} exceeds absolute ceiling {ceiling}")
+    for required in ("max_files_changed", "max_diff_lines", "max_repair_rounds"):
+        if not isinstance(budget.get(required), int) or int(budget.get(required)) < 1:
+            violations.append(f"{required} must be a positive integer")
+    return (not violations), violations
+

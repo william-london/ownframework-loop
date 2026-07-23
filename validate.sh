@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# OwnFramework Loop V1 — validate.
+# OwnFramework Loop V2 — validate.
 #
 # Two distinct code paths:
 #
@@ -43,11 +43,11 @@ ok() { echo "  PASS: $*"; }
 bad() { echo "  FAIL: $*"; exit 1; }
 
 if [[ "$INSTALLED_MODE" -eq 1 ]]; then
-  echo "=== OwnFramework Loop V1 — validate (INSTALLED COPY) ==="
+  echo "=== OwnFramework Loop V2 — validate (INSTALLED COPY) ==="
   DEFAULT_ROOT="/Users/mr.mrs.london/.claude/skills/of-loop"
   ROOT="${ROOT:-$DEFAULT_ROOT}"
 else
-  echo "=== OwnFramework Loop V1 — validate (SOURCE TREE) ==="
+  echo "=== OwnFramework Loop V2 — validate (SOURCE TREE) ==="
   HERE="$(cd "$(dirname "$0")" && pwd)"
   ROOT="${ROOT:-$HERE}"
 fi

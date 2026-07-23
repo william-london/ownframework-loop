@@ -7,6 +7,19 @@
           {
             "type": "command",
             "command": "${CLAUDE_PLUGIN_ROOT}/hooks/block_dangerous_bash.sh"
+          },
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/external_action_guard.sh"
+          }
+        ]
+      },
+      {
+        "matcher": "WebFetch",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/external_action_guard.sh"
           }
         ]
       },
@@ -32,6 +45,6 @@
       }
     ]
   },
-  "description": "OwnFramework Loop V1 — deterministic enforcement hooks. Refuse dangerous Bash commands, protected-path edits, and post-write secret scans.",
-  "version": "0.1.0"
+  "description": "OwnFramework Loop V2 — exact-run, exact-role scoped hooks. Refuse cross-run writes, canonical checkout mutations during build, external effects during an active run, and direct mutations of authoritative artifacts. Broad engineering tools (read, write within authority, shell, web search) remain permitted.",
+  "version": "0.2.0"
 }

@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
-# OwnFramework Loop V1 — fixture and integration test runner.
+# OwnFramework Loop V2 — release gate (single execution).
 #
-# Runs every test_*.sh file under tests/ and reports PASS/FAIL counts.
-# Each test exits 0 on PASS, non-zero on FAIL.
+# This is the single, authoritative release gate. It runs every
+# test_*.sh file under tests/ and reports PASS/FAIL counts. Each test
+# exits 0 on PASS, non-zero on FAIL. A single failure here is a release
+# blocker.
 
 set -uo pipefail
 
@@ -22,22 +24,22 @@ FAILED_TESTS=()
 # Discover tests.
 shopt -s nullglob
 TESTS=(
+  "$HERE"/unit/test_trust_*.sh
   "$HERE"/unit/test_*.sh
   "$HERE"/integration/test_*.sh
   "$HERE"/fixtures/test_*.sh
 )
 
-if [[ "${OFLOOP_FAST:-1}" == "1" ]]; then
-  echo "=== OwnFramework Loop V1 — fast test run ==="
-else
-  echo "=== OwnFramework Loop V1 — full test run ==="
-fi
+echo "=== OwnFramework Loop V2 — release gate ==="
+echo "OF_LOOP_OPERATOR_MARKER"
+echo "OF_LOOP_RELEASE_GATE=single"
+echo "OF_LOOP_PLUGIN_VERSION=0.2.0"
+echo
 
 for t in "${TESTS[@]}"; do
   [[ -e "$t" ]] || continue
   TOTAL=$((TOTAL+1))
   name="$(basename "$t")"
-  echo
   echo "--- $name ---"
   if bash "$t"; then
     PASSED=$((PASSED+1))
@@ -49,14 +51,17 @@ done
 
 echo
 echo "=== RESULTS ==="
-echo "TOTAL=$TOTAL"
-echo "PASSED=$PASSED"
-echo "FAILED=$FAILED"
+echo "OF_LOOP_TOTAL=$TOTAL"
+echo "OF_LOOP_PASSED=$PASSED"
+echo "OF_LOOP_FAILED=$FAILED"
 if [[ ${#FAILED_TESTS[@]} -gt 0 ]]; then
-  echo "FAILED_NAMES=${FAILED_TESTS[*]}"
+  echo "OF_LOOP_FAILED_NAMES=${FAILED_TESTS[*]}"
 fi
 
 if [[ "$FAILED" -gt 0 ]]; then
+  echo "OF_LOOP_RELEASE_GATE_RESULT=BLOCKED"
   exit 1
 fi
+echo "OF_LOOP_RELEASE_GATE_RESULT=PASS"
 exit 0
+

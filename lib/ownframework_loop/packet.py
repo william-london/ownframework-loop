@@ -1,17 +1,26 @@
-"""Work packet parsing, validation, hashing, and approval binding."""
+"""Work packet parsing, validation, hashing, and immutability.
+
+V2 wires approval authority to a separate ``APPROVAL.json`` artifact (see
+``approval.py``). The packet itself is byte-immutable after approval and
+must NOT carry any ``approved_*`` / ``human_approved`` fields. Only
+``schema: ownframework-work-packet/v2`` packets are accepted by V2 runs.
+V1 packets with embedded approval fields are recognized by
+``approval.is_legacy_packet_approval`` and must be re-approved under the
+V2 contract.
+"""
 
 from __future__ import annotations
 
 import json
 import re
-import sys
 from pathlib import Path
 from typing import Any
 
-from .util import sha256_text, utc_now_iso, ensure_mode
+from .util import sha256_text
 
 
-SCHEMA_VERSION = "ownframework-work-packet/v1"
+SCHEMA_VERSION = "ownframework-work-packet/v2"
+LEGACY_SCHEMA_VERSION = "ownframework-work-packet/v1"
 
 WORK_CLASSES = {
     "NEW_REPOSITORY", "FEATURE", "BUG", "DEBUG", "HARDENING",
@@ -60,8 +69,8 @@ def validate_packet_metadata(meta: dict[str, Any]) -> list[str]:
     for f in REQUIRED_FIELDS:
         if f not in meta:
             errors.append(f"missing required field: {f}")
-    if meta.get("schema") != SCHEMA_VERSION:
-        errors.append(f"schema must be {SCHEMA_VERSION}")
+    if meta.get("schema") not in (SCHEMA_VERSION, LEGACY_SCHEMA_VERSION):
+        errors.append(f"schema must be {SCHEMA_VERSION} or legacy {LEGACY_SCHEMA_VERSION}")
     wc = meta.get("work_class")
     if wc not in WORK_CLASSES:
         errors.append(f"invalid work_class: {wc}")
@@ -97,11 +106,17 @@ def validate_packet_metadata(meta: dict[str, Any]) -> list[str]:
 
 
 def is_approved(meta: dict[str, Any]) -> bool:
-    """Return True if the packet has been approved."""
-    if meta.get("human_approved") is True:
-        return True
-    if meta.get("approved_packet_sha256") and meta.get("approved_at"):
-        return True
+    """V1 packet-shape approval check — legacy fields only.
+
+    V2 runs MUST use the separate APPROVAL.json artifact. A return value
+    of True here is informational only and is never consulted by the V2
+    build/review finalizers (which call ``approval.validate_approval_binding``).
+    """
+    if meta.get("schema") == LEGACY_SCHEMA_VERSION:
+        if meta.get("human_approved") is True:
+            return True
+        if meta.get("approved_packet_sha256") and meta.get("approved_at"):
+            return True
     return False
 
 
@@ -115,29 +130,14 @@ def packet_metadata_sha256(meta: dict[str, Any]) -> str:
     return sha256_text(json.dumps(meta, indent=2, sort_keys=True))
 
 
-def apply_approval(meta: dict[str, Any], *, packet_sha256: str, actor: str) -> dict[str, Any]:
-    """Return a copy of meta with approval fields stamped. Does not write."""
-    new = dict(meta)
-    new["human_approved"] = True
-    new["approved_at"] = utc_now_iso()
-    new["approved_actor"] = actor
-    new["approved_packet_sha256"] = packet_sha256
-    return new
+def packet_is_v2(meta: dict[str, Any]) -> bool:
+    """True iff the packet carries the V2 schema."""
+    return meta.get("schema") == SCHEMA_VERSION
 
 
-def write_approved_packet(path: Path, meta: dict[str, Any], body_text: str) -> None:
-    """Rewrite the packet file with the updated metadata block + body."""
-    fence_open = "```json\n"
-    fence_close = "\n```"
-    body_without_meta = _strip_first_metadata_block(body_text)
-    payload = fence_open + json.dumps(meta, indent=2, sort_keys=True) + fence_close + "\n" + body_without_meta
-    path.write_text(payload, encoding="utf-8")
-    ensure_mode(path, 0o600)
-
-
-def _strip_first_metadata_block(text: str) -> str:
-    pattern = re.compile(r"```json\s*\n.*?\n```\n?", re.DOTALL)
-    return pattern.sub("", text, count=1)
+def packet_is_legacy_v1(meta: dict[str, Any]) -> bool:
+    """True iff the packet carries the legacy V1 schema."""
+    return meta.get("schema") == LEGACY_SCHEMA_VERSION
 
 
 def paths_within_packet(packet: dict[str, Any]) -> set[str]:

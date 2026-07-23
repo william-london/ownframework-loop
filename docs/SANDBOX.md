@@ -1,6 +1,6 @@
-# Claude Bash Sandbox — Required for Supervised V1 Pilot
+# Claude Bash Sandbox — Required for Supervised V2 Pilot
 
-> The OwnFramework Loop V1 supervised-local-only pilot REQUIRES Claude's
+> The OwnFramework Loop V2 supervised-local-only pilot REQUIRES Claude's
 > Bash sandbox to be enabled with `failIfUnavailable=true`. The first
 > pilot runs with `network=deny` as a default.
 

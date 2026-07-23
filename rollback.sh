@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# OwnFramework Loop V1 — rollback.
+# OwnFramework Loop V2 — rollback.
 #
 # Restores the most recent timestamped backup directory. Lists available
 # backups if no fresh backup is found.

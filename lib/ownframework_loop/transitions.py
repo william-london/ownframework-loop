@@ -1,4 +1,4 @@
-"""State machine for OwnFramework Loop V1 — exactly the 9 specified states."""
+"""State machine for OwnFramework Loop V2 — exactly the 9 specified states."""
 
 from __future__ import annotations
 

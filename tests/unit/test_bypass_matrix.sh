@@ -16,8 +16,12 @@ git -C "$TEST_TMP_REPO" config user.name "test"
 touch "$TEST_TMP_REPO/README.md"
 git -C "$TEST_TMP_REPO" add README.md
 git -C "$TEST_TMP_REPO" commit -m init >/dev/null 2>&1
-# Active-run marker so the hook's walk-up finds it.
+# Active-run marker so the hook's walk-up finds it. V2 hook requires
+# STATE.json (not just a directory) to recognize the active run.
 mkdir -p "$TEST_TMP_REPO/.ownframework-loop/run-active"
+cat > "$TEST_TMP_REPO/.ownframework-loop/run-active/STATE.json" <<'STATE'
+{"schema":"ownframework-loop-state/v1","run_id":"run-active","state":"BUILDING","transitions_count":1,"build_pass_count":1,"review_pass_count":0,"repair_round":0,"no_progress_streak":0,"state_history":[]}
+STATE
 
 # Run the textual guard against a command. Returns 0 if blocked, 1 if allowed.
 run_guard() {
@@ -141,13 +145,14 @@ else
   fail "protected-paths did NOT block unknown filename"
 fi
 
-# Inside an active loop, write to WORK_PACKET.md — ALLOWED.
+# V2: WORK_PACKET.md is authoritative — hook blocks direct Edit/Write to it.
+# Only the ofloop CLI may write it. Verify the hook blocks Edit.
 HOOK_INPUT='{"tool_name":"Edit","cwd":"'"$TEST_TMP_REPO"'","tool_input":{"file_path":"'"$TEST_TMP_REPO"'/.ownframework-loop/run-active/WORK_PACKET.md"}}'
 PP_OUT="$(printf '%s' "$HOOK_INPUT" | bash "$PP_HOOK" 2>/dev/null)"
 if echo "$PP_OUT" | grep -q '"decision": "block"'; then
-  fail "protected-paths BLOCKED a sanctioned WORK_PACKET.md write"
+  pass "protected-paths: WORK_PACKET.md direct edit blocked (V2 invariant)"
 else
-  pass "protected-paths: WORK_PACKET.md write allowed"
+  fail "protected-paths ALLOWED a direct WORK_PACKET.md edit"
 fi
 
 # ----- Row 9: malformed JSON input must fail closed -----

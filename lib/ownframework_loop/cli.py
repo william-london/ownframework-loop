@@ -1,4 +1,4 @@
-"""Command-line interface for OwnFramework Loop V1.
+"""Command-line interface for OwnFramework Loop V2.
 
 Thin wrapper around the Python library. Used by skills, agents, hooks, tests,
 and installers. Stable, JSON-friendly output.
@@ -39,7 +39,7 @@ from typing import Any
 from . import (
     git_checks, guards, packet as packet_mod, receipts, scheduling,
     state as state_mod, transitions, util, verdicts, worktrees,
-    integrity, limits as limits_mod,
+    integrity, limits as limits_mod, approval, build_finalize, review_finalize,
 )
 
 
@@ -182,43 +182,118 @@ def cmd_spec_status(args: argparse.Namespace) -> None:
 
 
 def cmd_spec_approve(args: argparse.Namespace) -> None:
+    """External approval gate.
+
+    Approval authority lives in a separate ``APPROVAL.json`` artifact.
+    The packet bytes are NOT modified. The CLI prompts the operator on
+    a TTY for a confirmation token derived from the packet SHA; only
+    after the typed token matches does it write ``APPROVAL.json`` and
+    transition to READY_TO_BUILD.
+
+    The model cannot approve its own packet:
+      - This subcommand requires a TTY. Non-interactive stdin is refused.
+      - The token is a deterministic short hash of the packet SHA; the
+        model has no way to type it without operator confirmation.
+    """
     repo = _repo_path(args.repo)
     packet_path = state_mod.run_dir(repo, args.run_id) / "WORK_PACKET.md"
     if not packet_path.exists():
         _emit_error("WORK_PACKET.md missing", exit_code=2)
-    meta, body = packet_mod.parse_packet_file(packet_path)
+    meta, _ = packet_mod.parse_packet_file(packet_path)
     errors = packet_mod.validate_packet_metadata(meta)
     if errors:
         _emit_error("packet invalid", exit_code=2, errors=errors)
-    packet_sha = util.sha256_text(packet_path.read_text(encoding="utf-8"))
     actor = args.actor or "william"
-    updated = packet_mod.apply_approval(meta, packet_sha256=packet_sha, actor=actor)
-    packet_mod.write_approved_packet(packet_path, updated, body)
-    new_sha = util.sha256_text(packet_path.read_text(encoding="utf-8"))
+    note = args.note
+    assume_tty = bool(getattr(args, "assume_tty", False))
+    try:
+        approval_doc = approval.request_human_approval(
+            canonical_repo=repo,
+            run_id=args.run_id,
+            packet_path=packet_path,
+            actor=actor,
+            operator_note=note,
+            assume_tty=assume_tty,
+        )
+    except RuntimeError as e:
+        state_mod.append_event(
+            repo, args.run_id,
+            event_type="approval_refused",
+            old_state=state_mod.load(repo, args.run_id).get("state"),
+            new_state=None,
+            actor=actor,
+            reason=str(e),
+        )
+        _emit_error(str(e), exit_code=4, classification="OF_LOOP_APPROVAL_REFUSED")
+
+    # Record the approval event (artifact hash included).
+    approval_sha = approval.approval_artifact_sha256(approval_doc)
+    cur_state = state_mod.load(repo, args.run_id).get("state")
     state_mod.append_event(
         repo, args.run_id,
         event_type="packet_approved",
-        old_state=state_mod.load(repo, args.run_id).get("state"),
+        old_state=cur_state,
         new_state=None,
         actor=actor,
-        reason=f"packet_sha256={packet_sha}",
-        extras={"approved_packet_sha256": packet_sha, "packet_sha256_after_rewrite": new_sha},
+        reason=f"packet_sha256={approval_doc['packet_sha256']}",
+        extras={
+            "approval_sha256": approval_sha,
+            "approval_method": approval_doc["approval_method"],
+            "baseline_sha": approval_doc["baseline_sha"],
+            "baseline_branch": approval_doc["baseline_branch"],
+            "confirmation_token": approval_doc["confirmation_token"],
+        },
     )
-    # Transition AWAITING_APPROVAL -> READY_TO_BUILD
+    # Transition AWAITING_APPROVAL -> READY_TO_BUILD only.
     cur = state_mod.load(repo, args.run_id)
     if cur.get("state") == "AWAITING_APPROVAL":
         state_mod.transition(
             repo, args.run_id,
             to_state="READY_TO_BUILD",
             actor=actor,
-            reason=f"packet approved (sha={packet_sha[:12]})",
+            reason=f"packet approved (packet_sha={approval_doc['packet_sha256'][:12]})",
         )
     _emit({
         "ok": True,
         "run_id": args.run_id,
         "approved": True,
-        "packet_sha256": packet_sha,
+        "approval_artifact": str(approval.approval_path(repo, args.run_id)),
+        "packet_sha256": approval_doc["packet_sha256"],
+        "baseline_sha": approval_doc["baseline_sha"],
+        "baseline_branch": approval_doc["baseline_branch"],
+        "approval_method": approval_doc["approval_method"],
         "state": "READY_TO_BUILD",
+    })
+
+
+def cmd_spec_inspect_legacy(args: argparse.Namespace) -> None:
+    """Inspect a run for legacy V1 approval fields and recommend re-approval."""
+    repo = _repo_path(args.repo)
+    packet_path = state_mod.run_dir(repo, args.run_id) / "WORK_PACKET.md"
+    if not packet_path.exists():
+        _emit_error("WORK_PACKET.md missing", exit_code=2)
+    meta, _ = packet_mod.parse_packet_file(packet_path)
+    legacy_packet = approval.is_legacy_packet_approval(meta)
+    legacy_schema = packet_mod.packet_is_legacy_v1(meta)
+    approval_doc = approval.load_approval(repo, args.run_id)
+    ok, msg = approval.validate_approval_binding(
+        canonical_repo=repo,
+        run_id=args.run_id,
+        approval=approval_doc,
+        packet=meta,
+        packet_path=packet_path,
+    )
+    _emit({
+        "ok": True,
+        "run_id": args.run_id,
+        "legacy_packet_metadata": legacy_packet,
+        "legacy_schema": legacy_schema,
+        "has_approval_artifact": approval_doc is not None,
+        "approval_binding_ok": ok,
+        "approval_binding_message": msg,
+        "recommendation": (
+            "re-approve under V2" if (legacy_packet or legacy_schema or not ok) else "ok"
+        ),
     })
 
 
@@ -263,13 +338,40 @@ def cmd_spec_abandon(args: argparse.Namespace) -> None:
 
 # --- build subcommands -----------------------------------------------------
 
+def _require_valid_approval(repo: Path, run_id: str) -> tuple[dict[str, Any], dict[str, Any], Path]:
+    """Validate the packet + APPROVAL.json binding before any build/review work.
+
+    Returns (packet_meta, approval_doc, packet_path). Raises RuntimeError
+    on any failure; the CLI converts that to a refusal.
+    """
+    packet_path = state_mod.run_dir(repo, run_id) / "WORK_PACKET.md"
+    if not packet_path.exists():
+        raise RuntimeError("WORK_PACKET.md missing")
+    meta, _ = packet_mod.parse_packet_file(packet_path)
+    errors = packet_mod.validate_packet_metadata(meta)
+    if errors:
+        raise RuntimeError("packet invalid: " + "; ".join(errors))
+    approval_doc = approval.load_approval(repo, run_id)
+    ok, msg = approval.validate_approval_binding(
+        canonical_repo=repo,
+        run_id=run_id,
+        approval=approval_doc,
+        packet=meta,
+        packet_path=packet_path,
+    )
+    if not ok:
+        raise RuntimeError(f"approval invalid: {msg}")
+    return meta, approval_doc or {}, packet_path
+
+
 def cmd_build_claim(args: argparse.Namespace) -> None:
     repo = _repo_path(args.repo)
-    meta = _require_packet(repo, args.run_id)
-    if not packet_mod.is_approved(meta):
-        _emit_error("packet is not approved", exit_code=2)
+    try:
+        meta, _approval_doc, _packet_path = _require_valid_approval(repo, args.run_id)
+    except RuntimeError as e:
+        _emit_error(str(e), exit_code=4)
     cur = state_mod.load(repo, args.run_id)
-    if cur.get("state") not in ("READY_TO_BUILD",):
+    if cur.get("state") not in ("READY_TO_BUILD", "CHANGES_REQUESTED"):
         _emit_error(f"cannot claim in state {cur.get('state')!r}", exit_code=2)
     try:
         state_mod.transition(
@@ -316,31 +418,62 @@ def cmd_build_transition(args: argparse.Namespace) -> None:
 
 
 def cmd_build_write_receipt(args: argparse.Namespace) -> None:
+    """DEPRECATED V1 path — kept for backward compatibility.
+
+    The V2 finalizer is the only entity that writes the authoritative
+    build receipt. ``ofloop build finalize`` performs the full
+    deterministic verification and writes the receipt itself.
+    This command refuses on V2 pipelines and emits a warning.
+    """
     repo = _repo_path(args.repo)
-    receipt = json.loads(Path(args.receipt).read_text(encoding="utf-8"))
-    if receipt.get("run_id") != args.run_id:
-        _emit_error("receipt run_id mismatch", exit_code=2)
-    cur = state_mod.load(repo, args.run_id)
-    receipt["builder_worktree"] = str(util.builder_worktree(repo, args.run_id))
-    receipts.write_receipt(repo, args.run_id, receipt)
-    state_mod.append_event(
-        repo, args.run_id, event_type="receipt_written",
-        old_state=cur.get("state"), new_state=None,
-        actor="of-builder",
-        commit_sha=receipt.get("candidate_sha"),
-        extras={"files_changed": receipt.get("files_changed"),
-                "added_lines": receipt.get("added_lines"),
-                "removed_lines": receipt.get("removed_lines")},
+    _emit_error(
+        "ofloop build write-receipt is deprecated by V2. Use "
+        "`ofloop build finalize <repo> <run-id> [agent-result.json]` instead.",
+        exit_code=2,
+        classification="OF_LOOP_WRITE_RECEIPT_DEPRECATED",
     )
-    if receipt.get("next_state") and receipt["next_state"] != cur.get("state"):
-        state_mod.transition(
-            repo, args.run_id, to_state=receipt["next_state"],
-            actor="of-builder",
-            reason="receipt next_state",
-            commit_sha=receipt.get("candidate_sha"),
+
+
+def cmd_build_finalize(args: argparse.Namespace) -> None:
+    """Deterministic build finalizer.
+
+    The builder agent returns a semantic ``BUILD_AGENT_RESULT.json``.
+    The finalizer independently verifies the candidate, computes diff
+    stats, runs validations, scans for secrets, and writes the
+    authoritative ``BUILD_RECEIPT.json``. The model cannot influence
+    the finalizer's verdict on any of the deterministic checks.
+    """
+    repo = _repo_path(args.repo)
+    agent_result_path = Path(args.agent_result).resolve(strict=False) if args.agent_result else None
+    try:
+        receipt = build_finalize.finalize_build(
+            canonical_repo=repo,
+            run_id=args.run_id,
+            agent_result_path=agent_result_path,
         )
-    _emit({"ok": True, "run_id": args.run_id, "next_state": receipt.get("next_state"),
-           "candidate_sha": receipt.get("candidate_sha")})
+    except RuntimeError as e:
+        state_mod.append_event(
+            repo, args.run_id,
+            event_type="build_finalize_refused",
+            old_state=state_mod.load(repo, args.run_id).get("state"),
+            new_state=None,
+            actor="build_finalizer",
+            reason=str(e),
+        )
+        _emit_error(str(e), exit_code=4, classification="OF_LOOP_BUILD_FINALIZE_REFUSED")
+    _emit({
+        "ok": True,
+        "run_id": args.run_id,
+        "candidate_sha": receipt["candidate_sha"],
+        "files_changed": receipt["files_changed"],
+        "added_lines": receipt["added_lines"],
+        "removed_lines": receipt["removed_lines"],
+        "next_state": receipt["next_state"],
+        "validation_count": len(receipt["validation"]),
+        "hard_secret_blocks": sum(1 for f in receipt["secret_scan_check"]["findings"] if f.get("severity") == "hard"),
+        "scope_findings": len(receipt["scope_check"]["findings"]),
+        "protected_findings": len(receipt["protected_path_check"]["offending_paths"]),
+    })
 
 
 def cmd_build_marker(args: argparse.Namespace) -> None:
@@ -362,57 +495,59 @@ def cmd_build_marker(args: argparse.Namespace) -> None:
 # --- review subcommands ----------------------------------------------------
 
 def cmd_review_write_verdict(args: argparse.Namespace) -> None:
+    """DEPRECATED V1 path — kept for backward compatibility.
+
+    The V2 finalizer is the only entity that writes the authoritative
+    review verdict. ``ofloop review finalize`` performs the full
+    deterministic verification and writes the verdict itself.
+    """
     repo = _repo_path(args.repo)
-    verdict = json.loads(Path(args.verdict).read_text(encoding="utf-8"))
-    if verdict.get("run_id") != args.run_id:
-        _emit_error("verdict run_id mismatch", exit_code=2)
-    receipt = receipts.load_receipt(repo, args.run_id)
-    if receipt is None:
-        _emit_error("no build receipt to review", exit_code=2)
-    if verdict.get("candidate_sha_reviewed") != receipt.get("candidate_sha"):
-        # Force STALE_CANDIDATE.
-        verdict["verdict"] = "STALE_CANDIDATE"
-        verdict["recommended_next_state"] = "READY_FOR_REVIEW"
-        verdict["stale_sha_check"] = {
-            "sha_match": False,
-            "receipt_match": False,
-            "packet_hash_match": False,
-        }
-    cur = state_mod.load(repo, args.run_id)
-    if cur.get("state") != "REVIEWING":
-        state_mod.transition(
-            repo, args.run_id, to_state="REVIEWING",
-            actor="of-reviewer", reason="claim review pass",
-        )
-    state_mod.increment_counter(
-        repo, args.run_id, counter="review_pass_count",
-        actor="of-reviewer", packet=_require_packet(repo, args.run_id),
+    _emit_error(
+        "ofloop review write-verdict is deprecated by V2. Use "
+        "`ofloop review finalize <repo> <run-id> <assessment.json>` instead.",
+        exit_code=2,
+        classification="OF_LOOP_WRITE_VERDICT_DEPRECATED",
     )
-    verdicts.write_verdict(repo, args.run_id, verdict)
-    state_mod.append_event(
-        repo, args.run_id, event_type="verdict_written",
-        old_state=None, new_state=None,
-        actor="of-reviewer",
-        commit_sha=verdict.get("candidate_sha_reviewed"),
-        extras={"verdict": verdict.get("verdict"),
-                "findings_count": len(verdict.get("findings", [])),
-                "must_fix": sum(1 for f in verdict.get("findings", []) if f.get("classification") == "must_fix")},
-    )
-    nxt = verdict.get("recommended_next_state") or "BLOCKED"
-    if transitions.is_valid("REVIEWING", nxt):
-        state_mod.transition(
-            repo, args.run_id, to_state=nxt,
-            actor="of-reviewer",
-            reason=f"verdict={verdict.get('verdict')}",
-            commit_sha=verdict.get("candidate_sha_reviewed"),
+
+
+def cmd_review_finalize(args: argparse.Namespace) -> None:
+    """Deterministic review finalizer.
+
+    The reviewer agent returns a semantic assessment
+    (``REVIEW_AGENT_ASSESSMENT.json``). The finalizer independently
+    verifies the candidate SHA, re-runs validations, scans for
+    secrets, and writes the authoritative ``REVIEW_VERDICT.json``.
+    The model cannot influence the finalizer's verdict on any of the
+    deterministic checks.
+    """
+    repo = _repo_path(args.repo)
+    assessment_path = Path(args.assessment).resolve(strict=False) if args.assessment else None
+    try:
+        verdict = review_finalize.finalize_review(
+            canonical_repo=repo,
+            run_id=args.run_id,
+            assessment_path=assessment_path,
         )
-        if nxt == "CHANGES_REQUESTED":
-            cur = state_mod.load(repo, args.run_id)
-            cur["repair_round"] = int(cur.get("repair_round", 0)) + 1
-            cur["no_progress_streak"] = 0
-            state_mod.save(repo, args.run_id, cur)
-    _emit({"ok": True, "run_id": args.run_id, "verdict": verdict.get("verdict"),
-           "next_state": nxt})
+    except RuntimeError as e:
+        state_mod.append_event(
+            repo, args.run_id,
+            event_type="review_finalize_refused",
+            old_state=state_mod.load(repo, args.run_id).get("state"),
+            new_state=None,
+            actor="review_finalizer",
+            reason=str(e),
+        )
+        _emit_error(str(e), exit_code=4, classification="OF_LOOP_REVIEW_FINALIZE_REFUSED")
+    _emit({
+        "ok": True,
+        "run_id": args.run_id,
+        "verdict": verdict["verdict"],
+        "candidate_sha": verdict["candidate_sha_reviewed"],
+        "failure_reason": verdict["failure_reason"],
+        "must_fix_count": sum(1 for f in verdict["findings"] if f.get("classification") == "must_fix"),
+        "hard_secret_blocks": sum(1 for f in verdict["secret_scan_check"]["findings"] if f.get("severity") == "hard"),
+        "validation_pass": all(v["passed"] for v in verdict["validation_results"]),
+    })
 
 
 def cmd_review_marker(args: argparse.Namespace) -> None:
@@ -548,11 +683,19 @@ def _build_parser() -> argparse.ArgumentParser:
     s_status.add_argument("repo")
     s_status.add_argument("run_id")
     s_status.set_defaults(func=cmd_spec_status)
-    s_app = spec_sub.add_parser("approve", help="approve the work packet")
+    s_app = spec_sub.add_parser("approve", help="approve the work packet (TTY required)")
     s_app.add_argument("repo")
     s_app.add_argument("run_id")
     s_app.add_argument("--actor", default="william")
+    s_app.add_argument("--note", default=None,
+                       help="optional operator note recorded in APPROVAL.json")
+    s_app.add_argument("--assume-tty", action="store_true",
+                       help="skip TTY probe (used only by trusted automation; printed token must still match)")
     s_app.set_defaults(func=cmd_spec_approve)
+    s_legacy = spec_sub.add_parser("inspect-legacy", help="inspect a run for legacy V1 approval fields")
+    s_legacy.add_argument("repo")
+    s_legacy.add_argument("run_id")
+    s_legacy.set_defaults(func=cmd_spec_inspect_legacy)
     s_amd = spec_sub.add_parser("amend", help="amend an existing packet")
     s_amd.add_argument("repo")
     s_amd.add_argument("run_id")
@@ -585,11 +728,17 @@ def _build_parser() -> argparse.ArgumentParser:
     b_trans.add_argument("--commit-sha", default=None,
                           help="candidate SHA to record as last_candidate_sha on this transition")
     b_trans.set_defaults(func=cmd_build_transition)
-    b_rec = bld_sub.add_parser("write-receipt", help="write a build receipt")
+    b_rec = bld_sub.add_parser("write-receipt", help="DEPRECATED — use build finalize")
     b_rec.add_argument("repo")
     b_rec.add_argument("run_id")
     b_rec.add_argument("receipt")
     b_rec.set_defaults(func=cmd_build_write_receipt)
+    b_fin = bld_sub.add_parser("finalize", help="deterministic build finalizer (V2)")
+    b_fin.add_argument("repo")
+    b_fin.add_argument("run_id")
+    b_fin.add_argument("agent_result", nargs="?", default=None,
+                       help="path to BUILD_AGENT_RESULT.json (semantic)")
+    b_fin.set_defaults(func=cmd_build_finalize)
     b_mk = bld_sub.add_parser("marker", help="emit builder marker")
     b_mk.add_argument("repo")
     b_mk.add_argument("run_id")
@@ -598,11 +747,17 @@ def _build_parser() -> argparse.ArgumentParser:
     # review
     rev = sub.add_parser("review", help="review subcommands")
     rev_sub = rev.add_subparsers(dest="review_cmd", required=True)
-    r_wv = rev_sub.add_parser("write-verdict", help="write a review verdict")
+    r_wv = rev_sub.add_parser("write-verdict", help="DEPRECATED — use review finalize")
     r_wv.add_argument("repo")
     r_wv.add_argument("run_id")
     r_wv.add_argument("verdict")
     r_wv.set_defaults(func=cmd_review_write_verdict)
+    r_fin = rev_sub.add_parser("finalize", help="deterministic review finalizer (V2)")
+    r_fin.add_argument("repo")
+    r_fin.add_argument("run_id")
+    r_fin.add_argument("assessment", nargs="?", default=None,
+                       help="path to REVIEW_AGENT_ASSESSMENT.json (semantic)")
+    r_fin.set_defaults(func=cmd_review_finalize)
     r_mk = rev_sub.add_parser("marker", help="emit reviewer marker")
     r_mk.add_argument("repo")
     r_mk.add_argument("run_id")

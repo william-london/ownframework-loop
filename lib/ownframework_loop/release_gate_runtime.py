@@ -84,7 +84,7 @@ def main() -> int:
 
     old = {sig: signal.signal(sig, stop) for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)}
     try:
-        _emit(output, f"=== OwnFramework Loop V1 release gate {stamp} ===")
+        _emit(output, f"=== OwnFramework Loop V2 release gate {stamp} ===")
         _emit(output, f"SOURCE_HEAD={head}")
         _emit(output, "SOURCE_BRANCH=master")
         _emit(output, "SOURCE_REMOTES=0")

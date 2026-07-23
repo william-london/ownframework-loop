@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# OwnFramework Loop V1 — uninstall.
+# OwnFramework Loop V2 — uninstall.
 #
 # Removes the installed copy at /Users/mr.mrs.london/.claude/skills/of-loop.
 # Does NOT remove the source repo, receipts, or backup directories.

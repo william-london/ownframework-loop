@@ -1,9 +1,8 @@
 ---
 name: of-builder
-description: OwnFramework Loop builder — implements or repairs one approved work unit per pass in an isolated worktree. Read tools, the dedicated `ofloop` CLI, and a tight write set. Writes a build receipt, never edits protected paths, never pushes, merges, deploys, or creates remotes.
+description: OwnFramework Loop builder — implements or repairs one approved work unit per pass in an isolated worktree. Broad engineering tools (read, write within authority, shell, web research) are available. Writes a build agent result, never edits protected paths, never pushes, merges, deploys, or creates remotes.
 model: inherit
 maxTurns: 80
-disallowedTools: WebFetch, WebSearch
 ---
 
 # of-builder

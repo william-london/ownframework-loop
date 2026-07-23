@@ -1,4 +1,4 @@
-# OwnFramework Loop V1
+# OwnFramework Loop V2
 
 > Human-gated two-loop engineering for specification, isolated building,
 > exact-SHA review, repair, and proof. Built for Claude Code 2.1+.

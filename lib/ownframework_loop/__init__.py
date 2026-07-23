@@ -1,6 +1,6 @@
 """OwnFramework Loop — Python core library.
 
-Deterministic, stdlib-only building blocks for the OwnFramework Loop V1 plugin.
+Deterministic, stdlib-only building blocks for the OwnFramework Loop V2 plugin.
 """
 
-__version__ = "0.1.4"
+__version__ = "0.2.0"

@@ -1,170 +1,165 @@
 #!/usr/bin/env bash
-# Case 19: reviewer detached at exact SHA.
-# Case 20: stale candidate detection.
-# Case 21: review verdict validation.
+# Review E2E — V2 deterministic finalizers.
 
 set -uo pipefail
 . "$(dirname "$0")/../_helpers.sh"
 
 REPO="$(make_tmp_repo)"
-RUN_DIR="$(make_tmp_run "$REPO")"
+RUN_DIR="$(make_approved_run "$REPO" BUG low "review-e2e")"
 echo "  REPO=$REPO RUN_DIR=$RUN_DIR"
 
-# Bootstrap packet + approve.
-PACKET_MD='```json
+# Build candidate.
+BRANCH="factory/candidate/$RUN_DIR"
+git -C "$REPO" worktree add "$REPO/.worktrees/ownframework-loop/$RUN_DIR/builder" -b "$BRANCH" master >/dev/null 2>&1
+WT="$REPO/.worktrees/ownframework-loop/$RUN_DIR/builder"
+mkdir -p "$WT/src"
+echo "x" > "$WT/src/feature.txt"
+git -C "$WT" add src/feature.txt && git -C "$WT" commit -m "loop-v2: candidate" >/dev/null 2>&1
+SHA=$(git -C "$WT" rev-parse HEAD)
+BASE=$(git -C "$WT" rev-parse master)
+
+"$OFLOOP_BIN" build claim "$REPO" "$RUN_DIR" >/dev/null
+"$OFLOOP_BIN" build finalize "$REPO" "$RUN_DIR" >/dev/null 2>&1
+
+# Verify receipt exists.
+[[ -f "$REPO/.ownframework-loop/$RUN_DIR/BUILD_RECEIPT.json" ]] && pass "build receipt present" || fail "build receipt missing"
+
+# Transition to REVIEWING (required by transition table).
+python3 - <<PY
+import sys
+sys.path.insert(0, "/Users/mr.mrs.london/projects/plugins/ownframework-loop/lib")
+from ownframework_loop import state
+from pathlib import Path
+state.transition(Path("$REPO"), "$RUN_DIR", to_state="REVIEWING", actor="test", reason="claim")
+PY
+
+# Now create the assessment.
+ASSESS=$(mktemp)
+cat > "$ASSESS" <<JSON
 {
-  "schema": "ownframework-work-packet/v1",
-  "packet_id": "rev-001",
-  "created_at": "2026-07-23T05:00:00Z",
-  "work_class": "FEATURE",
-  "risk_class": "medium",
-  "title": "Review E2E",
-  "target": {"repo": "'"$REPO"'", "branch": "master", "classification": "local_only"},
-  "acceptance_criteria": [{"id": "AC-1", "text": "x"}],
-  "non_goals": [{"id": "NG-1", "text": "y"}],
+  "schema": "ownframework-loop-review-agent-assessment/v1",
+  "run_id": "$RUN_DIR",
+  "candidate_sha_claimed": "$SHA",
+  "acceptance_results": [{"id": "AC-1", "result": "pass"}],
+  "non_goal_results": [],
+  "findings": [],
+  "recommended_verdict": "APPROVED"
+}
+JSON
+
+# Finalize review.
+"$OFLOOP_BIN" review finalize "$REPO" "$RUN_DIR" "$ASSESS" >/dev/null 2>&1
+VERDICT_FILE="$REPO/.ownframework-loop/$RUN_DIR/REVIEW_VERDICT.json"
+[[ -f "$VERDICT_FILE" ]] && pass "review verdict written by finalizer" || fail "review verdict missing"
+
+V=$(python3 -c "import json; print(json.load(open('$VERDICT_FILE'))['verdict'])")
+assert_eq "$V" "APPROVED" "verdict is APPROVED"
+
+# State after approved verdict.
+STATE=$(python3 -c "import json; print(json.load(open('$REPO/.ownframework-loop/$RUN_DIR/STATE.json'))['state'])")
+assert_eq "$STATE" "APPROVED" "state after approved verdict"
+
+# Stale candidate: new run with mismatched SHA.
+"$OFLOOP_BIN" spec new "$REPO" "second mission" >/dev/null
+RUN2=$(ls -1t "$REPO/.ownframework-loop" | head -n1)
+# Approve RUN2 by writing packet + approval.
+PP2="$REPO/.ownframework-loop/$RUN2/WORK_PACKET.md"
+cat > "$PP2" <<EOF
+\`\`\`json
+{
+  "schema": "ownframework-work-packet/v2",
+  "packet_id": "rev-002",
+  "created_at": "2026-07-23T00:00:00Z",
+  "work_class": "BUG",
+  "risk_class": "low",
+  "title": "stale-test",
+  "target": {"repo": "$REPO", "branch": "master", "classification": "local_only"},
+  "acceptance_criteria": [{"id": "AC-1", "text": "ok"}],
+  "non_goals": [],
   "allowed_paths": ["src/"],
   "protected_paths": [".ownframework-loop/"],
   "work_units": [{"id": "UNIT-1", "title": "u", "scope": "s"}],
   "merge_authority": "human_only",
   "deploy_authority": "human_only",
   "push_authority": "human_only",
-  "external_action_authority": "none"
+  "external_action_authority": "none",
+  "risk_budget": {"max_files_changed": 25, "max_diff_lines": 1000, "max_repair_rounds": 3}
 }
-```
-# Mission
-review test.'
-write_packet "$REPO" "$RUN_DIR" "$PACKET_MD" >/dev/null
-"$OFLOOP_BIN" spec approve "$REPO" "$RUN_DIR" >/dev/null
-
-# Build a candidate commit.
-BRANCH="factory/candidate/$RUN_DIR"
-git -C "$REPO" worktree add "$REPO/.worktrees/ownframework-loop/$RUN_DIR/builder" -b "$BRANCH" master >/dev/null 2>&1
-WT="$REPO/.worktrees/ownframework-loop/$RUN_DIR/builder"
-echo "x" > "$WT/feature.txt"
-git -C "$WT" add feature.txt
-git -C "$WT" commit -m "loop-v1: candidate" >/dev/null 2>&1
-SHA=$(git -C "$WT" rev-parse HEAD)
-BASE=$(git -C "$WT" rev-parse master)
-
-"$OFLOOP_BIN" build claim "$REPO" "$RUN_DIR" >/dev/null
-
-RECEIPT=$(mktemp)
-cat > "$RECEIPT" <<JSON
-{
-  "schema": "ownframework-loop-build-receipt/v1",
-  "run_id": "$RUN_DIR",
-  "packet_sha256": "$(python3 -c 'import hashlib;print(hashlib.sha256(open("'"$REPO"'/.ownframework-loop/'"$RUN_DIR"'/WORK_PACKET.md","rb").read()).hexdigest())')",
-  "work_unit_id": "UNIT-1",
-  "baseline_sha": "$BASE",
-  "candidate_sha": "$SHA",
-  "candidate_branch": "$BRANCH",
-  "builder_pass_number": 1,
-  "repair_round": 0,
-  "files_changed": 1,
-  "added_lines": 1,
-  "removed_lines": 0,
-  "validation": [{"name": "fast", "command": "true", "exit_code": 0, "duration_seconds": 0}],
-  "timestamp": "2026-07-23T05:30:00Z",
-  "builder_agent": "of-builder",
-  "next_state": "READY_FOR_REVIEW"
-}
-JSON
-"$OFLOOP_BIN" build write-receipt "$REPO" "$RUN_DIR" "$RECEIPT" >/dev/null
-
-# Now write a verdict for the correct SHA.
-VERDICT=$(mktemp)
-cat > "$VERDICT" <<JSON
-{
-  "schema": "ownframework-loop-review-verdict/v1",
-  "run_id": "$RUN_DIR",
-  "packet_sha256": "$(python3 -c 'import hashlib;print(hashlib.sha256(open("'"$REPO"'/.ownframework-loop/'"$RUN_DIR"'/WORK_PACKET.md","rb").read()).hexdigest())')",
-  "candidate_sha_reviewed": "$SHA",
-  "baseline_sha": "$BASE",
-  "review_pass_number": 1,
-  "verdict": "APPROVED",
-  "acceptance_results": [{"id": "AC-1", "result": "pass", "evidence": "feature.txt exists"}],
-  "non_goal_results": [{"id": "NG-1", "result": "preserved"}],
-  "findings": [],
-  "tracked_mutation_check": {"detected": false, "before_sha": "$SHA", "after_sha": "$SHA", "changed_paths": []},
-  "stale_sha_check": {"sha_match": true, "receipt_match": true, "packet_hash_match": true},
-  "reviewer_identity": "of-reviewer",
-  "timestamp": "2026-07-23T05:31:00Z",
-  "recommended_next_state": "APPROVED"
-}
-JSON
-
-# Review pass: transition to REVIEWING.
-python3 - <<PY
-import sys
+\`\`\`
+body
+EOF
+# Now use Python to write a proper approval.
+python3 - "$REPO" "$RUN2" <<'PY'
+import sys, json, subprocess
+from pathlib import Path
 sys.path.insert(0, "/Users/mr.mrs.london/projects/plugins/ownframework-loop/lib")
-from ownframework_loop import state
-state.transition("$REPO", "$RUN_DIR", to_state="REVIEWING", actor="of-reviewer", reason="claim")
+from ownframework_loop import approval, state as state_mod
+canonical_repo = Path(sys.argv[1])
+run_id = sys.argv[2]
+pp = canonical_repo / ".ownframework-loop" / run_id / "WORK_PACKET.md"
+sha = __import__("hashlib").sha256(pp.read_bytes()).hexdigest()
+baseline = subprocess.run(
+    ["git", "-C", str(canonical_repo), "rev-parse", "master"],
+    capture_output=True, text=True, check=True,
+).stdout.strip()
+doc = {
+    "schema": "ownframework-loop-approval/v1",
+    "run_id": run_id,
+    "packet_sha256": sha,
+    "approved_at": "2026-07-23T00:00:00Z",
+    "approved_actor": "test",
+    "canonical_repo": str(canonical_repo.resolve(strict=False)),
+    "baseline_branch": "master",
+    "baseline_sha": baseline,
+    "packet_schema": "ownframework-work-packet/v2",
+    "approval_method": "operator_marker",
+    "confirmation_token": approval.derive_confirmation_token(sha),
+}
+Path(canonical_repo, ".ownframework-loop", run_id, "APPROVAL.json").write_text(
+    json.dumps(doc, indent=2, sort_keys=True))
+state_mod.transition(canonical_repo, run_id, to_state="READY_TO_BUILD", actor="test", reason="x")
 PY
 
-"$OFLOOP_BIN" review write-verdict "$REPO" "$RUN_DIR" "$VERDICT" >/dev/null
-STATE=$(python3 -c "import json; print(json.load(open('$REPO/.ownframework-loop/$RUN_DIR/STATE.json'))['state'])")
-assert_eq "$STATE" "APPROVED" "state after approved verdict"
-pass "APPROVED transition recorded"
+# Build candidate for RUN2.
+WT2="$REPO/.worktrees/ownframework-loop/$RUN2/builder"
+git -C "$REPO" worktree add "$WT2" -b "factory/candidate/$RUN2" master >/dev/null 2>&1
+mkdir -p "$WT2/src"
+echo y > "$WT2/src/y.py"
+git -C "$WT2" add src/y.py && git -C "$WT2" commit -m y >/dev/null 2>&1
+SHA2=$(git -C "$WT2" rev-parse HEAD)
 
-# Stale candidate detection: write a verdict for a fake SHA.
-"$OFLOOP_BIN" spec new "$REPO" "second mission" >/dev/null
-RUN2=$(ls -1t "$REPO/.ownframework-loop" | head -n1)
-PACKET_MD2=$(echo "$PACKET_MD" | sed "s/$RUN_DIR/$RUN2/g")
-write_packet "$REPO" "$RUN2" "$PACKET_MD2" >/dev/null
-"$OFLOOP_BIN" spec approve "$REPO" "$RUN2" >/dev/null
 "$OFLOOP_BIN" build claim "$REPO" "$RUN2" >/dev/null
-RECEIPT2=$(mktemp)
-cat > "$RECEIPT2" <<JSON
-{
-  "schema": "ownframework-loop-build-receipt/v1",
-  "run_id": "$RUN2",
-  "packet_sha256": "$(python3 -c 'import hashlib;print(hashlib.sha256(open("'"$REPO"'/.ownframework-loop/'"$RUN2"'/WORK_PACKET.md","rb").read()).hexdigest())')",
-  "work_unit_id": "UNIT-1",
-  "baseline_sha": "$BASE",
-  "candidate_sha": "$SHA",
-  "candidate_branch": "factory/candidate/$RUN2",
-  "builder_pass_number": 1,
-  "repair_round": 0,
-  "files_changed": 1, "added_lines": 1, "removed_lines": 0,
-  "validation": [{"name": "fast", "command": "true", "exit_code": 0, "duration_seconds": 0}],
-  "timestamp": "2026-07-23T05:30:00Z",
-  "builder_agent": "of-builder",
-  "next_state": "READY_FOR_REVIEW"
-}
-JSON
-"$OFLOOP_BIN" build write-receipt "$REPO" "$RUN2" "$RECEIPT2" >/dev/null
+"$OFLOOP_BIN" build finalize "$REPO" "$RUN2" >/dev/null 2>&1
 
-# Write verdict with WRONG candidate SHA.
-STALE_VERDICT=$(mktemp)
-FAKE_SHA="0000000000000000000000000000000000000000"
-cat > "$STALE_VERDICT" <<JSON
-{
-  "schema": "ownframework-loop-review-verdict/v1",
-  "run_id": "$RUN2",
-  "packet_sha256": "$(python3 -c 'import hashlib;print(hashlib.sha256(open("'"$REPO"'/.ownframework-loop/'"$RUN2"'/WORK_PACKET.md","rb").read()).hexdigest())')",
-  "candidate_sha_reviewed": "$FAKE_SHA",
-  "baseline_sha": "$BASE",
-  "review_pass_number": 1,
-  "verdict": "APPROVED",
-  "acceptance_results": [], "non_goal_results": [], "findings": [],
-  "tracked_mutation_check": {"detected": false, "before_sha": "$FAKE_SHA", "after_sha": "$FAKE_SHA", "changed_paths": []},
-  "stale_sha_check": {"sha_match": true, "receipt_match": true, "packet_hash_match": true},
-  "reviewer_identity": "of-reviewer",
-  "timestamp": "2026-07-23T05:32:00Z",
-  "recommended_next_state": "APPROVED"
-}
-JSON
+# Transition RUN2 to REVIEWING.
 python3 - <<PY
 import sys
 sys.path.insert(0, "/Users/mr.mrs.london/projects/plugins/ownframework-loop/lib")
 from ownframework_loop import state
-state.transition("$REPO", "$RUN2", to_state="REVIEWING", actor="of-reviewer", reason="claim")
+from pathlib import Path
+state.transition(Path("$REPO"), "$RUN2", to_state="REVIEWING", actor="test", reason="claim")
 PY
-"$OFLOOP_BIN" review write-verdict "$REPO" "$RUN2" "$STALE_VERDICT" >/dev/null
-STATE2=$(python3 -c "import json; print(json.load(open('$REPO/.ownframework-loop/$RUN2/STATE.json'))['state'])")
-assert_eq "$STATE2" "READY_FOR_REVIEW" "stale SHA blocks APPROVED and reverts to READY_FOR_REVIEW"
 
-rm -f "$RECEIPT" "$RECEIPT2" "$VERDICT" "$STALE_VERDICT"
+# Stale SHA in assessment.
+STALE_ASSESS=$(mktemp)
+FAKE_SHA="0000000000000000000000000000000000000000"
+cat > "$STALE_ASSESS" <<JSON
+{
+  "schema": "ownframework-loop-review-agent-assessment/v1",
+  "run_id": "$RUN2",
+  "candidate_sha_claimed": "$FAKE_SHA",
+  "acceptance_results": [{"id": "AC-1", "result": "pass"}],
+  "non_goal_results": [],
+  "findings": [],
+  "recommended_verdict": "APPROVED"
+}
+JSON
+out="$("$OFLOOP_BIN" review finalize "$REPO" "$RUN2" "$STALE_ASSESS" 2>&1 || true)"
+assert_contains "$out" "OF_LOOP_REVIEW_FINALIZE_REFUSED" "stale SHA refused by review finalizer"
+
+# Cleanup.
+rm -f "$ASSESS" "$STALE_ASSESS"
 git -C "$REPO" worktree remove --force "$WT" >/dev/null 2>&1
+git -C "$REPO" worktree remove --force "$WT2" >/dev/null 2>&1
 
 echo "ALL PASS"

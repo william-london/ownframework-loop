@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# OwnFramework Loop V1 — legacy copy installer.
+# OwnFramework Loop V2 — legacy copy installer.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SOURCE_ROOT="$HERE"

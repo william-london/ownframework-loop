@@ -1,5 +1,5 @@
 <!--
-WORK_PACKET.md template for OwnFramework Loop V1.
+WORK_PACKET.md template for OwnFramework Loop V2.
 
 The metadata block is JSON inside a triple-backtick fence. Do NOT depend on
 YAML parsing. The body sections are Markdown for human review.
@@ -9,7 +9,7 @@ against schemas/work-packet.schema.json before approval.
 -->
 ```json
 {
-  "schema": "ownframework-work-packet/v1",
+  "schema": "ownframework-work-packet/v2",
   "packet_id": "<uuid-or-slug>",
   "created_at": "<UTC ISO 8601>",
   "work_class": "FEATURE",

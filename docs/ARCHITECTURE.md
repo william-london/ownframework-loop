@@ -1,4 +1,4 @@
-# Architecture — OwnFramework Loop V1
+# Architecture — OwnFramework Loop V2
 
 ## 0. CLI invocation contract
 
