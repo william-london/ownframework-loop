@@ -1,0 +1,81 @@
+"""Bounded, foreground subprocess execution for the release gate."""
+
+from __future__ import annotations
+
+import os
+import signal
+import subprocess
+import time
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Mapping, Sequence
+
+
+@dataclass(frozen=True)
+class CommandResult:
+    returncode: int
+    stdout: str
+    timed_out: bool = False
+
+
+def _terminate_group(proc: subprocess.Popen[str], grace_seconds: float = 3.0) -> None:
+    if proc.poll() is not None:
+        return
+    try:
+        os.killpg(proc.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    try:
+        proc.wait(timeout=grace_seconds)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    proc.wait()
+
+
+def run_bounded(
+    argv: Sequence[str],
+    *,
+    cwd: Path,
+    timeout_seconds: float,
+    env: Mapping[str, str] | None = None,
+) -> CommandResult:
+    """Run one command in its own process group and always await its exit."""
+    proc = subprocess.Popen(
+        list(argv),
+        cwd=str(cwd),
+        env=dict(env) if env is not None else None,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        start_new_session=True,
+    )
+    try:
+        output, _ = proc.communicate(timeout=timeout_seconds)
+        return CommandResult(proc.returncode, output)
+    except subprocess.TimeoutExpired:
+        _terminate_group(proc)
+        output, _ = proc.communicate()
+        return CommandResult(124, output, timed_out=True)
+    except BaseException:
+        _terminate_group(proc)
+        raise
+
+
+def process_group_drained(pgid: int) -> bool:
+    """Return true when an exact process group has no live members."""
+    result = subprocess.run(
+        ["ps", "-axo", "pgid="], capture_output=True, text=True, check=False, timeout=5
+    )
+    for value in result.stdout.splitlines():
+        try:
+            if int(value.strip()) == pgid:
+                return False
+        except ValueError:
+            continue
+    return True

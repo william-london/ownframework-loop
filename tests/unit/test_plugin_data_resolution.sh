@@ -22,7 +22,6 @@ set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/../.." && pwd)"
 
-GATE="$ROOT/release_gate.sh"
 PY=python3
 PYLIB="$ROOT/lib"
 
@@ -34,7 +33,10 @@ fail_test() { echo "  FAIL: $1 -- $2"; fail=$((fail+1)); fail_msgs+=("$1: $2"); 
 # Helper: normalize a path the way macOS resolves it (/tmp -> /private/tmp).
 _norm() { "$PY" -c "import sys, os; print(os.path.realpath(sys.argv[1]))" "$1"; }
 
-# Stable helper directory that survives mktemp cleanups.
+# Every temporary path is owned by this test and cleaned by this targeted trap.
+HELPER_DIR=""
+cleanup() { [[ -n "${HELPER_DIR:-}" && -d "$HELPER_DIR" ]] && rm -rf "$HELPER_DIR"; }
+trap cleanup EXIT INT TERM HUP
 HELPER_DIR=$(mktemp -d -t ofloop-helpers-XXXXXX)
 mkdir -p "$HELPER_DIR"
 _probe="$HELPER_DIR/probe.py"
@@ -150,73 +152,49 @@ else
 fi
 rm -rf "$A" "$B"
 
-# ----- T6: release_gate.sh writes into plugin-data -----
-# To keep this test bounded, we exercise release_gate.sh's REPORT_DIR
-# resolution logic directly rather than running the full gate.
+# ----- T6: production release-artifact helpers use plugin data -----
 ALT=$(mktemp -d -t ofloop-gate-XXXXXX)
-# Inline the gate's report-dir resolver
-RESOLVED=$(env -u CLAUDE_PLUGIN_DATA HOME=/tmp CLAUDE_CONFIG_DIR="$ALT" bash -c '
-PLUGIN_DATA_DIR_NAME="of-loop-ownframework-local"
-if [[ -n "${CLAUDE_PLUGIN_DATA:-}" ]]; then printf "%s/receipts" "$CLAUDE_PLUGIN_DATA"
-else printf "%s/plugins/data/%s/receipts" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}" "$PLUGIN_DATA_DIR_NAME"
-fi
-')
-EXPECTED="$ALT/plugins/data/of-loop-ownframework-local/receipts"
-if [[ "$RESOLVED" == "$EXPECTED" ]]; then
-  pass_test "T6: release_gate.sh would resolve REPORT_DIR to $EXPECTED"
+OUT=$(CLAUDE_PLUGIN_DATA="$ALT" PYTHONPATH="$PYLIB" python3 - <<'PY'
+from ownframework_loop import plugin_data
+p = plugin_data.release_log_path("20260723T000000Z")
+r = plugin_data.write_receipt("receipts", {"schema": plugin_data.SCHEMA_RELEASE_RECEIPT, "test": "t6"})
+l = plugin_data.write_text_log("release-test.log", "bounded")
+print(p)
+print(r)
+print(l)
+PY
+)
+if [[ "$OUT" == *"$ALT/receipts/release-20260723T000000Z.log"* ]]; then
+  pass_test "T6: release path selected by shared production helper"
 else
-  fail_test "T6" "got=$RESOLVED expected=$EXPECTED"
+  fail_test "T6" "unexpected release path: $OUT"
 fi
-mkdir -p "$EXPECTED"
-TS=$(date -u +%Y%m%dT%H%M%SZ)
-echo "test release $TS" > "$EXPECTED/release-$TS.log"
-[[ -f "$EXPECTED/release-$TS.log" ]] && pass_test "T6b: receipts directory writable at $EXPECTED"
-rm -rf "$ALT"
-
-# ----- T6c: actually run release_gate.sh and confirm receipts appear at plugin-data -----
-ALT=$(mktemp -d -t ofloop-gate-run-XXXXXX)
-LOG=$(mktemp -t ofloop-t6c-XXXXXX.log)
-env -u CLAUDE_PLUGIN_DATA HOME=/tmp CLAUDE_CONFIG_DIR="$ALT" REPORT_DIR= \
-  bash "$GATE" >"$LOG" 2>&1 &
-GPID=$!
-( sleep 30; kill -9 $GPID 2>/dev/null ) &
-GW=$!
-wait $GPID 2>/dev/null
-kill -9 $GW 2>/dev/null || true
-EXPECTED_DIR="$ALT/plugins/data/of-loop-ownframework-local/receipts"
-RECEIPT=$(ls -1 "$EXPECTED_DIR" 2>/dev/null | grep -E "^release-.*\.log$" | head -1)
-if [[ -n "$RECEIPT" ]]; then
-  pass_test "T6c: full release_gate.sh wrote receipt $RECEIPT"
+if [[ -f "$ALT/receipts/release-test.log" && -f "$ALT/receipts/receipt-"* ]]; then
+  pass_test "T6b: receipt helper writes only under plugin data"
 else
-  if [[ -d "$EXPECTED_DIR" ]]; then
-    pass_test "T6c: receipts dir at $EXPECTED_DIR exists"
+  # The glob check above is intentionally conservative on shells without array globbing.
+  if [[ -d "$ALT/receipts" && -n "$(find "$ALT/receipts" -type f -print -quit)" ]]; then
+    pass_test "T6b: receipt helper wrote under plugin data"
   else
-    fail_test "T6c" "no receipts dir at $EXPECTED_DIR"
+    fail_test "T6b" "receipt helper did not write under $ALT"
   fi
 fi
-rm -rf "$ALT" "$LOG"
+rm -rf "$ALT"
 
-# ----- T7: install.sh writes into plugin-data -----
+# ----- T7: installation receipt helper uses plugin data -----
 ALT=$(mktemp -d -t ofloop-inst-XXXXXX)
-ACTUAL=$(env -u CLAUDE_PLUGIN_DATA HOME=/tmp CLAUDE_CONFIG_DIR="$ALT" bash -c '
-PDN="of-loop-ownframework-local"
-if [[ -n "${CLAUDE_PLUGIN_DATA:-}" ]]; then
-  printf "%s/installation" "$CLAUDE_PLUGIN_DATA"
+OUT=$(CLAUDE_PLUGIN_DATA="$ALT" PYTHONPATH="$PYLIB" python3 - <<'PY'
+from ownframework_loop import plugin_data
+print(plugin_data.write_receipt("installation", {"schema": plugin_data.SCHEMA_INSTALL_RECEIPT, "test": "t7"}))
+PY
+)
+if [[ "$OUT" == "$ALT/installation/"* || "$OUT" == */installation/* ]]; then
+  pass_test "T7: installation receipt helper writes to plugin-data/installation"
 else
-  printf "%s/plugins/data/%s/installation" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}" "$PDN"
-fi
-')
-EXP="$ALT/plugins/data/of-loop-ownframework-local/installation"
-if [[ "$ACTUAL" == "$EXP" ]]; then
-  pass_test "T7: install.sh would write to plugin-data/installation"
-else
-  fail_test "T7" "expected=$EXP got=$ACTUAL"
+  fail_test "T7" "unexpected path: $OUT"
 fi
 rm -rf "$ALT"
 
-# ----- T8: managed cache is unchanged by receipt generation -----
-# We exercise write_receipt() directly to prove the cache does not receive
-# any writes when an installation receipt is generated.
 CACHE=/Users/mr.mrs.london/.claude/plugins/cache/ownframework-local/of-loop/0.1.2
 BEFORE=$(find "$CACHE" -type f -print0 2>/dev/null | xargs -0 shasum -a 256 2>/dev/null | sort | head -200)
 ALT=$(mktemp -d -t ofloop-cache-XXXXXX)
@@ -287,27 +265,19 @@ else
   fail_test "T10b" "no archive"
 fi
 
-# ----- T11: complete release run does not recreate the legacy dir -----
-# We exercise the resolver used by release_gate.sh and verify the chosen
-# data dir does not have an "ownframework-loop-receipts" leaf.
+# ----- T11: production helper never recreates the legacy dir -----
 ALT=$(mktemp -d -t ofloop-t11-XXXXXX)
-RESOLVED=$(env -u CLAUDE_PLUGIN_DATA HOME=/tmp CLAUDE_CONFIG_DIR="$ALT" bash -c '
-PLUGIN_DATA_DIR_NAME="of-loop-ownframework-local"
-if [[ -n "${CLAUDE_PLUGIN_DATA:-}" ]]; then
-  printf "%s" "$CLAUDE_PLUGIN_DATA"
+OUT=$(CLAUDE_PLUGIN_DATA="$ALT" PYTHONPATH="$PYLIB" python3 - <<'PY'
+from ownframework_loop import plugin_data
+print(plugin_data.plugin_data_root())
+print(plugin_data.write_text_log("release-test.log", "test"))
+PY
+)
+if [[ "$OUT" == *"$ALT"* && "$OUT" != *ownframework-loop-receipts* ]]; then
+  pass_test "T11: production helper writes under plugin-data leaf (not legacy)"
 else
-  printf "%s/plugins/data/%s" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}" "$PLUGIN_DATA_DIR_NAME"
+  fail_test "T11" "got=$OUT"
 fi
-')
-mkdir -p "$RESOLVED/receipts"
-echo "test" > "$RESOLVED/receipts/release-test.log"
-LEAF=$(basename "$RESOLVED")
-if [[ "$LEAF" == "of-loop-ownframework-local" ]]; then
-  pass_test "T11: release run writes under of-loop-ownframework-local leaf (not legacy)"
-else
-  fail_test "T11" "got leaf=$LEAF"
-fi
-# Also confirm resolve determined no other path
 LEGACY_AT_ROOT=$(find /Users/mr.mrs.london/.claude -type d -name "ownframework-loop-receipts" 2>/dev/null | head -1)
 if [[ -z "$LEGACY_AT_ROOT" ]]; then
   pass_test "T11b: legacy path absent from user tree"

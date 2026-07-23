@@ -18,11 +18,13 @@
 set -uo pipefail
 
 INSTALLED_MODE=0
+SKIP_TESTS=0
 ROOT=""
 for arg in "$@"; do
   case "$arg" in
     --installed) INSTALLED_MODE=1 ;;
     --installed=*) INSTALLED_MODE=1 ;;
+    --skip-tests) SKIP_TESTS=1 ;;
     --help|-h)
       cat <<USAGE
 Usage:
@@ -142,13 +144,16 @@ for h in block_dangerous_bash.sh block_protected_paths.sh post_bash_secret_scan.
 done
 ok "hook scripts are executable"
 
-# 8. Deterministic unit tests.
-if [[ "$INSTALLED_MODE" -eq 1 ]]; then
+# 8. Deterministic unit tests. The top-level release gate runs the source
+# suite once; installed-copy validation is structural-only when requested.
+if [[ "$SKIP_TESTS" -eq 1 ]]; then
+  ok "deterministic unit tests skipped by explicit structural validation mode"
+elif [[ "$INSTALLED_MODE" -eq 1 ]]; then
   echo "  running installed unit tests..."
-  bash "$ROOT/tests/run_all.sh" 2>&1 | tail -6 >/tmp/ofloop_validate_installed.out || true
+  bash "$ROOT/tests/run_all.sh"
 else
   echo "  running source unit tests..."
-  bash "$ROOT/tests/run_all.sh" 2>&1 | tail -6
+  bash "$ROOT/tests/run_all.sh"
 fi
 
 ok "all checks PASS for $ROOT"

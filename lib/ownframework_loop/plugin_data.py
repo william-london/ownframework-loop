@@ -116,7 +116,7 @@ def ensure_subdir(name: str) -> Path:
     Fails loud on unexpected subdirectory names (no implicit creation
     of arbitrary directories).
     """
-    allowed = {"installation", "receipts", "indexes", "logs", "migration"}
+    allowed = {"installation", "receipts", "indexes", "logs", "migration", "locks"}
     if name not in allowed:
         raise RuntimeError(f"Unknown plugin-data subdir: {name!r}")
     root = plugin_data_root()
@@ -143,6 +143,31 @@ def logs_dir() -> Path:
 
 def migration_dir() -> Path:
     return ensure_subdir("migration")
+
+
+def locks_dir() -> Path:
+    return ensure_subdir("locks")
+
+
+def release_log_path(timestamp: str) -> Path:
+    """Return the canonical release transcript path for a UTC timestamp."""
+    if not timestamp or any(c not in "0123456789TZ" for c in timestamp):
+        raise RuntimeError(f"Invalid release timestamp: {timestamp!r}")
+    return receipts_dir() / f"release-{timestamp}.log"
+
+
+def stale_temp_dirs() -> list[Path]:
+    """List, but never remove, marked OwnFramework Loop temp directories."""
+    import tempfile
+    root = Path(tempfile.gettempdir()).resolve(strict=False)
+    found: list[Path] = []
+    for candidate in root.glob("ofloop-*"):
+        try:
+            if candidate.is_dir() and (candidate / ".ofloop-owned").is_file():
+                found.append(candidate.resolve(strict=False))
+        except OSError:
+            continue
+    return sorted(found)
 
 
 def write_receipt(subdir_name: str, payload: dict[str, Any]) -> Path:
