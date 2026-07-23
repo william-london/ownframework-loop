@@ -89,7 +89,14 @@ def ensure_mode(path: Path, mode: int) -> None:
 
 
 def atomic_write_json(path: Path, payload: Any, mode: int = 0o600) -> None:
-    """Write JSON to a temp file, fsync, then atomic rename."""
+    """Write JSON to a temp file, fsync, then atomic rename.
+
+    Also attempts a directory fsync after the rename (best-effort). If
+    directory fsync is not supported by the filesystem, the failure is
+    swallowed and the function still returns success — the file write
+    itself was atomic, so a subsequent read of `path` will see the new
+    contents or the old contents, never a half-written file.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.parent / f".{path.name}.tmp.{os.getpid()}"
     data = json.dumps(payload, indent=2, sort_keys=True)
@@ -102,6 +109,25 @@ def atomic_write_json(path: Path, payload: Any, mode: int = 0o600) -> None:
             pass
     os.replace(tmp, path)
     ensure_mode(path, mode)
+    try:
+        fsync_dir(path.parent)
+    except OSError:
+        pass
+
+
+def fsync_dir(dirpath: Path) -> None:
+    """Best-effort directory fsync.
+
+    A directory's entries must be fsynced to durably persist a rename.
+    macOS exposes this via `os.fsync` on the directory fd; on some
+    Linux filesystems without dir-fsync support, the call raises
+    EINVAL/ENOTSUP, which we treat as best-effort and ignore.
+    """
+    fd = os.open(str(dirpath), os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
 
 
 def read_json(path: Path, default: Any = None) -> Any:

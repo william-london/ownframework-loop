@@ -20,11 +20,10 @@ Inside the Claude session, run `/reload-plugins`.
 1. Identify the hook output (Claude Code prints the block reason).
 2. Run the command through `ofloop` first. The CLI uses the same
    guards as the hooks, so what passes the CLI passes the hooks.
-3. If you must run a one-shot command outside the guardrails, prefix
-   it with `OWNFRAMEWORK_ALLOW=1` (only for the operator; documented
-   in `hooks/block_dangerous_bash.sh`). Do not use this prefix for
-   push, merge, deploy, or remote creation — those are forbidden
-   structurally, not by prefix.
+3. V1 has NO operator escape hatch and no model-controllable bypass.
+   Any future emergency override must be human-operated, out-of-band,
+   and outside V1. Push, merge, deploy, and remote creation are
+   forbidden structurally — there is no way to opt in.
 
 ## State transitions fail with "invalid transition"
 

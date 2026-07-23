@@ -10,7 +10,10 @@ from .locking import flock_exclusive
 from .transitions import assert_valid
 from .util import (
     atomic_write_json, read_json, run_dir, utc_now_iso, ensure_mode,
+    fsync_dir,
 )
+from . import integrity
+from . import limits as limits_mod
 
 
 SCHEMA_VERSION = "ownframework-loop-state/v1"
@@ -59,11 +62,45 @@ def load(canonical_repo: Path, run_id: str) -> dict[str, Any] | None:
     return read_json(state_path(canonical_repo, run_id))
 
 
+def load_verified(canonical_repo: Path, run_id: str) -> dict[str, Any]:
+    """Load STATE.json AND verify its SHA matches the last recorded event.
+
+    Raises `integrity.TamperingDetected` on mismatch. Returns {} for missing
+    (lets the caller decide what to do — usually create a fresh state).
+    """
+    sp = state_path(canonical_repo, run_id)
+    ep = events_path(canonical_repo, run_id)
+    ok, msg = integrity.verify_state_sha(sp, ep)
+    if not ok:
+        raise integrity.TamperingDetected(msg)
+    return read_json(sp, default={}) or {}
+
+
 def save(canonical_repo: Path, run_id: str, payload: dict[str, Any]) -> None:
-    """Persist state under flock and append a no-event marker to EVENTS.log."""
+    """Persist state under flock and record an integrity event.
+
+    `save()` is reserved for cases where the caller has computed a full new
+    state object (e.g. updating counters, patching a field). It writes
+    STATE.json atomically and appends a `state_saved` event so the SHA
+    chain stays consistent for subsequent `transition()` / `save()` calls.
+    """
+    actor = str(payload.get("last_actor", "spec"))
     with flock_exclusive(lock_path(canonical_repo, run_id)):
         atomic_write_json(state_path(canonical_repo, run_id), payload, mode=0o600)
         ensure_mode(events_path(canonical_repo, run_id), 0o600)
+    try:
+        fsync_dir(state_path(canonical_repo, run_id).parent)
+    except OSError:
+        pass
+    append_event(
+        canonical_repo, run_id,
+        event_type="state_saved",
+        old_state=payload.get("state"),
+        new_state=payload.get("state"),
+        actor=actor,
+        commit_sha=payload.get("last_candidate_sha"),
+        reason="non-transition state save",
+    )
 
 
 def append_event(
@@ -79,7 +116,9 @@ def append_event(
     extras: dict[str, Any] | None = None,
 ) -> None:
     """Append a JSON Lines event under flock."""
-    record = {
+    sp = state_path(canonical_repo, run_id)
+    state_sha_now = integrity.sha256_file(sp) if sp.exists() else None
+    record: dict[str, Any] = {
         "ts": utc_now_iso(),
         "run_id": run_id,
         "event_type": event_type,
@@ -88,6 +127,7 @@ def append_event(
         "actor": actor,
         "commit_sha": commit_sha,
         "reason": reason,
+        "state_sha256": state_sha_now,
     }
     if extras:
         record.update(extras)
@@ -103,6 +143,10 @@ def append_event(
             except OSError:
                 pass
         ensure_mode(ep, 0o600)
+        try:
+            fsync_dir(ep.parent)
+        except OSError:
+            pass
 
 
 def transition(
@@ -121,10 +165,21 @@ def transition(
     audit event is appended after the lock is released to avoid re-entrant
     flock acquisition on the same file (which is not guaranteed to be
     re-entrant across open file descriptions on all POSIX kernels).
+
+    Before transitioning, this function loads STATE.json *and* verifies
+    its recorded SHA. If the file was edited externally, we raise
+    `integrity.TamperingDetected`.
     """
+    # Verify before reading.
+    sp = state_path(canonical_repo, run_id)
+    ep = events_path(canonical_repo, run_id)
+    ok, msg = integrity.verify_state_sha(sp, ep)
+    if not ok:
+        raise integrity.TamperingDetected(f"transition refused: {msg}")
+
     with flock_exclusive(lock_path(canonical_repo, run_id)):
         current = read_json(state_path(canonical_repo, run_id))
-        if current is None:
+        if current is None or current == {}:
             raise FileNotFoundError(f"STATE.json missing for run {run_id}")
         from_state = current["state"]
         assert_valid(from_state, to_state)
@@ -146,7 +201,11 @@ def transition(
             new.update(extras)
 
         atomic_write_json(state_path(canonical_repo, run_id), new, mode=0o600)
-    # OUTSIDE the lock — append the audit event.
+    # Directory fsync for the rename, then audit outside the lock.
+    try:
+        fsync_dir(state_path(canonical_repo, run_id).parent)
+    except OSError:
+        pass
     append_event(
         canonical_repo, run_id,
         event_type="state_transition",
@@ -165,11 +224,21 @@ def increment_counter(
     *,
     counter: str,
     actor: str,
+    packet: dict[str, Any] | None = None,
+    hard_cap: bool = True,
 ) -> int:
-    """Increment a top-level integer counter under flock and return the new value."""
+    """Increment a top-level integer counter under flock and return the new value.
+
+    If `hard_cap` is True (default) and the counter is one of the V1-caps
+    list, refuse to increment past the effective cap (V1 max or packet
+    override). Raises `limits_mod.RepairLimitExceeded`.
+    """
+    if hard_cap:
+        limits_mod.enforce(counter, int(current_counter(canonical_repo, run_id, counter) or 0), packet)
+
     with flock_exclusive(lock_path(canonical_repo, run_id)):
         current = read_json(state_path(canonical_repo, run_id))
-        if current is None:
+        if current is None or current == {}:
             raise FileNotFoundError(f"STATE.json missing for run {run_id}")
         new = dict(current)
         new[counter] = int(current.get(counter, 0)) + 1
@@ -182,9 +251,17 @@ def increment_counter(
         event_type="counter_incremented",
         old_state=None, new_state=None,
         actor=actor, commit_sha=None,
-        reason=None, extras={"counter": counter, "new_value": new[counter]},
+        reason=None, extras={"counter": counter, "new_value": new[counter],
+                            "cap": limits_mod.effective_cap(counter, packet)},
     )
     return new[counter]
+
+
+def current_counter(canonical_repo: Path, run_id: str, counter: str) -> int | None:
+    s = read_json(state_path(canonical_repo, run_id), default=None)
+    if not s:
+        return None
+    return int(s.get(counter, 0))
 
 
 def request_stop(canonical_repo: Path, run_id: str, *, reason: str, actor: str = "human") -> None:

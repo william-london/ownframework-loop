@@ -27,10 +27,8 @@ if [[ -z "$command" ]]; then
   exit 0
 fi
 
-# Allow the operator to opt out for one invocation via prefix `OWNFRAMEWORK_ALLOW=1`.
-if [[ "$command" == OWNFRAMEWORK_ALLOW=1* ]]; then
-  exit 0
-fi
+# V1 has NO operator escape hatch and NO model-controllable bypass. Any future
+# emergency override must be human-operated, out-of-band, and outside V1.
 
 # Use the Python guard library for structural classification.
 result="$(python3 - <<PY 2>/dev/null || true

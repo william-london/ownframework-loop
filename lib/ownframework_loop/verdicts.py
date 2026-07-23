@@ -108,3 +108,30 @@ def finding_key(finding: dict[str, Any]) -> str:
         str(finding.get("line", "")),
         finding.get("title", ""),
     ])
+
+
+def classify_mutation(
+    mutation: dict[str, Any],
+    *,
+    expected_candidate_sha: str | None = None,
+) -> dict[str, Any]:
+    """Wrap a diff_tracked_mutation() result and translate it to a verdict
+    action.
+
+    Returns `{kind, action, ...}` where `action` is one of:
+      - `approve_candidate`  — no drift.
+      - `controlled_refresh` — head moved but it was the reviewer's own re-pin.
+      - `external_drift_block` — external drift, must BLOCK.
+      - `unexpected_initial_drift_block` — must BLOCK.
+
+    The reviewer must call this before stamping the verdict and adapt the
+    recommended_next_state per the action.
+    """
+    kind = mutation.get("kind", "no_change")
+    if kind == "no_change":
+        return {"kind": kind, "action": "approve_candidate"}
+    if kind == "controlled_refresh":
+        return {"kind": kind, "action": "controlled_refresh"}
+    if kind == "unexpected_initial_drift":
+        return {"kind": kind, "action": "unexpected_initial_drift_block"}
+    return {"kind": kind, "action": "external_drift_block"}

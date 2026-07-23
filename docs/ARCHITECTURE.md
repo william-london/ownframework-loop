@@ -1,5 +1,31 @@
 # Architecture — OwnFramework Loop V1
 
+## 0. CLI invocation contract
+
+The CLI shim `bin/ofloop` is a Python script (shebang `#!/usr/bin/env python3`).
+The supported invocations are exactly:
+
+```bash
+./bin/ofloop                       # executable-bit + shebang (preferred)
+python3 bin/ofloop                 # explicit interpreter
+ofloop                             # when bin/ is on PATH
+```
+
+The following form is **NOT supported** and is an outright mistake:
+
+```text
+NOT SUPPORTED — would produce SyntaxError: bash runs Python source as bash
+```
+
+Rationale: `bin/ofloop` is a Python source file. Invoking it through a
+Bash interpreter produces a `SyntaxError`. A test in
+`tests/unit/test_ofloop_invocation.sh` proves that the broken form fails
+(non-zero exit) while every documented form succeeds.
+
+The README, runbooks, and templates use `./bin/ofloop` and `python3 bin/ofloop`
+only. If you find a reference to `bash bin/ofloop` in the source tree or docs,
+it is a bug.
+
 ## 1. Purpose
 
 A reusable Claude Code plugin that provides a strong, affordable, generic

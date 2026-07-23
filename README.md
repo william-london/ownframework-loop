@@ -28,7 +28,8 @@ Reviewer session   --/loop /of-loop:review <run-id>--> verdict
 ## Quickstart
 
 ```bash
-# 1. Install (idempotent; backups the existing copy if present)
+# 1. Install (idempotent; backups the existing copy if present). install.sh
+#    is a bash script with a bash shebang — invoked via `bash`.
 bash /Users/mr.mrs.london/projects/plugins/ownframework-loop/install.sh
 
 # 2. Open Claude Code inside a target repo

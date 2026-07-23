@@ -39,6 +39,7 @@ from typing import Any
 from . import (
     git_checks, guards, packet as packet_mod, receipts, scheduling,
     state as state_mod, transitions, util, verdicts, worktrees,
+    integrity, limits as limits_mod,
 )
 
 
@@ -235,12 +236,18 @@ def cmd_build_claim(args: argparse.Namespace) -> None:
     cur = state_mod.load(repo, args.run_id)
     if cur.get("state") not in ("READY_TO_BUILD",):
         _emit_error(f"cannot claim in state {cur.get('state')!r}", exit_code=2)
-    state_mod.transition(
-        repo, args.run_id, to_state="BUILDING",
-        actor=args.actor or "of-builder",
-        reason="claim build pass",
-    )
-    state_mod.increment_counter(repo, args.run_id, counter="build_pass_count", actor="of-builder")
+    try:
+        state_mod.transition(
+            repo, args.run_id, to_state="BUILDING",
+            actor=args.actor or "of-builder",
+            reason="claim build pass",
+        )
+        state_mod.increment_counter(
+            repo, args.run_id, counter="build_pass_count",
+            actor="of-builder", packet=meta,
+        )
+    except limits_mod.RepairLimitExceeded as e:
+        _emit_error(f"repair limit exceeded: {e}", exit_code=4)
     state_mod.append_event(
         repo, args.run_id,
         event_type="build_claimed",
@@ -341,7 +348,10 @@ def cmd_review_write_verdict(args: argparse.Namespace) -> None:
             repo, args.run_id, to_state="REVIEWING",
             actor="of-reviewer", reason="claim review pass",
         )
-    state_mod.increment_counter(repo, args.run_id, counter="review_pass_count", actor="of-reviewer")
+    state_mod.increment_counter(
+        repo, args.run_id, counter="review_pass_count",
+        actor="of-reviewer", packet=_require_packet(repo, args.run_id),
+    )
     verdicts.write_verdict(repo, args.run_id, verdict)
     state_mod.append_event(
         repo, args.run_id, event_type="verdict_written",

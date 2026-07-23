@@ -20,8 +20,11 @@ William-issued `/of-loop:spec approve <run-id>` command.
 - `/of-loop:spec abandon <run-id>` — record STOP and transition to `STOPPED` for archival.
 
 The skill uses the bundled CLI (`bin/ofloop`) for all state transitions and
-packet parsing. Do NOT bypass the CLI to edit state files directly. Direct
-edits of `STATE.json` are reserved for the CLI only.
+packet parsing. The CLI is a Python source file invoked via `./bin/ofloop`
+(executable bit + python shebang) or `python3 bin/ofloop`. Never invoke it
+as `bash bin/ofloop` — that is `Bash interpreting Python source` and fails
+with `SyntaxError`. Do NOT bypass the CLI to edit state files directly.
+Direct edits of `STATE.json` are reserved for the CLI only.
 
 ## Behavior
 

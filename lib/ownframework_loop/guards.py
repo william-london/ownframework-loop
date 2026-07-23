@@ -1,4 +1,13 @@
-"""Deterministic guardrails — bash command classification, path checks, secret scan."""
+"""Deterministic guardrails — bash command classification, path checks, secret scan.
+
+Design contract (V1, post-audit):
+- The textual classifier is one layer of defense; the post-pass review pass is
+  the ultimate authority. The classifier is *not* a complete shell parser.
+- Hermes is recognized only as an executable identity (path component) when
+  invoked as the `hermes` CLI itself. The bare word "hermes" in argv,
+  filesystem paths under `~/.hermes/`, `grep hermes ...`, etc., are allowed.
+- See `docs/SECURITY_MODEL.md` for the full layered model.
+"""
 
 from __future__ import annotations
 
@@ -11,24 +20,45 @@ from typing import Any
 # Bash command tokens that must NEVER be issued by an OwnFramework Loop pass.
 # Each entry: (compiled regex, human description). Match anywhere in the argv
 # of any segment of the command chain.
+#
+# Note on intent: every regex here targets an executable identity or a specific
+# subcommand form. Do NOT add bare-keyword blocks (e.g. `\bhermes\b` was a
+# prompt-injection/UX hazard; paths under `~/.hermes/`, grep searches, and
+# docs that mention Hermes are legitimate).
 FORBIDDEN_PATTERNS: list[tuple[re.Pattern[str], str]] = [
+    # git push (any variant)
     (re.compile(r"\bgit\s+push\b"), "git push is prohibited"),
     (re.compile(r"\bgit\s+push\s+--force\b"), "force push is prohibited"),
     (re.compile(r"\bgit\s+push\s+-f\b"), "force push is prohibited"),
+    (re.compile(r"\bgit\s+push\s+--force-with-lease\b"), "force push is prohibited"),
+    (re.compile(r"\bgit\s+push\s+--no-verify\b"), "git push --no-verify is prohibited"),
+    # git merge (any form)
     (re.compile(r"\bgit\s+merge\b"), "git merge is prohibited"),
     (re.compile(r"\bgit\s+merge\s+--no-ff\b"), "merge commit is prohibited"),
+    # git reset / clean / branch destructive
     (re.compile(r"\bgit\s+reset\s+--hard\b"), "git reset --hard is prohibited"),
-    (re.compile(r"\bgit\s+clean\b"), "git clean is prohibited"),
-    (re.compile(r"\bgit\s+clean\s+-fd\b"), "git clean is prohibited"),
+    (re.compile(r"\bgit\s+clean\s+-?fdx?\b"), "git clean with force/clean-untracked is prohibited"),
     (re.compile(r"\bgit\s+branch\s+-D\b"), "git branch -D is prohibited"),
+    (re.compile(r"\bgit\s+branch\s+-d\b"), "git branch -d is prohibited"),
+    (re.compile(r"\bgit\s+worktree\s+prune\b"), "broad git worktree prune is prohibited"),
+    # git remote mutations
     (re.compile(r"\bgit\s+remote\s+add\b"), "remote creation is prohibited"),
     (re.compile(r"\bgit\s+remote\s+set-url\b"), "remote modification is prohibited"),
     (re.compile(r"\bgit\s+remote\s+remove\b"), "remote deletion is prohibited"),
+    # system / container mutations on production
     (re.compile(r"\bsystemctl\s+(start|stop|restart|reload)\b"), "systemctl is prohibited"),
     (re.compile(r"\bdocker\s+compose\s+(up|down|restart)\b"), "production docker mutation is prohibited"),
+    # remote shell to protected production hosts
     (re.compile(r"\bssh\s+horus\b"), "ssh to production is prohibited"),
     (re.compile(r"\bssh\s+firelove\b"), "ssh to production is prohibited"),
-    (re.compile(r"\bhermes\b"), "hermes invocation is prohibited in V1"),
+    # Hermes executable identity — when invoked via its CLI binary. Path
+    # references like `~/.hermes/` and grep/docs mentioning Hermes are fine.
+    # Matches: `hermes`, `/usr/bin/hermes`, `./hermes`, but NOT `cat hermes.txt`.
+    (re.compile(r"(^|[\s;|&`\"'\\(])(?:\./|/usr/(?:bin|local/bin)/)?hermes(?:\s|$|&|;|\||`)"),
+     "hermes CLI invocation is prohibited"),
+    # Codex CLI — out of scope for the supervised local-only V1 pilot.
+    (re.compile(r"(^|[\s;|&`\"'\\(])(?:\./|/usr/(?:bin|local/bin)/)?codex(?:\s|$|&|;|\||`)"),
+     "codex invocation is out of scope for V1"),
 ]
 
 
@@ -40,7 +70,7 @@ REVIEWER_ALLOWLIST_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"^\s*git\s+show\b"),
     re.compile(r"^\s*git\s+diff\b"),
     re.compile(r"^\s*git\s+rev-parse\b"),
-    re.compile(r"^\s*git\s+branch\b(?!.*-D)"),
+    re.compile(r"^\s*git\s+branch\b(?!.*-[dD])"),
     re.compile(r"^\s*git\s+worktree\s+list\b"),
     re.compile(r"^\s*git\s+cat-file\b"),
     re.compile(r"^\s*git\s+ls-files\b"),
@@ -86,6 +116,11 @@ def classify_bash_command(command: str) -> dict[str, Any]:
 
     Splits the command on common shell-chain operators before classifying each
     segment, so `git status && git push` is detected as forbidden.
+
+    Note: textual classification is ONE LAYER of defense. Forms that
+    cannot be safely interpreted pre-execution (multiline heredocs, eval
+    indirection, Python subprocess), defer to the post-pass verification
+    layer and the sandbox boundary.
     """
     segments = _split_command_chain(command)
     forbidden: list[str] = []
@@ -106,7 +141,15 @@ def _split_command_chain(command: str) -> list[str]:
     """Split a shell command into segments separated by &&, ||, ;, |.
 
     Naive but adequate — we are matching dangerous tokens, not parsing shell.
+
+    Returns [] for multiline commands so the caller can defer to the
+    post-pass verification layer instead of crashing the classifier.
     """
+    if "\n" in command or "\r" in command:
+        # Multiline/heredoc input: text classifier can't safely parse this.
+        # The post-pass verification must catch any prohibited operation.
+        return []
+
     parts: list[str] = []
     buf: list[str] = []
     i = 0
@@ -157,7 +200,11 @@ def _split_command_chain(command: str) -> list[str]:
 
 def is_reviewer_allowed(command: str) -> bool:
     """Return True iff every segment of the command matches an allowed pattern."""
-    for seg in _split_command_chain(command):
+    segments = _split_command_chain(command)
+    if not segments:
+        # Multiline/unparseable: do not pretend it is allowed.
+        return False
+    for seg in segments:
         if not any(p.search(seg) for p in REVIEWER_ALLOWLIST_PATTERNS):
             return False
     return True
@@ -181,3 +228,25 @@ def scan_path_for_secrets(path: Path) -> list[dict[str, str]]:
     except OSError:
         return []
     return scan_text_for_secrets(text)
+
+
+def classify_for_executable_identity(command: str) -> list[str]:
+    """Classify by executable identity — matches only when the literal CLI is
+    on the argv (e.g. `hermes cron`, `/usr/local/bin/hermes run`, not
+    `cat ~/.hermes/STATE.json`).
+
+    Returns a list of human descriptions for any prohibited executable
+    identity found. Used by post-pass verification (which can run on parsed
+    argv) and not by the textual hook (which cannot reliably parse argv).
+    """
+    findings: list[str] = []
+    tokens = shlex.split(command)
+    for tok in tokens:
+        # Strip a leading env-var assignment segment if any.
+        base = tok.rsplit("/", 1)[-1]
+        if base in ("hermes",):
+            findings.append(f"hermes CLI invocation: {tok}")
+        elif base in ("codex",):
+            findings.append(f"codex CLI invocation: {tok}")
+    return findings
+
