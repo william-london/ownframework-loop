@@ -80,10 +80,20 @@ fi
 
 # Use the Python guard library for structural classification.
 # Encode the command as base64 to safely embed it in the Python source.
+#
+# F-001 closure: refuse to silently fall back to a hardcoded William
+# installation path. If CLAUDE_PLUGIN_ROOT (or OFLOOP_PLUGIN_ROOT) is
+# unset, fail closed with a clear operator action.
+if [[ -z "${CLAUDE_PLUGIN_ROOT:-}" && -z "${OFLOOP_PLUGIN_ROOT:-}" ]]; then
+  echo "  [of-loop hook] CLAUDE_PLUGIN_ROOT not provided by Claude Code and OFLOOP_PLUGIN_ROOT not set in environment; refusing for safety" 1>&2
+  exit 2
+fi
+PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-${OFLOOP_PLUGIN_ROOT}}"
+export CLAUDE_PLUGIN_ROOT="$PLUGIN_ROOT"
 encoded_command="$(printf '%s' "$command" | base64)"
-result="$(CLAUDE_PLUGIN_ROOT="${OFLOOP_PLUGIN_ROOT:-/Users/mr.mrs.london/.claude/skills/of-loop}" python3 - "$encoded_command" 2>/dev/null <<'PY' || echo "CLASSIFY_ERROR"
+result="$(python3 - "$encoded_command" 2>/dev/null <<'PY' || echo "CLASSIFY_ERROR"
 import sys, os, base64
-sys.path.insert(0, os.path.join(os.environ.get("CLAUDE_PLUGIN_ROOT", "/Users/mr.mrs.london/.claude/skills/of-loop"), "lib"))
+sys.path.insert(0, os.path.join(os.environ.get("CLAUDE_PLUGIN_ROOT", ""), "lib"))
 from ownframework_loop import guards
 try:
     cmd = base64.b64decode(sys.argv[1]).decode("utf-8", errors="replace")

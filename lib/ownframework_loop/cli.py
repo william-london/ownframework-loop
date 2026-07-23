@@ -86,7 +86,42 @@ def _require_packet(canonical_repo: Path, run_id: str) -> dict[str, Any]:
 
 def cmd_spec_new(args: argparse.Namespace) -> None:
     repo = _repo_path(args.repo)
+    # F-004 closure: deterministic CLI-side eligibility guards.
+    # The spec skill remains the primary gate, but the CLI refuses
+    # categorically unsupported targets without requiring --unsafe.
+    unsafe = bool(getattr(args, "unsafe", False))
+    if not git_checks.is_git_repo(repo):
+        _emit_error(
+            "not a git repository; spec new requires a Git repository. "
+            "Use 'ofloop new-repo' for explicit NEW_REPOSITORY bootstrap.",
+            exit_code=2,
+            classification="NON_GIT_REFUSAL",
+        )
+    if git_checks.is_bare(repo):
+        _emit_error(
+            "bare repositories are not eligible targets",
+            exit_code=2,
+            classification="BARE_REPOSITORY_UNSUPPORTED",
+        )
+    cls = git_checks.dirty_classification(repo)
+    if (cls["has_tracked_modified"] or cls["has_tracked_deleted"] or cls["has_staged"]) and not unsafe:
+        _emit_error(
+            "tracked dirty state detected; refuse, stash, reset, clean, or "
+            "absorb those changes. To force-create a run in spite of dirt, "
+            "use --unsafe (model layer will still refuse).",
+            exit_code=2,
+            classification="TRACKED_DIRTY_REFUSAL",
+            dirty=cls,
+        )
+    # Refuse when a conflicting run branch exists with this run id pattern.
     run_id = state_mod.run_dir(repo, f"run-{util.utc_now_compact()}-{uuid.uuid4().hex[:8]}").name
+    candidate_branch = f"factory/candidate/{run_id}"
+    if git_checks.branch_exists(repo, candidate_branch):
+        _emit_error(
+            f"conflicting run branch already exists: {candidate_branch}",
+            exit_code=2,
+            classification="RUN_BRANCH_COLLISION",
+        )
     state_mod.run_dir(repo, run_id).mkdir(parents=True, exist_ok=True)
     initial = state_mod.initial_state(run_id)
     state_mod.save(repo, run_id, initial)
@@ -402,16 +437,29 @@ def cmd_doctor(args: argparse.Namespace) -> None:
     if not git_checks.is_git_repo(repo):
         _emit({"ok": False, "is_git_repo": False})
         return
+    # F-003 closure: refuse bare repositories explicitly.
+    if git_checks.is_bare(repo):
+        _emit({
+            "ok": False,
+            "repo": str(repo),
+            "is_git_repo": True,
+            "bare": True,
+            "reason": "bare repositories are not eligible targets",
+            "classification": "BARE_REPOSITORY_UNSUPPORTED",
+        })
+        return
     info = {
         "ok": True,
         "repo": str(repo),
         "is_git_repo": True,
+        "bare": False,
         "toplevel": str(git_checks.git_toplevel(repo)),
         "current_branch": git_checks.current_branch(repo),
         "current_head": git_checks.current_head(repo),
         "remote_count": git_checks.remote_count(repo),
         "remotes": git_checks.remotes(repo),
         "is_dirty": git_checks.is_dirty(repo),
+        "dirty_classification": git_checks.dirty_classification(repo),
     }
     if args.run_id:
         run_dir = state_mod.run_dir(repo, args.run_id)
@@ -441,9 +489,19 @@ def cmd_new_repo(args: argparse.Namespace) -> None:
     if rc > 0:
         _emit_error(f"newly created repo has remotes (should be zero)", exit_code=2)
     if args.init_baseline:
-        # Make an initial empty commit so worktrees can branch off it.
-        subprocess.run(["git", "-C", str(target), "config", "user.email", "william@ownframework.local"], check=False)
-        subprocess.run(["git", "-C", str(target), "config", "user.name", "William"], check=False)
+        # F-002 closure: read the effective Git identity from the target
+        # repo's local config (which inherits from global config). Never
+        # silently synthesize an identity; never modify global config.
+        name, email = git_checks.effective_git_author(target)
+        if not name or not email:
+            _emit_error(
+                "git identity not configured (user.name / user.email). "
+                "Configure once via 'git config --global user.name ...' "
+                "and 'git config --global user.email ...', or set them "
+                "in the target repo's local config.",
+                exit_code=4,
+                classification="MISSING_GIT_IDENTITY",
+            )
         readme = target / "README.md"
         readme.write_text(
             f"# {args.project_name}\n\nMinimal bootstrap baseline created by OwnFramework Loop.\n",
@@ -452,13 +510,21 @@ def cmd_new_repo(args: argparse.Namespace) -> None:
         gitignore = target / ".gitignore"
         gitignore.write_text(".ownframework-loop/\n.worktrees/ownframework-loop/\n", encoding="utf-8")
         subprocess.run(["git", "-C", str(target), "add", "README.md", ".gitignore"], check=True)
-        subprocess.run(["git", "-C", str(target), "commit", "-m", "loop-v1: minimal bootstrap baseline"], check=True)
+        # Use the discovered identity; do NOT pass --local config writes.
+        env = {**os.environ, "GIT_AUTHOR_NAME": name, "GIT_AUTHOR_EMAIL": email,
+               "GIT_COMMITTER_NAME": name, "GIT_COMMITTER_EMAIL": email}
+        subprocess.run(
+            ["git", "-C", str(target), "commit", "-m", "loop-v1: minimal bootstrap baseline"],
+            check=True, env=env,
+        )
     _emit({
         "ok": True,
         "target": str(target),
         "branch": "master",
         "remote_count": git_checks.remote_count(target),
         "baseline_initialized": bool(args.init_baseline),
+        "git_author": {"name": name if args.init_baseline else None,
+                       "email": email if args.init_baseline else None},
     })
 
 
@@ -474,6 +540,8 @@ def _build_parser() -> argparse.ArgumentParser:
     s_new = spec_sub.add_parser("new", help="create a new run")
     s_new.add_argument("repo")
     s_new.add_argument("mission", nargs="?")
+    s_new.add_argument("--unsafe", action="store_true",
+                       help="bypass CLI-side dirty-state refusal (model layer still refuses)")
     s_new.set_defaults(func=cmd_spec_new)
     s_status = spec_sub.add_parser("status", help="show run status")
     s_status.add_argument("repo")

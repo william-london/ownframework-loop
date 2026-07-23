@@ -61,6 +61,86 @@ def is_dirty(path: Path) -> bool:
     return r.returncode == 0 and bool(r.stdout.strip())
 
 
+def is_bare(path: Path) -> bool:
+    """True iff `path` is a bare Git repository."""
+    r = run_subprocess(["git", "-C", str(path), "rev-parse", "--is-bare-repository"], timeout=10)
+    return r.returncode == 0 and r.stdout.strip().lower() == "true"
+
+
+def dirty_classification(path: Path) -> dict[str, Any]:
+    """Classify the dirty state of a Git working tree.
+
+    Returns a dict with keys:
+      - has_tracked_modified: bool (M in first column of porcelain)
+      - has_tracked_deleted: bool  (D in first column)
+      - has_staged: bool          (any first-column entry other than '?')
+      - has_untracked: bool       (?? in porcelain)
+      - has_ignored_present: bool (ignored files that exist on disk; surfaced
+                                    only as a hint, not as a refusal reason)
+      - porcelain: list[str]      (raw porcelain lines for transparency)
+    """
+    out: dict[str, Any] = {
+        "has_tracked_modified": False,
+        "has_tracked_deleted": False,
+        "has_staged": False,
+        "has_untracked": False,
+        "has_ignored_present": False,
+        "porcelain": [],
+    }
+    r = run_subprocess(["git", "-C", str(path), "status", "--porcelain"], timeout=10)
+    if r.returncode != 0:
+        return out
+    lines = r.stdout.splitlines()
+    out["porcelain"] = lines
+    for line in lines:
+        if not line.strip():
+            continue
+        x = line[0] if len(line) > 0 else " "
+        y = line[1] if len(line) > 1 else " "
+        if x == "?" and y == "?" :
+            out["has_untracked"] = True
+            continue
+        if x == "!":
+            continue
+        if x != " ":
+            out["has_staged"] = True
+        if y == "M":
+            out["has_tracked_modified"] = True
+        if y == "D":
+            out["has_tracked_deleted"] = True
+    # Hint: do any ignored files exist? `git status --ignored --porcelain`
+    # lists ignored files; we use this only as informational output.
+    ri = run_subprocess(
+        ["git", "-C", str(path), "status", "--ignored", "--porcelain"],
+        timeout=10,
+    )
+    if ri.returncode == 0:
+        for line in ri.stdout.splitlines():
+            if line.startswith("!!"):
+                out["has_ignored_present"] = True
+                break
+    return out
+
+
+def effective_git_author(path: Path) -> tuple[str | None, str | None]:
+    """Read the effective Git author identity from local repo config (no
+    global config writes). Returns (name, email). Either may be None if
+    not configured. Reads only the repository's local config; does not
+    fall back to global config to keep installation scope strict.
+    """
+    rn = run_subprocess(["git", "-C", str(path), "config", "--local", "user.name"], timeout=10)
+    re_ = run_subprocess(["git", "-C", str(path), "config", "--local", "user.email"], timeout=10)
+    name = rn.stdout.strip() if rn.returncode == 0 else None
+    email = re_.stdout.strip() if re_.returncode == 0 else None
+    if not name:
+        rn2 = run_subprocess(["git", "-C", str(path), "config", "user.name"], timeout=10)
+        name = rn2.stdout.strip() if rn2.returncode == 0 else None
+    if not email:
+        re2 = run_subprocess(["git", "-C", str(path), "config", "user.email"], timeout=10)
+        email = re2.stdout.strip() if re2.returncode == 0 else None
+    return (name or None, email or None)
+
+
 def worktree_list(path: Path) -> list[dict[str, Any]]:
     r = run_subprocess(["git", "-C", str(path), "worktree", "list", "--porcelain"], timeout=10)
     if r.returncode != 0:
