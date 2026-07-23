@@ -20,7 +20,14 @@ ROOT="$HERE"
 LIB_DIR="$ROOT/lib"
 INSTALL_ROOT="${INSTALL_ROOT:-/Users/mr.mrs.london/.claude/skills/of-loop}"
 TIMESTAMP="$(date -u +%Y%m%dT%H%M%SZ)"
-REPORT_DIR="${REPORT_DIR:-/Users/mr.mrs.london/.claude/ownframework-loop-receipts}"
+REPORT_DIR="${REPORT_DIR:-}"
+if [[ -z "$REPORT_DIR" && -n "${CLAUDE_PLUGIN_DATA:-}" ]]; then
+  REPORT_DIR="${CLAUDE_PLUGIN_DATA}/receipts"
+  mkdir -p "$REPORT_DIR"
+fi
+if [[ -z "$REPORT_DIR" ]]; then
+  REPORT_DIR="/Users/mr.mrs.london/.claude/ownframework-loop-receipts"
+fi
 mkdir -p "$REPORT_DIR"
 RELEASE_REPORT="$REPORT_DIR/release-$TIMESTAMP.log"
 

@@ -15,7 +15,15 @@ INSTALL_ROOT="${INSTALL_ROOT:-/Users/mr.mrs.london/.claude/skills/of-loop}"
 INSTALL_PARENT="$(dirname "$INSTALL_ROOT")"
 TIMESTAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 BACKUP_ROOT="${INSTALL_ROOT}.backup-${TIMESTAMP}"
-RECEIPT_DIR="${OFLOOP_RECEIPT_DIR:-/Users/mr.mrs.london/.claude/ownframework-loop-receipts}"
+RECEIPT_DIR="${OFLOOP_RECEIPT_DIR:-}"
+# Prefer Claude-managed persistent plugin data when available.
+if [[ -z "$RECEIPT_DIR" && -n "${CLAUDE_PLUGIN_DATA:-}" ]]; then
+  RECEIPT_DIR="${CLAUDE_PLUGIN_DATA}/installation"
+  mkdir -p "$RECEIPT_DIR"
+fi
+if [[ -z "$RECEIPT_DIR" ]]; then
+  RECEIPT_DIR="/Users/mr.mrs.london/.claude/ownframework-loop-receipts"
+fi
 RECEIPT_PATH="$RECEIPT_DIR/install-${TIMESTAMP}.json"
 STAGING="$(mktemp -d -t ofloop_install.XXXXXX)"
 
