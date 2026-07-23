@@ -1,0 +1,34 @@
+# OwnFramework Loop per-repository policy. Drop into <repo>/.claude/loop.yaml.
+schema: ownframework-loop-policy/v1
+version: 0.1.0
+factory:
+  source: /Users/mr.mrs.london/projects/plugins/ownframework-loop
+  version: 0.1.0
+risk_policy:
+  default_risk: medium
+  max_repair_rounds: 3
+  max_diff_lines: 400
+  max_files_changed: 12
+  max_runtime_seconds: 28800
+  max_pass_runtime_seconds: 1800
+branch_policy:
+  expected_branch: master
+  work_branch_prefix: factory/candidate/
+  protected_branches: [master]
+protected_paths:
+  - AGENTS.md
+  - CLAUDE.md
+  - .claude/
+  - .ownframework-loop/
+  - .worktrees/ownframework-loop/
+  - state/
+build:
+  interval_minutes: 10
+review:
+  interval_minutes: 15
+remotes:
+  local_only_default: true
+  block_remote_creation: true
+  block_push: true
+  block_merge: true
+  block_deploy: true

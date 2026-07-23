@@ -1,0 +1,19 @@
+{
+  "schema": "ownframework-loop-policy/v1",
+  "approved_roots": [
+    "/Users/mr.mrs.london/projects"
+  ],
+  "forbidden_roots": [
+    "/Users/mr.mrs.london/projects/horus",
+    "/Users/mr.mrs.london/projects/firelove",
+    "/Users/mr.mrs.london/projects/cockpit",
+    "/Users/mr.mrs.london/projects/video-factory",
+    "/Users/mr.mrs.london/projects/vps",
+    "/Users/mr.mrs.london/projects/decal-os"
+  ],
+  "max_run_wallclock_seconds": 28800,
+  "max_pass_runtime_seconds": 1800,
+  "model_smoke_budget_usd": 3.00,
+  "default_branch": "master",
+  "require_local_only_default": true
+}
