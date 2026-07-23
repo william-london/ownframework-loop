@@ -10,3 +10,6 @@ __pycache__/
 *.tmp
 *.swp
 .tmp/
+*.log
+.install.log
+.uninstall.log
