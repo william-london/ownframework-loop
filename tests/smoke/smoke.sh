@@ -13,7 +13,16 @@ SMOKE_ROOT="${SMOKE_ROOT:-/tmp/ofloop-smoke-$(date -u +%Y%m%dT%H%M%SZ)}"
 PROJECT="${PROJECT:-ofloop-smoke-pilot-$(printf '%04x' $RANDOM)}"
 PLUGIN_DIR="${PLUGIN_DIR:-/Users/mr.mrs.london/.claude/skills/of-loop}"
 MAX_TURNS="${MAX_TURNS:-30}"
-SMOKE_LOG="${SMOKE_LOG:-/Users/mr.mrs.london/.claude/ownframework-loop-receipts/smoke-$(date -u +%Y%m%dT%H%M%SZ).log}"
+
+# Resolve plugin-data dir using the official storage doctrine.
+PLUGIN_DATA_DIR_NAME="of-loop-ownframework-local"
+if [[ -n "${CLAUDE_PLUGIN_DATA:-}" ]]; then
+  _PD_ROOT="$CLAUDE_PLUGIN_DATA"
+else
+  _cfg="${CLAUDE_CONFIG_DIR:-${HOME}/.claude}"
+  _PD_ROOT="$_cfg/plugins/data/$PLUGIN_DATA_DIR_NAME"
+fi
+SMOKE_LOG="${SMOKE_LOG:-$_PD_ROOT/logs/smoke-$(date -u +%Y%m%dT%H%M%SZ).log}"
 
 mkdir -p "$SMOKE_ROOT"
 mkdir -p "$(dirname "$SMOKE_LOG")"

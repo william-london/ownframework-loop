@@ -6,6 +6,11 @@
 # replaces /Users/mr.mrs.london/.claude/skills/of-loop.
 #
 # Idempotent. Safe to re-run. Creates an installation receipt.
+#
+# Receipt location follows the official storage doctrine:
+#   1. CLAUDE_PLUGIN_DATA (when loaded as a managed plugin)
+#   2. ${CLAUDE_CONFIG_DIR:-$HOME/.claude}/plugins/data/of-loop-ownframework-local
+# It NEVER writes into ~/.claude/ownframework-loop-receipts anymore.
 
 set -euo pipefail
 
@@ -15,15 +20,20 @@ INSTALL_ROOT="${INSTALL_ROOT:-/Users/mr.mrs.london/.claude/skills/of-loop}"
 INSTALL_PARENT="$(dirname "$INSTALL_ROOT")"
 TIMESTAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 BACKUP_ROOT="${INSTALL_ROOT}.backup-${TIMESTAMP}"
-RECEIPT_DIR="${OFLOOP_RECEIPT_DIR:-}"
-# Prefer Claude-managed persistent plugin data when available.
-if [[ -z "$RECEIPT_DIR" && -n "${CLAUDE_PLUGIN_DATA:-}" ]]; then
-  RECEIPT_DIR="${CLAUDE_PLUGIN_DATA}/installation"
-  mkdir -p "$RECEIPT_DIR"
-fi
-if [[ -z "$RECEIPT_DIR" ]]; then
-  RECEIPT_DIR="/Users/mr.mrs.london/.claude/ownframework-loop-receipts"
-fi
+PLUGIN_DATA_DIR_NAME="of-loop-ownframework-local"
+
+# Resolve the persistent plugin-data root.
+resolve_plugin_data_dir() {
+  if [[ -n "${CLAUDE_PLUGIN_DATA:-}" ]]; then
+    printf '%s' "$CLAUDE_PLUGIN_DATA"
+    return
+  fi
+  local cfg="${CLAUDE_CONFIG_DIR:-${HOME}/.claude}"
+  printf '%s' "$cfg/plugins/data/$PLUGIN_DATA_DIR_NAME"
+}
+
+RECEIPT_DIR="$(resolve_plugin_data_dir)/installation"
+mkdir -p "$RECEIPT_DIR"
 RECEIPT_PATH="$RECEIPT_DIR/install-${TIMESTAMP}.json"
 STAGING="$(mktemp -d -t ofloop_install.XXXXXX)"
 
@@ -31,6 +41,7 @@ log() { echo "[install] $*"; }
 
 log "source: $SOURCE_ROOT"
 log "install_root: $INSTALL_ROOT"
+log "receipt_dir: $RECEIPT_DIR"
 log "staging: $STAGING"
 
 # 1. Run the source release gate first. Abort on failure.

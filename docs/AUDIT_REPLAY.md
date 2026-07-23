@@ -143,9 +143,9 @@ enforced, validate.sh had no real `--installed` path.
 - Every marker runs a real proof and captures exit code.
 - No `|| true`, no grep-of-source PASS, no PASS_WITH_WARNINGS for internal flaws.
 - Gate is timestamped and tied to source HEAD, installed-copy manifest, claude version, exact test run.
-- Final report goes to `~/.claude/ownframework-loop-receipts/release-<TS>.log`.
+- Final report goes to `~/.claude/plugins/data/of-loop-ownframework-local/receipts/release-<TS>.log`.
 
-**Proof:** Release report at `~/.claude/ownframework-loop-receipts/release-20260723T065345Z.log` shows 74 PASS / 0 WARN / 0 FAIL.
+**Proof:** Release report at `~/.claude/plugins/data/of-loop-ownframework-local/receipts/release-<TS>.log` shows 74 PASS / 0 WARN / 0 FAIL. (Pre-managed-migration run used the legacy path; migrated copy preserved under the same hash in plugin-data.)
 
 ---
 
@@ -238,8 +238,10 @@ and was never touched in the pilot's own plugin source).
 
 ## Receipts
 
-- Release report: `~/.claude/ownframework-loop-receipts/release-20260723T065345Z.log`
-- Install receipt: `~/.claude/ownframework-loop-receipts/install-20260723T065124Z.json`
+- Release report: `~/.claude/plugins/data/of-loop-ownframework-local/receipts/release-20260723T065345Z.log`
+- Install receipt: `~/.claude/plugins/data/of-loop-ownframework-local/installation/install-20260723T065124Z.json`
+  (Both files have been migrated from the retired `~/.claude/ownframework-loop-receipts/`
+  path; byte-equality verified through SHA-256.)
 - Cycle evidence: `/tmp/ofloop-cycle-evidence/`
   - `cycle.log`
   - `01-spec-new.json`, `02-approve.json`, `03-claim.json`, `05-receipt.json`, `06-verdict.json`

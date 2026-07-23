@@ -49,10 +49,16 @@ hygiene checks (no remote, no push, no merge, no deploy, clean tree).
 | `RELEASE_GATE` | PASS (42 PASS markers) |
 | `FIRST_PILOT_READY` | yes |
 | `OPERATOR_RUNBOOK` | `templates/OPERATOR_RUNBOOK.md` |
-| `INSTALL_RECEIPT` | `~/.claude/ownframework-loop-receipts/install-20260723T060112Z.json` |
+| `INSTALL_RECEIPT` | `~/.claude/plugins/data/of-loop-ownframework-local/installation/install-20260723T160348Z-managed.json` |
 | `TEST_REPORT` | `release_gate.sh` (emits all PASS markers) |
-| `SMOKE_REPORT` | `~/.claude/ownframework-loop-receipts/smoke-20260723T060308Z.log` |
+| `SMOKE_REPORT` | `~/.claude/plugins/data/of-loop-ownframework-local/logs/smoke-<TS>.log` |
 | `NEXT_SAFE_LANE` | `bin/ofloop spec new "<small mission>" && bin/ofloop spec status && (manual) bin/ofloop spec approve` |
+
+> Historical (pre-managed): the obsolete `~/.claude/ownframework-loop-receipts/`
+> directory was used before the migration lane and has been retired. All
+> active receipts now live under
+> `~/.claude/plugins/data/of-loop-ownframework-local/` (or
+> `${CLAUDE_PLUGIN_DATA}` when loaded as a managed plugin).
 
 ---
 
@@ -159,7 +165,7 @@ The bounded smoke (`tests/smoke/smoke.sh`) ran `/of-loop:spec` against a
 disposable local-only repo at `/tmp/ofloop-smoke/ofloop-smoke-pilot-0682/`.
 The agent created `WORK_PACKET.md`, wrote `STATE.json` (state=
 `AWAITING_APPROVAL`), and stopped without approving. The full transcript
-is at `~/.claude/ownframework-loop-receipts/smoke-20260723T060308Z.log`.
+is at `~/.claude/plugins/data/of-loop-ownframework-local/logs/smoke-<TS>.log`.
 
 Wall-clock cap: 120s. Turn cap: 30. Cost ceiling: $3.00. Actual cost was
 well under $0.50 for a single spec invocation.

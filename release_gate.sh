@@ -32,14 +32,20 @@ if [[ -d "${HOME}/.claude/plugins/cache/ownframework-local/of-loop" ]]; then
 fi
 INSTALL_ROOT="${INSTALL_ROOT:-${MANAGED_INSTALL_ROOT:-${LEGACY_INSTALL_ROOT}}}"
 TIMESTAMP="$(date -u +%Y%m%dT%H%M%SZ)"
-REPORT_DIR="${REPORT_DIR:-}"
-if [[ -z "$REPORT_DIR" && -n "${CLAUDE_PLUGIN_DATA:-}" ]]; then
-  REPORT_DIR="${CLAUDE_PLUGIN_DATA}/receipts"
-  mkdir -p "$REPORT_DIR"
-fi
-if [[ -z "$REPORT_DIR" ]]; then
-  REPORT_DIR="/Users/mr.mrs.london/.claude/ownframework-loop-receipts"
-fi
+
+# Resolve the persistent plugin-data root.
+# Order: CLAUDE_PLUGIN_DATA, then ${CLAUDE_CONFIG_DIR:-$HOME/.claude}/plugins/data/of-loop-ownframework-local
+# Never falls back to ~/.claude/ownframework-loop-receipts.
+PLUGIN_DATA_DIR_NAME="of-loop-ownframework-local"
+resolve_plugin_data_dir() {
+  if [[ -n "${CLAUDE_PLUGIN_DATA:-}" ]]; then
+    printf '%s' "$CLAUDE_PLUGIN_DATA"
+    return
+  fi
+  local cfg="${CLAUDE_CONFIG_DIR:-${HOME}/.claude}"
+  printf '%s' "$cfg/plugins/data/$PLUGIN_DATA_DIR_NAME"
+}
+REPORT_DIR="${REPORT_DIR:-$(resolve_plugin_data_dir)/receipts}"
 mkdir -p "$REPORT_DIR"
 RELEASE_REPORT="$REPORT_DIR/release-$TIMESTAMP.log"
 
