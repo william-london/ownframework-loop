@@ -1,0 +1,36 @@
+#!/usr/bin/env python3
+"""OwnFramework Loop CLI shim.
+
+Invokes the ofloop Python module from anywhere on PATH.
+"""
+
+from __future__ import annotations
+
+import os
+import sys
+from pathlib import Path
+
+
+def _resolve_lib() -> Path:
+    """Return the lib directory containing ownframework_loop/."""
+    here = Path(__file__).resolve()
+    # bin/ofloop -> lib/ownframework_loop
+    candidate = here.parent.parent / "lib"
+    if (candidate / "ownframework_loop").is_dir():
+        return candidate
+    # Fallback: env var override (used in installed copies).
+    env = os.environ.get("OFLOOP_LIB")
+    if env:
+        return Path(env)
+    raise RuntimeError("cannot locate ownframework_loop library")
+
+
+def main() -> int:
+    lib = _resolve_lib()
+    sys.path.insert(0, str(lib))
+    from ownframework_loop import cli
+    return cli.main()
+
+
+if __name__ == "__main__":
+    sys.exit(main())
