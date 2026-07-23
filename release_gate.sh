@@ -18,7 +18,19 @@ set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$HERE"
 LIB_DIR="$ROOT/lib"
-INSTALL_ROOT="${INSTALL_ROOT:-/Users/mr.mrs.london/.claude/skills/of-loop}"
+# Discover installed copy. Prefer the Claude-managed user-scope cache at
+#   ~/.claude/plugins/cache/<marketplace>/<plugin>/<version>/
+# which is what `claude plugin install of-loop@ownframework-local --scope user`
+# creates. Fall back to the legacy skills-dir install for environments that
+# have not yet been migrated.
+LEGACY_INSTALL_ROOT="/Users/mr.mrs.london/.claude/skills/of-loop"
+MANAGED_INSTALL_ROOT=""
+if [[ -d "${HOME}/.claude/plugins/cache/ownframework-local/of-loop" ]]; then
+  # Pick the highest installed version directory deterministically.
+  MANAGED_INSTALL_ROOT="$(ls -1d "${HOME}/.claude/plugins/cache/ownframework-local/of-loop"/*/ 2>/dev/null | sort -V | tail -1)"
+  MANAGED_INSTALL_ROOT="${MANAGED_INSTALL_ROOT%/}"
+fi
+INSTALL_ROOT="${INSTALL_ROOT:-${MANAGED_INSTALL_ROOT:-${LEGACY_INSTALL_ROOT}}}"
 TIMESTAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 REPORT_DIR="${REPORT_DIR:-}"
 if [[ -z "$REPORT_DIR" && -n "${CLAUDE_PLUGIN_DATA:-}" ]]; then
