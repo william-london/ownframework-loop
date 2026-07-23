@@ -79,12 +79,15 @@ if [[ -z "$active_run" ]]; then
 fi
 
 # Use the Python guard library for structural classification.
-result="$(CLAUDE_PLUGIN_ROOT="${OFLOOP_PLUGIN_ROOT:-$HOME/.claude/skills/of-loop}" python3 - <<PY 2>/dev/null || echo "CLASSIFY_ERROR"
-import sys, os
+# Encode the command as base64 to safely embed it in the Python source.
+encoded_command="$(printf '%s' "$command" | base64)"
+result="$(CLAUDE_PLUGIN_ROOT="${OFLOOP_PLUGIN_ROOT:-/Users/mr.mrs.london/.claude/skills/of-loop}" python3 - "$encoded_command" 2>/dev/null <<'PY' || echo "CLASSIFY_ERROR"
+import sys, os, base64
 sys.path.insert(0, os.path.join(os.environ.get("CLAUDE_PLUGIN_ROOT", "/Users/mr.mrs.london/.claude/skills/of-loop"), "lib"))
 from ownframework_loop import guards
 try:
-    cls = guards.classify_bash_command("""$command""")
+    cmd = base64.b64decode(sys.argv[1]).decode("utf-8", errors="replace")
+    cls = guards.classify_bash_command(cmd)
     print(cls["severity"])
     if cls["forbidden"]:
         print(";".join(cls["forbidden"]))
@@ -102,16 +105,20 @@ fi
 severity="$(printf '%s' "$result" | head -n1 || true)"
 if [[ "$severity" == "forbidden" ]]; then
   reasons="$(printf '%s' "$result" | tail -n +2 || true)"
-  STABLE_CODE="OF_LOOP_BASH_FORBIDDEN"
-  python3 - <<PY
-import json, sys
+  reasons="${reasons:0:380}"
+  # Pass reasons via stdin (as base64) so shell quotes in the matched
+  # command cannot break Python source parsing.
+  reasons_b64="$(printf '%s' "$reasons" | base64)"
+  reasons_b64="$reasons_b64" python3 - <<'PY'
+import json, sys, base64, os
+reasons = base64.b64decode(os.environ["reasons_b64"]).decode("utf-8", errors="replace")
 print(json.dumps({
     "decision": "block",
-    "reason": "[$STABLE_CODE] OwnFramework Loop: dangerous Bash command refused by textual guardrail. ${reasons:0:380}",
+    "reason": "[OF_LOOP_BASH_FORBIDDEN] OwnFramework Loop: dangerous Bash command refused by textual guardrail. " + reasons,
     "hookSpecificOutput": {
         "hookEventName": "PreToolUse",
         "permissionDecision": "deny",
-        "permissionDecisionReason": "$STABLE_CODE"
+        "permissionDecisionReason": "OF_LOOP_BASH_FORBIDDEN"
     }
 }))
 PY

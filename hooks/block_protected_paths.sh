@@ -77,17 +77,26 @@ if [[ -z "$active_run" ]]; then
   exit 0
 fi
 
-# Resolve file_path to absolute, normalized form.
-abs_path="$(python3 - "$file_path" <<'PY' 2>/dev/null || true
+# Resolve file_path AND active_run to absolute, normalized form. macOS
+# resolves /var/folders → /private/var/folders, so both must be canonical
+# to compare correctly.
+resolved_paths="$(python3 - "$file_path" "$active_run" <<'PY' 2>/dev/null || true
 import sys
 from pathlib import Path
 fp = sys.argv[1]
+ar = sys.argv[2]
 try:
     print(str(Path(fp).expanduser().resolve(strict=False)))
 except Exception:
     print(fp)
+try:
+    print(str(Path(ar).expanduser().resolve(strict=False)))
+except Exception:
+    print(ar)
 PY
 )"
+abs_path="$(printf '%s\n' "$resolved_paths" | sed -n '1p')"
+active_run="$(printf '%s\n' "$resolved_paths" | sed -n '2p')"
 
 run_root="$active_run/.ownframework-loop"
 wt_root="$active_run/.worktrees/ownframework-loop"
@@ -123,7 +132,7 @@ fi
 if [[ "$abs_path" == "$wt_root"/*/builder"* || "$abs_path" == "$wt_root"/*/builder/"* ]]; then
   ALLOWED=1
 fi
-if [[ "$abs_path" == "$wt_root"/*/reviewer"* ]]; then
+if [[ "$abs_path" == "$wt_root"/*/reviewer" || "$abs_path" == "$wt_root"/*/reviewer/"* ]]; then
   ALLOWED=0
 fi
 

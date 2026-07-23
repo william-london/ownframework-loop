@@ -3,9 +3,10 @@
 Design contract (V1, post-audit):
 - The textual classifier is one layer of defense; the post-pass review pass is
   the ultimate authority. The classifier is *not* a complete shell parser.
-- Hermes is recognized only as an executable identity (path component) when
-  invoked as the `hermes` CLI itself. The bare word "hermes" in argv,
-  filesystem paths under `~/.hermes/`, `grep hermes ...`, etc., are allowed.
+- Hermes is recognized only as an executable identity (first word of a shell
+  segment) when invoked as the `hermes` CLI itself. The bare word "hermes"
+  in argv (e.g. `grep hermes`), filesystem paths under `~/.hermes/`, and
+  docs that mention Hermes are allowed.
 - See `docs/SECURITY_MODEL.md` for the full layered model.
 """
 
@@ -25,40 +26,50 @@ from typing import Any
 # subcommand form. Do NOT add bare-keyword blocks (e.g. `\bhermes\b` was a
 # prompt-injection/UX hazard; paths under `~/.hermes/`, grep searches, and
 # docs that mention Hermes are legitimate).
-FORBIDDEN_PATTERNS: list[tuple[re.Pattern[str], str]] = [
-    # git push (any variant)
-    (re.compile(r"\bgit\s+push\b"), "git push is prohibited"),
-    (re.compile(r"\bgit\s+push\s+--force\b"), "force push is prohibited"),
-    (re.compile(r"\bgit\s+push\s+-f\b"), "force push is prohibited"),
-    (re.compile(r"\bgit\s+push\s+--force-with-lease\b"), "force push is prohibited"),
-    (re.compile(r"\bgit\s+push\s+--no-verify\b"), "git push --no-verify is prohibited"),
+#
+# The shell-quote-insensitive patterns (e.g. for `git "push"`, `git 'push'`)
+# normalize the command by stripping inline quotes before matching. This
+# catches the most common form of arg-quoting bypass without parsing full
+# shell; fuller forms (eval, Python subprocess) defer to NATIVE_PERMISSION
+# + POST_PASS verification.
+def _norm(s: str) -> str:
+    """Strip inline single/double quotes for tolerant command matching."""
+    return s.replace('"', '').replace("'", '')
+
+FORBIDDEN_PATTERNS: list[tuple[re.Pattern[str], str, str]] = [
+    # git push (any variant) — match plain and quote-insensitive forms.
+    (re.compile(r"\bgit\s+push\b"), "git push is prohibited", "subcommand"),
+    (re.compile(r"\bgit\s+(?:-[A-Za-z]+\s+)*(?:\S+\s+)*push\b"), "git push (with options/args) is prohibited", "subcommand"),
+    (re.compile(r"\bgit\s+push\s+--force\b"), "force push is prohibited", "subcommand"),
+    (re.compile(r"\bgit\s+push\s+-f\b"), "force push is prohibited", "subcommand"),
+    (re.compile(r"\bgit\s+push\s+--force-with-lease\b"), "force push is prohibited", "subcommand"),
+    (re.compile(r"\bgit\s+push\s+--no-verify\b"), "git push --no-verify is prohibited", "subcommand"),
     # git merge (any form)
-    (re.compile(r"\bgit\s+merge\b"), "git merge is prohibited"),
-    (re.compile(r"\bgit\s+merge\s+--no-ff\b"), "merge commit is prohibited"),
+    (re.compile(r"\bgit\s+merge\b"), "git merge is prohibited", "subcommand"),
+    (re.compile(r"\bgit\s+merge\s+--no-ff\b"), "merge commit is prohibited", "subcommand"),
     # git reset / clean / branch destructive
-    (re.compile(r"\bgit\s+reset\s+--hard\b"), "git reset --hard is prohibited"),
-    (re.compile(r"\bgit\s+clean\s+-?fdx?\b"), "git clean with force/clean-untracked is prohibited"),
-    (re.compile(r"\bgit\s+branch\s+-D\b"), "git branch -D is prohibited"),
-    (re.compile(r"\bgit\s+branch\s+-d\b"), "git branch -d is prohibited"),
-    (re.compile(r"\bgit\s+worktree\s+prune\b"), "broad git worktree prune is prohibited"),
+    (re.compile(r"\bgit\s+reset\s+--hard\b"), "git reset --hard is prohibited", "subcommand"),
+    (re.compile(r"\bgit\s+clean\s+-?fdx?\b"), "git clean with force/clean-untracked is prohibited", "subcommand"),
+    (re.compile(r"\bgit\s+branch\s+-D\b"), "git branch -D is prohibited", "subcommand"),
+    (re.compile(r"\bgit\s+branch\s+-d\b"), "git branch -d is prohibited", "subcommand"),
+    (re.compile(r"\bgit\s+worktree\s+prune\b"), "broad git worktree prune is prohibited", "subcommand"),
     # git remote mutations
-    (re.compile(r"\bgit\s+remote\s+add\b"), "remote creation is prohibited"),
-    (re.compile(r"\bgit\s+remote\s+set-url\b"), "remote modification is prohibited"),
-    (re.compile(r"\bgit\s+remote\s+remove\b"), "remote deletion is prohibited"),
+    (re.compile(r"\bgit\s+remote\s+add\b"), "remote creation is prohibited", "subcommand"),
+    (re.compile(r"\bgit\s+remote\s+set-url\b"), "remote modification is prohibited", "subcommand"),
+    (re.compile(r"\bgit\s+remote\s+remove\b"), "remote deletion is prohibited", "subcommand"),
     # system / container mutations on production
-    (re.compile(r"\bsystemctl\s+(start|stop|restart|reload)\b"), "systemctl is prohibited"),
-    (re.compile(r"\bdocker\s+compose\s+(up|down|restart)\b"), "production docker mutation is prohibited"),
+    (re.compile(r"\bsystemctl\s+(start|stop|restart|reload)\b"), "systemctl is prohibited", "subcommand"),
+    (re.compile(r"\bdocker\s+compose\s+(up|down|restart)\b"), "production docker mutation is prohibited", "subcommand"),
     # remote shell to protected production hosts
-    (re.compile(r"\bssh\s+horus\b"), "ssh to production is prohibited"),
-    (re.compile(r"\bssh\s+firelove\b"), "ssh to production is prohibited"),
-    # Hermes executable identity — when invoked via its CLI binary. Path
-    # references like `~/.hermes/` and grep/docs mentioning Hermes are fine.
-    # Matches: `hermes`, `/usr/bin/hermes`, `./hermes`, but NOT `cat hermes.txt`.
-    (re.compile(r"(^|[\s;|&`\"'\\(])(?:\./|/usr/(?:bin|local/bin)/)?hermes(?:\s|$|&|;|\||`)"),
-     "hermes CLI invocation is prohibited"),
+    (re.compile(r"\bssh\s+horus\b"), "ssh to production is prohibited", "subcommand"),
+    (re.compile(r"\bssh\s+firelove\b"), "ssh to production is prohibited", "subcommand"),
+    # Hermes executable identity — match ONLY when `hermes` is the first
+    # non-assignment word of a shell segment. Filesystem paths
+    # (`~/.hermes/`, `hermes.txt`) and grep/docs mentions are legitimate
+    # and must not be blocked.
+    (re.compile(r""), "hermes CLI invocation is prohibited", "executable_identity"),
     # Codex CLI — out of scope for the supervised local-only V1 pilot.
-    (re.compile(r"(^|[\s;|&`\"'\\(])(?:\./|/usr/(?:bin|local/bin)/)?codex(?:\s|$|&|;|\||`)"),
-     "codex invocation is out of scope for V1"),
+    (re.compile(r""), "codex CLI invocation is out of scope for V1", "executable_identity"),
 ]
 
 
@@ -125,9 +136,33 @@ def classify_bash_command(command: str) -> dict[str, Any]:
     segments = _split_command_chain(command)
     forbidden: list[str] = []
     for seg in segments:
-        for pattern, desc in FORBIDDEN_PATTERNS:
-            if pattern.search(seg):
-                forbidden.append(f"{desc}: {seg.strip()}")
+        # Strip leading env-var assignments (FOO=bar BAZ=qux ...) before
+        # inspecting the first executable word.
+        first_word = _first_executable_word(seg)
+        # Check both the raw segment and the de-quoted segment.
+        candidates = [seg, _norm(seg)]
+        for pattern, desc, kind in FORBIDDEN_PATTERNS:
+            if kind == "executable_identity":
+                # Match ONLY against the first executable word (e.g. `hermes`,
+                # `/usr/bin/hermes`, `./hermes`). This is what makes
+                # `grep hermes` and `ls ~/.hermes/` legitimate.
+                if first_word is None:
+                    continue
+                # Compare normalized first_word (strip quotes) against a
+                # path-aware match.
+                norm_first = _norm(first_word)
+                base = norm_first.rsplit("/", 1)[-1]
+                expected = desc.split()[0]  # "hermes" or "codex"
+                if base == expected or norm_first.endswith("/" + expected):
+                    forbidden.append(f"{desc}: {seg.strip()}")
+                    break
+                continue
+            # Subcommand-shape patterns (git push, ssh horus, …) — match
+            # the whole segment with permissive quote-stripping.
+            for cand in candidates:
+                if pattern.search(cand):
+                    forbidden.append(f"{desc}: {seg.strip()}")
+                    break
     severity = "forbidden" if forbidden else "allowed"
     return {
         "command": command,
@@ -198,6 +233,38 @@ def _split_command_chain(command: str) -> list[str]:
     return [p for p in parts if p]
 
 
+def _first_executable_word(segment: str) -> str | None:
+    """Return the first non-assignment word of a shell segment.
+
+    Strips leading `FOO=bar` environment-style assignments and any
+    `command`/`builtin`/`env`/`nice`/`time` prefixes, returning the
+    would-be executable path or bare command name. Returns None if the
+    segment has no executable word (e.g. assignment-only).
+    """
+    if not segment:
+        return None
+    # Use shlex to split tokens correctly handling quotes.
+    try:
+        tokens = shlex.split(segment)
+    except ValueError:
+        tokens = segment.split()
+    prefixes = {"command", "builtin", "env", "nice", "time", "stdbuf"}
+    i = 0
+    while i < len(tokens):
+        tok = tokens[i]
+        # Skip env-var assignments like FOO=bar.
+        if re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", tok):
+            i += 1
+            continue
+        # Skip recognized prefix commands.
+        base = tok.rsplit("/", 1)[-1]
+        if base in prefixes:
+            i += 1
+            continue
+        return tok
+    return None
+
+
 def is_reviewer_allowed(command: str) -> bool:
     """Return True iff every segment of the command matches an allowed pattern."""
     segments = _split_command_chain(command)
@@ -249,4 +316,3 @@ def classify_for_executable_identity(command: str) -> list[str]:
         elif base in ("codex",):
             findings.append(f"codex CLI invocation: {tok}")
     return findings
-
