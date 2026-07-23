@@ -1,30 +1,22 @@
 #!/usr/bin/env bash
-# OwnFramework Loop V2 — uninstall.
+# OwnFramework Loop V2 — managed uninstall.
 #
-# Removes the installed copy at /Users/mr.mrs.london/.claude/skills/of-loop.
-# Does NOT remove the source repo, receipts, or backup directories.
-# A subsequent install.sh creates a fresh copy.
+# Removes the managed plugin via Claude's official plugin manager:
+#   claude plugin uninstall of-loop@ownframework-local --scope user
+#
+# Preserves:
+#   - persistent plugin data at ~/.claude/plugins/data/of-loop-ownframework-local
+#   - archived legacy skills-dir at ~/.claude/ownframework-loop-mgmt-backup-*
+#   - source repo at /Users/mr.mrs.london/projects/plugins/ownframework-loop
 
 set -euo pipefail
 
-INSTALL_ROOT="${INSTALL_ROOT:-/Users/mr.mrs.london/.claude/skills/of-loop}"
-
-if [[ ! -e "$INSTALL_ROOT" && ! -L "$INSTALL_ROOT" ]]; then
-  echo "[uninstall] nothing to remove at $INSTALL_ROOT"
-  exit 0
+if ! command -v claude >/dev/null 2>&1; then
+  echo "[uninstall] claude CLI not on PATH; cannot run managed uninstall"
+  exit 2
 fi
 
-if [[ -L "$INSTALL_ROOT" ]]; then
-  echo "[uninstall] refusing to follow symlink; aborting"
-  exit 1
-fi
-
-if [[ ! -f "$INSTALL_ROOT/.claude-plugin/plugin.json" ]]; then
-  echo "[uninstall] refusing to remove path that does not look like an of-loop install: $INSTALL_ROOT"
-  exit 1
-fi
-
-echo "[uninstall] removing $INSTALL_ROOT"
-rm -rf "$INSTALL_ROOT"
-echo "[uninstall] complete"
+echo "[uninstall] running: claude plugin uninstall of-loop@ownframework-local --scope user"
+claude plugin uninstall of-loop@ownframework-local --scope user 2>&1
+echo "[uninstall] complete; plugin data and backup dir retained"
 exit 0

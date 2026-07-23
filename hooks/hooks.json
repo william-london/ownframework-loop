@@ -46,5 +46,5 @@
     ]
   },
   "description": "OwnFramework Loop V2 — exact-run, exact-role scoped hooks. Refuse cross-run writes, canonical checkout mutations during build, external effects during an active run, and direct mutations of authoritative artifacts. Broad engineering tools (read, write within authority, shell, web search) remain permitted.",
-  "version": "0.2.0"
+  "version": "0.2.1"
 }

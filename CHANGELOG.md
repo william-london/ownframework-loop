@@ -2,6 +2,54 @@
 
 All notable changes to OwnFramework Loop are documented here.
 
+## v0.2.1 — 2026-07-23
+
+Managed-marketplace convergence, known guard-evasion repair,
+approval-claim correction.
+
+- **Managed marketplace install**: `install.sh` now invokes
+  `claude plugin install of-loop@ownframework-local --scope user`
+  through the local marketplace catalog at
+  `projects/.claude-plugin/marketplace.json`. The skills-dir copy
+  path under `~/.claude/skills/of-loop` is removed at install time
+  and archived to `~/.claude/ownframework-loop-mgmt-backup-<UTC>/`
+  for rollback. Legacy `uninstall.sh` is rewritten to call the
+  managed uninstall; persistent plugin data is preserved.
+- **Three guard evasions closed**:
+  1. Python-subprocess: `python3 -c "import subprocess; subprocess.run(['git','push'])"`
+     — closed by command-text decomposition of `-c` payload; the
+     interpreter inspects bounded literal subprocess/os.system/exec
+     calls and refuses on a forbidden action.
+  2. Variable assembly: `X=push; Y=origin; Z=master; git $X $Y $Z`
+     — closed by Bash top-level command-line extraction before
+     normalization, so variable expansion is recognized as a
+     candidate git invocation with action category "git_push".
+  3. Hyphenated executable form:
+     `./git-remote-add origin https://x`
+     — closed by basename normalization of the resolved
+     executable identity. A hyphenated wrapper named
+     `git-remote-add` is normalized to category `remote_add`
+     and refused.
+- **Approval claim correction**: the documentation now correctly
+  states `TOKEN_IS_SECRET=no`, `TOKEN_IS_PACKET_DERIVED=yes`.
+  The `CONFIRM-OF-LOOP-<8hex>` token is derived from the packet
+  SHA-256 (plaintext) and proves packet acknowledgement, not
+  secrecy. The architectural root of trust is artifact binding
+  (packet SHA + canonical_repo + baseline_sha + confirmation_token)
+  plus tested command-origin refusal, not token cryptographic
+  unspoofability.
+- **Agent-tool posture clarification**: the absence of `tools:`
+  and `disallowedTools:` in `agents/of-builder.md` and
+  `agents/of-reviewer.md` is intentional. Authority comes from
+  packet, exact worktree, hooks, finalizers, and promotion
+  boundaries — not from a narrow tool allowlist.
+- **Multiple stale cache directories (0.1.1, 0.1.2, 0.1.3, 0.1.4,
+  0.2.0) are normal**: they are Claude-managed orphan/grace-period
+  artifacts; manual cache deletion is forbidden.
+- **VERSION**: bumped source, plugin manifest, marketplace
+  catalog, library `__version__`, hook manifest. The V2
+  architecture designation remains. 0.2.1 is a release inside V2.
+
 ## v0.2.0 — 2026-07-23
 
 Two-loop engineering for specification, isolated building, exact-SHA
