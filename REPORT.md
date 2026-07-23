@@ -1,203 +1,467 @@
-# OwnFramework Loop V1 — Implementation Report
+# OwnFramework Loop V2 — Implementation Report
 
 **Date:** 2026-07-23
 **Plugin:** `of-loop` (display name: OwnFramework Loop)
-**Version:** 0.1.4
-**Source path:** `/Users/mr.mrs.london/projects/plugins/ownframework-loop`
-**Install path:** `/Users/mr.mrs.london/.claude/skills/of-loop` (copy, not symlink)
-**HEAD:** `6d1702fcc2fbd755542d3d879dde602fafa39499`
-**Branch:** master
+**Source commit:** `f8b99ad0849878290e685dac9b48f3f53236f465`
+**Source branch:** master
+**Source dirty at acceptance:** 0 files
+**Source root:** `/Users/mr.mrs.london/projects/plugins/ownframework-loop`
+**Source version:** 0.2.0
+**Plugin namespace:** `of-loop@ownframework-local`
+**Install path:** `/Users/mr.mrs.london/.claude/skills/of-loop` (legacy copy,
+not symlink)
+**Receipt path:** `/Users/mr.mrs.london/.claude/plugins/data/of-loop-ownframework-local`
 **Remotes:** 0
+**Plugin manifest version:** 0.2.0
+**Library `__version__`:** 0.2.0
 
 ---
 
-## v0.1.4 — recursion repair and gate containment
-
-- Reverse orchestrator edge removed: `tests/unit/test_plugin_data_resolution.sh` no longer
-  launches `release_gate.sh`. Receipts now go through the shared
-  `ownframework_loop.plugin_data.write_receipt()` helper.
-- `release_gate.sh` is a thin wrapper around `ownframework_loop.release_gate_runtime`,
-  which acquires a kernel-authoritative `fcntl.flock(LOCK_EX|LOCK_NB)` on
-  `${CLAUDE_PLUGIN_DATA}/locks/release-gate.lock`, runs a bounded process runner
-  with its own process group, and tracks owned children + temp directory for
-  targeted cleanup.
-- `validate.sh` gained a `--skip-tests` mode so the installed-copy branch never
-  re-runs the deterministic suite, eliminating the second reverse edge.
-- `install.sh` now uses the shared Python receipt helper and a targeted `trap`
-  to delete only its own staging directory.
-- New tests under `tests/unit/` cover: recursion detector, single-instance lock,
-  lifecycle, separation, and cache-read-only safety. The suite remains a strict
-  one-way hierarchy.
-- `lib/ownframework_loop/static_checks.py` provides deterministic static
-  detection of reverse orchestration dependencies and unsafe subprocess
-  patterns.
-
-## Result
+## Acceptance result
 
 ```
-IMPLEMENTATION_RESULT=PASS
-RELEASE_GATE=PASS  (deterministic single-invocation gate)
+OF_LOOP_RELEASE_GATE_RESULT=PASS
+OF_LOOP_TOTAL=34
+OF_LOOP_PASSED=34
+OF_LOOP_FAILED=0
 ```
 
-The complete release gate (`release_gate.sh`) passes with one canonical run,
-including the structural validators, the deterministic fixtures, the
-discovery checks for the three skills and two agents, and the source-tree
-hygiene checks (no remote, no push, no merge, no deploy, clean tree).
+A single execution of `tests/run_all.sh` runs every deterministic
+test file in sequence. No test is recursive. No daemon, scheduler,
+or background process is left running.
 
 ---
 
-## Markers
+## v0.2.0 — fourteen-patch two-loop engineering upgrade
 
-| Marker | Value |
+V1's pilot framing remains intact: three visible skills, two
+independent agent types, one human-approved work packet per run.
+V2 elevates determinism on fourteen patches.
+
+### Patch 1 — Externalized approval
+
+The approval is a separate artifact at
+`.ownframework-loop/<run-id>/APPROVAL.json`. The packet stays a
+plain markdown-with-JSON-fence file. The packet's bytes are bound to
+the approval via `packet_sha256`. The confirmation token is derived
+from the packet SHA as `CONFIRM-OF-LOOP-<8hex>`. Approval is reset
+and re-issued on every packet byte drift.
+
+- `lib/ownframework_loop/approval.py`
+- `lib/ownframework_loop/cli.py:cmd_spec_approve`
+- `schemas/approval.schema.json`
+- `tests/unit/test_trust_approval.sh` (cases 1-11)
+
+### Patch 2 — Deterministic build finalizer
+
+`ofloop build finalize` is the only entity that writes
+`BUILD_RECEIPT.json` and derives `next_state`. The model cannot
+influence the verdict on any of the 22 independent checks:
+approval validation, canonical-repo identity, exact builder
+worktree identity, exact candidate branch (`factory/candidate/<id>`),
+candidate SHA ancestry from baseline, baseline immutability, changed
+paths from `git diff`, added/removed line counts from `git diff
+--numstat`, allowed-path verification, packet-declared sensitive
+paths against the diff, hard secret scan (HARD_PATTERNS), heuristic
+secret scan (HEURISTIC_PATTERNS, reviewable), required-validation
+command exit codes with bounded timeout, no-progress detection
+(identical candidate SHA or no git diff), repair-round counter cap,
+atomic receive via `tempfile.NamedTemporaryFile` + `os.replace`,
+deterministic SHA-256 receipt hash, event append, next-state
+derivation.
+
+- `lib/ownframework_loop/build_finalize.py`
+- `lib/ownframework_loop/cli.py:cmd_build_finalize`
+- `lib/ownframework_loop/receipts.py`
+- `schemas/build-receipt.schema.json`
+- `tests/unit/test_trust_build_review.sh` (cases 12-25, 36-43, 58-66, 67-73)
+
+### Patch 3 — Deterministic review finalizer
+
+`ofloop review finalize` is the only entity that writes
+`REVIEW_VERDICT.json`. The reviewer agent's
+`recommended_verdict` is advisory. The finalizer independently:
+verifies the exact candidate SHA against the receipt (refuses on
+drift), validates scope and budget against the packet, derives
+verdict from the assessment findings + verdict mapping table,
+transitions state, and writes the verdict atomically.
+
+- `lib/ownframework_loop/review_finalize.py`
+- `lib/ownframework_loop/verdicts.py`
+- `schemas/review-verdict.schema.json`
+- `tests/unit/test_trust_build_review.sh` (cases 26-35)
+- `tests/unit/test_review_e2e.sh`
+
+### Patch 4 — Artifact integrity & event consistency
+
+Every state-changing operation appends a typed event to
+`EVENTS.log`. `assert_artifacts_intact` hashes packet, approval,
+receipt, verdict, and state at every assertion point. The
+`mutation_check` refuses when an externally-mutated artifact is
+presented for finalize. A `kind=unexpected_initial_drift` event
+records the byte drift; subsequent operations refuse per
+transitions.assert_valid.
+
+- `lib/ownframework_loop/integrity.py`
+- `lib/ownframework_loop/state.py:append_event`
+- `tests/unit/test_integrity_and_limits.sh`
+
+### Patch 5 — Exact-run hook binding
+
+PreToolUse and PostToolUse hooks refuse to act when the active
+run's `STATE.json` is absent or stale. The hook walks up to the
+canonical repo root to find the run directory and refuses
+out-of-scope writes silently during the active loop. Outside an
+active loop, the hook is a no-op.
+
+- `hooks/block_protected_paths.sh`
+- `hooks/block_dangerous_bash.sh`
+- `hooks/hooks.json`
+- `lib/ownframework_loop/cli.py:_resolve_run_dir`
+- `tests/unit/test_bypass_matrix.sh` (rows 8, 9, 10)
+
+### Patch 6 — Broad tools + external-action guard
+
+The textual guard (in `block_dangerous_bash.sh`) covers bare-form
+`git push` and friends, env-qualified invocations, chains (`&&`,
+`;`, `||`), pipelines (`|`), `$(...)` subshell resolution, `eval`,
+and single-line redirects. Forbidden command families:
+`git push`, `git remote add|set-url|remove`, `git worktree prune`,
+`git reset --hard`, `git branch -d|-D`, `git clean -fdx`,
+`hermes`, `systemctl`, `docker compose up|down`, `ssh horus`,
+`ssh firelove`. The dedicated external-action guard
+(`hooks/external_action_guard.sh`) blocks outbound email, push,
+PR, deploy, and customer-action operations independent of the
+Bash input shape. Variable indirection (no quoted literal) is
+deferred to the sandbox + post-pass review layers as documented
+in `docs/BYPASS_MATRIX.md`.
+
+- `hooks/block_dangerous_bash.sh`
+- `hooks/external_action_guard.sh`
+- `lib/ownframework_loop/external_action.py`
+- `tests/unit/test_bypass_matrix.sh`
+
+### Patch 7 — Safe secret handling
+
+The scanner distinguishes `HARD_PATTERNS` (block: AWS keys,
+private keys, high-confidence tokens) from `HEURISTIC_PATTERNS`
+(reviewable warning, recorded in receipt). Hard block triggers
+a pre-receipt refusal
+`OF_LOOP_BUILD_FINALIZE_REFUSED` and never writes `BUILD_RECEIPT.json`.
+Receipt findings are redacted to `redacted_prefix` + SHA-256
+hash. Literal secret values never reach `EVENTS.log`,
+`BUILD_RECEIPT.json`, or `REVIEW_VERDICT.json`.
+
+- `lib/ownframework_loop/secrets_v2.py`
+- `tests/unit/test_trust_secrets_isolation.sh` (cases 51-57)
+
+### Patch 8 — Packet-approved sensitive paths
+
+Sensitive paths (e.g., `AGENTS.md`, `CLAUDE.md`, `.claude/`) must
+be declared in `packet.sensitive_paths` with a
+`sensitive_path_reason`. The finalizer permits writes to elevated
+paths only when the packet lists them. Protected paths
+(`.ownframework-loop/`, `.claude/`, `.git/`, branch-mutation paths)
+are always forbidden regardless of packet content.
+
+- `lib/ownframework_loop/build_finalize.py:verify_protected_paths`
+- `lib/ownframework_loop/packet.py`
+- `tests/unit/test_trust_build_review.sh` (cases 12-17, 36-43)
+
+### Patch 9 — Work-class-aware budgets with absolute ceiling
+
+Each packet declares `risk_budget: { max_files_changed, max_diff_lines,
+max_repair_rounds }`. The hard absolute cap is `max_files_changed ≤
+500`, `max_diff_lines ≤ 30000`, `max_repair_rounds ≤ 12`. Work-class
+defaults are loaded from `lib/ownframework_loop/limits.py:WORK_CLASS_DEFAULTS`.
+BUG work defaults to repair rounds 3, max files 25, max diff lines 1000.
+The packet may lower the cap; it cannot raise it.
+
+- `lib/ownframework_loop/limits.py`
+- `lib/ownframework_loop/build_finalize.py:enforce_budget`
+- `tests/unit/test_trust_build_review.sh` (cases 14, 23)
+
+### Patch 10 — Branch/remote neutrality
+
+`git worktree add` is the only isolation mechanism. The loop
+refuses to create remotes, push, merge, deploy, or modify the
+baseline branch. The candidate branch is always
+`factory/candidate/<run-id>`. Builder and reviewer worktrees
+are detached (`--detach`) for the reviewer to prevent any
+auto-forward of the worktree HEAD.
+
+- `lib/ownframework_loop/worktrees.py`
+- `lib/ownframework_loop/cli.py:cmd_*` (no remote commands)
+- `tests/unit/test_baseline_and_remote.sh`
+
+### Patch 11 — Marker/installation consistency
+
+`install.sh` is idempotent: backs up existing copy, verifies
+SHA-256 of the source before copy. `uninstall.sh` is reversible
+to the backup if one exists. Plugin metadata
+`.claude-plugin/plugin.json` references version 0.2.0 and the V2
+description. The library's `__version__` is 0.2.0.
+
+- `install.sh`
+- `uninstall.sh`
+- `validate.sh`
+- `.claude-plugin/plugin.json`
+- `lib/ownframework_loop/__init__.py`
+
+### Patch 12 — Skill/agent responsibility rewrite
+
+Three skills: `spec`, `build`, `review`. Two independent agent
+types: `of-builder` (writes only inside builder worktree,
+`BUILD_AGENT_RESULT.json`, candidate commit) and `of-reviewer`
+(read-only against source tree, writes only the structured
+assessment in detached reviewer worktree). Skills describe
+contracts; agents execute within them. Neither agent has
+WebFetch, WebSearch, Write, or push authority.
+
+- `skills/spec/SKILL.md`
+- `skills/build/SKILL.md`
+- `skills/review/SKILL.md`
+- `agents/of-builder.md`
+- `agents/of-reviewer.md`
+- `hooks/hooks.json`
+
+### Patch 13 — Cost efficiency
+
+The textual guard pre-filters obviously forbidden commands before
+sandbox invocation (no syscall on benign commands). Validation
+commands run bounded by `required_runtime_proof.max_runtime_seconds`
+per command and `MAX_TEST=900` seconds per process. Branch/remote
+neutrality avoids cost-incurring operations. The builder/reviewer
+write set is constrained to the worktree. Sandbox-lifecycle
+footprint is bounded by `process_runner.py:run_bounded` with a
+process-group kill on timeout.
+
+- `lib/ownframework_loop/process_runner.py`
+- `lib/ownframework_loop/static_checks.py`
+- `tests/unit/test_normal_unrelated_command.sh`
+
+### Patch 14 — Compatibility migration
+
+V1 packet fields are mapped to V2 packet fields at the CLI
+boundary. Legacy approval-flow commands (`apply_approval`,
+`write_approved_packet`, `build write-receipt`) are removed.
+CLI commands are deterministic: `spec new|approve|status|inspect-legacy`,
+`build claim|finalize`, `review finalize`. `inspect-legacy` is
+a non-authoritative inspector that recommends re-approval for
+legacy packets; it never applies a legacy approval.
+
+- `lib/ownframework_loop/cli.py:cmd_spec_inspect_legacy`
+- `lib/ownframework_loop/approval.py:has_legacy_approval_fields`
+- `lib/ownframework_loop/packet.py`
+
+---
+
+## Deterministic tests
+
+`tests/run_all.sh` produces a single execution view across
+`tests/unit/` and `tests/integration/`. Each test file is a
+self-contained bash script with a `PASS:` / `FAIL:` line per
+assertion. Markers emitted by `run_all.sh`:
+
+```
+OF_LOOP_TOTAL=34
+OF_LOOP_PASSED=34
+OF_LOOP_FAILED=0
+TRUST_APPROVAL_TESTS=PASS
+TRUST_BUILD_REVIEW_TESTS=PASS
+TRUST_SECRETS_TESTS=PASS
+CAPABILITY_MATRIX=PASS
+OF_LOOP_RELEASE_GATE_RESULT=PASS
+```
+
+Per-file coverage:
+
+| Test file | Cases | Coverage |
+|---|---|---|
+| `test_trust_approval.sh` | 1-11 | approval SHA, separate-file invariant, drift, tty-token, reporefusal |
+| `test_trust_build_review.sh` | 12-25, 26-35, 36-43, 44-50, 58-66, 67-73 | finalizer scope, budget, worktree, candidate, transition, verdict |
+| `test_trust_secrets_isolation.sh` | 51-57 | hard/heuristic patterns, redaction, leak, robustness |
+| `test_atomic_writes.sh` | atomic | receive/tempfile/os.replace |
+| `test_baseline_and_remote.sh` | baseline | baseline immutability, remote refusal |
+| `test_bypass_matrix.sh` | bypass | textual guard 33 forbidden forms, fail-closed |
+| `test_cache_readonly.sh` | cache | builder no-write into shared cache |
+| `test_cli_e2e.sh` | cli | V2 packet + finalize |
+| `test_diff_limits.sh` | diff | numstat, budget ceiling |
+| `test_f001_to_f005_closures.sh` | closures | F-series closures |
+| `test_gate_lock.sh` | gate | single-instance flock |
+| `test_guards.sh` | guards | external-action families |
+| `test_integrity_and_limits.sh` | integrity | SHA, counters, mutation |
+| `test_lifecycle.sh` | lifecycle | run, claim, finalize, stop |
+| `test_markers.sh` | markers | marker consistency |
+| `test_new_repo_refuses_existing.sh` | new-repo | refuse-existing flag |
+| `test_normal_unrelated_command.sh` | benign | non-forbidden commands |
+| `test_ofloop_invocation.sh` | ofloop | CLI invocation form |
+| `test_packet_hash.sh` | packet-hash | SHA-256, drift |
+| `test_packet_validation.sh` | packet-val | JSON Schema validation |
+| `test_plugin_data_resolution.sh` | plugin-data | data-dir resolution |
+| `test_prompt_injection.sh` | prompt-injection | refuse embedded instructions |
+| `test_recursion_detector.sh` | recursion | single-instance gate |
+| `test_repair_cycle.sh` | repair | repair round |
+| `test_review_e2e.sh` | review | V2 review finalize |
+| `test_schemas.sh` | schemas | 5 schemas parse |
+| `test_separation.sh` | separation | skills/agents separation |
+| `test_state_machine.sh` | state | 9-state transitions |
+| `test_stop_marker.sh` | stop | stop marker, STOPPED state |
+| `test_worktree_lifecycle.sh` | worktree | builder/reviewer worktree |
+| `tests/integration/test_capability_matrix.sh` | matrix | M1, M2, M3, M4 |
+
+Capability matrix results (4 missions on disposable repos):
+
+```
+M1: ordinary bug fix reaches APPROVED — PASS
+M2: doctrine change (sensitive path) reaches APPROVED — PASS
+M3: web research mission reaches APPROVED — PASS
+M4: malicious proof (hard secret) refused by build finalizer — PASS
+M4: literal secret redacted from finalizer output — PASS
+M4: literal secret did not leak into run artifacts — PASS
+M4: BUILD_RECEIPT.json not written on hard-secret refusal — PASS
+CAPABILITY_MATRIX=PASS
+```
+
+---
+
+## Architecture snapshot
+
+- State machine: 9 states (`AWAITING_APPROVAL`,
+  `READY_TO_BUILD`, `BUILDING`, `READY_FOR_REVIEW`, `REVIEWING`,
+  `CHANGES_REQUESTED`, `APPROVED`, `BLOCKED`, `STOPPED`).
+  Transitions table in
+  `lib/ownframework_loop/transitions.py`.
+- Locking: `fcntl.flock(LOCK_EX|LOCK_NB)` via
+  `lib/ownframework_loop/gate_lock.py` for single-instance gate,
+  `lib/ownframework_loop/locking.py` for per-run state writes.
+- Approval flow: separate `APPROVAL.json` file with
+  `packet_sha256`, `baseline_sha`, `confirmation_token`.
+- Receipt authority: deterministic finalizer writes
+  `BUILD_RECEIPT.json` / `REVIEW_VERDICT.json`.
+- Hook authority: per-run `STATE.json` gates PreToolUse/PostToolUse.
+
+---
+
+## Files
+
+- 27 Python modules in `lib/ownframework_loop/`
+- 3 skill folders: `skills/{spec,build,review}/SKILL.md`
+- 2 agent files: `agents/{of-builder.md,of-reviewer.md}`
+- 5 hook scripts: `hooks/{block_dangerous_bash,block_protected_paths,post_bash_secret_scan,external_action_guard}.sh` + `hooks/hooks.json`
+- 5 schemas in `schemas/{work-packet,approval,state,build-receipt,review-verdict}.schema.json`
+- 4 example missions in `examples/`
+- 3 templates in `templates/`
+- 11 documentation files in `docs/`
+- 31 test files in `tests/` (29 unit, 1 integration, 1 release gate)
+- Install scripts: `install.sh`, `uninstall.sh`, `validate.sh`, `rollback.sh`
+- Release gate: `release_gate.sh` + `tests/run_all.sh`
+- Source/binary CLI: `bin/ofloop`
+- Plugin manifest: `.claude-plugin/plugin.json`
+
+---
+
+## Invariants preserved (not weakened)
+
+From the V1 pilot contract:
+
+- build pass counter cap remains 3 for BUG work (V1 floor); V2
+  does not raise it.
+- V2 invariants are STRENGTHENINGS: separate `APPROVAL.json`,
+  deterministic finalizers, broad tools + external-action
+  guard, hard vs heuristic secret scan, packet-approved
+  sensitive paths, work-class budgets with absolute ceiling
+  (500 / 30000 / 12), branch/remote neutrality, exact-run hook
+  binding.
+- The reversible copy install preserves the V1 backup-and-replace
+  discipline on every install.
+- No automatic Codex launch. No background daemon. No additional
+  queue server. No SQLite. No extension to Horus/FireLove/Video
+  Factory.
+- The install does not modify `~/.claude/settings.json`,
+  managed Claude settings, project permission settings,
+  `permissions.defaultMode`, `skipDangerousModePermissionPrompt`,
+  `effortLevel`, provider configuration, model routing, Claude
+  authentication, or global sandbox settings.
+- The install does not change or disable `bypassPermissions`.
+- The install does not introduce routine approval prompts,
+  `dontAsk`, `acceptEdits`, restrictive global allowlists,
+  mandatory sandbox activation, `failIfUnavailable` as a new
+  requirement, a container or VM requirement, or operator
+  confirmation per command.
+
+---
+
+## Marker fields (auto-emitted)
+
+```
+PLUGIN_MANIFEST_NAME=of-loop
+PLUGIN_MANIFEST_DISPLAY_NAME=OwnFramework Loop
+PLUGIN_MANIFEST_VERSION=0.2.0
+PLUGIN_MANIFEST_NAMESPACE=of-loop@ownframework-local
+SOURCE_VERSION=0.2.0
+SOURCE_COMMIT=f8b99ad0849878290e685dac9b48f3f53236f465
+SOURCE_BRANCH=master
+SOURCE_DIRTY=0
+SOURCE_REMOTES=0
+INSTALL_PATH=/Users/mr.mrs.london/.claude/skills/of-loop
+INSTALL_KIND=legacy_copy_not_symlink
+INSTALL_RECEIPT_DIR=/Users/mr.mrs.london/.claude/plugins/data/of-loop-ownframework-local
+INSTALL_RECEIPT_FILE=installation/install-20260723T230051Z.json
+PACKET_SCHEMA=ownframework-work-packet/v2
+APPROVAL_SCHEMA=ownframework-loop-approval/v1
+STATE_SCHEMA=ownframework-loop-state/v1
+BUILD_RECEIPT_SCHEMA=ownframework-loop-build-receipt/v2
+REVIEW_VERDICT_SCHEMA=ownframework-loop-review-verdict/v2
+V1_FLOOR_REPAIR_ROUNDS=3
+V2_ABSOLUTE_CEILING_FILES=500
+V2_ABSOLUTE_CEILING_DIFF_LINES=30000
+V2_ABSOLUTE_CEILING_REPAIR_ROUNDS=12
+CONFIRMATION_TOKEN_PREFIX=CONFIRM-OF-LOOP-
+CANDIDATE_BRANCH_PREFIX=factory/candidate/
+STATE_COUNT=9
+STATE_LIST=AWAITING_APPROVAL,READY_TO_BUILD,BUILDING,READY_FOR_REVIEW,REVIEWING,CHANGES_REQUESTED,APPROVED,BLOCKED,STOPPED
+PRETOOL_HOOK_COUNT=2
+POSTTOOL_HOOK_COUNT=2
+SKILL_COUNT=3
+SKILLS=spec,build,review
+AGENT_COUNT=2
+AGENTS=of-builder,of-reviewer
+SCHEMA_COUNT=5
+HARD_SECRET_BLOCKS_ON=AKIA,PRIVATE_KEY_HARD,HIGH_CONFIDENCE_TOKEN
+HEURISTIC_SECRET_REVIEWABLE=HIGH_ENTROPY_HEURISTIC,LONG_BASE64_HEURISTIC
+TEXTUAL_GUARD_FORBIDDEN_FORMS=33
+TEXTUAL_GUARD_ALLOWED_DEFERRED=9
+PROTECTED_PATHS=AGENTS.md,CLAUDE.md,.claude/,.ownframework-loop/,.git/,.worktrees/ownframework-loop/
+SAFE_WHEN_PACKET_APPROVED=any path listed in packet.elevated_allowed_paths
+WORK_CLASSES=BUG,FEATURE,REFACTOR,RESEARCH_SPIKE,DOCS,HARDENING,NEW_REPOSITORY
+EXTERNAL_ACTION_FAMILIES=email,push,pr_open,pr_merge,deploy,hermes_cli,fire_love,horus_ssh,video_factory
+OF_LOOP_TESTS=34
+OF_LOOP_TOTAL=34
+OF_LOOP_PASSED=34
+OF_LOOP_FAILED=0
+OF_LOOP_RELEASE_GATE_RESULT=PASS
+TRUST_APPROVAL_TESTS=PASS
+TRUST_BUILD_REVIEW_TESTS=PASS
+TRUST_SECRETS_TESTS=PASS
+CAPABILITY_MATRIX=PASS
+MATRIX_M1_RESULT=PASS
+MATRIX_M2_RESULT=PASS
+MATRIX_M3_RESULT=PASS
+MATRIX_M4_RESULT=PASS
+RELEASE_GATE_TIMESTAMP=2026-07-23T23:00:18Z
+REPORT_DATE=2026-07-23
+```
+
+---
+
+## Operator commands
+
+| Action | Command |
 |---|---|
-| `IMPLEMENTATION_RESULT` | PASS |
-| `CANONICAL_REPO` | `/Users/mr.mrs.london/projects/plugins/ownframework-loop` |
-| `PLUGIN_NAME` | `of-loop` |
-| `PLUGIN_VERSION` | `0.1.0` |
-| `FINAL_BRANCH` | `master` |
-| `SOURCE_TREE_CLEAN` | yes |
-| `REMOTE_COUNT` | 0 |
-| `COMMITS` | 8 (loop-v1 series) |
-| `FILES_CREATED` | 68 (Python + Markdown + shell + JSON) |
-| `CLAUDE_CODE_VERSION` | `2.1.217 (Claude Code)` |
-| `MODEL_SMOKE_BUDGET_LIMIT` | `$3.00` |
-| `MODEL_SMOKE_ACTUAL_COST` | `< $0.50` (1 spec invocation, --max-turns 30, 120s cap) |
-| `MODEL_BUILD_SMOKE` | not run separately — same dispatch path as spec |
-| `MODEL_REVIEW_SMOKE` | not run separately — same dispatch path as spec |
-| `INSTALL_RESULT` | PASS (atomic copy, backup retained, rollback tar written) |
-| `INSTALLED_PATH` | `/Users/mr.mrs.london/.claude/skills/of-loop` |
-| `ACTIVE_LOOPS` | 0 |
-| `RELEASE_GATE` | PASS (42 PASS markers) |
-| `FIRST_PILOT_READY` | yes |
-| `OPERATOR_RUNBOOK` | `templates/OPERATOR_RUNBOOK.md` |
-| `INSTALL_RECEIPT` | `~/.claude/plugins/data/of-loop-ownframework-local/installation/install-20260723T160348Z-managed.json` |
-| `TEST_REPORT` | `release_gate.sh` (emits all PASS markers) |
-| `SMOKE_REPORT` | `~/.claude/plugins/data/of-loop-ownframework-local/logs/smoke-<TS>.log` |
-| `NEXT_SAFE_LANE` | `bin/ofloop spec new "<small mission>" && bin/ofloop spec status && (manual) bin/ofloop spec approve` |
-
-> Historical (pre-managed): the obsolete `~/.claude/ownframework-loop-receipts/`
-> directory was used before the migration lane and has been retired. All
-> active receipts now live under
-> `~/.claude/plugins/data/of-loop-ownframework-local/` (or
-> `${CLAUDE_PLUGIN_DATA}` when loaded as a managed plugin).
-
----
-
-## What shipped
-
-### Plugin manifest + discovery
-- `.claude-plugin/plugin.json` — `name: of-loop`, `displayName: OwnFramework Loop`, `version: 0.1.0`
-- Three skills: `skills/spec/SKILL.md`, `skills/build/SKILL.md`, `skills/review/SKILL.md`
-- Two agents: `agents/of-builder.md`, `agents/of-reviewer.md`
-- `hooks/hooks.json` + 3 hook scripts (bash classification, protected paths, secret scan)
-
-### Python core (`lib/ownframework_loop/`)
-- `state.py` — 9-state machine, `fcntl.flock` exclusive locking, atomic JSON writes (`fsync` + `os.replace`)
-- `packet.py` — work-packet schema, hash-pinned approval, mutation detection
-- `receipts.py`, `verdicts.py` — exact-SHA build/review artifacts
-- `transitions.py` — transition validator (rejects illegal moves, dirty baselines, wrong repos)
-- `worktrees.py` — detached-HEAD worktree create/cleanup, refuses to touch files outside `expected_paths`
-- `git_checks.py` — dirty baseline, remote addition, repo mismatch detection
-- `guards.py` — forbidden bash patterns (push/merge/reset--hard/deploy/etc.), secret scanner
-- `locking.py` — `flock_exclusive` context manager with `LOCK_BUSY` semantics
-- `scheduling.py` — self-paced `/loop` markers
-- `cli.py` + `bin/ofloop` — subcommands `spec`, `build`, `review`, `doctor`, `new-repo`
-
-### JSON Schemas (`schemas/`)
-- `work-packet.schema.json` — `ownframework-work-packet/v1`
-- `state.schema.json` — `ownframework-loop-state/v1`
-- `build-receipt.schema.json` — `ownframework-loop-build-receipt/v1`
-- `review-verdict.schema.json` — `ownframework-loop-review-verdict/v1`
-
-### Tests
-- `tests/unit/` — 16 deterministic tests (all PASS)
-- `tests/integration/` — full-fixture integration tests
-- `tests/smoke/smoke.sh` — bounded real-model smoke (1 spec invocation against disposable local-only repo; PASS)
-
-### Operator docs
-- `templates/OPERATOR_RUNBOOK.md` — daily-use runbook
-- `templates/PILOT_PLAYBOOK.md` — first-pilot runbook
-- `templates/PROHIBITED_REPOS.md` — Horus, FireLove, Cockpit, Video Factory, VPS, production
-- `templates/PROHIBITED_PATTERNS.md` — Hermes, Linear, Windmill, SQLite queues, dispatcher services
-- `examples/` — example packet, example state, example receipt
-
-### Install / uninstall / rollback
-- `install.sh` — atomic copy with backup, validates staged copy, writes receipt
-- `uninstall.sh` — refuses to follow symlinks; refuses to remove non-of-loop paths
-- `rollback.sh` — restores most recent timestamped backup
-- `validate.sh` — `validate.sh` (source) and `validate.sh --installed` (installed copy)
-
----
-
-## Commits
-
-```
-6d1702f loop-v1: add bounded real-model smoke test
-d3c6048 loop-v1: add bin/ofloop CLI shim
-c0d0ee6 loop-v1: add source release gate
-33705ad loop-v1: add deterministic fixtures and integration tests
-e129b2c loop-v1: add templates, examples, and operator documentation
-4cdeb8e loop-v1: add skills, agents, and hooks
-79b8365 loop-v1: add deterministic state engine
-ec3d6b0 loop-v1: scaffold plugin and doctrine
-```
-
----
-
-## Hard prohibitions upheld
-
-| Prohibition | Status |
-|---|---|
-| Hermes / Hermes Kanban | not present |
-| Linear | not present |
-| Windmill | not present |
-| SQLite queues / dispatcher service / background daemon | not present |
-| GitHub Issues as a requirement | not present |
-| Automatic PRs / pushes / merges / deploys | not present — hooks block these bash patterns |
-| Remote creation on local-only repos | blocked by `LOCAL_ONLY_REMOTE_BLOCK` |
-| Touching Horus, FireLove, Cockpit, Video Factory, VPS, production repos | blocked by `PROTECTED_PATH_BLOCK` |
-| npm / venv / extra deps | none — Python stdlib only |
-| Symlink install | refused — copy only |
-
----
-
-## First pilot lane
-
-```
-$ bin/ofloop new-repo /tmp/ofloop-pilot
-$ cd /tmp/ofloop-pilot
-$ # operator opens Claude Code with the plugin loaded:
-$ /of-loop:spec "<mission>"
-$ # Claude writes the packet and leaves it in AWAITING_APPROVAL.
-$ bin/ofloop spec status
-$ # operator reviews packet, then:
-$ bin/ofloop spec approve
-$ /of-loop:build   # Claude claims the build, works in worktree, writes receipt
-$ /of-loop:review  # Claude reviews exact-SHA diff, writes verdict
-$ # operator decides: APPROVE / REQUEST CHANGES / STOP
-$ # human merges and deploys manually
-```
-
----
-
-## Smoke evidence
-
-The bounded smoke (`tests/smoke/smoke.sh`) ran `/of-loop:spec` against a
-disposable local-only repo at `/tmp/ofloop-smoke/ofloop-smoke-pilot-0682/`.
-The agent created `WORK_PACKET.md`, wrote `STATE.json` (state=
-`AWAITING_APPROVAL`), and stopped without approving. The full transcript
-is at `~/.claude/plugins/data/of-loop-ownframework-local/logs/smoke-<TS>.log`.
-
-Wall-clock cap: 120s. Turn cap: 30. Cost ceiling: $3.00. Actual cost was
-well under $0.50 for a single spec invocation.
-
----
-
-## Next safe lane
-
-The plugin is ready for its first real pilot. Operator should:
-
-1. Pick a small, local-only, non-production repo for the first pilot.
-2. Follow `templates/PILOT_PLAYBOOK.md`.
-3. Confirm the pilot completes one full loop (spec → build → review → APPROVED).
-4. Only then extend to a second pilot or relax constraints.
+| Install (idempotent) | `bash /Users/mr.mrs.london/projects/plugins/ownframework-loop/install.sh` |
+| Validate installed copy | `bash /Users/mr.mrs.london/.claude/skills/of-loop/validate.sh` |
+| Single release gate | `bash /Users/mr.mrs.london/projects/plugins/ownframework-loop/tests/run_all.sh` |
+| Rollback to backup | `bash /Users/mr.mrs.london/projects/plugins/ownframework-loop/rollback.sh` |
+| Uninstall (restore backup if any) | `bash /Users/mr.mrs.london/projects/plugins/ownframework-loop/uninstall.sh` |
+| Source release gate | `bash /Users/mr.mrs.london/projects/plugins/ownframework-loop/release_gate.sh` |
