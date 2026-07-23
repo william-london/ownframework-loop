@@ -1,0 +1,80 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://ownframework.local/schemas/build-receipt.schema.json",
+  "title": "OwnFramework Loop Build Receipt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema", "run_id", "packet_sha256", "work_unit_id",
+    "baseline_sha", "candidate_sha", "candidate_branch",
+    "builder_worktree", "builder_pass_number", "repair_round",
+    "files_changed", "added_lines", "removed_lines",
+    "validation", "timestamp", "builder_agent", "next_state"
+  ],
+  "properties": {
+    "schema": { "const": "ownframework-loop-build-receipt/v1" },
+    "run_id": { "type": "string" },
+    "packet_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "work_unit_id": { "type": "string" },
+    "baseline_sha": { "type": "string", "pattern": "^[a-f0-9]{7,64}$" },
+    "candidate_sha": { "type": "string", "pattern": "^[a-f0-9]{7,64}$" },
+    "candidate_branch": { "type": "string" },
+    "builder_worktree": { "type": "string" },
+    "builder_pass_number": { "type": "integer", "minimum": 1 },
+    "repair_round": { "type": "integer", "minimum": 0 },
+    "files_changed": { "type": "integer", "minimum": 0 },
+    "added_lines": { "type": "integer", "minimum": 0 },
+    "removed_lines": { "type": "integer", "minimum": 0 },
+    "validation": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "command", "exit_code", "duration_seconds"],
+        "properties": {
+          "name": { "type": "string" },
+          "command": { "type": "string" },
+          "exit_code": { "type": "integer" },
+          "duration_seconds": { "type": "number", "minimum": 0 },
+          "skipped": { "type": "boolean" },
+          "skip_reason": { "type": "string" },
+          "marker_match": { "type": "boolean" }
+        }
+      }
+    },
+    "protected_path_check": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["result"],
+      "properties": {
+        "result": { "type": "string", "enum": ["pass", "fail"] },
+        "offending_paths": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "secret_scan_check": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["result"],
+      "properties": {
+        "result": { "type": "string", "enum": ["pass", "fail"] },
+        "findings": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "scope_check": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["result"],
+      "properties": {
+        "result": { "type": "string", "enum": ["pass", "fail"] },
+        "findings": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "timestamp": { "type": "string", "format": "date-time" },
+    "builder_agent": { "type": "string" },
+    "next_state": {
+      "type": "string",
+      "enum": ["READY_FOR_REVIEW", "BLOCKED", "STOPPED"]
+    },
+    "notes": { "type": "string" }
+  }
+}

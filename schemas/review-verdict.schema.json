@@ -1,0 +1,119 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://ownframework.local/schemas/review-verdict.schema.json",
+  "title": "OwnFramework Loop Review Verdict",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema", "run_id", "packet_sha256", "candidate_sha_reviewed",
+    "baseline_sha", "review_pass_number", "verdict",
+    "acceptance_results", "non_goal_results", "findings",
+    "tracked_mutation_check", "stale_sha_check", "reviewer_identity",
+    "timestamp", "recommended_next_state"
+  ],
+  "properties": {
+    "schema": { "const": "ownframework-loop-review-verdict/v1" },
+    "run_id": { "type": "string" },
+    "packet_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "candidate_sha_reviewed": { "type": "string", "pattern": "^[a-f0-9]{7,64}$" },
+    "baseline_sha": { "type": "string", "pattern": "^[a-f0-9]{7,64}$" },
+    "review_pass_number": { "type": "integer", "minimum": 1 },
+    "verdict": {
+      "type": "string",
+      "enum": [
+        "APPROVED", "CHANGES_REQUESTED", "BLOCKED",
+        "HUMAN_REVIEW_REQUIRED", "STALE_CANDIDATE"
+      ]
+    },
+    "acceptance_results": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "result"],
+        "properties": {
+          "id": { "type": "string", "pattern": "^AC-[0-9]+$" },
+          "result": { "type": "string", "enum": ["pass", "fail", "inconclusive"] },
+          "evidence": { "type": "string" }
+        }
+      }
+    },
+    "non_goal_results": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "result"],
+        "properties": {
+          "id": { "type": "string", "pattern": "^NG-[0-9]+$" },
+          "result": { "type": "string", "enum": ["preserved", "violated", "inconclusive"] },
+          "evidence": { "type": "string" }
+        }
+      }
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["finding_id", "severity", "classification", "title", "description"],
+        "properties": {
+          "finding_id": { "type": "string", "pattern": "^F-[a-zA-Z0-9_-]+$" },
+          "severity": { "type": "string", "enum": ["critical", "high", "medium", "low", "info"] },
+          "classification": { "type": "string", "enum": ["must_fix", "advisory"] },
+          "title": { "type": "string" },
+          "description": { "type": "string" },
+          "file": { "type": "string" },
+          "line": { "type": "integer", "minimum": 1 }
+        }
+      }
+    },
+    "commands_executed": { "type": "array", "items": { "type": "string" } },
+    "validation_results": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "command", "exit_code"],
+        "properties": {
+          "name": { "type": "string" },
+          "command": { "type": "string" },
+          "exit_code": { "type": "integer" },
+          "duration_seconds": { "type": "number", "minimum": 0 }
+        }
+      }
+    },
+    "tracked_mutation_check": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["detected", "before_sha", "after_sha"],
+      "properties": {
+        "detected": { "type": "boolean" },
+        "before_sha": { "type": "string" },
+        "after_sha": { "type": "string" },
+        "changed_paths": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "stale_sha_check": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sha_match", "receipt_match", "packet_hash_match"],
+      "properties": {
+        "sha_match": { "type": "boolean" },
+        "receipt_match": { "type": "boolean" },
+        "packet_hash_match": { "type": "boolean" }
+      }
+    },
+    "reviewer_identity": { "type": "string" },
+    "timestamp": { "type": "string", "format": "date-time" },
+    "recommended_next_state": {
+      "type": "string",
+      "enum": [
+        "APPROVED", "CHANGES_REQUESTED", "BLOCKED",
+        "READY_FOR_REVIEW", "STOPPED"
+      ]
+    },
+    "codex_escalation_recommended": { "type": "boolean" },
+    "codex_reason": { "type": "string" }
+  }
+}

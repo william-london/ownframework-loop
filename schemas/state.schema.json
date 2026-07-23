@@ -1,0 +1,48 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://ownframework.local/schemas/state.schema.json",
+  "title": "OwnFramework Loop State",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema", "run_id", "state", "state_history", "transitions_count",
+    "build_pass_count", "review_pass_count", "repair_round", "no_progress_streak"
+  ],
+  "properties": {
+    "schema": { "const": "ownframework-loop-state/v1" },
+    "run_id": { "type": "string", "minLength": 1, "maxLength": 64 },
+    "state": {
+      "type": "string",
+      "enum": [
+        "AWAITING_APPROVAL", "READY_TO_BUILD", "BUILDING",
+        "READY_FOR_REVIEW", "REVIEWING", "CHANGES_REQUESTED",
+        "APPROVED", "BLOCKED", "STOPPED"
+      ]
+    },
+    "state_history": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["from", "to", "at", "actor"],
+        "properties": {
+          "from": { "type": "string" },
+          "to": { "type": "string" },
+          "at": { "type": "string", "format": "date-time" },
+          "actor": { "type": "string" },
+          "reason": { "type": "string" }
+        }
+      }
+    },
+    "transitions_count": { "type": "integer", "minimum": 0 },
+    "build_pass_count": { "type": "integer", "minimum": 0 },
+    "review_pass_count": { "type": "integer", "minimum": 0 },
+    "repair_round": { "type": "integer", "minimum": 0 },
+    "no_progress_streak": { "type": "integer", "minimum": 0 },
+    "started_at": { "type": "string", "format": "date-time" },
+    "updated_at": { "type": "string", "format": "date-time" },
+    "last_actor": { "type": "string" },
+    "terminal_reason": { "type": "string" },
+    "last_candidate_sha": { "type": "string", "pattern": "^[a-f0-9]{7,64}$" }
+  }
+}

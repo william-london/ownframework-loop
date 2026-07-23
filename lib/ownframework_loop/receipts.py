@@ -1,0 +1,122 @@
+"""Build receipt — create, validate, and inspect."""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any
+
+from .util import (
+    atomic_write_json, builder_worktree, run_dir, run_subprocess,
+    short_sha, utc_now_iso,
+)
+
+
+SCHEMA_VERSION = "ownframework-loop-build-receipt/v1"
+
+
+def receipt_path(canonical_repo: Path, run_id: str) -> Path:
+    return run_dir(canonical_repo, run_id) / "BUILD_RECEIPT.json"
+
+
+def new_receipt(
+    *,
+    run_id: str,
+    packet_sha256: str,
+    work_unit_id: str,
+    baseline_sha: str,
+    candidate_sha: str,
+    candidate_branch: str,
+    builder_pass_number: int,
+    repair_round: int,
+    files_changed: int,
+    added_lines: int,
+    removed_lines: int,
+    validation: list[dict[str, Any]],
+    builder_agent: str,
+    next_state: str,
+    protected_path_check: dict[str, Any] | None = None,
+    secret_scan_check: dict[str, Any] | None = None,
+    scope_check: dict[str, Any] | None = None,
+    notes: str | None = None,
+) -> dict[str, Any]:
+    """Build a build-receipt document. Does not write."""
+    return {
+        "schema": SCHEMA_VERSION,
+        "run_id": run_id,
+        "packet_sha256": packet_sha256,
+        "work_unit_id": work_unit_id,
+        "baseline_sha": baseline_sha,
+        "candidate_sha": candidate_sha,
+        "candidate_branch": candidate_branch,
+        "builder_worktree": "",  # filled in by caller
+        "builder_pass_number": builder_pass_number,
+        "repair_round": repair_round,
+        "files_changed": files_changed,
+        "added_lines": added_lines,
+        "removed_lines": removed_lines,
+        "validation": validation,
+        "protected_path_check": protected_path_check or {"result": "pass"},
+        "secret_scan_check": secret_scan_check or {"result": "pass"},
+        "scope_check": scope_check or {"result": "pass"},
+        "timestamp": utc_now_iso(),
+        "builder_agent": builder_agent,
+        "next_state": next_state,
+        "notes": notes,
+    }
+
+
+def write_receipt(canonical_repo: Path, run_id: str, receipt: dict[str, Any]) -> Path:
+    p = receipt_path(canonical_repo, run_id)
+    atomic_write_json(p, receipt, mode=0o600)
+    return p
+
+
+def load_receipt(canonical_repo: Path, run_id: str) -> dict[str, Any] | None:
+    p = receipt_path(canonical_repo, run_id)
+    if not p.exists():
+        return None
+    import json
+    return json.loads(p.read_text(encoding="utf-8"))
+
+
+def compute_diff_stats(worktree: Path, baseline_sha: str, candidate_sha: str) -> dict[str, int]:
+    """Compute files_changed, added_lines, removed_lines for a candidate commit."""
+    r = run_subprocess(
+        ["git", "-C", str(worktree), "diff", "--numstat", baseline_sha, candidate_sha],
+        timeout=30,
+    )
+    if r.returncode != 0:
+        return {"files_changed": 0, "added_lines": 0, "removed_lines": 0}
+    files = 0
+    added = 0
+    removed = 0
+    for line in r.stdout.splitlines():
+        parts = line.split("\t")
+        if len(parts) >= 3:
+            files += 1
+            try:
+                added += int(parts[0]) if parts[0] != "-" else 0
+                removed += int(parts[1]) if parts[1] != "-" else 0
+            except ValueError:
+                pass
+    return {"files_changed": files, "added_lines": added, "removed_lines": removed}
+
+
+def list_changed_files(worktree: Path, baseline_sha: str, candidate_sha: str) -> list[str]:
+    """Return the list of changed paths in a candidate commit."""
+    r = run_subprocess(
+        ["git", "-C", str(worktree), "diff", "--name-only", baseline_sha, candidate_sha],
+        timeout=30,
+    )
+    if r.returncode != 0:
+        return []
+    return [line.strip() for line in r.stdout.splitlines() if line.strip()]
+
+
+def is_candidate_branch_contains_sha(worktree: Path, branch: str, sha: str) -> bool:
+    """Return True iff `branch` contains `sha`."""
+    r = run_subprocess(
+        ["git", "-C", str(worktree), "merge-base", "--is-ancestor", sha, branch],
+        timeout=10,
+    )
+    return r.returncode == 0
