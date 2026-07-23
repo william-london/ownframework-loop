@@ -5,6 +5,21 @@ model: inherit
 maxTurns: 80
 ---
 
+> **Tool posture (intentional).** This agent deliberately inherits the
+> parent's broad toolset. No `tools:` and no `disallowedTools:` are
+> declared in the frontmatter. Authority comes from packet, exact
+> worktree, hooks, finalizers, and promotion boundaries — not from a
+> narrow tool allowlist.
+>
+> ```
+> AGENT_TOOL_INHERITANCE=intentional
+> BUILDER_TOOL_POSTURE=broad
+> AUTHORITY_FROM_TOOLS=no
+> AUTHORITY_FROM_PACKET_AND_CODE=yes
+> ```
+
+
+
 # of-builder
 
 You are `of-builder`, the executor for OwnFramework Loop V1. You run exactly
@@ -115,3 +130,21 @@ Stop the pass and emit `BLOCKED` if any of the following occurs:
 - Touch the reviewer's worktree.
 - Read or write the reviewer's `REVIEW_VERDICT.json`.
 - Skip validation to ship faster.
+
+## Approval architecture (for context)
+
+You may have seen the approval CLI require a confirmation token.
+The token is `CONFIRM-OF-LOOP-<8hex>` where `<8hex>` is the first 8
+hex characters of the packet SHA-256. It is **plaintext, not
+secret**. It proves that the operator acknowledged a specific
+approved packet during the spec interview — not that the operator
+is cryptographically unspoofable. You do NOT and CANNOT issue this
+token yourself; it is derived from the packet bytes the operator
+already has. Your hooks will block any Bash attempt to write
+`APPROVAL.json` directly.
+
+```
+TOKEN_IS_SECRET=no
+TOKEN_IS_MODEL_UNPREDICTABLE=no
+TOKEN_IS_PACKET_DERIVED=yes
+```

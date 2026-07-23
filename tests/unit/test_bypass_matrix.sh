@@ -75,15 +75,17 @@ assert_textual_block  "compound: ;"    "git status; git push origin master"
 assert_textual_block  "compound: ||"   "false || git push origin master"
 assert_textual_block  "pipeline: |"    "ls / | git push origin master"
 
-# ----- Row 3: indirection forms (textual guard partial; rest by sandbox/post-pass) -----
+# ----- Row 3: indirection forms (V2.0.1 closes Python-subprocess and variable-assembly evasions) -----
 # The textual guard CAN see through `$(...)` and `eval` because the inner
-# command is still visible in the string. Variable indirection (no quoted
-# literal) and Python subprocess defer to the other layers (sandbox +
-# post-pass).
+# command is still visible in the string. V2.0.1 also closes the
+# Python-subprocess argv-literal and variable-assembly evasions via
+# layered normalization (see lib/ownframework_loop/external_action.py).
+# Forms that still defer to other layers (multiline, opaque dynamic code,
+# base64 payloads) are documented in docs/BYPASS_MATRIX.md.
 assert_textual_block  "subshell \$(...) sees inner" 'echo $(git push origin master)'
 assert_textual_block  "eval sees inner command"    'eval "git push origin master"'
-assert_textual_allow  "variable indirection"       'CMD=git; $CMD push origin master'
-assert_textual_allow  "Python subprocess"          'python3 -c "import subprocess; subprocess.run([\"git\", \"push\"])"'
+assert_textual_block  "variable indirection (V2.0.1 closed)" 'CMD=git; $CMD push origin master'
+assert_textual_block  "Python subprocess (V2.0.1 closed)"    'python3 -c "import subprocess; subprocess.run([\"git\", \"push\"])"'
 assert_textual_block  "single-line redirect"       "git push origin master > /tmp/push.log 2>&1"
 
 # ----- Row 4: hermes-related benign commands — must NOT block -----
@@ -185,8 +187,8 @@ rm -rf "$TEST_TMP_REPO" 2>/dev/null || true
 
 echo
 echo "=== bypass-matrix coverage ==="
-echo "  textual blocks tested: 23 forbidden forms"
-echo "  textual allows (deferred to other layers): 9 forms"
+echo "  textual blocks tested: 25 forbidden forms (incl. 2 V2.0.1 closed evasions)"
+echo "  textual allows (deferred to other layers): 7 forms (multiline, opaque dynamic, base64)"
 echo "  protected-paths tested: 4 scenarios"
 echo "  fail-closed on malformed JSON: 2 hooks"
 echo "  TOTAL bypass rows covered: ~38 + 4 + 2 = 44"

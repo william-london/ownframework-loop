@@ -1,19 +1,80 @@
 # OwnFramework Loop V2 — Implementation Report
 
 **Date:** 2026-07-23
+**Release:** V2.0.1
 **Plugin:** `of-loop` (display name: OwnFramework Loop)
 **Source commit:** `f8b99ad0849878290e685dac9b48f3f53236f465`
 **Source branch:** master
 **Source dirty at acceptance:** 0 files
 **Source root:** `/Users/mr.mrs.london/projects/plugins/ownframework-loop`
-**Source version:** 0.2.0
+**Source version:** 0.2.1
 **Plugin namespace:** `of-loop@ownframework-local`
-**Install path:** `/Users/mr.mrs.london/.claude/skills/of-loop` (legacy copy,
-not symlink)
+**Install path (managed):** `/Users/mr.mrs.london/.claude/plugins/cache/ownframework-local/of-loop/0.2.1`
+**Install path (legacy skills-dir backup, archived):** `~/.claude/ownframework-loop-mgmt-backup-<UTC>/`
 **Receipt path:** `/Users/mr.mrs.london/.claude/plugins/data/of-loop-ownframework-local`
 **Remotes:** 0
-**Plugin manifest version:** 0.2.0
-**Library `__version__`:** 0.2.0
+**Plugin manifest version:** 0.2.1
+**Library `__version__`:** 0.2.1
+
+---
+
+## Approval security claim (corrected)
+
+The OwnFramework Loop approval architecture relies on **artifact
+binding plus tested command-origin refusal** — not on token
+cryptographic unspoofability.
+
+```
+TOKEN_IS_SECRET=no
+TOKEN_IS_MODEL_UNPREDICTABLE=no
+TOKEN_IS_PACKET_DERIVED=yes
+```
+
+The confirmation token `CONFIRM-OF-LOOP-<8hex>` is the first 8 hex
+characters of the packet SHA-256 — plaintext, not secret. What it
+proves is that the operator acknowledged a specific approved packet
+during the spec interview. Pseudo-TTY attacks CAN make stdin look
+like a TTY; they cannot derive the token without first reading the
+packet bytes the operator already has.
+
+Root of trust:
+
+- packet SHA → derived token (plaintext, not secret)
+- `APPROVAL.json` binds `run_id`, `canonical_repo`, `baseline_branch`,
+  `baseline_sha`, `packet_sha256`, `confirmation_token`
+- The CLI requires all five to match at finalize time
+- Pseudo-TTY attacks do NOT bypass the binding — they still need a
+  valid token derived from the packet SHA
+
+Properties preserved:
+
+```
+PACKET_HASH_BOUND=yes
+REPOSITORY_BOUND=yes
+BASELINE_BOUND=yes
+NONINTERACTIVE_APPROVAL=blocked
+PSEUDO_TTY_APPROVAL=blocked
+DIRECT_FILE_APPROVAL=blocked
+DIRECT_LIBRARY_APPROVAL=blocked
+PACKET_MUTATION_INVALIDATION=PASS
+```
+
+## Tool inheritance posture (intentional)
+
+`of-builder` and `of-reviewer` deliberately do NOT list `tools:` or
+`disallowedTools:` in their frontmatter. They inherit the parent's
+broad toolset (read, write within authority, shell, WebSearch,
+WebFetch, MCP read-only verbs). Authority comes from packet, exact
+worktree, hooks, finalizers, and promotion boundaries — not from a
+narrow tool allowlist.
+
+```
+AGENT_TOOL_INHERITANCE=intentional
+BUILDER_TOOL_POSTURE=broad
+REVIEWER_TOOL_POSTURE=broad_inspection
+AUTHORITY_FROM_TOOLS=no
+AUTHORITY_FROM_PACKET_AND_CODE=yes
+```
 
 ---
 
@@ -32,7 +93,7 @@ or background process is left running.
 
 ---
 
-## v0.2.0 — fourteen-patch two-loop engineering upgrade
+## v0.2.1 — fourteen-patch two-loop engineering upgrade
 
 V1's pilot framing remains intact: three visible skills, two
 independent agent types, one human-approved work packet per run.
@@ -132,13 +193,30 @@ and single-line redirects. Forbidden command families:
 `ssh firelove`. The dedicated external-action guard
 (`hooks/external_action_guard.sh`) blocks outbound email, push,
 PR, deploy, and customer-action operations independent of the
-Bash input shape. Variable indirection (no quoted literal) is
-deferred to the sandbox + post-pass review layers as documented
-in `docs/BYPASS_MATRIX.md`.
+Bash input shape.
+
+V2.0.1 closes three known audit evasion forms by layered
+normalization before pattern matching:
+
+  1. **Python-subprocess argv literals** — `subprocess.run(["git",
+     "push"])`, `os.system("git push")`, `[git, push]`,
+     `["git","push"]`, `executable="git", args=["push"]`.
+  2. **Shell variable assembly** — `X=push; git $X origin master`
+     and `X=push; Y=origin; Z=master; git $X $Y $Z`.
+  3. **Hyphenated wrapper executable identity** — `./git-push`,
+     `./git-remote-add`, `gh-pr-create`, `git-remote-remove`,
+     `git-reset-hard`, `git-branch-D`, etc.
+
+The textual guard is **one layer** of defense. Forms that escape
+detection (multiline heredocs, opaque arbitrary Python code,
+base64-encoded payloads) defer to the post-pass review layer and
+exact-SHA receipt check. The guard is bounded; it does not claim
+semantic containment of arbitrary opaque local code.
 
 - `hooks/block_dangerous_bash.sh`
 - `hooks/external_action_guard.sh`
 - `lib/ownframework_loop/external_action.py`
+- `lib/ownframework_loop/guards.py` (V2.0.1 normalization hooks)
 - `tests/unit/test_bypass_matrix.sh`
 
 ### Patch 7 — Safe secret handling
@@ -199,8 +277,8 @@ auto-forward of the worktree HEAD.
 `install.sh` is idempotent: backs up existing copy, verifies
 SHA-256 of the source before copy. `uninstall.sh` is reversible
 to the backup if one exists. Plugin metadata
-`.claude-plugin/plugin.json` references version 0.2.0 and the V2
-description. The library's `__version__` is 0.2.0.
+`.claude-plugin/plugin.json` references version 0.2.1 and the V2
+description. The library's `__version__` is 0.2.1.
 
 - `install.sh`
 - `uninstall.sh`
@@ -215,8 +293,22 @@ types: `of-builder` (writes only inside builder worktree,
 `BUILD_AGENT_RESULT.json`, candidate commit) and `of-reviewer`
 (read-only against source tree, writes only the structured
 assessment in detached reviewer worktree). Skills describe
-contracts; agents execute within them. Neither agent has
-WebFetch, WebSearch, Write, or push authority.
+contracts; agents execute within them.
+
+**Tool inheritance is INTENTIONAL.** Neither agent's frontmatter
+declares `tools:` or `disallowedTools:`. They inherit the
+parent's broad toolset (read, write within authority, shell,
+WebSearch, WebFetch, MCP read-only verbs). Authority is bound
+by packet, exact worktree, hooks, finalizers, and promotion
+boundaries — NOT by a narrow tool allowlist.
+
+```
+AGENT_TOOL_INHERITANCE=intentional
+BUILDER_TOOL_POSTURE=broad
+REVIEWER_TOOL_POSTURE=broad_inspection
+AUTHORITY_FROM_TOOLS=no
+AUTHORITY_FROM_PACKET_AND_CODE=yes
+```
 
 - `skills/spec/SKILL.md`
 - `skills/build/SKILL.md`
@@ -397,17 +489,21 @@ From the V1 pilot contract:
 ```
 PLUGIN_MANIFEST_NAME=of-loop
 PLUGIN_MANIFEST_DISPLAY_NAME=OwnFramework Loop
-PLUGIN_MANIFEST_VERSION=0.2.0
+SOURCE_VERSION=0.2.1
+PLUGIN_MANIFEST_VERSION=0.2.1
 PLUGIN_MANIFEST_NAMESPACE=of-loop@ownframework-local
-SOURCE_VERSION=0.2.0
+SOURCE_VERSION=0.2.1
 SOURCE_COMMIT=f8b99ad0849878290e685dac9b48f3f53236f465
 SOURCE_BRANCH=master
 SOURCE_DIRTY=0
 SOURCE_REMOTES=0
-INSTALL_PATH=/Users/mr.mrs.london/.claude/skills/of-loop
-INSTALL_KIND=legacy_copy_not_symlink
+INSTALL_PATH_MANAGED=/Users/mr.mrs.london/.claude/plugins/cache/ownframework-local/of-loop/0.2.1
+INSTALL_PATH_SKILLS_BACKUP=/Users/mr.mrs.london/.claude/ownframework-loop-mgmt-backup-<UTC>/
+INSTALL_KIND=managed_marketplace
+MARKETPLACE_NAME=ownframework-local
+MARKETPLACE_VERSION=1.0.1
+ACTIVE_PLUGIN_IDENTITIES=1
 INSTALL_RECEIPT_DIR=/Users/mr.mrs.london/.claude/plugins/data/of-loop-ownframework-local
-INSTALL_RECEIPT_FILE=installation/install-20260723T230051Z.json
 PACKET_SCHEMA=ownframework-work-packet/v2
 APPROVAL_SCHEMA=ownframework-loop-approval/v1
 STATE_SCHEMA=ownframework-loop-state/v1
@@ -431,11 +527,27 @@ SCHEMA_COUNT=5
 HARD_SECRET_BLOCKS_ON=AKIA,PRIVATE_KEY_HARD,HIGH_CONFIDENCE_TOKEN
 HEURISTIC_SECRET_REVIEWABLE=HIGH_ENTROPY_HEURISTIC,LONG_BASE64_HEURISTIC
 TEXTUAL_GUARD_FORBIDDEN_FORMS=33
-TEXTUAL_GUARD_ALLOWED_DEFERRED=9
+TEXTUAL_GUARD_CLOSED_EVASIONS=3
+GUARD_EVASION_CLOSED_PYTHON_SUBPROCESS=yes
+GUARD_EVASION_CLOSED_VARIABLE_ASSEMBLY=yes
+GUARD_EVASION_CLOSED_HYPHENATED_EXECUTABLE=yes
 PROTECTED_PATHS=AGENTS.md,CLAUDE.md,.claude/,.ownframework-loop/,.git/,.worktrees/ownframework-loop/
 SAFE_WHEN_PACKET_APPROVED=any path listed in packet.elevated_allowed_paths
 WORK_CLASSES=BUG,FEATURE,REFACTOR,RESEARCH_SPIKE,DOCS,HARDENING,NEW_REPOSITORY
 EXTERNAL_ACTION_FAMILIES=email,push,pr_open,pr_merge,deploy,hermes_cli,fire_love,horus_ssh,video_factory
+AGENT_TOOL_INHERITANCE=intentional
+BUILDER_TOOL_POSTURE=broad
+REVIEWER_TOOL_POSTURE=broad_inspection
+AUTHORITY_FROM_TOOLS=no
+AUTHORITY_FROM_PACKET_AND_CODE=yes
+TOKEN_IS_SECRET=no
+TOKEN_IS_MODEL_UNPREDICTABLE=no
+TOKEN_IS_PACKET_DERIVED=yes
+GLOBAL_PERMISSION_MODE=bypassPermissions
+BYPASS_PERMISSIONS_PRESERVED=yes
+GLOBAL_SETTINGS_MUTATED=no
+SANDBOX_REQUIRED_BY_PLUGIN=no
+PER_PASS_HUMAN_APPROVAL=no
 OF_LOOP_TESTS=34
 OF_LOOP_TOTAL=34
 OF_LOOP_PASSED=34

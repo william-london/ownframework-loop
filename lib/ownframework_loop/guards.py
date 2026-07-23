@@ -132,6 +132,11 @@ def classify_bash_command(command: str) -> dict[str, Any]:
     cannot be safely interpreted pre-execution (multiline heredocs, eval
     indirection, Python subprocess), defer to the post-pass verification
     layer and the sandbox boundary.
+
+    V2.0.1: applies layered normalizations to close known audit
+    evasion forms (Python subprocess argv literals, variable
+    assembly, hyphenated wrapper executable identity) before
+    matching against forbidden patterns.
     """
     # Apply the same layered normalizations as external_action to close
     # the known audit evasion forms (Python subprocess, variable
@@ -149,24 +154,17 @@ def classify_bash_command(command: str) -> dict[str, Any]:
         cmd_norm = _normalize_hyphenated_executable(cmd_norm)
     except Exception:
         cmd_norm = command
-    segments = _split_command_chain(command)
+
+    # Use the normalized command for splitting AND matching. This is
+    # what closes the variable-assembly and python-subprocess evasion
+    # forms. The original command is retained for diagnostics.
+    segments = _split_command_chain(cmd_norm)
+    if not segments:
+        # Multiline/unparseable: fall back to the original.
+        segments = _split_command_chain(command)
     forbidden: list[str] = []
     for seg in segments:
-        # Also match against the normalized version.
-        normalized_segs = _split_command_chain(cmd_norm)
-        seg_normalized = ""
-        for ns in normalized_segs:
-            # Match by leading token sequence to align segments.
-            if ns.lstrip() and seg.lstrip().startswith(ns.lstrip().split()[0] if ns.lstrip().split() else "X"):
-                seg_normalized = ns
-                break
-        candidates_for_match = [seg, _norm(seg)]
-        if seg_normalized:
-            candidates_for_match.extend([seg_normalized, _norm(seg_normalized)])
-        # Strip leading env-var assignments (FOO=bar BAZ=qux ...) before
-        # inspecting the first executable word.
         first_word = _first_executable_word(seg)
-        # Check both the raw segment and the de-quoted segment.
         candidates = [seg, _norm(seg)]
         for pattern, desc, kind in FORBIDDEN_PATTERNS:
             if kind == "executable_identity":
@@ -175,47 +173,6 @@ def classify_bash_command(command: str) -> dict[str, Any]:
                 # `grep hermes` and `ls ~/.hermes/` legitimate.
                 if first_word is None:
                     continue
-                # Compare normalized first_word (strip quotes) against a
-                # path-aware match.
-                norm_first = _norm(first_word)
-                base = norm_first.rsplit("/", 1)[-1]
-                expected = desc.split()[0]  # "hermes" or "codex"
-                if base == expected or norm_first.endswith("/" + expected):
-                    forbidden.append(f"{desc}: {seg.strip()}")
-                    break
-                continue
-            # Subcommand-shape patterns (git push, ssh horus, …) — match
-            # the whole segment with permissive quote-stripping.
-            for cand in candidates_for_match:
-                if pattern.search(cand):
-                    forbidden.append(f"{desc}: {seg.strip()}")
-                    break
-            else:
-                continue
-            break
-    severity = "forbidden" if forbidden else "allowed"
-    return {
-        "command": command,
-        "segments": segments,
-        "forbidden": forbidden,
-        "severity": severity,
-    }
-    forbidden: list[str] = []
-    for seg in segments:
-        # Strip leading env-var assignments (FOO=bar BAZ=qux ...) before
-        # inspecting the first executable word.
-        first_word = _first_executable_word(seg)
-        # Check both the raw segment and the de-quoted segment.
-        candidates = [seg, _norm(seg)]
-        for pattern, desc, kind in FORBIDDEN_PATTERNS:
-            if kind == "executable_identity":
-                # Match ONLY against the first executable word (e.g. `hermes`,
-                # `/usr/bin/hermes`, `./hermes`). This is what makes
-                # `grep hermes` and `ls ~/.hermes/` legitimate.
-                if first_word is None:
-                    continue
-                # Compare normalized first_word (strip quotes) against a
-                # path-aware match.
                 norm_first = _norm(first_word)
                 base = norm_first.rsplit("/", 1)[-1]
                 expected = desc.split()[0]  # "hermes" or "codex"
@@ -229,6 +186,9 @@ def classify_bash_command(command: str) -> dict[str, Any]:
                 if pattern.search(cand):
                     forbidden.append(f"{desc}: {seg.strip()}")
                     break
+            else:
+                continue
+            break
     severity = "forbidden" if forbidden else "allowed"
     return {
         "command": command,
