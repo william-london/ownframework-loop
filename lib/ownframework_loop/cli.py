@@ -13,7 +13,7 @@ Usage:
   ofloop spec abandon <repo> <run-id>
 
   ofloop build claim <repo> <run-id> [--actor <name>]
-  ofloop build transition <repo> <run-id> --to <state> [--reason <r>] [--actor <name>]
+  ofloop build transition <repo> <run-id> --to <state> [--reason <r>] [--actor <name>] [--commit-sha <sha>]
   ofloop build write-receipt <repo> <run-id> <receipt.json>
   ofloop build marker <repo> <run-id>
 
@@ -298,6 +298,7 @@ def cmd_build_transition(args: argparse.Namespace) -> None:
         repo, args.run_id, to_state=args.to,
         actor=args.actor or "of-builder",
         reason=args.reason or "",
+        commit_sha=getattr(args, "commit_sha", None),
     )
     if args.to == "CHANGES_REQUESTED":
         # Increment repair round on every CHANGES_REQUESTED.
@@ -581,6 +582,8 @@ def _build_parser() -> argparse.ArgumentParser:
     b_trans.add_argument("--to", required=True)
     b_trans.add_argument("--reason", default="")
     b_trans.add_argument("--actor", default="of-builder")
+    b_trans.add_argument("--commit-sha", default=None,
+                          help="candidate SHA to record as last_candidate_sha on this transition")
     b_trans.set_defaults(func=cmd_build_transition)
     b_rec = bld_sub.add_parser("write-receipt", help="write a build receipt")
     b_rec.add_argument("repo")
