@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-23
 **Plugin:** `of-loop` (display name: OwnFramework Loop)
-**Version:** 0.1.0
+**Version:** 0.1.4
 **Source path:** `/Users/mr.mrs.london/projects/plugins/ownframework-loop`
 **Install path:** `/Users/mr.mrs.london/.claude/skills/of-loop` (copy, not symlink)
 **HEAD:** `6d1702fcc2fbd755542d3d879dde602fafa39499`
@@ -11,14 +11,35 @@
 
 ---
 
+## v0.1.4 — recursion repair and gate containment
+
+- Reverse orchestrator edge removed: `tests/unit/test_plugin_data_resolution.sh` no longer
+  launches `release_gate.sh`. Receipts now go through the shared
+  `ownframework_loop.plugin_data.write_receipt()` helper.
+- `release_gate.sh` is a thin wrapper around `ownframework_loop.release_gate_runtime`,
+  which acquires a kernel-authoritative `fcntl.flock(LOCK_EX|LOCK_NB)` on
+  `${CLAUDE_PLUGIN_DATA}/locks/release-gate.lock`, runs a bounded process runner
+  with its own process group, and tracks owned children + temp directory for
+  targeted cleanup.
+- `validate.sh` gained a `--skip-tests` mode so the installed-copy branch never
+  re-runs the deterministic suite, eliminating the second reverse edge.
+- `install.sh` now uses the shared Python receipt helper and a targeted `trap`
+  to delete only its own staging directory.
+- New tests under `tests/unit/` cover: recursion detector, single-instance lock,
+  lifecycle, separation, and cache-read-only safety. The suite remains a strict
+  one-way hierarchy.
+- `lib/ownframework_loop/static_checks.py` provides deterministic static
+  detection of reverse orchestration dependencies and unsafe subprocess
+  patterns.
+
 ## Result
 
 ```
 IMPLEMENTATION_RESULT=PASS
-RELEASE_GATE=PASS  (42 PASS markers)
+RELEASE_GATE=PASS  (deterministic single-invocation gate)
 ```
 
-The complete release gate (`release_gate.sh`) passes with 42 PASS markers,
+The complete release gate (`release_gate.sh`) passes with one canonical run,
 including the structural validators, the deterministic fixtures, the
 discovery checks for the three skills and two agents, and the source-tree
 hygiene checks (no remote, no push, no merge, no deploy, clean tree).
