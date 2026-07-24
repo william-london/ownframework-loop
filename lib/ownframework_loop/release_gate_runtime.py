@@ -50,6 +50,46 @@ def _emit(lines: list[str], text: str) -> None:
     lines.append(text)
 
 
+def _parse_test_outcome(output_lines: list[str]) -> dict[str, object]:
+    """Extract test totals and failed names from run_all.sh output.
+
+    run_all.sh emits OF_LOOP_TOTAL / OF_LOOP_PASSED / OF_LOOP_FAILED /
+    OF_LOOP_FAILED_NAMES / OF_LOOP_RELEASE_GATE_RESULT markers. This is a
+    defense-in-depth parse: even if validate.sh's overall returncode is
+    masked (e.g. by a wrapper), the release gate will refuse to emit
+    RELEASE_GATE=PASS when the markers show a failure.
+    """
+    info: dict[str, object] = {
+        "total": 0,
+        "passed": 0,
+        "failed": 0,
+        "failed_names": [],
+        "result": "UNKNOWN",
+    }
+    for line in output_lines:
+        if line.startswith("OF_LOOP_TOTAL="):
+            try:
+                info["total"] = int(line.split("=", 1)[1].strip())
+            except ValueError:
+                pass
+        elif line.startswith("OF_LOOP_PASSED="):
+            try:
+                info["passed"] = int(line.split("=", 1)[1].strip())
+            except ValueError:
+                pass
+        elif line.startswith("OF_LOOP_FAILED="):
+            try:
+                info["failed"] = int(line.split("=", 1)[1].strip())
+            except ValueError:
+                pass
+        elif line.startswith("OF_LOOP_FAILED_NAMES="):
+            names = line.split("=", 1)[1].strip()
+            info["failed_names"] = names.split() if names else []
+        elif line.startswith("OF_LOOP_RELEASE_GATE_RESULT="):
+            info["result"] = line.split("=", 1)[1].strip()
+    return info
+
+
 def _run(root: Path, argv: list[str], timeout: int, env: dict[str, str]) -> CommandResult:
     return run_bounded(argv, cwd=root, timeout_seconds=timeout, env=env)
 
@@ -107,6 +147,24 @@ def main() -> int:
         if validation.timed_out or validation.returncode != 0:
             _emit(output, "VALIDATION=FAIL")
             return 1
+        # Defense-in-depth: parse the OF_LOOP_* markers from run_all.sh's
+        # output. validate.sh now propagates run_all.sh's exit code, but
+        # even if that ever regresses, the gate must refuse to emit
+        # RELEASE_GATE=PASS when the test markers show a failure.
+        test_outcome = _parse_test_outcome(validation.stdout.splitlines())
+        failed_count = int(test_outcome.get("failed") or 0) if isinstance(test_outcome.get("failed"), (int, str)) else 0
+        failed_names = test_outcome.get("failed_names")
+        if not isinstance(failed_names, list):
+            failed_names = []
+        if failed_count > 0:
+            _emit(output, f"OF_LOOP_GATE_BLOCKED_FAILED={failed_count}")
+            _emit(output, f"OF_LOOP_GATE_BLOCKED_NAMES={' '.join(failed_names)}")
+            _emit(output, "RELEASE_GATE=BLOCKED")
+            return 1
+        verified_total = int(test_outcome.get("total") or 0) if isinstance(test_outcome.get("total"), (int, str)) else 0
+        verified_passed = int(test_outcome.get("passed") or 0) if isinstance(test_outcome.get("passed"), (int, str)) else 0
+        _emit(output, f"OF_LOOP_GATE_VERIFIED_TOTAL={verified_total}")
+        _emit(output, f"OF_LOOP_GATE_VERIFIED_PASSED={verified_passed}")
         _emit(output, "NARROW_TESTS=PASS")
         install_root = os.environ.get("INSTALL_ROOT", "")
         if install_root and Path(install_root).is_dir():

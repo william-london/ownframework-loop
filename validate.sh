@@ -146,14 +146,22 @@ ok "hook scripts are executable"
 
 # 8. Deterministic unit tests. The top-level release gate runs the source
 # suite once; installed-copy validation is structural-only when requested.
+TEST_RC=0
 if [[ "$SKIP_TESTS" -eq 1 ]]; then
   ok "deterministic unit tests skipped by explicit structural validation mode"
 elif [[ "$INSTALLED_MODE" -eq 1 ]]; then
   echo "  running installed unit tests..."
-  bash "$ROOT/tests/run_all.sh"
+  bash "$ROOT/tests/run_all.sh" || TEST_RC=$?
 else
   echo "  running source unit tests..."
-  bash "$ROOT/tests/run_all.sh"
+  bash "$ROOT/tests/run_all.sh" || TEST_RC=$?
+fi
+
+# Propagate run_all.sh's exit code. run_all.sh already prints
+# OF_LOOP_TOTAL / OF_LOOP_PASSED / OF_LOOP_FAILED / OF_LOOP_RELEASE_GATE_RESULT;
+# validate.sh must NOT paper over a failing test suite with a PASS line.
+if [[ "$TEST_RC" -ne 0 ]]; then
+  bad "test suite reported failures; refusing to validate"
 fi
 
 ok "all checks PASS for $ROOT"
