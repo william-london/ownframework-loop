@@ -34,7 +34,7 @@ if HAVE_JSONSCHEMA:
     verdict_schema = json.loads((schemas / "review-verdict.schema.json").read_text())
 
     valid_pkt = {
-        "schema": "ownframework-work-packet/v1",
+        "schema": "ownframework-work-packet/v2",
         "packet_id": "x", "created_at": "2026-07-23T05:00:00Z",
         "work_class": "FEATURE", "risk_class": "low", "title": "t",
         "target": {"repo": "/x", "branch": "master", "classification": "local_only"},
