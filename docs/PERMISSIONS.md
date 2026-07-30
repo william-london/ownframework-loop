@@ -50,15 +50,15 @@ also checks. The exact rules, in documented Claude permission syntax:
       "Bash(docker compose up:*)",
       "Bash(docker compose down:*)",
       "Bash(docker compose restart:*)",
-      "Bash(ssh horus:*)",
-      "Bash(ssh firelove:*)",
+      "Bash(ssh production-host-1:*)",
+      "Bash(ssh production-host-2:*)",
       "Bash(/usr/bin/hermes:*)",
       "Bash(/usr/local/bin/hermes:*)",
       "Bash(codex:*)",
-      "Edit(/Users/mr.mrs.london/projects/plugins/horus/**)",
-      "Edit(/Users/mr.mrs.london/projects/plugins/firelove/**)",
-      "Edit(/Users/mr.mrs.london/projects/plugins/cockpit/**)",
-      "Edit(/Users/mr.mrs.london/projects/plugins/video-factory/**)"
+      "Edit(/Users/mr.mrs.london/projects/plugins/production-host-1/**)",
+      "Edit(/Users/mr.mrs.london/projects/plugins/production-host-2/**)",
+      "Edit(/Users/mr.mrs.london/projects/plugins/personal-project-tree/**)",
+      "Edit(/Users/mr.mrs.london/projects/plugins/personal-project-tree/**)"
     ],
     "ask": [
       "Bash(ofloop *)"

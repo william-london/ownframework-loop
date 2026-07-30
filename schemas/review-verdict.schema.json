@@ -12,7 +12,7 @@
     "timestamp", "recommended_next_state"
   ],
   "properties": {
-    "schema": { "const": "ownframework-loop-review-verdict/v1" },
+    "schema": { "const": "ownframework-loop-review-verdict/v2" },
     "run_id": { "type": "string" },
     "packet_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
     "candidate_sha_reviewed": { "type": "string", "pattern": "^[a-f0-9]{7,64}$" },

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 from pathlib import Path
 from typing import Any
@@ -115,9 +116,18 @@ def append_event(
     reason: str | None = None,
     extras: dict[str, Any] | None = None,
 ) -> None:
-    """Append a JSON Lines event under flock."""
+    """Append a JSON Lines event under flock.
+
+    The new event carries an `event_chain_sha256` field: SHA-256 over the
+    full EVENTS.log as it will exist once this line lands. Subsequent
+    reads can verify the event chain by recomputing (see
+    `integrity.compute_event_chain_hash`) and comparing it to the most
+    recent recorded value.
+    """
     sp = state_path(canonical_repo, run_id)
+    ep = events_path(canonical_repo, run_id)
     state_sha_now = integrity.sha256_file(sp) if sp.exists() else None
+
     record: dict[str, Any] = {
         "ts": utc_now_iso(),
         "run_id": run_id,
@@ -128,11 +138,18 @@ def append_event(
         "commit_sha": commit_sha,
         "reason": reason,
         "state_sha256": state_sha_now,
+        "event_chain_sha256": "PENDING",
     }
     if extras:
         record.update(extras)
+    # Pre-serialize with a placeholder chain hash, compute the chained
+    # SHA over the file as it will exist AFTER this line, then patch the
+    # record and re-serialize so the on-disk line carries the chain hash.
     line = _json_dumps(record)
-    ep = events_path(canonical_repo, run_id)
+    chain_hash = _compute_chain_hash_for_append(ep, line, state_sha_now)
+    record["event_chain_sha256"] = chain_hash
+    line = _json_dumps(record)
+
     with flock_exclusive(lock_path(canonical_repo, run_id)):
         ep.parent.mkdir(parents=True, exist_ok=True)
         with open(ep, "a", encoding="utf-8") as f:
@@ -147,7 +164,6 @@ def append_event(
             fsync_dir(ep.parent)
         except OSError:
             pass
-
 
 def transition(
     canonical_repo: Path,
@@ -285,3 +301,24 @@ def is_stop_requested(canonical_repo: Path, run_id: str) -> bool:
 def _json_dumps(obj: Any) -> str:
     import json
     return json.dumps(obj, sort_keys=True, separators=(",", ":"))
+
+
+def _compute_chain_hash_for_append(
+    ep: Path, line: str, state_sha_now: str | None
+) -> str:
+    """SHA-256 over the full EVENTS.log after appending `line`.
+
+    Computes the chain that will exist once `line` is written to disk,
+    so we can record it atomically in the event itself.
+    """
+    try:
+        existing = ep.read_bytes() if ep.exists() else b""
+    except OSError:
+        existing = b""
+    h = hashlib.sha256()
+    if existing:
+        h.update(existing)
+    if not existing.endswith(b"\n") and existing:
+        h.update(b"\n")
+    h.update(line.encode("utf-8"))
+    return h.hexdigest()

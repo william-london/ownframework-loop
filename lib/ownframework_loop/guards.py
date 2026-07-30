@@ -60,9 +60,10 @@ FORBIDDEN_PATTERNS: list[tuple[re.Pattern[str], str, str]] = [
     # system / container mutations on production
     (re.compile(r"\bsystemctl\s+(start|stop|restart|reload)\b"), "systemctl is prohibited", "subcommand"),
     (re.compile(r"\bdocker\s+compose\s+(up|down|restart)\b"), "production docker mutation is prohibited", "subcommand"),
-    # remote shell to protected production hosts
-    (re.compile(r"\bssh\s+horus\b"), "ssh to production is prohibited", "subcommand"),
-    (re.compile(r"\bssh\s+firelove\b"), "ssh to production is prohibited", "subcommand"),
+    # remote shell to operator-configured protected production hosts.
+    # Targets are loaded from $OFLOOP_BLOCKED_SSH_TARGETS (whitespace- or
+    # comma-separated). Empty/unset means no ssh-target blocks (universal
+    # engine policy does NOT enumerate specific deployment identifiers).
     # Hermes executable identity — match ONLY when `hermes` is the first
     # non-assignment word of a shell segment. Filesystem paths
     # (`~/.hermes/`, `hermes.txt`) and grep/docs mentions are legitimate
@@ -71,6 +72,35 @@ FORBIDDEN_PATTERNS: list[tuple[re.Pattern[str], str, str]] = [
     # Codex CLI — out of scope for the supervised local-only V1 pilot.
     (re.compile(r""), "codex CLI invocation is out of scope for V1", "executable_identity"),
 ]
+
+
+def _load_operator_configured_ssh_blocks() -> list[tuple[re.Pattern[str], str, str]]:
+    """Build ssh-target forbidden patterns from operator configuration.
+
+    Honors $OFLOOP_BLOCKED_SSH_TARGETS as whitespace- or comma-separated
+    target names. Unset/empty returns an empty list — no universal block.
+    """
+    import os as _os
+    raw = _os.environ.get("OFLOOP_BLOCKED_SSH_TARGETS", "").strip()
+    if not raw:
+        return []
+    targets = re.split(r"[\s,]+", raw)
+    out: list[tuple[re.Pattern[str], str, str]] = []
+    for t in targets:
+        t = t.strip()
+        if not t:
+            continue
+        # Escape any regex metacharacters in operator-supplied target names.
+        esc = re.escape(t)
+        out.append((re.compile(rf"\bssh\s+{esc}\b"),
+                    f"ssh to operator-configured protected target '{t}' is prohibited",
+                    "subcommand"))
+    return out
+
+
+# Append operator-configured ssh-target blocks at import time.
+FORBIDDEN_PATTERNS.extend(_load_operator_configured_ssh_blocks())
+
 
 
 # Bash command tokens that are allowed for the reviewer (read-only inspection

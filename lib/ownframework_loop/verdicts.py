@@ -9,7 +9,7 @@ from typing import Any
 from .util import atomic_write_json, run_dir, utc_now_iso
 
 
-SCHEMA_VERSION = "ownframework-loop-review-verdict/v1"
+SCHEMA_VERSION = "ownframework-loop-review-verdict/v2"
 
 
 VERDICTS = {"APPROVED", "CHANGES_REQUESTED", "BLOCKED", "HUMAN_REVIEW_REQUIRED", "STALE_CANDIDATE"}

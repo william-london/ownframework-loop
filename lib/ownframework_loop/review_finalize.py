@@ -371,6 +371,24 @@ def finalize_review(
         "candidate_sha_present": git_checks.commit_exists(canonical_repo, receipt_candidate_sha),
     }
 
+    # 14b. Increment review_pass_count under the effective cap so the receipt
+    # and downstream state reflect THIS review pass.
+    cur_state = state_mod.load(canonical_repo, run_id)
+    try:
+        new_review_pass_count = state_mod.increment_counter(
+            canonical_repo, run_id,
+            counter="review_pass_count",
+            actor=actor,
+            packet=meta,
+            hard_cap=True,
+        )
+    except limits_mod.RepairLimitExceeded as e:
+        raise RuntimeError(f"review_pass_count cap reached: {e}")
+    # Persist alongside the reviewer-specific counters.
+    cur_state["review_pass_count"] = int(new_review_pass_count)
+    cur_state["updated_at"] = util.utc_now_iso()
+    state_mod.save(canonical_repo, run_id, cur_state)
+
     # 15. Acceptance criteria semantic check.
     ac_results = assessment.get("acceptance_results") or []
     if not isinstance(ac_results, list):
@@ -382,12 +400,22 @@ def finalize_review(
     ng_violated = [g for g in ng_results if (g.get("result") or "").lower() != "preserved"]
     must_fix = [f for f in (assessment.get("findings") or []) if f.get("classification") == "must_fix"]
 
-    # 16. Stale-SHA record.
+    # 16. Stale-SHA record. Each field is computed from current repo state.
     stale_sha_check = {
-        "sha_match": True,
-        "receipt_match": True,
+        "sha_match": (
+            receipt_candidate_sha is not None
+            and git_checks.commit_exists(canonical_repo, receipt_candidate_sha)
+        ),
+        "receipt_match": (
+            receipt is not None
+            and (receipt.get("run_id") == run_id)
+        ),
         "packet_hash_match": final_packet_sha == approval_doc["packet_sha256"],
-        "branch_contains_sha": True,
+        "branch_contains_sha": _candidate_branch_contains(
+            canonical_repo,
+            receipt_branch,
+            receipt_candidate_sha,
+        ) if receipt_branch and receipt_candidate_sha else False,
     }
 
     # 17. Compute final verdict.
@@ -451,7 +479,7 @@ def finalize_review(
         "approval_sha256": approval.approval_artifact_sha256(approval_doc),
         "candidate_sha_reviewed": receipt_candidate_sha,
         "baseline_sha": baseline_sha,
-        "review_pass_number": int(state_mod.load(canonical_repo, run_id).get("review_pass_count") or 1),
+        "review_pass_number": int(new_review_pass_count),
         "verdict": verdict,
         "acceptance_results": ac_results,
         "non_goal_results": ng_results,

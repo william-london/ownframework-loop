@@ -81,7 +81,7 @@ fi
 # Use the Python guard library for structural classification.
 # Encode the command as base64 to safely embed it in the Python source.
 #
-# F-001 closure: refuse to silently fall back to a hardcoded William
+# F-001 closure: refuse to silently fall back to a hardcoded operator
 # installation path. If CLAUDE_PLUGIN_ROOT (or OFLOOP_PLUGIN_ROOT) is
 # unset, fail closed with a clear operator action.
 if [[ -z "${CLAUDE_PLUGIN_ROOT:-}" && -z "${OFLOOP_PLUGIN_ROOT:-}" ]]; then

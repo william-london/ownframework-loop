@@ -1,8 +1,8 @@
 {
   "name": "of-loop",
   "displayName": "OwnFramework Loop",
-  "description": "V2 — Human-gated two-loop engineering with deterministic approval, exact-SHA build/review finalizers, exact-run hook authority, broad engineering tools, and external-action guard.",
-  "version": "0.2.1",
+  "description": "V2 \u2014 Human-gated two-loop engineering with deterministic approval, exact-SHA build/review finalizers, exact-run hook authority, broad engineering tools, and external-action guard.",
+  "version": "0.2.2",
   "author": {
     "name": "OwnFramework"
   },

@@ -391,6 +391,20 @@ def finalize_build(
     cap_repair = limits_mod.effective_cap("repair_round", meta)
     if cap_build is not None and new_build_pass_count > cap_build:
         raise RuntimeError(f"build_pass_count={new_build_pass_count} above cap={cap_build}")
+    # 18b. Increment build_pass_count under the effective cap so it reflects
+    # THIS attempt. If this finalizer runs in a state that does not count
+    # toward the cap (e.g. CHANGES_REQUESTED), the counter still increments
+    # because the receipt is being written and that counts as a build pass.
+    try:
+        new_build_pass_count = state_mod.increment_counter(
+            canonical_repo, run_id,
+            counter="build_pass_count",
+            actor=actor,
+            packet=meta,
+            hard_cap=True,
+        )
+    except limits_mod.RepairLimitExceeded as e:
+        raise RuntimeError(f"build_pass_count cap reached: {e}")
 
     # 19. Derive next_state.
     if state_mod.is_stop_requested(canonical_repo, run_id):
@@ -429,7 +443,7 @@ def finalize_build(
         "candidate_sha": candidate_sha,
         "candidate_branch": candidate_branch,
         "builder_worktree": str(builder_wt),
-        "builder_pass_number": int(state.get("build_pass_count") or 1),
+        "builder_pass_number": int(new_build_pass_count),
         "repair_round": int(state.get("repair_round") or 0),
         "files_changed": int(stats["files_changed"]),
         "added_lines": int(stats["added_lines"]),
@@ -489,6 +503,7 @@ def finalize_build(
     cur = state_mod.load(canonical_repo, run_id)
     cur["no_progress_streak"] = no_progress_streak
     cur["last_candidate_sha"] = candidate_sha
+    cur["build_pass_count"] = int(new_build_pass_count)
     state_mod.save(canonical_repo, run_id, cur)
 
     # 24. Transition if appropriate.

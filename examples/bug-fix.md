@@ -4,7 +4,7 @@ Use this shape for `work_class: BUG`.
 
 ```json
 {
-  "schema": "ownframework-work-packet/v1",
+  "schema": "ownframework-work-packet/v2",
   "packet_id": "bug-flake-login-001",
   "created_at": "2026-07-23T05:00:00Z",
   "work_class": "BUG",
@@ -12,7 +12,7 @@ Use this shape for `work_class: BUG`.
   "authority_class": "low",
   "title": "Fix intermittent 500 on /login when email contains a '+' character",
   "target": {
-    "repo": "/Users/mr.mrs.london/projects/example-app",
+    "repo": "/srv/repos/example-app",
     "branch": "master",
     "classification": "local_only"
   },

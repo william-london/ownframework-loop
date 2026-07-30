@@ -6,7 +6,7 @@ the candidate branch.
 
 ```json
 {
-  "schema": "ownframework-work-packet/v1",
+  "schema": "ownframework-work-packet/v2",
   "packet_id": "new-repo-edge-fetcher-001",
   "created_at": "2026-07-23T05:15:00Z",
   "work_class": "NEW_REPOSITORY",
@@ -14,13 +14,13 @@ the candidate branch.
   "authority_class": "medium",
   "title": "Bootstrap a new local-only repository: edge-fetcher",
   "target": {
-    "repo": "/Users/mr.mrs.london/projects/edge-fetcher",
+    "repo": "/srv/repos/edge-fetcher",
     "branch": "master",
     "classification": "local_only"
   },
   "acceptance_criteria": [
-    { "id": "AC-1", "text": "Repo exists at the absolute path with branch master and zero remotes", "verification": "ofloop new-repo /Users/mr.mrs.london/projects edge-fetcher --init-baseline" },
-    { "id": "AC-2", "text": "Minimal bootstrap baseline (README, .gitignore) is committed", "verification": "git -C /Users/mr.mrs.london/projects/edge-fetcher show HEAD" }
+    { "id": "AC-1", "text": "Repo exists at the absolute path with branch master and zero remotes", "verification": "ofloop new-repo /srv/repos edge-fetcher --init-baseline" },
+    { "id": "AC-2", "text": "Minimal bootstrap baseline (README, .gitignore) is committed", "verification": "git -C /srv/repos/edge-fetcher show HEAD" }
   ],
   "non_goals": [
     { "id": "NG-1", "text": "Do not create a remote" },

@@ -4,7 +4,7 @@ Use this shape for `work_class: HARDENING`.
 
 ```json
 {
-  "schema": "ownframework-work-packet/v1",
+  "schema": "ownframework-work-packet/v2",
   "packet_id": "harden-rate-limit-001",
   "created_at": "2026-07-23T05:05:00Z",
   "work_class": "HARDENING",
@@ -12,7 +12,7 @@ Use this shape for `work_class: HARDENING`.
   "authority_class": "low",
   "title": "Add per-IP rate limit to /api/sync",
   "target": {
-    "repo": "/Users/mr.mrs.london/projects/example-app",
+    "repo": "/srv/repos/example-app",
     "branch": "master",
     "classification": "local_only"
   },

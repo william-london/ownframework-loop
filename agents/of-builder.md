@@ -60,7 +60,7 @@ resolved.
 6. **No protected-path edits.** If a required change would touch a protected
    path, stop and emit `next_state: BLOCKED` with `reason: protected_path`.
 7. **No production actions.** No `systemctl`, no `docker compose up` on a
-   production target, no SSH to `horus` or `firelove`, no deploy command.
+   production target, no SSH to `production-host-1` or `production-host-2`, no deploy command.
 8. **No autonomous approval.** You cannot approve your own work.
 9. **Budget yourself.** Run the minimum validation set required by the packet.
    Fast tests first; full tests only when fast tests pass.

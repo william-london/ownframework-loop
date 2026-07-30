@@ -6,6 +6,7 @@
 # Case 13: allowed-path edit accepted.
 # Case 35: secret-like fixture detection.
 
+export OFLOOP_BLOCKED_SSH_TARGETS="production-host-1 production-host-2"
 set -uo pipefail
 . "$(dirname "$0")/../_helpers.sh"
 
@@ -29,8 +30,8 @@ forbidden_cases = [
     "systemctl restart nginx",
     "docker compose up -d",
     "docker compose down",
-    "ssh horus",
-    "ssh firelove",
+    "ssh production-host-1",
+    "ssh production-host-2",
     "git status && git push origin master",
     "git log | head; git push",
 ]

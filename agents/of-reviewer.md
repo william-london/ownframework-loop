@@ -81,7 +81,7 @@ validation commands. Specifically:
 
 You may NOT use Bash for any `git push`, `git merge`, `git reset --hard`,
 `git clean`, `git remote add`, `systemctl`, `docker compose up/down`, or
-`ssh horus|firelove` command. The plugin hooks will block these regardless;
+`ssh production-host-1|production-host-2` command. The plugin hooks will block these regardless;
 do not test them.
 
 ## Output

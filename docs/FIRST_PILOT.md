@@ -3,7 +3,7 @@
 ## Scope
 
 Phase 1 of the OwnFramework Loop rollout. One repository. One builder.
-One reviewer. One work packet. Expected spend under $1.00. William
+One reviewer. One work packet. Expected spend under $1.00. operator
 supervised.
 
 ## Repository
@@ -11,11 +11,11 @@ supervised.
 Recommended first pilot: a small, low-risk repository that already has a
 deterministic test suite. The pilot does NOT touch:
 
-- `horus`
-- `firelove`
-- `cockpit`
-- `video-factory`
-- `vps`
+- `production-host-1`
+- `production-host-2`
+- `personal-project-tree`
+- `personal-project-tree`
+- `personal-project-tree`
 - any production repository
 
 A disposable fixture repository is acceptable. The fixture must live
@@ -60,7 +60,7 @@ Two terminal tabs:
 ## Pass criteria for the first pilot
 
 - The packet reaches `APPROVED` in 1–2 repair rounds.
-- William manually merges the candidate branch (no autonomous merge).
+- operator manually merges the candidate branch (no autonomous merge).
 - Zero autonomous push, merge, or deploy events.
 - Zero secret / prompt-injection / scope-exceeded events.
 - Zero stale-candidate review invalidations beyond 1.
@@ -88,4 +88,4 @@ After Phase 1 passes:
 - Phase 3: one additional repository.
 - Phase 4: 3–4 repositories. Only after measuring usage and stability.
 
-Each phase requires William-supervised observation.
+Each phase requires operator-supervised observation.

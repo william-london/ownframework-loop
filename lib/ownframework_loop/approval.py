@@ -240,7 +240,7 @@ def request_human_approval(
     canonical_repo: Path,
     run_id: str,
     packet_path: Path,
-    actor: str = "william",
+    actor: str | None = None,
     operator_note: str | None = None,
     assume_tty: bool = False,
 ) -> dict[str, Any]:

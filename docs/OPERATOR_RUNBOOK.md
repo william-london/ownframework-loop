@@ -1,6 +1,6 @@
 # Operator Runbook
 
-This runbook is for William. It assumes the plugin has been installed
+This runbook is for operator. It assumes the plugin has been installed
 via `install.sh`. If you have not installed it, see the README quickstart.
 
 ## 1. Create a mission
@@ -62,17 +62,17 @@ context never carries build state.
 Every pass emits a compact operator marker:
 
 ```text
-OF_LOOPER_OPERATOR_MARKER
-OF_LOOPER_RUN_ID=<run-id>
-OF_LOOPER_ROLE=builder|reviewer
-OF_LOOPER_STATE=<state>
-OF_LOOPER_ACTION=RESCHEDULE|STOP
-OF_LOOPER_NEXT_DELAY_MINUTES=<int>
-OF_LOOPER_REASON=<short>
+OF_LOOP_OPERATOR_MARKER
+OF_LOOP_RUN_ID=<run-id>
+OF_LOOP_ROLE=builder|reviewer
+OF_LOOP_STATE=<state>
+OF_LOOP_ACTION=RESCHEDULE|STOP
+OF_LOOP_NEXT_DELAY_MINUTES=<int>
+OF_LOOP_REASON=<short>
 ```
 
 At a terminal state (`APPROVED`, `BLOCKED`, `STOPPED`), the loop emits
-`OF_LOOPER_ACTION=STOP` and exits.
+`OF_LOOP_ACTION=STOP` and exits.
 
 ## 5. Inspect state at any time
 
@@ -201,7 +201,7 @@ local-only repo. Hooks block push and merge.
 
 Use `work_class: NEW_REPOSITORY`. The spec skill calls
 `ofloop new-repo <root> <project> --init-baseline` to bootstrap.
-William must merge the candidate branch manually.
+operator must merge the candidate branch manually.
 
 ## 18. Runtime-sensitive candidate work
 

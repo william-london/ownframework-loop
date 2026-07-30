@@ -43,7 +43,7 @@ from . import (
 )
 
 
-SCHEMA_PACKET = "ownframework-work-packet/v1"
+SCHEMA_PACKET = "ownframework-work-packet/v2"
 SCHEMA_STATE = "ownframework-loop-state/v1"
 
 
@@ -203,7 +203,8 @@ def cmd_spec_approve(args: argparse.Namespace) -> None:
     errors = packet_mod.validate_packet_metadata(meta)
     if errors:
         _emit_error("packet invalid", exit_code=2, errors=errors)
-    actor = args.actor or "william"
+    import os as _os
+    actor = args.actor or _os.environ.get("OFLOOP_ACTOR") or "operator"
     note = args.note
     assume_tty = bool(getattr(args, "assume_tty", False))
     try:
@@ -434,6 +435,82 @@ def cmd_build_write_receipt(args: argparse.Namespace) -> None:
     )
 
 
+def cmd_build_cleanup(args: argparse.Namespace) -> None:
+    """Remove the per-run builder worktree (idempotent; safe to re-run)."""
+    repo = _repo_path(args.repo)
+    ok, msg = worktrees.cleanup_builder_worktree(repo, args.run_id)
+    state_mod.append_event(
+        repo, args.run_id,
+        event_type="builder_worktree_cleanup",
+        old_state=state_mod.load(repo, args.run_id).get("state"),
+        new_state=None,
+        actor="build_cleanup",
+        reason=msg,
+    )
+    _emit({"ok": ok, "run_id": args.run_id, "message": msg, "removed": ok})
+
+
+def cmd_review_cleanup(args: argparse.Namespace) -> None:
+    """Remove the per-run reviewer worktree (idempotent; safe to re-run)."""
+    repo = _repo_path(args.repo)
+    ok, msg = worktrees.cleanup_reviewer_worktree(repo, args.run_id)
+    state_mod.append_event(
+        repo, args.run_id,
+        event_type="reviewer_worktree_cleanup",
+        old_state=state_mod.load(repo, args.run_id).get("state"),
+        new_state=None,
+        actor="review_cleanup",
+        reason=msg,
+    )
+    _emit({"ok": ok, "run_id": args.run_id, "message": msg, "removed": ok})
+
+
+def cmd_teardown_branch(args: argparse.Namespace) -> None:
+    """Guarded candidate-branch teardown. Requires packet-controlled authority.
+
+    Refuses unless ALL of:
+      - packet declares ``teardown_allowed: true``
+      - the run state is APPROVED, BLOCKED, STOPPED, or CHANGES_REQUESTED
+    """
+    repo = _repo_path(args.repo)
+    s = state_mod.load(repo, args.run_id)
+    if s is None:
+        _emit_error(f"run not found: {args.run_id}", exit_code=2)
+    packet_path = state_mod.run_dir(repo, args.run_id) / "WORK_PACKET.md"
+    teardown_allowed = False
+    if packet_path.exists():
+        meta, _ = packet_mod.parse_packet_file(packet_path)
+        teardown_allowed = bool(meta.get("teardown_allowed"))
+    if not teardown_allowed:
+        _emit_error(
+            "teardown refused: packet does not declare teardown_allowed=true",
+            exit_code=4, classification="OF_LOOP_TEARDOWN_NOT_AUTHORIZED",
+        )
+    cur_state = s.get("state")
+    if cur_state not in ("APPROVED", "BLOCKED", "STOPPED", "CHANGES_REQUESTED"):
+        _emit_error(
+            f"teardown refused: run is in {cur_state!r}; only APPROVED/BLOCKED/STOPPED/CHANGES_REQUESTED are teardown-eligible",
+            exit_code=4, classification="OF_LOOP_TEARDOWN_STATE_INELIGIBLE",
+        )
+    branch = f"factory/candidate/{args.run_id}"
+    if not git_checks.branch_exists(repo, branch):
+        _emit({"ok": True, "run_id": args.run_id, "branch": branch, "removed": False, "message": "branch already absent"})
+        return
+    r = util.run_subprocess(
+        ["git", "-C", str(repo), "branch", "-D", branch],
+        timeout=15,
+    )
+    if r.returncode != 0:
+        _emit_error(f"branch delete failed: {r.stderr.strip()}", exit_code=5)
+    state_mod.append_event(
+        repo, args.run_id,
+        event_type="candidate_branch_teardown",
+        old_state=cur_state, new_state=None,
+        actor="teardown", reason=f"deleted branch {branch}",
+    )
+    _emit({"ok": True, "run_id": args.run_id, "branch": branch, "removed": True, "message": "deleted"})
+
+
 def cmd_build_finalize(args: argparse.Namespace) -> None:
     """Deterministic build finalizer.
 
@@ -610,7 +687,102 @@ def cmd_doctor(args: argparse.Namespace) -> None:
             info["has_receipt"] = (run_dir / "BUILD_RECEIPT.json").exists()
             info["has_verdict"] = (run_dir / "REVIEW_VERDICT.json").exists()
             info["stop_requested"] = state_mod.is_stop_requested(repo, args.run_id)
+            # Crash reconciliation: detect receipt-written-but-not-transitioned,
+            # event-chain-vs-state mismatch, and verifier-cache inconsistencies.
+            state_obj = info["state"] if isinstance(info["state"], dict) else None
+            cur_state = state_obj.get("state") if state_obj else None
+            events_path = run_dir / "EVENTS.log"
+            info["crash_reconciliation"] = _reconcile_crashes(
+                repo, args.run_id, state_obj, packet_path,
+                run_dir / "BUILD_RECEIPT.json",
+                run_dir / "REVIEW_VERDICT.json",
+                events_path,
+            )
+            info["ok"] = bool(info["crash_reconciliation"].get("ok", True)) and info["ok"]
     _emit(info)
+
+
+def _reconcile_crashes(
+    repo: Path, run_id: str, state_obj: dict[str, Any] | None,
+    receipt_path: Path, verdict_path: Path, events_path: Path,
+) -> dict[str, Any]:
+    """Inspect run artifacts and surface any inconsistencies.
+
+    Returns a dict with keys:
+      ok              - True iff no anomaly detected.
+      anomalies       - list of human-readable findings (empty when clean).
+      state_chain_ok  - True iff verify_state_sha(STATE.json, EVENTS.log) passes.
+      event_chain_ok  - True iff compute_event_chain_hash equals the most
+                        recent recorded event_chain_sha256 in EVENTS.log.
+      receipt_present - True iff receipt_path exists.
+      verdict_present - True iff verdict_path exists.
+      packet_binds_receipt - True iff receipt.packet_sha256 matches approval's.
+    """
+    anomalies: list[str] = []
+    receipt_present = receipt_path.exists()
+    verdict_present = verdict_path.exists()
+
+    state_chain_ok = True
+    try:
+        ok, msg = integrity.verify_state_sha(state_mod.state_path(repo, run_id), events_path)
+        state_chain_ok = ok
+        if not ok:
+            anomalies.append(f"state_chain_mismatch: {msg}")
+    except Exception as e:
+        anomalies.append(f"state_chain_check_error: {e}")
+
+    event_chain_ok = True
+    if events_path.exists():
+        try:
+            recorded_chain = integrity.get_event_chain_hash(events_path)
+            actual_chain = integrity.compute_event_chain_hash(events_path)
+            event_chain_ok = (recorded_chain == actual_chain)
+            if not event_chain_ok:
+                anomalies.append("event_chain_mismatch")
+        except Exception as e:
+            anomalies.append(f"event_chain_check_error: {e}")
+            event_chain_ok = False
+
+    packet_binds_receipt = True
+    if receipt_present and state_obj is not None:
+        try:
+            with open(receipt_path, encoding="utf-8") as f:
+                rec = json.load(f)
+            approval_doc = approval.load_approval(repo, run_id)
+            if approval_doc:
+                rec_packet_sha = rec.get("packet_sha256")
+                approval_packet_sha = approval_doc.get("packet_sha256")
+                if rec_packet_sha and approval_packet_sha and rec_packet_sha != approval_packet_sha:
+                    anomalies.append(
+                        f"receipt_packet_sha_mismatch: receipt={rec_packet_sha[:12]} "
+                        f"!= approval={approval_packet_sha[:12]}"
+                    )
+                    packet_binds_receipt = False
+                cand = rec.get("candidate_sha")
+                if cand and not git_checks.commit_exists(repo, cand):
+                    anomalies.append(f"receipt_candidate_missing: {cand[:12]}")
+        except Exception as e:
+            anomalies.append(f"receipt_inspection_error: {e}")
+
+    if verdict_present and state_obj is not None:
+        try:
+            with open(verdict_path, encoding="utf-8") as f:
+                ver = json.load(f)
+            cand = ver.get("candidate_sha_reviewed")
+            if cand and not git_checks.commit_exists(repo, cand):
+                anomalies.append(f"verdict_candidate_missing: {cand[:12]}")
+        except Exception as e:
+            anomalies.append(f"verdict_inspection_error: {e}")
+
+    return {
+        "ok": not anomalies,
+        "anomalies": anomalies,
+        "state_chain_ok": state_chain_ok,
+        "event_chain_ok": event_chain_ok,
+        "receipt_present": receipt_present,
+        "verdict_present": verdict_present,
+        "packet_binds_receipt": packet_binds_receipt,
+    }
 
 
 def cmd_new_repo(args: argparse.Namespace) -> None:
@@ -686,7 +858,8 @@ def _build_parser() -> argparse.ArgumentParser:
     s_app = spec_sub.add_parser("approve", help="approve the work packet (TTY required)")
     s_app.add_argument("repo")
     s_app.add_argument("run_id")
-    s_app.add_argument("--actor", default="william")
+    s_app.add_argument("--actor", default=os.environ.get("OFLOOP_ACTOR", "operator"),
+                        help="operator identifier recorded in APPROVAL.json; defaults to $OFLOOP_ACTOR or 'operator'")
     s_app.add_argument("--note", default=None,
                        help="optional operator note recorded in APPROVAL.json")
     s_app.add_argument("--assume-tty", action="store_true",
@@ -710,6 +883,13 @@ def _build_parser() -> argparse.ArgumentParser:
     s_aban.add_argument("repo")
     s_aban.add_argument("run_id")
     s_aban.set_defaults(func=cmd_spec_abandon)
+    s_td = spec_sub.add_parser("teardown-branch", help="guarded candidate-branch teardown (packet-controlled)")
+    s_td.add_argument("repo")
+    s_td.add_argument("run_id")
+    s_td.set_defaults(func=cmd_teardown_branch)
+    s_td.add_argument("repo")
+    s_td.add_argument("run_id")
+    s_td.set_defaults(func=cmd_teardown_branch)
 
     # build
     bld = sub.add_parser("build", help="build subcommands")
@@ -733,6 +913,10 @@ def _build_parser() -> argparse.ArgumentParser:
     b_rec.add_argument("run_id")
     b_rec.add_argument("receipt")
     b_rec.set_defaults(func=cmd_build_write_receipt)
+    b_cln = bld_sub.add_parser("cleanup", help="remove per-run builder worktree (idempotent)")
+    b_cln.add_argument("repo")
+    b_cln.add_argument("run_id")
+    b_cln.set_defaults(func=cmd_build_cleanup)
     b_fin = bld_sub.add_parser("finalize", help="deterministic build finalizer (V2)")
     b_fin.add_argument("repo")
     b_fin.add_argument("run_id")
@@ -757,6 +941,10 @@ def _build_parser() -> argparse.ArgumentParser:
     r_fin.add_argument("run_id")
     r_fin.add_argument("assessment", nargs="?", default=None,
                        help="path to REVIEW_AGENT_ASSESSMENT.json (semantic)")
+    r_cln = rev_sub.add_parser("cleanup", help="remove per-run reviewer worktree (idempotent)")
+    r_cln.add_argument("repo")
+    r_cln.add_argument("run_id")
+    r_cln.set_defaults(func=cmd_review_cleanup)
     r_fin.set_defaults(func=cmd_review_finalize)
     r_mk = rev_sub.add_parser("marker", help="emit reviewer marker")
     r_mk.add_argument("repo")

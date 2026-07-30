@@ -7,7 +7,7 @@
 # Preserves:
 #   - persistent plugin data at ~/.claude/plugins/data/of-loop-ownframework-local
 #   - archived legacy skills-dir at ~/.claude/ownframework-loop-mgmt-backup-*
-#   - source repo at /Users/mr.mrs.london/projects/plugins/ownframework-loop
+#   - source repo (preserved at its original location, not modified by this script)
 
 set -euo pipefail
 

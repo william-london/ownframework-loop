@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # OwnFramework Loop V1 — bypass matrix.
+export OFLOOP_BLOCKED_SSH_TARGETS="production-host-1 production-host-2"
 #
 # Each row in the contract's required matrix is exercised against the
 # textual guard. Where the textual guard cannot reliably classify (eval,
@@ -100,8 +101,8 @@ assert_textual_block  "/usr/local/bin/hermes" "/usr/local/bin/hermes status"
 assert_textual_block  "systemctl"          "systemctl restart nginx"
 assert_textual_block  "docker compose up"  "docker compose up -d"
 assert_textual_block  "docker compose down" "docker compose down"
-assert_textual_block  "ssh horus"          "ssh horus echo hi"
-assert_textual_block  "ssh firelove"       "ssh firelove ls"
+assert_textual_block  "ssh production-host-1"          "ssh production-host-1 echo hi"
+assert_textual_block  "ssh production-host-2"       "ssh production-host-2 ls"
 
 # ----- Row 6: git remote mutations -----
 assert_textual_block  "git remote add"     "git remote add origin https://example.com/repo.git"

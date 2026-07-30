@@ -12,7 +12,7 @@
     "validation", "timestamp", "builder_agent", "next_state"
   ],
   "properties": {
-    "schema": { "const": "ownframework-loop-build-receipt/v1" },
+    "schema": { "const": "ownframework-loop-build-receipt/v2" },
     "run_id": { "type": "string" },
     "packet_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
     "work_unit_id": { "type": "string" },

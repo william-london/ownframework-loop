@@ -208,7 +208,7 @@ def stderr(msg: str) -> None:
 
 
 # Work-class-aware budget recommendations. These are starting ranges, not
-# hard caps; the packet's exact risk_budget overrides them. William approves
+# hard caps; the packet's exact risk_budget overrides them. Operator confirms via TTY.
 # the packet's budget, so any reasonable mission-appropriate funding is
 # acceptable. The blanket V1 400-line / 12-file cap is removed.
 WORK_CLASS_BUDGET_RECOMMENDATIONS: dict[str, dict[str, int]] = {

@@ -157,7 +157,7 @@ enforced, validate.sh had no real `--installed` path.
 2. Chains & pipelines (4 forms: &&, ;, ||, |)
 3. Indirection forms (5 forms: $() sees inner, eval sees inner, var-indirection deferred, Python subprocess deferred, redirect)
 4. Hermes-related (7 forms: 4 ALLOW + 3 BLOCK)
-5. Deployment / production paths (5 forms: systemctl, docker compose up, docker compose down, ssh horus, ssh firelove)
+5. Deployment / production paths (5 forms: systemctl, docker compose up, docker compose down, ssh production-host-1, ssh production-host-2)
 6. Git remote mutations (4 forms: remote add, remote set-url, remote remove, worktree prune)
 7. Git reset / branch destructive (4 forms: reset --hard, branch -D, branch -d, clean -fdx)
 8. Protected-paths hook (4 scenarios: outside-loop no-op, real-source block, unknown-filename block, sanctioned WORK_PACKET.md allow)
@@ -227,8 +227,8 @@ This pilot run did NOT:
 - Create any remote (origin / upstream / anything)
 - Push, merge, or deploy anything
 - Auto-Codex
-- Touch production paths (Horus / FireLove / Cockpit / Video Factory / VPS / decal-os / apparelops-os / experienceops-os / ownframework-growth)
-- Modify William's global `~/.claude/settings.json` silently
+- Touch production paths (Production-Host-1 / Production-Host-2 / Cockpit / Video Factory / VPS / personal-project-tree / personal-project-tree / personal-project-tree / personal-project-tree)
+- Modify operator's global `~/.claude/settings.json` silently
 
 Source HEAD before pilot: `740eee7`. Source HEAD after pilot: `740eee7`
 (worktree-only mutations; the master branch in the test repo is local-only

@@ -2,7 +2,7 @@
 
 ## Threat model
 
-The OwnFramework Loop is designed for a single operator (William) running
+The OwnFramework Loop is designed for a single operator (operator) running
 locally on Mac. Threats considered:
 
 1. **A model prompt-injection attempt from inside the repo** that tries to
@@ -34,7 +34,7 @@ opt out.
 - `PreToolUse` on Bash blocks forbidden command patterns
   (`git push`, `git merge`, `git reset --hard`, `git clean`,
   `git remote add`, `systemctl`, `docker compose up|down`,
-  `ssh horus|firelove`, `hermes`). Patterns are compiled
+  `ssh production-host-1|production-host-2`, `hermes`). Patterns are compiled
   regexes; chains like `git status && git push` are split on `&&`, `||`,
   `;`, `|` before matching.
 - `PreToolUse` on Write|Edit|MultiEdit|NotebookEdit blocks protected
@@ -256,7 +256,7 @@ regardless of what the packet says.
 
 `CODEX=manual_triggered_escalation`. The loop emits a durable
 recommendation in `REVIEW_VERDICT.json` and `EVENTS.log` when an
-escalation condition is observed. William invokes Codex as a separate
+escalation condition is observed. operator invokes Codex as a separate
 manual lane. The loop never calls Codex automatically.
 
 ## Auditability
@@ -280,7 +280,7 @@ WEBFETCH_AVAILABLE=yes
 PER_PASS_HUMAN_APPROVAL=no
 ```
 
-William's deliberate posture is `bypassPermissions` + broad tools +
+operator's deliberate posture is `bypassPermissions` + broad tools +
 no per-pass prompts. OwnFramework Loop is built to operate under
 that posture. The plugin does NOT modify any of these settings
 (`~/.claude/settings.json`, `~/.claude.json`, managed settings,

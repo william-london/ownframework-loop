@@ -152,8 +152,8 @@ is rejected with `InvalidTransitionError`.
 - **Hook layer**:
   - `PreToolUse` on Bash refuses forbidden commands
     (`git push`, `git merge`, `git reset --hard`, `git clean`,
-    `git remote add`, `systemctl`, `docker compose up|down`, `ssh horus`,
-    `ssh firelove`, `hermes`).
+    `git remote add`, `systemctl`, `docker compose up|down`, `ssh production-host-1`,
+    `ssh production-host-2`, `hermes`).
   - `PreToolUse` on Write|Edit|MultiEdit|NotebookEdit refuses protected
     paths when an OwnFramework Loop run is active in the current cwd.
   - `PostToolUse` on Bash scans command output for secret patterns.

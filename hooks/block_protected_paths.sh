@@ -73,8 +73,14 @@ if [[ -z "$cwd" ]]; then
 fi
 
 # Resolve both paths to canonical absolute form (macOS /var/folders → /private/var/folders).
-abs_path="$(python3 -c "from pathlib import Path; print(str(Path('$file_path').expanduser().resolve(strict=False)))" 2>/dev/null || echo "$file_path")"
-abs_cwd="$(python3 -c "from pathlib import Path; print(str(Path('$cwd').expanduser().resolve(strict=False)))" 2>/dev/null || echo "$cwd")"
+abs_path="$(python3 -c 'import sys
+from pathlib import Path
+p = sys.argv[1] if len(sys.argv) > 1 else ""
+print(str(Path(p).expanduser().resolve(strict=False))) if p else print("")' "$file_path" 2>/dev/null || echo "$file_path")"
+abs_cwd="$(python3 -c 'import sys
+from pathlib import Path
+c = sys.argv[1] if len(sys.argv) > 1 else ""
+print(str(Path(c).expanduser().resolve(strict=False))) if c else print("")' "$cwd" 2>/dev/null || echo "$cwd")"
 
 # Find the canonical repo by walking up from cwd.
 canonical_repo=""
@@ -193,7 +199,12 @@ if [[ "$abs_path" == "$canonical_repo"/* && "$abs_path" != "$run_root"/*" && "$a
   for rid in "${RUN_IDS[@]}"; do
     state_file="$run_root/$rid/STATE.json"
     if [[ -f "$state_file" ]]; then
-      cur_state="$(python3 -c "import json; d=json.load(open('$state_file')); print(d.get('state',''))" 2>/dev/null || true)"
+      cur_state="$(python3 -c 'import sys, json
+p = sys.argv[1] if len(sys.argv) > 1 else ""
+try:
+    print(json.load(open(p)).get("state",""))
+except Exception:
+    pass' "$state_file" 2>/dev/null || true)"
       if [[ "$cur_state" == "BUILDING" || "$cur_state" == "REVIEWING" ]]; then
         emit_block "CANONICAL_CHECKOUT_WRITE_DURING_BUILD" \
           "Writes to canonical checkout refused while run $rid is in $cur_state. Builder writes go through the builder worktree."

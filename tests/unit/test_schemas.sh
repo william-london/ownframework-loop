@@ -76,7 +76,7 @@ if HAVE_JSONSCHEMA:
         raise AssertionError("bad state accepted")
 
     valid_receipt = {
-        "schema": "ownframework-loop-build-receipt/v1", "run_id": "r",
+        "schema": "ownframework-loop-build-receipt/v2", "run_id": "r",
         "packet_sha256": "a"*64, "work_unit_id": "U-1",
         "baseline_sha": "abc1234", "candidate_sha": "def5678",
         "candidate_branch": "factory/candidate/r", "builder_worktree": "/x",
@@ -89,7 +89,7 @@ if HAVE_JSONSCHEMA:
     print("  PASS: valid receipt validates against build-receipt.schema.json")
 
     valid_verdict = {
-        "schema": "ownframework-loop-review-verdict/v1", "run_id": "r",
+        "schema": "ownframework-loop-review-verdict/v2", "run_id": "r",
         "packet_sha256": "a"*64, "candidate_sha_reviewed": "abc1234",
         "baseline_sha": "abc1234", "review_pass_number": 1,
         "verdict": "APPROVED", "acceptance_results": [],

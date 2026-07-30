@@ -11,7 +11,7 @@ from .util import (
 )
 
 
-SCHEMA_VERSION = "ownframework-loop-build-receipt/v1"
+SCHEMA_VERSION = "ownframework-loop-build-receipt/v2"
 
 
 def receipt_path(canonical_repo: Path, run_id: str) -> Path:

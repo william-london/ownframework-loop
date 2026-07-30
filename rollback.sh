@@ -1,16 +1,29 @@
 #!/usr/bin/env bash
 # OwnFramework Loop V2 — rollback.
 #
-# Restores the most recent timestamped backup directory. Lists available
-# backups if no fresh backup is found.
+# Restores the most recent timestamped backup directory. Accepts the legacy
+# `of-loop.backup-*` naming and the current `ownframework-loop-mgmt-backup-*`
+# naming produced by install.sh. Lists available backups if no fresh backup is
+# found.
+#
+# Honors:
+#   INSTALL_ROOT  - path of the installed copy (default: see below)
+#   INSTALL_PARENT - directory under which to look for backups (derived
+#                    from INSTALL_ROOT when unset)
 
 set -euo pipefail
 
-INSTALL_ROOT="${INSTALL_ROOT:-/Users/mr.mrs.london/.claude/skills/of-loop}"
-INSTALL_PARENT="$(dirname "$INSTALL_ROOT")"
+: "${INSTALL_ROOT:=$HOME/.claude/skills/of-loop}"
+: "${INSTALL_PARENT:=$(dirname "$INSTALL_ROOT")}"
 
-# Find candidate backups in time order (newest first).
-mapfile -t BACKUPS < <(ls -1dt "$INSTALL_PARENT"/of-loop.backup-* 2>/dev/null || true)
+# Find candidate backups in time order (newest first). Accept both naming
+# conventions produced by historical versions of install.sh.
+mapfile -t BACKUPS < <(
+  {
+    ls -1dt "$INSTALL_PARENT"/of-loop.backup-*            2>/dev/null || true
+    ls -1dt "$INSTALL_PARENT"/ownframework-loop-mgmt-backup-* 2>/dev/null || true
+  } | awk '!seen[$0]++'
+)
 
 if [[ ${#BACKUPS[@]} -eq 0 ]]; then
   echo "[rollback] no backups found under $INSTALL_PARENT"
@@ -30,7 +43,7 @@ if [[ -e "$INSTALL_ROOT" || -L "$INSTALL_ROOT" ]]; then
   if [[ -L "$INSTALL_ROOT" ]]; then
     rm "$INSTALL_ROOT"
   else
-    # Move current to a "rolled-back" tag.
+    # Move current to a "rolled-back" tag so the previous install is preserved.
     RB="${INSTALL_ROOT}.rolled-back-$(date -u +%Y%m%dT%H%M%SZ)"
     mv "$INSTALL_ROOT" "$RB"
     echo "[rollback] moved current install to $RB"
