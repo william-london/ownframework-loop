@@ -305,15 +305,15 @@
                 "minimum": 0
               },
               "candidate_sha": {
-                "type": "string",
+                "type": ["string", "null"],
                 "pattern": "^[a-f0-9]{7,64}$"
               },
               "build_receipt_sha256": {
-                "type": "string",
+                "type": ["string", "null"],
                 "pattern": "^[a-f0-9]{64}$"
               },
               "verdict_sha256": {
-                "type": "string",
+                "type": ["string", "null"],
                 "pattern": "^[a-f0-9]{64}$"
               },
               "terminal": {
