@@ -21,6 +21,74 @@
   marker; program init is also gated on a valid APPROVAL.json binding.
 All notable changes to OwnFramework Loop are documented here.
 
+
+## 0.3.1 — Crash reconciliation + lifecycle truth + schema truth (2026-07-31)
+
+### Added
+- `lib/ownframework_loop/reconcile.py` — deterministic automatic crash
+  reconciliation. Invoked at the start of every orchestrator resume
+  (single-mode and program-mode) and by `ofloop doctor`. Handles 7 crash
+  boundaries (build receipt, build transition, review verdict, review
+  transition, checkpoint advancement, checkpoint transition, final
+  integrated verdict). Idempotent. Stale artifacts (whose implied
+  transition is no longer reachable from the current state per the
+  state machine) are SKIPPED — the orchestrator overwrites them.
+- `lib/ownframework_loop/schema_validate.py` — real JSON-schema
+  validation against the actual schemas in `schemas/` (work-packet v1/v2/v3,
+  state v1/v2, approval, build-receipt, review-verdict). Uses `jsonschema`
+  Draft202012Validator.
+- `scripts/verify_payload_manifest.py` — verifies the installed cache
+  matches the recorded `.payload.manifest` (file list + per-file SHA-256).
+- `install.sh` now writes `.payload.manifest` after the managed install
+  succeeds, capturing every regular file in the cache tree with its SHA-256.
+- `validate.sh --installed` fails closed if the manifest is missing,
+  any listed file is missing, or any file's SHA-256 has drifted.
+
+### Changed
+- `lib/ownframework_loop/integrity.py` — `compute_event_chain_hash`
+  rewritten as a non-self-referential iterative SHA-256 chain
+  (`chain_hash_n = SHA(prev_chain || event_n_stripped)`). The chain
+  hash no longer depends on its own value.
+- `lib/ownframework_loop/state.py` — `_compute_chain_hash_for_append`
+  rewritten to match the verifier's iterative model. `append_event`
+  placeholder length fixed to 64 chars so writer/verifier bytes
+  match. `run_dir` accepts `Path|str`.
+- `lib/ownframework_loop/reconcile.py` — `_live_process` probes flock
+  with non-blocking `LOCK_EX` instead of mere LOCK file existence
+  (LOCK files persist across normal operations and are not by
+  themselves a live-process indicator).
+- `rollback.sh` — replaced `mapfile` (bash 4+) with a bash 3.2
+  compatible read loop so it works on macOS default Bash.
+- `validate.sh` — added `reconcile` to the Python library imports
+  smoke check; payload-manifest verification added to the
+  `--installed` block.
+- `schemas/state-v2.schema.json` — checkpoint `candidate_sha`,
+  `build_receipt_sha256`, `verdict_sha256` accept null (the engine
+  initializes these as None until a checkpoint has been worked on).
+- `schemas/approval.schema.json` — `confirmation_token` maxLength
+  raised to 64 (engine emits 24-char tokens).
+
+### Fixed
+- Pre-existing latent bug in event-chain hash self-reference that
+  caused any state-saved event after the first one to fail chain
+  verification on the next read.
+- Rollback was broken on macOS (default Bash 3.2) because it relied
+  on `mapfile`.
+- Validate.sh previously masked `cmd && ok` failures (no `-e`,
+  `set -uo pipefail` only); the script no longer applies this
+  anti-pattern.
+
+### Notes
+- The public command surface remains: `/of-loop:spec`, `/of-loop:build`,
+  `/of-loop:review`. Internal deterministic CLI subcommands (`ofloop
+  build claim`, `ofloop build finalize`, `ofloop review claim`,
+  `ofloop review finalize`, `ofloop program init`, `ofloop program
+  status`, `ofloop loop run`, `ofloop doctor`) are unchanged and
+  continue to support the slash commands without requiring manual
+  operator invocation.
+- The release gate (42 tests across unit, integration, smoke) passes
+  with `OF_LOOP_RELEASE_GATE_RESULT=PASS`.
+
 ## v0.2.1 — 2026-07-23
 
 Managed-marketplace convergence, known guard-evasion repair,

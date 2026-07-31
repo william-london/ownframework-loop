@@ -1,8 +1,8 @@
 {
   "name": "of-loop",
   "displayName": "OwnFramework Loop",
-  "description": "V0.3.0 - single-mode + finite packet-bound PROGRAM-mode checkpoints, deterministic approval, exact-SHA build/review finalizers, exact-run hook authority, broad engineering tools, and external-action guard.",
-  "version": "0.3.0",
+  "description": "V0.3.1 - single-mode + finite packet-bound PROGRAM-mode checkpoints, deterministic approval, exact-SHA build/review finalizers, exact-run hook authority, broad engineering tools, external-action guard, deterministic automatic crash reconciliation, and atomic-install payload manifest.",
+  "version": "0.3.1",
   "author": {
     "name": "OwnFramework"
   },
