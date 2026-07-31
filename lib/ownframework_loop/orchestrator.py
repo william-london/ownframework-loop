@@ -385,28 +385,27 @@ def run_program_mode(
                     new_prog, cp_id=cp_id, counter="review_pass_count",
                     packet_cp=cp_packet,
                 )
-                # Source-tree accounting: guard global caps with the
-                # candidate-vs-baseline numstat.
-                try:
+                # Source-tree accounting: ALWAYS run when we have a
+                # baseline+candidate SHA pair. If git diff fails or the
+                # record raises ProgramStateError (cap exceeded), we HARD
+                # BLOCK the checkpoint rather than silently swallowing the
+                # cap violation. Audit v0.3.0-F1: the previous try/except
+                # swallowed cap-rejection, allowing a program to exceed
+                # GLOBAL_MAX_UNIQUE_CHANGED_FILES / DIFF_LINES and still
+                # finalize as APPROVED.
+                baseline_sha = (program_state.get("source_sha_provenance") or {}).get("baseline_sha")
+                last_candidate = cur.get("last_candidate_sha")
+                if baseline_sha and last_candidate:
                     acc = program_mod.source_tree_accounting(
                         canonical_repo=canonical_repo,
-                        baseline_sha=cur.get("last_candidate_sha")
-                                       and program_state.get("source_sha_provenance", {}).get("baseline_sha")
-                                       or cur.get("last_candidate_sha"),
-                        candidate_sha=cur.get("last_candidate_sha") or "",
+                        baseline_sha=baseline_sha,
+                        candidate_sha=last_candidate,
                     )
-                    # Only update if we got valid SHAs.
-                    if cur.get("last_candidate_sha") and program_state.get(
-                        "source_sha_provenance", {}
-                    ).get("baseline_sha"):
-                        new_prog = program_mod.record_aggregate_change(
-                            new_prog,
-                            files_changed_unique_delta=acc["files_changed_unique"],
-                            diff_lines_delta=acc["diff_lines"],
-                        )
-                except (subprocess.CalledProcessError, ProgramStateError) as e:
-                    history.append({"phase": "source_accounting_skipped",
-                                     "reason": str(e)})
+                    new_prog = program_mod.record_aggregate_change(
+                        new_prog,
+                        files_changed_unique_delta=acc["files_changed_unique"],
+                        diff_lines_delta=acc["diff_lines"],
+                    )
             except program_mod.ProgramStateError as e:
                 history.append({"phase": "cp_counter_cap", "reason": str(e)})
                 cp_terminal = "BLOCKED"
@@ -457,14 +456,13 @@ def run_program_mode(
                                              reason="state_reset_failed", history=history)
 
         if cp_terminal == "BLOCKED":
-            # Programmatically mark program blocked; record + exit.
-            new_prog_blocked = program_mod.finalize_checkpoint(
-                program_state=(cur.get("program") or {}),
-                cp_id=cp_id, terminal_state="BLOCKED",
-                evidence_manifest={"_packet": meta, "round": round_idx},
-            )
+            # The checkpoint was already finalized via finalise_checkpoint
+            # above (which set new_prog = ...). The DOUBLE-finalize in the
+            # bug here (audit v0.3.0-C5) appended the cp_id twice to
+            # finalized_checkpoints and let the orchestrator reconcile
+            # stale snapshots. Use the already-finalized new_prog instead.
             new_state = dict(cur)
-            new_state["program"] = new_prog_blocked
+            new_state["program"] = new_prog
             new_state["state"] = "BLOCKED"
             new_state["schema"] = state_mod.PROGRAM_STATE_SCHEMA_VERSION
             state_mod.save(canonical_repo, run_id, new_state)

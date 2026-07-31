@@ -34,7 +34,7 @@ from . import git_checks, packet as packet_mod, util
 
 SCHEMA_VERSION = "ownframework-loop-approval/v1"
 
-ALLOWED_APPROVAL_METHODS = {"tty_confirmation", "operator_marker"}
+ALLOWED_APPROVAL_METHODS = {"tty_confirmation", "operator_marker", "operator_explicit_override"}
 
 CONFIRMATION_PREFIX = "CONFIRM-OF-LOOP"
 
@@ -223,10 +223,14 @@ def validate_approval_binding(
     current_head = git_checks.current_head(canonical_repo)
     if current_head is None:
         return False, "canonical repo has no HEAD"
-    if not current_head.startswith(approval["baseline_sha"][:7]):
+    # Audit v0.3.0: full SHA equality (not 7-char prefix match). A 7-char
+    # prefix is ambiguous (birthday collision ~1/2^28) and asymmetric
+    # (current_head could equal just the prefix substring). Full equality
+    # is the only way to bind an approval to a specific historical commit.
+    if current_head != approval["baseline_sha"]:
         return False, (
-            f"canonical HEAD {current_head[:12]} does not match "
-            f"approval baseline_sha {approval['baseline_sha'][:12]}"
+            f"canonical HEAD {current_head} does not match "
+            f"approval baseline_sha {approval['baseline_sha']}"
         )
     # Verify the confirmation token matches the deterministic token.
     expected_token = derive_confirmation_token(approval["packet_sha256"])
@@ -299,6 +303,7 @@ def request_human_approval(
         f"  Type this token to approve: {token}",
         "",
     ]
+    approval_method = "operator_explicit_override" if assume_tty else "tty_confirmation"
     if not assume_tty:
         sys.stdout.write("\n".join(prompt_lines))
         sys.stdout.flush()
@@ -318,7 +323,7 @@ def request_human_approval(
         "baseline_branch": target_branch,
         "baseline_sha": baseline_sha,
         "packet_schema": meta.get("schema") or "",
-        "approval_method": "tty_confirmation",
+        "approval_method": approval_method,
         "confirmation_token": token,
         "operator_note": operator_note,
         "packet_work_class": meta.get("work_class"),

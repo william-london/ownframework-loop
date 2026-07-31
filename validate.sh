@@ -144,14 +144,28 @@ from ownframework_loop import (
 print('  PASS: Python core library imports cleanly')
 "
 
-# 6. CLI runs (against this root, regardless of source/installed).
+# 6. CLI runs (against this root, regardless of source/installed). Audit v0.3.0
+# fixed: the previous `cmd && ok "..."` pattern silently continued past a
+# non-zero exit (with `set -uo pipefail` and no `-e`, the failure was masked
+# and the script eventually reported PASS).
 cd "$ROOT"
 if [[ "$INSTALLED_MODE" -eq 1 ]]; then
-  # Installed copy: invoke via the install's CLI path.
-  python3 bin/ofloop --help >/dev/null && ok "installed ofloop CLI runs (python3 bin/ofloop)"
-  ./bin/ofloop --help >/dev/null && ok "installed ofloop CLI runs (./bin/ofloop)"
+  if python3 bin/ofloop --help >/dev/null 2>&1; then
+    ok "installed ofloop CLI runs (python3 bin/ofloop)"
+  else
+    bad "installed ofloop CLI failed (python3 bin/ofloop)"
+  fi
+  if ./bin/ofloop --help >/dev/null 2>&1; then
+    ok "installed ofloop CLI runs (./bin/ofloop)"
+  else
+    bad "installed ofloop CLI failed (./bin/ofloop)"
+  fi
 else
-  python3 bin/ofloop --help >/dev/null && ok "source ofloop CLI runs"
+  if python3 bin/ofloop --help >/dev/null 2>&1; then
+    ok "source ofloop CLI runs"
+  else
+    bad "source ofloop CLI failed"
+  fi
 fi
 
 # 7. Hook scripts are executable.

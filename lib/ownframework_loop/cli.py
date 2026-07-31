@@ -188,6 +188,25 @@ def cmd_program_init(args: argparse.Namespace) -> None:
     s = state_mod.load(repo, run_id)
     if s is None:
         _emit_error(f"STATE.json missing for {run_id}", exit_code=2)
+
+    # Audit v0.3.0-F2: refuse to re-init if the existing program state has
+    # a different checkpoint_graph_sha256. This prevents post-approval
+    # widening via the init path (operator edits packet, refreshes
+    # APPROVAL.json, re-init rolls the frozen SHA forward).
+    existing_program = (s.get("program") or {})
+    existing_graph_sha = existing_program.get("checkpoint_graph_sha256")
+    new_graph_sha = program_state.get("checkpoint_graph_sha256")
+    if existing_graph_sha and existing_graph_sha != new_graph_sha:
+        _emit_error(
+            f"refusing to refreeze checkpoint graph: "
+            f"existing={existing_graph_sha[:12]} new={new_graph_sha[:12]}",
+            exit_code=3,
+            classification="PROGRAM_GRAPH_SHA_DRIFT",
+            field="program.checkpoint_graph_sha256",
+            remediation="Submit a new run with a new run-id; do not re-initialize "
+                        "an existing program with a different graph.",
+        )
+
     new = dict(s)
     new["program"] = program_state
     new["schema"] = state_mod.PROGRAM_STATE_SCHEMA_VERSION

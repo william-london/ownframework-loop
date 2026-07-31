@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from .util import sha256_text
+from .integrity import canonical_json_dumps
 
 
 SCHEMA_VERSION = "ownframework-work-packet/v2"
@@ -82,12 +83,17 @@ def validate_packet_metadata(meta: dict[str, Any]) -> list[str]:
         # potentially-mutated field set.
         return errors
 
-    # v3 packets must additionally declare execution_mode.
-    if schema == PROGRAM_SCHEMA_VERSION and "execution_mode" not in meta:
-        errors.append("v3 packets must declare execution_mode (single|program)")
+    # v3 packets: execution_mode is OPTIONAL in the schema (default "single")
+    # so v3 stays a strict superset of v2. The validator must accept the
+    # schema default; only invalidate when execution_mode is present but
+    # invalid. Audit v0.3.0-F2: previous hard-reject diverged from the
+    # schema and rejected schema-valid packets.
+    if schema == PROGRAM_SCHEMA_VERSION and "execution_mode" in meta and meta["execution_mode"] not in ("single", "program"):
+        errors.append(f"execution_mode must be single|program, got {meta['execution_mode']!r}")
     if schema == PROGRAM_SCHEMA_VERSION:
         em = meta.get("execution_mode")
-        if em not in (None, "single", "program"):
+        # Schema default is "single"; only validate when present.
+        if em is not None and em not in ("single", "program"):
             errors.append(f"execution_mode must be single|program, got {em!r}")
         pp = meta.get("promotion_policy")
         if pp is not None and pp not in ("human_gate", "merge_on_approved"):
@@ -154,8 +160,14 @@ def packet_file_sha256(path: Path) -> str:
 
 
 def packet_metadata_sha256(meta: dict[str, Any]) -> str:
-    """SHA-256 of the deterministic metadata serialization."""
-    return sha256_text(json.dumps(meta, indent=2, sort_keys=True))
+    """SHA-256 of the deterministic metadata serialization.
+
+    Uses canonical_json_dumps (compact, sort_keys, separators=(",", ":"))
+    so packet_metadata_sha256 is byte-identical to canonical_json_dumps
+    output. Indented json.dumps diverges from the canonical form and was
+    removed by audit (v0.3.0).
+    """
+    return sha256_text(canonical_json_dumps(meta))
 
 
 def packet_is_v2(meta: dict[str, Any]) -> bool:

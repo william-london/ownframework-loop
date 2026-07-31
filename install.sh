@@ -35,6 +35,13 @@ MARKETPLACE_ROOT="$(cd "$SOURCE_ROOT/.." && pwd)"
 PLUGIN_DIR_NAME="$(basename "$SOURCE_ROOT")"
 SOURCE_BRANCH="${SOURCE_BRANCH:-$(git -C "$SOURCE_ROOT" branch --show-current 2>/dev/null || echo unknown)}"
 SOURCE_SHA="${SOURCE_SHA:-$(git -C "$SOURCE_ROOT" rev-parse HEAD 2>/dev/null || echo unknown)}"
+# Verify SOURCE_ROOT is actually a git repository (`git -C ...` succeeds) AND
+# that the porcelain status is empty. The previous form silently returned 0
+# `wc -l` on non-git trees (audit v0.3.0).
+if ! git -C "$SOURCE_ROOT" rev-parse --git-dir >/dev/null 2>&1; then
+  log "SOURCE_ROOT is not a git repository: $SOURCE_ROOT"
+  exit 6
+fi
 SOURCE_DESC_DIRTY="$(git -C "$SOURCE_ROOT" status --porcelain 2>/dev/null | wc -l | tr -d ' ')"
 EXPECTED_VERSION="$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['version'])" "$SOURCE_ROOT/.claude-plugin/plugin.json")"
 MARKET_VERSION="$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['plugins'][0]['version'])" "$MARKETPLACE_ROOT/.claude-plugin/marketplace.json")"
@@ -44,14 +51,23 @@ log "source: $SOURCE_ROOT (branch=${SOURCE_BRANCH}, sha=${SOURCE_SHA}, dirty_fil
 log "expected version: $EXPECTED_VERSION"
 log "marketplace version: $MARKET_VERSION"
 
-# Provenance: refuse to install from a tree with uncommitted changes (dirty
-# installs are not reproducible). Persist source SHA + branch + version next
-# to the install log so the cache payload is auditable post-hoc.
+# Version-match check FIRST (avoids leaving a provenance artifact on
+# version drift; audit v0.3.0).
+if [[ "$EXPECTED_VERSION" != "$MARKET_VERSION" ]]; then
+  log "version mismatch between source and marketplace; refusing"
+  exit 2
+fi
+
+# Refuse to install from a tree with uncommitted changes (dirty installs
+# are not reproducible). The check above already verified SOURCE_ROOT is a
+# git repo, so an empty porcelain status truly means clean.
 if [[ "$SOURCE_DESC_DIRTY" != "0" ]]; then
   log "source tree is dirty (${SOURCE_DESC_DIRTY} unstaged/staged files); refusing"
   exit 6
 fi
 
+# Provenance: written AFTER all pre-flight checks pass so a failed install
+# does not leave a stale .install.provenance file in the source tree.
 PROVENANCE="$SOURCE_ROOT/.install.provenance"
 {
   echo "source_branch=${SOURCE_BRANCH}"
