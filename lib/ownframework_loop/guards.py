@@ -241,7 +241,7 @@ def classify_bash_command(command: str) -> dict[str, Any]:
                     forbidden.append(f"{desc}: {seg.strip()}")
                     break
                 continue
-            # Subcommand-shape patterns (git push, ssh horus, …) — match
+            # Subcommand-shape patterns (git push, ssh <operator-blocked-target>, …) — match
             # the whole segment with permissive quote-stripping.
             for cand in candidates:
                 if pattern.search(cand):

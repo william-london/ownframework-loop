@@ -50,7 +50,7 @@ must be honored. `work_class: TRACKED_CONTRACT`.
 
 Implement a SOC2 evidence export endpoint that produces an immutable JSONL
 trail of the last 30 days of audit events. Gate it behind an explicit
-admin token. Code review must include Codex on data-boundary concerns.
+admin token. Code review must include an operator-designated external reviewer on data-boundary concerns.
 
 # Non-goals
 

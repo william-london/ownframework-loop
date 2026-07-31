@@ -34,7 +34,7 @@ opt out.
 - `PreToolUse` on Bash blocks forbidden command patterns
   (`git push`, `git merge`, `git reset --hard`, `git clean`,
   `git remote add`, `systemctl`, `docker compose up|down`,
-  `ssh production-host-1|production-host-2`, `hermes`). Patterns are compiled
+  `ssh production-host-1|production-host-2`, <operator-blocked-executable>). Patterns are compiled
   regexes; chains like `git status && git push` are split on `&&`, `||`,
   `;`, `|` before matching.
 - `PreToolUse` on Write|Edit|MultiEdit|NotebookEdit blocks protected
@@ -254,7 +254,7 @@ regardless of what the packet says.
 
 ## Why escalation is not wired
 
-`CODEX=manual_triggered_escalation`. The loop emits a durable
+`OFLOOP_ESCALATION_TRIGGER=manual_triggered_escalation`. The loop emits a durable
 recommendation in `REVIEW_VERDICT.json` and `EVENTS.log` when an
 escalation condition is observed. operator invokes escalation as a separate
 manual lane. The loop never calls escalation automatically.

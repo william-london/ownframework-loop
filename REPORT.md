@@ -189,8 +189,8 @@ The textual guard (in `block_dangerous_bash.sh`) covers bare-form
 and single-line redirects. Forbidden command families:
 `git push`, `git remote add|set-url|remove`, `git worktree prune`,
 `git reset --hard`, `git branch -d|-D`, `git clean -fdx`,
-`hermes`, `systemctl`, `docker compose up|down`, `ssh horus`,
-`ssh firelove`. The dedicated external-action guard
+`operator-configured executables`, `systemctl`, `docker compose up|down`, `ssh <operator-blocked-target>`,
+`ssh <operator-blocked-target>`. The dedicated external-action guard
 (`hooks/external_action_guard.sh`) blocks outbound email, push,
 PR, deploy, and customer-action operations independent of the
 Bash input shape.
@@ -534,7 +534,7 @@ GUARD_EVASION_CLOSED_HYPHENATED_EXECUTABLE=yes
 PROTECTED_PATHS=AGENTS.md,CLAUDE.md,.claude/,.ownframework-loop/,.git/,.worktrees/ownframework-loop/
 SAFE_WHEN_PACKET_APPROVED=any path listed in packet.elevated_allowed_paths
 WORK_CLASSES=BUG,FEATURE,REFACTOR,RESEARCH_SPIKE,DOCS,HARDENING,NEW_REPOSITORY
-EXTERNAL_ACTION_FAMILIES=email,push,pr_open,pr_merge,deploy,hermes_cli,fire_love,horus_ssh,video_factory
+EXTERNAL_ACTION_FAMILIES=email,push,pr_open,pr_merge,deploy,operator_cli_1,operator_external_2,operator_ssh_3,operator_restricted_root
 AGENT_TOOL_INHERITANCE=intentional
 BUILDER_TOOL_POSTURE=broad
 REVIEWER_TOOL_POSTURE=broad_inspection

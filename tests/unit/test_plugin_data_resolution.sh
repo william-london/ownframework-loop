@@ -231,7 +231,7 @@ rm -rf "$ALT"
 # ----- T9: legacy migration manifest is intentionally archived, not re-emitted -----
 # Storage doctrine: the legacy-migration-manifest.json is a one-time migration
 # inventory record. Per the migration-receipt's archive contract, the manifest
-# lives in the Cockpit migration evidence tree (operator-owned, separate from
+# Archive lives in an operator-restricted evidence tree (operator-owned, separate from)
 # the plugin's runtime data). It is NOT regenerated under
 # ~/.claude/plugins/data/of-loop-ownframework-local/migration/ after the
 # migration has completed — the plugin-data migration/ subdir is reserved

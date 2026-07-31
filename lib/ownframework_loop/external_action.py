@@ -267,7 +267,7 @@ def _normalize_hyphenated_executable(cmd: str) -> str:
         git-remote-remove → git remote remove
         git-push          → git push
         gh-pr-create      → gh pr create
-        hermes-cron       → hermes cron
+        operator-cli-cron       → operator cli cron
 
     Bounded to the four forbidden executable categories in this module;
     ordinary hyphenated commands (grep-something, ls-tr, etc.) pass through.

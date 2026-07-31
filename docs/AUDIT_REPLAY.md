@@ -45,19 +45,19 @@ toggle.
 
 ---
 
-## Patch 3 — Fix hermes false positive
+## Patch 3 — Fix operator-executable-name false positive
 
-**Audit finding:** Global `\bhermes\b` blocked `ls ~/.hermes/`, `grep hermes`, docs.
+**Audit finding:** Global `\b<operator-executable-name>\b` blocked `ls ~/<operator-executable-name>/`, `grep <operator-executable-name>`, docs.
 
-**Fix:** Refactored `guards.classify_bash_command` to match hermes/codex
+**Fix:** Refactored `guards.classify_bash_command` to match only when the operator-configured executable name is the first word of a shell segment
 only by executable identity (first word of a shell segment after stripping
 env-var assignments). Filesystem paths, grep mentions, and string arguments
 are explicitly allowed.
 
 **Proof:**
 - `tests/unit/test_bypass_matrix.sh` Row 4: 4 ALLOW cases (ls, grep, echo, cat) + 3 BLOCK cases (CLI invocations).
-- `HERMES_WORD_FALSE_POSITIVE_FIX` marker.
-- `HERMES_WORD_FALSE_POSITIVE=no` marker (in this report).
+- `OPERATOR_EXECUTABLE_NAME_FALSE_POSITIVE_FIX` marker.
+- `OPERATOR_EXECUTABLE_NAME_FALSE_POSITIVE=no` marker (in this report).
 
 ---
 
@@ -206,7 +206,7 @@ State machine progression: AWAITING_APPROVAL → READY_TO_BUILD → BUILDING →
 | `SANDBOX_AVAILABLE=yes` | **PASS** |
 | `SANDBOX_FAIL_CLOSED=yes` | **PASS** |
 | `REVIEWER_SELF_REFRESH_FALSE_POSITIVE=no` | **PASS** |
-| `HERMES_WORD_FALSE_POSITIVE=no` | **PASS** |
+| `OPERATOR_EXECUTABLE_NAME_FALSE_POSITIVE=no` | **PASS** |
 | `OFLOOP_DOCUMENTED_INVOCATIONS=PASS` | **PASS** |
 | `STATE_TAMPER_DETECTION=PASS` | **PASS** |
 | `REPAIR_LIMIT_CODE_ENFORCEMENT=PASS` | **PASS** |
@@ -227,7 +227,7 @@ This pilot run did NOT:
 - Create any remote (origin / upstream / anything)
 - Push, merge, or deploy anything
 - Auto-escalation-target
-- Touch production paths (Production-Host-1 / Production-Host-2 / Cockpit / Video Factory / production-host / production-project-tree / production-project-tree / production-project-tree / production-project-tree)
+- Touch production paths (Production-Host-1 / Production-Host-2 / <operator-restricted-root> / <operator-restricted-root> / production-host / production-project-tree / production-project-tree / production-project-tree / production-project-tree)
 - Modify operator's global `~/.claude/settings.json` silently
 
 Source HEAD before pilot: `740eee7`. Source HEAD after pilot: `740eee7`
