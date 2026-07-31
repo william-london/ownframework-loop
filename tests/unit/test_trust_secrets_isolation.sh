@@ -14,7 +14,8 @@ SECRET="AKIAIOSFODNN7EXAMPLE"
 python3 - "$EVENTS" <<'PY'
 import sys, base64, os, json
 from pathlib import Path
-sys.path.insert(0, "/Users/mr.mrs.london/projects/plugins/ownframework-loop/lib")
+import os as _os_for_path
+sys.path.insert(0, _os_for_path.environ.get('OFLOOP_LIB', '/path/to/ownframework-loop/lib'))
 from ownframework_loop import secrets_v2, state as state_mod
 events = sys.argv[1]
 secret = "AKIAIOSFODNN7EXAMPLE"
@@ -111,7 +112,8 @@ print(len(heur))
 # 56. scanner handles quotes/newlines safely
 out56="$(python3 -c "
 import sys
-sys.path.insert(0, '/Users/mr.mrs.london/projects/plugins/ownframework-loop/lib')
+import os as _os_for_path
+sys.path.insert(0, _os_for_path.environ.get('OFLOOP_LIB', '/path/to/ownframework-loop/lib'))
 from ownframework_loop import secrets_v2
 text = 'line1 \"with quotes\"\nline2\n-----BEGIN RSA PRIVATE KEY-----\n'
 findings = secrets_v2.scan_text(text)
@@ -123,7 +125,8 @@ assert_contains "$out56" "pem_private_key" "scanner handles quotes/newlines safe
 # 57. scanner failure cannot leak a traceback or secret
 out57="$(python3 -c "
 import sys
-sys.path.insert(0, '/Users/mr.mrs.london/projects/plugins/ownframework-loop/lib')
+import os as _os_for_path
+sys.path.insert(0, _os_for_path.environ.get('OFLOOP_LIB', '/path/to/ownframework-loop/lib'))
 from ownframework_loop import secrets_v2
 try:
     findings = secrets_v2.scan_text(None)

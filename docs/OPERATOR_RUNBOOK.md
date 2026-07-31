@@ -1,13 +1,13 @@
 # Operator Runbook
 
-This runbook is for William. It assumes the plugin has been installed
+This runbook is for operator. It assumes the plugin has been installed
 via `install.sh`. If you have not installed it, see the README quickstart.
 
 ## 1. Create a mission
 
 ```bash
 cd /path/to/target-repo
-claude --plugin-dir /Users/mr.mrs.london/.claude/skills/of-loop
+claude --plugin-dir $HOME/.claude/skills/of-loop
 ```
 
 Inside the Claude session:
@@ -62,17 +62,17 @@ context never carries build state.
 Every pass emits a compact operator marker:
 
 ```text
-OF_LOOPER_OPERATOR_MARKER
-OF_LOOPER_RUN_ID=<run-id>
-OF_LOOPER_ROLE=builder|reviewer
-OF_LOOPER_STATE=<state>
-OF_LOOPER_ACTION=RESCHEDULE|STOP
-OF_LOOPER_NEXT_DELAY_MINUTES=<int>
-OF_LOOPER_REASON=<short>
+OF_LOOP_OPERATOR_MARKER
+OF_LOOP_RUN_ID=<run-id>
+OF_LOOP_ROLE=builder|reviewer
+OF_LOOP_STATE=<state>
+OF_LOOP_ACTION=RESCHEDULE|STOP
+OF_LOOP_NEXT_DELAY_MINUTES=<int>
+OF_LOOP_REASON=<short>
 ```
 
 At a terminal state (`APPROVED`, `BLOCKED`, `STOPPED`), the loop emits
-`OF_LOOPER_ACTION=STOP` and exits.
+`OF_LOOP_ACTION=STOP` and exits.
 
 ## 5. Inspect state at any time
 
@@ -162,7 +162,7 @@ recover when the cleanup scope is bounded to one run.
 ## 13. Roll back the plugin
 
 ```bash
-bash /Users/mr.mrs.london/projects/plugins/ownframework-loop/rollback.sh
+bash /path/to/ownframework-loop/rollback.sh
 ```
 
 Restores the previous installed copy from the timestamped backup. The
@@ -179,17 +179,17 @@ Returns `build_pass_count`, `review_pass_count`, `transitions_count`,
 spend is visible in the Claude Code session transcript; the plugin
 does not require a separate metering layer.
 
-## 15. Use Codex as a manual inspector
+## 15. Use escalation-target as a manual inspector
 
-When a verdict marks `codex_escalation_recommended: true` or
+When a verdict marks `escalation_recommended: true` or
 `EVENTS.log` shows a known escalation trigger:
 
-1. Open Codex in a separate session.
+1. Open escalation-target in a separate session.
 2. Provide it the packet SHA, the candidate SHA, the verdict, and the
    findings.
-3. Codex returns a manual investigation. You decide what to do.
+3. escalation-target returns a manual investigation. You decide what to do.
 
-The loop does not call Codex.
+The loop does not call escalation-target.
 
 ## 16. Local-only repositories
 
@@ -201,7 +201,7 @@ local-only repo. Hooks block push and merge.
 
 Use `work_class: NEW_REPOSITORY`. The spec skill calls
 `ofloop new-repo <root> <project> --init-baseline` to bootstrap.
-William must merge the candidate branch manually.
+operator must merge the candidate branch manually.
 
 ## 18. Runtime-sensitive candidate work
 
@@ -223,7 +223,7 @@ Open a separate pair of `/loop` tabs per project.
 Stop and inspect if any of:
 
 - The state is `BLOCKED` and you do not know why.
-- `EVENTS.log` shows a Codex escalation marker.
+- `EVENTS.log` shows a escalation-target escalation marker.
 - The reviewer wrote `verdict: HUMAN_REVIEW_REQUIRED`.
 - The packet SHA drifted after approval.
 - Hooks are firing on benign commands (verify hook config, not the

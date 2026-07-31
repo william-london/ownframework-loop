@@ -16,7 +16,7 @@ export OFLOOP_PERMISSIONS_PROFILE=enforce
 
 # Optional: enable Claude Bash sandbox in this session only:
 # (per official Claude Code docs, set via permission-rule settings or --sandbox flag)
-claude --plugin-dir /Users/mr.mrs.london/.claude/skills/of-loop \
+claude --plugin-dir $HOME/.claude/skills/of-loop \
       --permission-profile enforce
 ```
 
@@ -50,15 +50,15 @@ also checks. The exact rules, in documented Claude permission syntax:
       "Bash(docker compose up:*)",
       "Bash(docker compose down:*)",
       "Bash(docker compose restart:*)",
-      "Bash(ssh horus:*)",
-      "Bash(ssh firelove:*)",
-      "Bash(/usr/bin/hermes:*)",
-      "Bash(/usr/local/bin/hermes:*)",
-      "Bash(codex:*)",
-      "Edit(/Users/mr.mrs.london/projects/plugins/horus/**)",
-      "Edit(/Users/mr.mrs.london/projects/plugins/firelove/**)",
-      "Edit(/Users/mr.mrs.london/projects/plugins/cockpit/**)",
-      "Edit(/Users/mr.mrs.london/projects/plugins/video-factory/**)"
+      "Bash(ssh production-host-1:*)",
+      "Bash(ssh production-host-2:*)",
+      "Bash(/usr/bin/<operator-blocked-executable>:*)",
+      "Bash(/usr/local/bin/<operator-blocked-executable>:*)",
+      "Bash(<operator-blocked-executable>:*)",
+      "Edit(/path/to/repository/production-host-1/**)",
+      "Edit(/path/to/repository/production-host-2/**)",
+      "Edit(/path/to/repository/production-project-tree/**)",
+      "Edit(/path/to/repository/production-project-tree/**)"
     ],
     "ask": [
       "Bash(ofloop *)"

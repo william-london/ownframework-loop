@@ -13,3 +13,4 @@ __pycache__/
 *.log
 .install.log
 .uninstall.log
+.install.provenance

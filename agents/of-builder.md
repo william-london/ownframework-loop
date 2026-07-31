@@ -60,7 +60,7 @@ resolved.
 6. **No protected-path edits.** If a required change would touch a protected
    path, stop and emit `next_state: BLOCKED` with `reason: protected_path`.
 7. **No production actions.** No `systemctl`, no `docker compose up` on a
-   production target, no SSH to `horus` or `firelove`, no deploy command.
+   production target, no SSH to `production-host-1` or `production-host-2`, no deploy command.
 8. **No autonomous approval.** You cannot approve your own work.
 9. **Budget yourself.** Run the minimum validation set required by the packet.
    Fast tests first; full tests only when fast tests pass.
@@ -124,7 +124,7 @@ Stop the pass and emit `BLOCKED` if any of the following occurs:
 
 ## What you do NOT do
 
-- Call Codex automatically. If a Codex escalation is warranted, emit a
+- Call escalation automatically. If a escalation escalation is warranted, emit a
   durable recommendation in the receipt's `notes` field and the EVENTS log.
 - Modify the work packet.
 - Touch the reviewer's worktree.
@@ -148,3 +148,22 @@ TOKEN_IS_SECRET=no
 TOKEN_IS_MODEL_UNPREDICTABLE=no
 TOKEN_IS_PACKET_DERIVED=yes
 ```
+
+
+## PROGRAM mode (v3 packets)
+
+In program mode, this agent is invoked once per checkpoint (CP-N) of the
+finite packet-bound DAG. The packet's `checkpoint_graph` is the source
+of truth; per-checkpoint `risk_budget` is the cap for this agent. The
+agent MUST:
+
+- Honor the current checkpoint's `scope` and `work_units` only.
+- Never mutate shared run state outside the assigned checkpoint's
+  scratch and the builder worktree.
+- Never widen the checkpoint graph, raise any cap, or add a new
+  checkpoint — those are packet-level decisions the operator makes
+  before approval.
+- Never touch another checkpoint's worktree (CP-N writes only when
+  CP-N is the active checkpoint).
+- Skip cleanly when the checkpoint is already terminal; the
+  orchestrator will mark CHANGES_REQUESTED vs APPROVED accordingly.

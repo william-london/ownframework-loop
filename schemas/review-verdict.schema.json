@@ -9,15 +9,20 @@
     "baseline_sha", "review_pass_number", "verdict",
     "acceptance_results", "non_goal_results", "findings",
     "tracked_mutation_check", "stale_sha_check", "reviewer_identity",
-    "timestamp", "recommended_next_state"
+    "timestamp", "recommended_next_state",
+    "approval_sha256", "integrity_check", "protected_path_check",
+    "scope_check", "secret_scan_check", "sensitive_path_assessment",
+    "escalation_recommended", "failure_reason"
   ],
   "properties": {
-    "schema": { "const": "ownframework-loop-review-verdict/v1" },
+    "schema": { "const": "ownframework-loop-review-verdict/v2" },
     "run_id": { "type": "string" },
     "packet_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "approval_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
     "candidate_sha_reviewed": { "type": "string", "pattern": "^[a-f0-9]{7,64}$" },
     "baseline_sha": { "type": "string", "pattern": "^[a-f0-9]{7,64}$" },
     "review_pass_number": { "type": "integer", "minimum": 1 },
+    "builder_pass_number_ref": { "type": "integer", "minimum": 0 },
     "verdict": {
       "type": "string",
       "enum": [
@@ -78,8 +83,12 @@
         "properties": {
           "name": { "type": "string" },
           "command": { "type": "string" },
+          "kind": { "type": "string" },
           "exit_code": { "type": "integer" },
-          "duration_seconds": { "type": "number", "minimum": 0 }
+          "duration_seconds": { "type": "number", "minimum": 0 },
+          "expected_exit_code": { "type": "integer" },
+          "passed": { "type": "boolean" },
+          "timed_out": { "type": "boolean" }
         }
       }
     },
@@ -89,19 +98,94 @@
       "required": ["detected", "before_sha", "after_sha"],
       "properties": {
         "detected": { "type": "boolean" },
-        "before_sha": { "type": "string" },
-        "after_sha": { "type": "string" },
+        "before_sha": { "type": ["string", "null"] },
+        "after_sha": { "type": ["string", "null"] },
         "changed_paths": { "type": "array", "items": { "type": "string" } }
       }
     },
     "stale_sha_check": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["sha_match", "receipt_match", "packet_hash_match"],
+      "required": ["sha_match", "receipt_match", "packet_hash_match", "branch_contains_sha"],
       "properties": {
         "sha_match": { "type": "boolean" },
         "receipt_match": { "type": "boolean" },
-        "packet_hash_match": { "type": "boolean" }
+        "packet_hash_match": { "type": "boolean" },
+        "branch_contains_sha": { "type": "boolean" }
+      }
+    },
+    "integrity_check": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["packet_sha_match", "approval_present", "approval_sha_stable", "candidate_sha_present"],
+      "properties": {
+        "packet_sha_match": { "type": "boolean" },
+        "approval_present": { "type": "boolean" },
+        "approval_sha_stable": { "type": "boolean" },
+        "receipt_sha_stable": { "type": "boolean" },
+        "candidate_sha_present": { "type": "boolean" }
+      }
+    },
+    "protected_path_check": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["result"],
+      "properties": {
+        "result": { "type": "string", "enum": ["pass", "fail"] },
+        "offending_paths": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "secret_scan_check": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["result"],
+      "properties": {
+        "result": { "type": "string", "enum": ["pass", "fail"] },
+        "findings": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["path", "pattern_id", "severity"],
+            "properties": {
+              "path": { "type": "string" },
+              "pattern_id": { "type": "string" },
+              "severity": { "type": "string", "enum": ["hard", "soft", "informational"] },
+              "sha256": { "type": "string" },
+              "redacted_prefix": { "type": "string" },
+              "line": { "type": "integer", "minimum": 1 },
+              "count": { "type": "integer", "minimum": 1 }
+            }
+          }
+        }
+      }
+    },
+    "scope_check": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["result"],
+      "properties": {
+        "result": { "type": "string", "enum": ["pass", "fail"] },
+        "findings": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["path"],
+            "properties": {
+              "path": { "type": "string" }
+            }
+          }
+        }
+      }
+    },
+    "sensitive_path_assessment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["result"],
+      "properties": {
+        "result": { "type": "string", "enum": ["none", "elevated"] },
+        "paths": { "type": "array", "items": { "type": "string" } }
       }
     },
     "reviewer_identity": { "type": "string" },
@@ -113,7 +197,8 @@
         "READY_FOR_REVIEW", "STOPPED"
       ]
     },
-    "codex_escalation_recommended": { "type": "boolean" },
-    "codex_reason": { "type": "string" }
+    "failure_reason": { "type": "string" },
+    "escalation_recommended": { "type": "boolean" },
+    "escalation_reason": { "type": "string" }
   }
 }

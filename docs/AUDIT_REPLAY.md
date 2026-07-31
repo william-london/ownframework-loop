@@ -4,7 +4,7 @@
 **Source HEAD:** 740eee7 (loop-v1: tighten guards (quoted-arg-safe), fix protected-paths glob, expand bypass matrix)
 **Release gate:** PASS (74 markers, 0 WARN, 0 FAIL)
 **Test count:** 20 PASS / 0 FAIL
-**Installed copy:** `/Users/mr.mrs.london/.claude/skills/of-loop`
+**Installed copy:** `$HOME/.claude/skills/of-loop`
 **Rollback path:** `~/.claude/skills/of-loop.backup-20260723T065124Z`
 
 This document replays the audit's findings, the corrective patches, and the
@@ -45,19 +45,19 @@ toggle.
 
 ---
 
-## Patch 3 — Fix hermes false positive
+## Patch 3 — Fix operator-executable-name false positive
 
-**Audit finding:** Global `\bhermes\b` blocked `ls ~/.hermes/`, `grep hermes`, docs.
+**Audit finding:** Global `\b<operator-executable-name>\b` blocked `ls ~/<operator-executable-name>/`, `grep <operator-executable-name>`, docs.
 
-**Fix:** Refactored `guards.classify_bash_command` to match hermes/codex
+**Fix:** Refactored `guards.classify_bash_command` to match only when the operator-configured executable name is the first word of a shell segment
 only by executable identity (first word of a shell segment after stripping
 env-var assignments). Filesystem paths, grep mentions, and string arguments
 are explicitly allowed.
 
 **Proof:**
 - `tests/unit/test_bypass_matrix.sh` Row 4: 4 ALLOW cases (ls, grep, echo, cat) + 3 BLOCK cases (CLI invocations).
-- `HERMES_WORD_FALSE_POSITIVE_FIX` marker.
-- `HERMES_WORD_FALSE_POSITIVE=no` marker (in this report).
+- `OPERATOR_EXECUTABLE_NAME_FALSE_POSITIVE_FIX` marker.
+- `OPERATOR_EXECUTABLE_NAME_FALSE_POSITIVE=no` marker (in this report).
 
 ---
 
@@ -156,8 +156,8 @@ enforced, validate.sh had no real `--installed` path.
 1. git-push family (10 forms: bare, --force, --force-with-lease, --no-verify, env-prefix, -C path, /usr/bin/git, command, quoted, redirect)
 2. Chains & pipelines (4 forms: &&, ;, ||, |)
 3. Indirection forms (5 forms: $() sees inner, eval sees inner, var-indirection deferred, Python subprocess deferred, redirect)
-4. Hermes-related (7 forms: 4 ALLOW + 3 BLOCK)
-5. Deployment / production paths (5 forms: systemctl, docker compose up, docker compose down, ssh horus, ssh firelove)
+4. production-orchestrator-related (7 forms: 4 ALLOW + 3 BLOCK)
+5. Deployment / production paths (5 forms: systemctl, docker compose up, docker compose down, ssh production-host-1, ssh production-host-2)
 6. Git remote mutations (4 forms: remote add, remote set-url, remote remove, worktree prune)
 7. Git reset / branch destructive (4 forms: reset --hard, branch -D, branch -d, clean -fdx)
 8. Protected-paths hook (4 scenarios: outside-loop no-op, real-source block, unknown-filename block, sanctioned WORK_PACKET.md allow)
@@ -206,7 +206,7 @@ State machine progression: AWAITING_APPROVAL → READY_TO_BUILD → BUILDING →
 | `SANDBOX_AVAILABLE=yes` | **PASS** |
 | `SANDBOX_FAIL_CLOSED=yes` | **PASS** |
 | `REVIEWER_SELF_REFRESH_FALSE_POSITIVE=no` | **PASS** |
-| `HERMES_WORD_FALSE_POSITIVE=no` | **PASS** |
+| `OPERATOR_EXECUTABLE_NAME_FALSE_POSITIVE=no` | **PASS** |
 | `OFLOOP_DOCUMENTED_INVOCATIONS=PASS` | **PASS** |
 | `STATE_TAMPER_DETECTION=PASS` | **PASS** |
 | `REPAIR_LIMIT_CODE_ENFORCEMENT=PASS` | **PASS** |
@@ -226,9 +226,9 @@ State machine progression: AWAITING_APPROVAL → READY_TO_BUILD → BUILDING →
 This pilot run did NOT:
 - Create any remote (origin / upstream / anything)
 - Push, merge, or deploy anything
-- Auto-Codex
-- Touch production paths (Horus / FireLove / Cockpit / Video Factory / VPS / decal-os / apparelops-os / experienceops-os / ownframework-growth)
-- Modify William's global `~/.claude/settings.json` silently
+- Auto-escalation-target
+- Touch production paths (Production-Host-1 / Production-Host-2 / <operator-restricted-root> / <operator-restricted-root> / production-host / production-project-tree / production-project-tree / production-project-tree / production-project-tree)
+- Modify operator's global `~/.claude/settings.json` silently
 
 Source HEAD before pilot: `740eee7`. Source HEAD after pilot: `740eee7`
 (worktree-only mutations; the master branch in the test repo is local-only

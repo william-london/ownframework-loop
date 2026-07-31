@@ -10,7 +10,7 @@ import json
 from pathlib import Path
 import sys
 
-ROOT = Path("/Users/mr.mrs.london/projects/plugins/ownframework-loop")
+ROOT = Path(__import__("os").environ.get("OFLOOP_ROOT", str(Path(__file__).resolve().parents[2])))
 schemas = ROOT / "schemas"
 for s in ["work-packet.schema.json", "state.schema.json",
           "build-receipt.schema.json", "review-verdict.schema.json"]:
@@ -76,28 +76,45 @@ if HAVE_JSONSCHEMA:
         raise AssertionError("bad state accepted")
 
     valid_receipt = {
-        "schema": "ownframework-loop-build-receipt/v1", "run_id": "r",
-        "packet_sha256": "a"*64, "work_unit_id": "U-1",
+        "schema": "ownframework-loop-build-receipt/v2", "run_id": "r",
+        "packet_sha256": "a"*64, "approval_sha256": "b"*64,
+        "work_unit_id": "U-1",
         "baseline_sha": "abc1234", "candidate_sha": "def5678",
         "candidate_branch": "factory/candidate/r", "builder_worktree": "/x",
         "builder_pass_number": 1, "repair_round": 0,
         "files_changed": 0, "added_lines": 0, "removed_lines": 0,
+        "changed_paths": [],
         "validation": [], "timestamp": "2026-07-23T05:00:00Z",
         "builder_agent": "of-builder", "next_state": "READY_FOR_REVIEW",
+        "protected_path_check": {"result": "pass", "offending_paths": []},
+        "scope_check": {"result": "pass", "findings": []},
+        "secret_scan_check": {"result": "pass", "findings": []},
+        "sensitive_path_assessment": {"result": "none", "paths": []},
+        "escalation_recommended": False,
     }
     jsonschema.validate(valid_receipt, receipt_schema)
     print("  PASS: valid receipt validates against build-receipt.schema.json")
 
     valid_verdict = {
-        "schema": "ownframework-loop-review-verdict/v1", "run_id": "r",
-        "packet_sha256": "a"*64, "candidate_sha_reviewed": "abc1234",
+        "schema": "ownframework-loop-review-verdict/v2", "run_id": "r",
+        "packet_sha256": "a"*64, "approval_sha256": "b"*64,
+        "candidate_sha_reviewed": "abc1234",
         "baseline_sha": "abc1234", "review_pass_number": 1,
         "verdict": "APPROVED", "acceptance_results": [],
         "non_goal_results": [], "findings": [],
         "tracked_mutation_check": {"detected": False, "before_sha": "abc1234", "after_sha": "abc1234"},
-        "stale_sha_check": {"sha_match": True, "receipt_match": True, "packet_hash_match": True},
+        "stale_sha_check": {"sha_match": True, "receipt_match": True,
+                           "packet_hash_match": True, "branch_contains_sha": True},
+        "integrity_check": {"packet_sha_match": True, "approval_present": True,
+                           "approval_sha_stable": True, "candidate_sha_present": True},
+        "protected_path_check": {"result": "pass", "offending_paths": []},
+        "scope_check": {"result": "pass", "findings": []},
+        "secret_scan_check": {"result": "pass", "findings": []},
+        "sensitive_path_assessment": {"result": "none", "paths": []},
         "reviewer_identity": "of-reviewer", "timestamp": "2026-07-23T05:00:00Z",
         "recommended_next_state": "APPROVED",
+        "failure_reason": "",
+        "escalation_recommended": False,
     }
     jsonschema.validate(valid_verdict, verdict_schema)
     print("  PASS: valid verdict validates against review-verdict.schema.json")

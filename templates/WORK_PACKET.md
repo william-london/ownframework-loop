@@ -57,7 +57,7 @@ against schemas/work-packet.schema.json before approval.
   ],
   "rollback_requirements": "Revert candidate branch; rerun full test suite.",
   "product_decisions": ["<decision id>"],
-  "codex_escalation_conditions": ["<trigger>"],
+  "escalation_conditions": ["<trigger>"],
   "human_approved": false,
   "merge_authority": "human_only",
   "deploy_authority": "human_only",

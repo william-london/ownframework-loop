@@ -5,7 +5,7 @@ must be honored. `work_class: TRACKED_CONTRACT`.
 
 ```json
 {
-  "schema": "ownframework-work-packet/v1",
+  "schema": "ownframework-work-packet/v2",
   "packet_id": "contract-soc2-evidence-001",
   "created_at": "2026-07-23T05:10:00Z",
   "work_class": "TRACKED_CONTRACT",
@@ -13,7 +13,7 @@ must be honored. `work_class: TRACKED_CONTRACT`.
   "authority_class": "high",
   "title": "Add SOC2 evidence export endpoint",
   "target": {
-    "repo": "/Users/mr.mrs.london/projects/example-app",
+    "repo": "/srv/repos/example-app",
     "branch": "master",
     "classification": "local_only"
   },
@@ -31,7 +31,7 @@ must be honored. `work_class: TRACKED_CONTRACT`.
   "work_units": [
     { "id": "UNIT-1", "title": "Endpoint + tests + admin token gate", "scope": "Add endpoint, JSONL serializer, integration tests, admin-token middleware", "acceptance": ["AC-1"] }
   ],
-  "codex_escalation_conditions": [
+  "escalation_conditions": [
     "data boundary change",
     "production infrastructure"
   ],
@@ -50,7 +50,7 @@ must be honored. `work_class: TRACKED_CONTRACT`.
 
 Implement a SOC2 evidence export endpoint that produces an immutable JSONL
 trail of the last 30 days of audit events. Gate it behind an explicit
-admin token. Code review must include Codex on data-boundary concerns.
+admin token. Code review must include an operator-designated external reviewer on data-boundary concerns.
 
 # Non-goals
 

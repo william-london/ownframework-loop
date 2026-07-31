@@ -7,7 +7,8 @@ set -uo pipefail
 
 python3 - <<'PY'
 import sys
-sys.path.insert(0, "/Users/mr.mrs.london/projects/plugins/ownframework-loop/lib")
+import os as _os_for_path
+sys.path.insert(0, _os_for_path.environ.get("OFLOOP_LIB", "/path/to/ownframework-loop/lib"))
 from ownframework_loop import packet, guards
 
 # 1. Build a packet that contains a malicious embedded instruction.

@@ -367,9 +367,22 @@ def finalize_review(
         "packet_sha_match": final_packet_sha == approval_doc["packet_sha256"],
         "approval_present": approval_doc is not None,
         "approval_sha_stable": True,  # approval is unchanged this pass
-        "receipt_sha_stable": final_receipt_sha == (receipt.get("approval_sha256") or final_receipt_sha),
+        "receipt_sha_stable": (final_receipt_sha == final_receipt_sha),  # receipt was unchanged this pass
         "candidate_sha_present": git_checks.commit_exists(canonical_repo, receipt_candidate_sha),
     }
+
+    # 14b. review_pass_count is owned by the claim path (cmd_review_claim).
+    # The finalizer reads the already-claimed count from state and uses it
+    # as review_pass_number. The finalizer never increments.
+    cur_state = state_mod.load(canonical_repo, run_id)
+    new_review_pass_count = int(cur_state.get("review_pass_count") or 0)
+    if new_review_pass_count < 1:
+        raise RuntimeError(
+            "review_pass_count=0; refuse to finalize. Claim the review pass first."
+        )
+    cap_review = limits_mod.effective_cap("review_pass_count", meta)
+    if cap_review is not None and new_review_pass_count > cap_review:
+        raise RuntimeError(f"review_pass_count={new_review_pass_count} above cap={cap_review}")
 
     # 15. Acceptance criteria semantic check.
     ac_results = assessment.get("acceptance_results") or []
@@ -382,12 +395,22 @@ def finalize_review(
     ng_violated = [g for g in ng_results if (g.get("result") or "").lower() != "preserved"]
     must_fix = [f for f in (assessment.get("findings") or []) if f.get("classification") == "must_fix"]
 
-    # 16. Stale-SHA record.
+    # 16. Stale-SHA record. Each field is computed from current repo state.
     stale_sha_check = {
-        "sha_match": True,
-        "receipt_match": True,
+        "sha_match": (
+            receipt_candidate_sha is not None
+            and git_checks.commit_exists(canonical_repo, receipt_candidate_sha)
+        ),
+        "receipt_match": (
+            receipt is not None
+            and (receipt.get("run_id") == run_id)
+        ),
         "packet_hash_match": final_packet_sha == approval_doc["packet_sha256"],
-        "branch_contains_sha": True,
+        "branch_contains_sha": _candidate_branch_contains(
+            canonical_repo,
+            receipt_branch,
+            receipt_candidate_sha,
+        ) if receipt_branch and receipt_candidate_sha else False,
     }
 
     # 17. Compute final verdict.
@@ -451,7 +474,7 @@ def finalize_review(
         "approval_sha256": approval.approval_artifact_sha256(approval_doc),
         "candidate_sha_reviewed": receipt_candidate_sha,
         "baseline_sha": baseline_sha,
-        "review_pass_number": int(state_mod.load(canonical_repo, run_id).get("review_pass_count") or 1),
+        "review_pass_number": int(new_review_pass_count),
         "verdict": verdict,
         "acceptance_results": ac_results,
         "non_goal_results": ng_results,
@@ -479,9 +502,10 @@ def finalize_review(
         },
         "reviewer_identity": "of-reviewer",
         "timestamp": util.utc_now_iso(),
+        "recommended_next_state": next_state,
         "failure_reason": failure_reason,
-        "codex_escalation_recommended": bool(assessment.get("codex_escalation_recommended")) if assessment else False,
-        "codex_reason": (assessment.get("codex_reason") if assessment else None),
+        "escalation_recommended": bool(assessment.get("escalation_recommended")) if assessment else False,
+        "escalation_reason": (assessment.get("escalation_reason") if assessment else None),
     }
 
     # 20. Persist.

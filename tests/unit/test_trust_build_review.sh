@@ -16,7 +16,8 @@ reapprove() {
   python3 - "$repo" "$rid" "$sha" "$branch" <<'PY'
 import sys, json, subprocess
 from pathlib import Path
-sys.path.insert(0, "/Users/mr.mrs.london/projects/plugins/ownframework-loop/lib")
+import os as _os_for_path
+sys.path.insert(0, _os_for_path.environ.get('OFLOOP_LIB', '/path/to/ownframework-loop/lib'))
 from ownframework_loop import approval
 canonical_repo = Path(sys.argv[1])
 run_id = sys.argv[2]
@@ -83,7 +84,8 @@ git -C "$T1" cat-file -e "$SHA1" && pass "candidate SHA exists in canonical repo
 # 14. non-descendant SHA rejected — check helper
 out14="$(python3 -c "
 import sys, tempfile, subprocess
-sys.path.insert(0, '/Users/mr.mrs.london/projects/plugins/ownframework-loop/lib')
+import os as _os_for_path
+sys.path.insert(0, _os_for_path.environ.get('OFLOOP_LIB', '/path/to/ownframework-loop/lib'))
 from ownframework_loop.build_finalize import _ancestor_of
 from pathlib import Path
 td = tempfile.mkdtemp()
@@ -105,7 +107,8 @@ assert_contains "$out14" "NON_DESCENDANT" "non-descendant SHA is rejected"
 # 15. wrong candidate branch is rejected — helper rejects a non-existent branch
 out15="$(python3 -c "
 import sys, tempfile, subprocess
-sys.path.insert(0, '/Users/mr.mrs.london/projects/plugins/ownframework-loop/lib')
+import os as _os_for_path
+sys.path.insert(0, _os_for_path.environ.get('OFLOOP_LIB', '/path/to/ownframework-loop/lib'))
 from ownframework_loop.build_finalize import _candidate_branch_contains
 from pathlib import Path
 td = tempfile.mkdtemp()
@@ -325,7 +328,8 @@ assert_contains "$out28" "OF_LOOP_REVIEW_FINALIZE_REFUSED" "candidate SHA mismat
 # 30. assessment schema validates
 out30="$(python3 -c "
 import sys
-sys.path.insert(0, '/Users/mr.mrs.london/projects/plugins/ownframework-loop/lib')
+import os as _os_for_path
+sys.path.insert(0, _os_for_path.environ.get('OFLOOP_LIB', '/path/to/ownframework-loop/lib'))
 from ownframework_loop.review_finalize import _assessment_schema_ok
 ok, errs = _assessment_schema_ok({
     'schema': 'ownframework-loop-review-agent-assessment/v1',
@@ -343,7 +347,8 @@ assert_contains "$out30" "OK" "review assessment schema validates"
 # 31. missing fields refused
 out31="$(python3 -c "
 import sys
-sys.path.insert(0, '/Users/mr.mrs.london/projects/plugins/ownframework-loop/lib')
+import os as _os_for_path
+sys.path.insert(0, _os_for_path.environ.get('OFLOOP_LIB', '/path/to/ownframework-loop/lib'))
 from ownframework_loop.review_finalize import _assessment_schema_ok
 ok, errs = _assessment_schema_ok({})
 print('OK' if ok else 'ERR:' + ','.join(errs))
@@ -353,7 +358,8 @@ assert_contains "$out31" "ERR" "review assessment with missing fields refused"
 # 32. must-fix finding accepted in assessment
 out32="$(python3 -c "
 import sys
-sys.path.insert(0, '/Users/mr.mrs.london/projects/plugins/ownframework-loop/lib')
+import os as _os_for_path
+sys.path.insert(0, _os_for_path.environ.get('OFLOOP_LIB', '/path/to/ownframework-loop/lib'))
 from ownframework_loop.review_finalize import _assessment_schema_ok
 ok, errs = _assessment_schema_ok({
     'schema': 'ownframework-loop-review-agent-assessment/v1',
@@ -411,7 +417,8 @@ assert_contains "$out47" "ok" "ordinary Python command succeeds"
 # 48. read-only MCP-shaped tool classification succeeds
 out48="$(python3 -c "
 import sys
-sys.path.insert(0, '/Users/mr.mrs.london/projects/plugins/ownframework-loop/lib')
+import os as _os_for_path
+sys.path.insert(0, _os_for_path.environ.get('OFLOOP_LIB', '/path/to/ownframework-loop/lib'))
 from ownframework_loop import external_action
 d = external_action.classify_tool_call(tool_name='mcp__server__search', tool_input={}, active_run='/x')
 print(d)
@@ -421,7 +428,8 @@ assert_contains "$out48" "ALLOW" "read-only MCP tool classification succeeds"
 # 49. external-effect MCP-shaped tool is refused
 out49="$(python3 -c "
 import sys
-sys.path.insert(0, '/Users/mr.mrs.london/projects/plugins/ownframework-loop/lib')
+import os as _os_for_path
+sys.path.insert(0, _os_for_path.environ.get('OFLOOP_LIB', '/path/to/ownframework-loop/lib'))
 from ownframework_loop import external_action
 d = external_action.classify_tool_call(tool_name='mcp__server__send_email', tool_input={}, active_run='/x')
 print(d)
@@ -485,7 +493,8 @@ assert_eq "$REMOTE_COUNT_AFTER" "$REMOTE_COUNT_BEFORE" "existing remote works wi
 # 62. small packet budget works
 out62="$(python3 -c "
 import sys
-sys.path.insert(0, '/Users/mr.mrs.london/projects/plugins/ownframework-loop/lib')
+import os as _os_for_path
+sys.path.insert(0, _os_for_path.environ.get('OFLOOP_LIB', '/path/to/ownframework-loop/lib'))
 from ownframework_loop import util
 ok, v = util.budget_within_ceiling({'max_files_changed': 25, 'max_diff_lines': 1000, 'max_repair_rounds': 4})
 print('OK' if ok else 'BAD:'+','.join(v))
@@ -495,7 +504,8 @@ assert_contains "$out62" "OK" "small packet budget works"
 # 63. approved larger packet budget works
 out63="$(python3 -c "
 import sys
-sys.path.insert(0, '/Users/mr.mrs.london/projects/plugins/ownframework-loop/lib')
+import os as _os_for_path
+sys.path.insert(0, _os_for_path.environ.get('OFLOOP_LIB', '/path/to/ownframework-loop/lib'))
 from ownframework_loop import util
 ok, v = util.budget_within_ceiling({'max_files_changed': 100, 'max_diff_lines': 5000, 'max_repair_rounds': 5})
 print('OK' if ok else 'BAD:'+','.join(v))
@@ -505,7 +515,8 @@ assert_contains "$out63" "OK" "approved larger packet budget works"
 # 64. unbounded budget is rejected
 out64="$(python3 -c "
 import sys
-sys.path.insert(0, '/Users/mr.mrs.london/projects/plugins/ownframework-loop/lib')
+import os as _os_for_path
+sys.path.insert(0, _os_for_path.environ.get('OFLOOP_LIB', '/path/to/ownframework-loop/lib'))
 from ownframework_loop import util
 ok, v = util.budget_within_ceiling({'max_files_changed': 99999, 'max_diff_lines': 99999, 'max_repair_rounds': 99})
 print('OK' if ok else 'REJECTED:'+','.join(v))
@@ -532,7 +543,8 @@ assert_eq "$NEXT66" "BLOCKED" ".claude/ edit blocked when not elevated"
 # 67. terminal builder launches no agent
 out67="$(python3 -c "
 import sys
-sys.path.insert(0, '/Users/mr.mrs.london/projects/plugins/ownframework-loop/lib')
+import os as _os_for_path
+sys.path.insert(0, _os_for_path.environ.get('OFLOOP_LIB', '/path/to/ownframework-loop/lib'))
 from ownframework_loop import scheduling
 a, d = scheduling.recommend_next_delay_minutes(role='builder', state='APPROVED')
 print('STOP' if a == 'STOP' else 'RESCHEDULE')
@@ -542,7 +554,8 @@ assert_contains "$out67" "STOP" "no-work builder emits STOP marker"
 # 68. terminal reviewer launches no agent
 out68="$(python3 -c "
 import sys
-sys.path.insert(0, '/Users/mr.mrs.london/projects/plugins/ownframework-loop/lib')
+import os as _os_for_path
+sys.path.insert(0, _os_for_path.environ.get('OFLOOP_LIB', '/path/to/ownframework-loop/lib'))
 from ownframework_loop import scheduling
 a, d = scheduling.recommend_next_delay_minutes(role='reviewer', state='APPROVED')
 print('STOP' if a == 'STOP' else 'RESCHEDULE')
@@ -556,7 +569,8 @@ pass "terminal reviewer launches no agent (covered by scheduling)"
 # 71. invalid state transition is rejected
 out71="$(python3 -c "
 import sys
-sys.path.insert(0, '/Users/mr.mrs.london/projects/plugins/ownframework-loop/lib')
+import os as _os_for_path
+sys.path.insert(0, _os_for_path.environ.get('OFLOOP_LIB', '/path/to/ownframework-loop/lib'))
 from ownframework_loop import transitions
 try:
     transitions.assert_valid('APPROVED', 'BUILDING')
@@ -584,7 +598,8 @@ RID15="$(make_approved_run "$T15" BUG low "event-tamper")"
 echo "this is not a valid event" >> "$T15/.ownframework-loop/$RID15/EVENTS.log"
 out73="$(python3 -c "
 import sys
-sys.path.insert(0, '/Users/mr.mrs.london/projects/plugins/ownframework-loop/lib')
+import os as _os_for_path
+sys.path.insert(0, _os_for_path.environ.get('OFLOOP_LIB', '/path/to/ownframework-loop/lib'))
 from ownframework_loop import integrity
 from pathlib import Path
 ok, failures = integrity.assert_artifacts_intact(Path('$T15'), '$RID15')

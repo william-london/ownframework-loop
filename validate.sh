@@ -14,6 +14,10 @@
 # the install root is a copy (not a symlink), that there is no .git/ directory
 # inside it, and that the CLI invoked through the installed paths actually
 # works end-to-end.
+#
+# Honor:
+#   OFLOOP_VALIDATE_SOURCE_ROOT  - default source root (when not passing as arg)
+#   OFLOOP_VALIDATE_INSTALL_ROOT - default installed root for --installed
 
 set -uo pipefail
 
@@ -28,11 +32,11 @@ for arg in "$@"; do
     --help|-h)
       cat <<USAGE
 Usage:
-  bash validate.sh                 # validate the SOURCE tree
-  bash validate.sh --installed     # validate the INSTALLED copy
+  bash validate.sh                    # validate the SOURCE tree
+  bash validate.sh --installed        # validate the INSTALLED copy
 
-Source root : /Users/mr.mrs.london/projects/plugins/ownframework-loop
-Install root: /Users/mr.mrs.london/.claude/skills/of-loop
+Source root : OFLOOP_VALIDATE_SOURCE_ROOT (or repo of this script)
+Install root: OFLOOP_VALIDATE_INSTALL_ROOT (or \$HOME/.claude/skills/of-loop)
 USAGE
       exit 0 ;;
     *) ROOT="$arg" ;;
@@ -44,12 +48,14 @@ bad() { echo "  FAIL: $*"; exit 1; }
 
 if [[ "$INSTALLED_MODE" -eq 1 ]]; then
   echo "=== OwnFramework Loop V2 — validate (INSTALLED COPY) ==="
-  DEFAULT_ROOT="/Users/mr.mrs.london/.claude/skills/of-loop"
+  : "${OFLOOP_VALIDATE_INSTALL_ROOT:=$HOME/.claude/skills/of-loop}"
+  DEFAULT_ROOT="$OFLOOP_VALIDATE_INSTALL_ROOT"
   ROOT="${ROOT:-$DEFAULT_ROOT}"
 else
   echo "=== OwnFramework Loop V2 — validate (SOURCE TREE) ==="
   HERE="$(cd "$(dirname "$0")" && pwd)"
-  ROOT="${ROOT:-$HERE}"
+  : "${OFLOOP_VALIDATE_SOURCE_ROOT:=$HERE}"
+  ROOT="${ROOT:-$OFLOOP_VALIDATE_SOURCE_ROOT}"
 fi
 
 if [[ ! -d "$ROOT" ]]; then
@@ -60,11 +66,19 @@ fi
 python3 - "$ROOT" <<'PY'
 import json, sys
 root = sys.argv[1]
+import re
 data = json.load(open(f"{root}/.claude-plugin/plugin.json"))
 assert data["name"] == "of-loop", f"plugin name must be of-loop, got {data.get('name')}"
 assert data["displayName"] == "OwnFramework Loop"
 assert "version" in data
-print("  PASS: plugin manifest has name=of-loop, displayName=OwnFramework Loop")
+ver = data["version"]
+m = re.match(r"^(\d+)\.(\d+)\.(\d+)$", ver)
+assert m, f"version must be semver, got {ver!r}"
+major = int(m.group(1)); minor = int(m.group(2)); patch = int(m.group(3))
+assert (major, minor, patch) >= (0, 3, 0), (
+    f"installed version must be >= 0.3.0 (got {ver})"
+)
+print(f"  PASS: plugin manifest valid (version={ver} >= 0.3.0)")
 PY
 
 # 2. Required files.
@@ -81,7 +95,9 @@ for f in \
   lib/ownframework_loop/limits.py \
   lib/ownframework_loop/integrity.py \
   schemas/work-packet.schema.json \
+  schemas/work-packet-v3.schema.json \
   schemas/state.schema.json \
+  schemas/state-v2.schema.json \
   schemas/build-receipt.schema.json \
   schemas/review-verdict.schema.json
 do
@@ -110,9 +126,9 @@ fi
 python3 - "$ROOT" <<'PY'
 import json, sys
 root = sys.argv[1]
-for s in ["work-packet.schema.json", "state.schema.json", "build-receipt.schema.json", "review-verdict.schema.json"]:
+for s in ["work-packet.schema.json", "work-packet-v3.schema.json", "state.schema.json", "state-v2.schema.json", "build-receipt.schema.json", "review-verdict.schema.json"]:
     json.load(open(f"{root}/schemas/{s}"))
-print("  PASS: all 4 schemas parse as JSON")
+print("  PASS: all 6 schemas parse as JSON")
 PY
 
 # 5. Python library imports.
@@ -123,19 +139,33 @@ sys.path.insert(0, '$LIB_DIR')
 from ownframework_loop import (
     cli, packet, state, transitions, worktrees, git_checks,
     guards, receipts, verdicts, scheduling, locking, util,
-    integrity, limits,
+    integrity, limits, orchestrator, program,
 )
 print('  PASS: Python core library imports cleanly')
 "
 
-# 6. CLI runs (against this root, regardless of source/installed).
+# 6. CLI runs (against this root, regardless of source/installed). Audit v0.3.0
+# fixed: the previous `cmd && ok "..."` pattern silently continued past a
+# non-zero exit (with `set -uo pipefail` and no `-e`, the failure was masked
+# and the script eventually reported PASS).
 cd "$ROOT"
 if [[ "$INSTALLED_MODE" -eq 1 ]]; then
-  # Installed copy: invoke via the install's CLI path.
-  python3 bin/ofloop --help >/dev/null && ok "installed ofloop CLI runs (python3 bin/ofloop)"
-  ./bin/ofloop --help >/dev/null && ok "installed ofloop CLI runs (./bin/ofloop)"
+  if python3 bin/ofloop --help >/dev/null 2>&1; then
+    ok "installed ofloop CLI runs (python3 bin/ofloop)"
+  else
+    bad "installed ofloop CLI failed (python3 bin/ofloop)"
+  fi
+  if ./bin/ofloop --help >/dev/null 2>&1; then
+    ok "installed ofloop CLI runs (./bin/ofloop)"
+  else
+    bad "installed ofloop CLI failed (./bin/ofloop)"
+  fi
 else
-  python3 bin/ofloop --help >/dev/null && ok "source ofloop CLI runs"
+  if python3 bin/ofloop --help >/dev/null 2>&1; then
+    ok "source ofloop CLI runs"
+  else
+    bad "source ofloop CLI failed"
+  fi
 fi
 
 # 7. Hook scripts are executable.
@@ -149,11 +179,8 @@ ok "hook scripts are executable"
 TEST_RC=0
 if [[ "$SKIP_TESTS" -eq 1 ]]; then
   ok "deterministic unit tests skipped by explicit structural validation mode"
-elif [[ "$INSTALLED_MODE" -eq 1 ]]; then
-  echo "  running installed unit tests..."
-  bash "$ROOT/tests/run_all.sh" || TEST_RC=$?
 else
-  echo "  running source unit tests..."
+  echo "  running unit tests..."
   bash "$ROOT/tests/run_all.sh" || TEST_RC=$?
 fi
 

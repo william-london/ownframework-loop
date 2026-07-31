@@ -10,12 +10,12 @@ set -uo pipefail
 TMP=$(mktemp -d)
 cd "$TMP"
 INPUT='{"tool_name":"Bash","tool_input":{"command":"ls -la"}}'
-OUT=$(echo "$INPUT" | CLAUDE_PLUGIN_ROOT=/Users/mr.mrs.london/projects/plugins/ownframework-loop bash /Users/mr.mrs.london/projects/plugins/ownframework-loop/hooks/block_dangerous_bash.sh)
+OUT=$(echo "$INPUT" | CLAUDE_PLUGIN_ROOT=/path/to/ownframework-loop bash /path/to/ownframework-loop/hooks/block_dangerous_bash.sh)
 assert_eq "$OUT" "" "benign bash command produces no block"
 
 # Same for the protected-path hook on a file outside an active run.
 INPUT2='{"tool_name":"Write","tool_input":{"file_path":"/tmp/x.txt"}}'
-OUT2=$(echo "$INPUT2" | CLAUDE_PLUGIN_ROOT=/Users/mr.mrs.london/projects/plugins/ownframework-loop bash /Users/mr.mrs.london/projects/plugins/ownframework-loop/hooks/block_protected_paths.sh)
+OUT2=$(echo "$INPUT2" | CLAUDE_PLUGIN_ROOT=/path/to/ownframework-loop bash /path/to/ownframework-loop/hooks/block_protected_paths.sh)
 assert_eq "$OUT2" "" "benign write outside active run produces no block"
 
 # Cleanup.

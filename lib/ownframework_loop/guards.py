@@ -3,10 +3,12 @@
 Design contract (V1, post-audit):
 - The textual classifier is one layer of defense; the post-pass review pass is
   the ultimate authority. The classifier is *not* a complete shell parser.
-- Hermes is recognized only as an executable identity (first word of a shell
-  segment) when invoked as the `hermes` CLI itself. The bare word "hermes"
-  in argv (e.g. `grep hermes`), filesystem paths under `~/.hermes/`, and
-  docs that mention Hermes are allowed.
+- Operator-installed executable identities are recognized only as the FIRST
+  WORD of a shell segment (i.e. as the executable to invoke). The bare
+  word in argv (e.g. `grep pattern`), filesystem paths under `~/.<name>/`,
+  and docs that mention such tools are allowed.
+- The guarded list of recognized executables is operator-overridable via
+  the ``OFLOOP_RECOGNIZED_EXECUTABLES`` env var. The default is empty.
 - See `docs/SECURITY_MODEL.md` for the full layered model.
 """
 
@@ -23,9 +25,9 @@ from typing import Any
 # of any segment of the command chain.
 #
 # Note on intent: every regex here targets an executable identity or a specific
-# subcommand form. Do NOT add bare-keyword blocks (e.g. `\bhermes\b` was a
-# prompt-injection/UX hazard; paths under `~/.hermes/`, grep searches, and
-# docs that mention Hermes are legitimate).
+# subcommand form. Do NOT add bare-keyword blocks (a bare-name block is a
+# prompt-injection/UX hazard; paths under `~/.<name>/`, grep searches, and
+# docs that mention the tool are legitimate).
 #
 # The shell-quote-insensitive patterns (e.g. for `git "push"`, `git 'push'`)
 # normalize the command by stripping inline quotes before matching. This
@@ -60,17 +62,76 @@ FORBIDDEN_PATTERNS: list[tuple[re.Pattern[str], str, str]] = [
     # system / container mutations on production
     (re.compile(r"\bsystemctl\s+(start|stop|restart|reload)\b"), "systemctl is prohibited", "subcommand"),
     (re.compile(r"\bdocker\s+compose\s+(up|down|restart)\b"), "production docker mutation is prohibited", "subcommand"),
-    # remote shell to protected production hosts
-    (re.compile(r"\bssh\s+horus\b"), "ssh to production is prohibited", "subcommand"),
-    (re.compile(r"\bssh\s+firelove\b"), "ssh to production is prohibited", "subcommand"),
-    # Hermes executable identity — match ONLY when `hermes` is the first
-    # non-assignment word of a shell segment. Filesystem paths
-    # (`~/.hermes/`, `hermes.txt`) and grep/docs mentions are legitimate
-    # and must not be blocked.
-    (re.compile(r""), "hermes CLI invocation is prohibited", "executable_identity"),
-    # Codex CLI — out of scope for the supervised local-only V1 pilot.
-    (re.compile(r""), "codex CLI invocation is out of scope for V1", "executable_identity"),
+    # remote shell to operator-configured protected production hosts.
+    # Targets are loaded from $OFLOOP_BLOCKED_SSH_TARGETS (whitespace- or
+    # comma-separated). Empty/unset means no ssh-target blocks (universal
+    # engine policy does NOT enumerate specific deployment identifiers).
+
 ]
+
+
+def _load_operator_configured_ssh_blocks() -> list[tuple[re.Pattern[str], str, str]]:
+    """Build ssh-target forbidden patterns from operator configuration.
+
+    Honors $OFLOOP_BLOCKED_SSH_TARGETS as whitespace- or comma-separated
+    target names. Unset/empty returns an empty list — no universal block.
+    """
+    import os as _os
+    raw = _os.environ.get("OFLOOP_BLOCKED_SSH_TARGETS", "").strip()
+    if not raw:
+        return []
+    targets = re.split(r"[\s,]+", raw)
+    out: list[tuple[re.Pattern[str], str, str]] = []
+    for t in targets:
+        t = t.strip()
+        if not t:
+            continue
+        # Escape any regex metacharacters in operator-supplied target names.
+        esc = re.escape(t)
+        out.append((re.compile(rf"\bssh\s+{esc}\b"),
+                    f"ssh to operator-configured protected target '{t}' is prohibited",
+                    "subcommand"))
+    return out
+
+
+# Append operator-configured ssh-target blocks at import time.
+FORBIDDEN_PATTERNS.extend(_load_operator_configured_ssh_blocks())
+
+
+def _load_operator_configured_executable_blocks() -> list[tuple[re.Pattern[str], str, str]]:
+    """Build executable-identity forbidden patterns from operator configuration.
+
+    Honors $OFLOOP_RECOGNIZED_AND_BLOCKED_EXECUTABLES as whitespace- or
+    comma-separated names. Each name is matched only as the FIRST WORD of a
+    shell segment (i.e. as the executable to invoke); filesystem paths
+    (`~/.<name>/`, `<name>.txt`), grep searches, and docs mentions are
+    legitimate and must not be blocked. Empty/unset means no executable
+    blocks (universal engine policy does NOT enumerate specific operator
+    tools).
+    """
+    import os as _os
+    raw = _os.environ.get("OFLOOP_RECOGNIZED_AND_BLOCKED_EXECUTABLES", "").strip()
+    if not raw:
+        return []
+    names = re.split(r"[\s,]+", raw)
+    out: list[tuple[re.Pattern[str], str, str]] = []
+    for name in names:
+        name = name.strip()
+        if not name:
+            continue
+        esc = re.escape(name)
+        # Match only when the name is the first word of a shell segment.
+        # The leading \A matches start-of-string; the [^;&|\s] group excludes
+        # trailing args/flags. We use a non-greedy shell-segment start.
+        out.append((re.compile(rf"(?:^|[;&|\n])\s*{esc}(?:\s|$)"),
+                    f"operator-configured executable identity '{name}' invocation is prohibited",
+                    "executable_identity"))
+    return out
+
+
+# Append operator-configured executable-identity blocks at import time.
+FORBIDDEN_PATTERNS.extend(_load_operator_configured_executable_blocks())
+
 
 
 # Bash command tokens that are allowed for the reviewer (read-only inspection
@@ -168,19 +229,19 @@ def classify_bash_command(command: str) -> dict[str, Any]:
         candidates = [seg, _norm(seg)]
         for pattern, desc, kind in FORBIDDEN_PATTERNS:
             if kind == "executable_identity":
-                # Match ONLY against the first executable word (e.g. `hermes`,
-                # `/usr/bin/hermes`, `./hermes`). This is what makes
-                # `grep hermes` and `ls ~/.hermes/` legitimate.
+                # Match ONLY against the first executable word. The compiled
+                # pattern itself encodes the operator-supplied name (regex-
+                # escaped), so filesystem paths (`~/.<name>/`, `<name>.txt`)
+                # and grep/docs mentions are legitimate.
                 if first_word is None:
                     continue
                 norm_first = _norm(first_word)
                 base = norm_first.rsplit("/", 1)[-1]
-                expected = desc.split()[0]  # "hermes" or "codex"
-                if base == expected or norm_first.endswith("/" + expected):
+                if pattern.search(base) or pattern.search(norm_first):
                     forbidden.append(f"{desc}: {seg.strip()}")
                     break
                 continue
-            # Subcommand-shape patterns (git push, ssh horus, …) — match
+            # Subcommand-shape patterns (git push, ssh <operator-blocked-target>, …) — match
             # the whole segment with permissive quote-stripping.
             for cand in candidates:
                 if pattern.search(cand):
@@ -325,20 +386,26 @@ def scan_path_for_secrets(path: Path) -> list[dict[str, str]]:
 
 def classify_for_executable_identity(command: str) -> list[str]:
     """Classify by executable identity — matches only when the literal CLI is
-    on the argv (e.g. `hermes cron`, `/usr/local/bin/hermes run`, not
-    `cat ~/.hermes/STATE.json`).
+    on the argv (e.g. `<name> subcommand`, `/usr/local/bin/<name> run`, not
+    `cat ~/.<name>/STATE.json`).
 
     Returns a list of human descriptions for any prohibited executable
-    identity found. Used by post-pass verification (which can run on parsed
-    argv) and not by the textual hook (which cannot reliably parse argv).
+    identity found. The list is operator-configurable via
+    $OFLOOP_HIGH_RISK_EXECUTABLES (whitespace- or comma-separated). Empty
+    default means no universal list of flagged CLIs.
+
+    Used by post-pass verification (which can run on parsed argv) and not
+    by the textual hook (which cannot reliably parse argv).
     """
+    import os as _os_cf
+    flagged = set(re.split(r"[\s,]+", _os_cf.environ.get("OFLOOP_HIGH_RISK_EXECUTABLES", "").strip()))
     findings: list[str] = []
+    if not flagged:
+        return findings
     tokens = shlex.split(command)
     for tok in tokens:
         # Strip a leading env-var assignment segment if any.
         base = tok.rsplit("/", 1)[-1]
-        if base in ("hermes",):
-            findings.append(f"hermes CLI invocation: {tok}")
-        elif base in ("codex",):
-            findings.append(f"codex CLI invocation: {tok}")
+        if base in flagged:
+            findings.append(f"flagged executable identity {base!r} invocation: {tok}")
     return findings

@@ -385,10 +385,21 @@ def finalize_build(
         no_progress_streak = 0
 
     # 18. Repair limits.
+    # build_pass_count is owned by the claim path (cmd_build_claim).
+    # The finalizer reads the existing claimed count and uses it as
+    # builder_pass_number. The finalizer never increments, so:
+    #   - idempotent finalizer replay cannot double-count.
+    #   - a crashed claim still consumes one pass (the claim committed it).
+    #   - resume of the same claimed pass produces the same number.
     new_build_pass_count = int(state.get("build_pass_count") or 0)
     new_repair_round = int(state.get("repair_round") or 0)
     cap_build = limits_mod.effective_cap("build_pass_count", meta)
     cap_repair = limits_mod.effective_cap("repair_round", meta)
+    if new_build_pass_count < 1:
+        # Refuse: a finalizer must run AFTER a successful claim.
+        raise RuntimeError(
+            "build_pass_count=0; refuse to finalize. Claim the build pass first."
+        )
     if cap_build is not None and new_build_pass_count > cap_build:
         raise RuntimeError(f"build_pass_count={new_build_pass_count} above cap={cap_build}")
 
@@ -429,8 +440,8 @@ def finalize_build(
         "candidate_sha": candidate_sha,
         "candidate_branch": candidate_branch,
         "builder_worktree": str(builder_wt),
-        "builder_pass_number": int(state.get("build_pass_count") or 1),
-        "repair_round": int(state.get("repair_round") or 0),
+        "builder_pass_number": int(new_build_pass_count),
+        "repair_round": int(new_repair_round),
         "files_changed": int(stats["files_changed"]),
         "added_lines": int(stats["added_lines"]),
         "removed_lines": int(stats["removed_lines"]),
@@ -458,8 +469,8 @@ def finalize_build(
         "next_state": next_state,
         "agent_summary": (agent_result.get("summary") if agent_result else None),
         "blocker_reason": (agent_result.get("blocker_reason") if agent_result else None),
-        "codex_escalation_recommended": bool(agent_result.get("codex_escalation_recommended")) if agent_result else False,
-        "codex_reason": (agent_result.get("codex_reason") if agent_result else None),
+        "escalation_recommended": bool(agent_result.get("escalation_recommended")) if agent_result else False,
+        "escalation_reason": (agent_result.get("escalation_reason") if agent_result else None),
     }
 
     # 21. Persist atomically.
@@ -489,6 +500,7 @@ def finalize_build(
     cur = state_mod.load(canonical_repo, run_id)
     cur["no_progress_streak"] = no_progress_streak
     cur["last_candidate_sha"] = candidate_sha
+    cur["build_pass_count"] = int(new_build_pass_count)
     state_mod.save(canonical_repo, run_id, cur)
 
     # 24. Transition if appropriate.

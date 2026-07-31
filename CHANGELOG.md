@@ -1,5 +1,24 @@
 # Changelog
 
+
+## 0.3.0 — Program mode + checkpoints (2026-07-30)
+### Added
+- v3 packet schema (`ownframework-work-packet/v3`) with `execution_mode`,
+  `checkpoint_graph`, and `promotion_policy` fields.
+- `lib/ownframework_loop/program.py` — owns the finite checkpoint DAG,
+  per-checkpoint counters, cumulative caps, global source ceilings,
+  automatic advancement, nonterminal approval guards, and source-tree
+  accounting.
+- v2 state schema (`ownframework-loop-state/v2`) with optional `program`
+  block. v1 single-mode state remains the default when `program` is absent.
+- `ofloop program init` and `ofloop program status` subcommands.
+- `ofloop loop run` dispatches to single-mode or program-mode based on
+  the packet.
+- `test_program_mode.sh` end-to-end integration test (2 checkpoints → APPROVED).
+### Notes
+- v1/v2 packets remain backward-compatible.
+- The orchestrator still refuses to start without an operator approval
+  marker; program init is also gated on a valid APPROVAL.json binding.
 All notable changes to OwnFramework Loop are documented here.
 
 ## v0.2.1 — 2026-07-23
@@ -86,10 +105,10 @@ on fourteen patches.
    silently during the active loop.
 6. **Broad tools + external-action guard** — the textual guard
    blocks `git push`/`git remote *`/`docker compose`/`systemctl`
-   and SSH access to Horus / FireLove. Detection covers bare forms,
+   and SSH access to production-host-1 / production-host-2. Detection covers bare forms,
    chains (`&&`, `;`, `||`), pipelines (`|`), `$(...)` and `eval`,
    and single-line redirects. Variable indirection is deferred to
-   the sandbox + post-pass review layers. Hermes, Kanban, Linear,
+   the sandbox + post-pass review layers. production-orchestrator, Kanban, Linear,
    Windmill, and SQLite are not added.
 7. **Safe secret handling** — secret scanner distinguishes
    `HARD_PATTERNS` (block: AWS keys, private keys, high-confidence

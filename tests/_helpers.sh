@@ -130,7 +130,8 @@ EOF
   python3 - "$repo" "$rid" "$sha" "$branch" <<'PY'
 import sys, json, subprocess
 from pathlib import Path
-sys.path.insert(0, "/Users/mr.mrs.london/projects/plugins/ownframework-loop/lib")
+import os as _os_for_path
+sys.path.insert(0, _os_for_path.environ.get("OFLOOP_LIB", "/path/to/ownframework-loop/lib"))
 from ownframework_loop import approval
 canonical_repo = Path(sys.argv[1])
 run_id = sys.argv[2]
@@ -160,7 +161,8 @@ PY
   # Transition to READY_TO_BUILD so the builder can claim.
   python3 - "$repo" "$rid" <<'PY'
 import sys
-sys.path.insert(0, "/Users/mr.mrs.london/projects/plugins/ownframework-loop/lib")
+import os as _os_for_path
+sys.path.insert(0, _os_for_path.environ.get("OFLOOP_LIB", "/path/to/ownframework-loop/lib"))
 from ownframework_loop import state as state_mod
 from pathlib import Path
 canonical_repo = Path(sys.argv[1])

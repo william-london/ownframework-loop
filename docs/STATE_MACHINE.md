@@ -96,3 +96,36 @@ post-pass validation.
 - Runtime deployment required (out of scope for V2).
 - Authority outside the packet (e.g., attempting to push to a remote).
 - Budget or runtime limit.
+
+
+## v0.3.0 PROGRAM mode
+
+When a packet declares `execution_mode: program`, the state schema is v2
+and the canonical state machine remains the same nine states, but each
+checkpoint inside `program.checkpoints` carries its own per-checkpoint
+state field with the same vocabulary. The orchestrator drives one
+checkpoint per pass; transitions between checkpoints do NOT go through
+the host FSM (the host FSM still governs the overall run state, but
+checkpoint internal state is set via `state.save()` directly to avoid
+bouncing through CHANGES_REQUESTED/APPROVED gates).
+
+Per-checkpoint state is one of:
+
+- `READY_TO_BUILD` — current checkpoint, ready to claim
+- `BUILDING` — checkpoint builder has claimed this pass
+- `READY_FOR_REVIEW` — checkpoint produced a candidate SHA
+- `REVIEWING` — checkpoint reviewer has claimed this pass
+- `APPROVED` — checkpoint terminal (good)
+- `BLOCKED` — checkpoint terminal (needs human)
+- `CHANGES_REQUESTED` — checkpoint reviewer returned must-fix findings
+
+The orchestrator guarantees invariants on the per-checkpoint lifecycle:
+
+1. A checkpoint that is `APPROVED` MUST have at least one build pass and
+   at least one review pass recorded in `program.checkpoints[CP-N].counters`
+   before finalize. Otherwise `nonterminal_cp_approval_refused` is raised.
+2. The checkpoint graph SHA is frozen at `program init` time. Re-running
+   init with a different graph SHA is refused (`program_graph_sha_drift`).
+3. The source-tree accounting (unique changed files, diff lines) is computed
+   baseline->final per checkpoint AND cumulatively across the program.
+   Cumulative caps come from the sum of approved-checkpoint exact caps.

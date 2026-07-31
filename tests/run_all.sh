@@ -27,13 +27,15 @@ TESTS=(
   "$HERE"/unit/test_trust_*.sh
   "$HERE"/unit/test_*.sh
   "$HERE"/integration/test_*.sh
+  "$HERE"/smoke/smoke.sh
   "$HERE"/fixtures/test_*.sh
 )
 
 echo "=== OwnFramework Loop V2 — release gate ==="
 echo "OF_LOOP_OPERATOR_MARKER"
 echo "OF_LOOP_RELEASE_GATE=single"
-echo "OF_LOOP_PLUGIN_VERSION=0.2.0"
+OF_LOOP_PLUGIN_VERSION="$(python3 -c "import sys; sys.path.insert(0, '$LIB_DIR'); from ownframework_loop import __version__; print(__version__)")"
+echo "OF_LOOP_PLUGIN_VERSION=$OF_LOOP_PLUGIN_VERSION"
 echo
 
 for t in "${TESTS[@]}"; do

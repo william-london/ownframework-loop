@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
 # OwnFramework Loop V1 — bypass matrix.
+export OFLOOP_BLOCKED_SSH_TARGETS="production-host-1 production-host-2"
+export OFLOOP_RECOGNIZED_AND_BLOCKED_EXECUTABLES="hermes codex"
+export OFLOOP_HIGH_RISK_EXECUTABLES="hermes codex"
 #
 # Each row in the contract's required matrix is exercised against the
 # textual guard. Where the textual guard cannot reliably classify (eval,
@@ -89,7 +92,7 @@ assert_textual_block  "Python subprocess (V2.0.1 closed)"    'python3 -c "import
 assert_textual_block  "single-line redirect"       "git push origin master > /tmp/push.log 2>&1"
 
 # ----- Row 4: hermes-related benign commands — must NOT block -----
-assert_textual_allow  "ls ~/.hermes/"  "ls /Users/mr.mrs.london/.hermes/"
+assert_textual_allow  "ls ~/.hermes/"  "ls /path/to/operator-home/.hermes/"
 assert_textual_allow  "grep hermes"    "grep -r hermes src/"
 assert_textual_allow  "echo hermes"    "echo hermes check"
 assert_textual_block  "hermes CLI"     "hermes cron"
@@ -100,8 +103,8 @@ assert_textual_block  "/usr/local/bin/hermes" "/usr/local/bin/hermes status"
 assert_textual_block  "systemctl"          "systemctl restart nginx"
 assert_textual_block  "docker compose up"  "docker compose up -d"
 assert_textual_block  "docker compose down" "docker compose down"
-assert_textual_block  "ssh horus"          "ssh horus echo hi"
-assert_textual_block  "ssh firelove"       "ssh firelove ls"
+assert_textual_block  "ssh production-host-1"          "ssh production-host-1 echo hi"
+assert_textual_block  "ssh production-host-2"       "ssh production-host-2 ls"
 
 # ----- Row 6: git remote mutations -----
 assert_textual_block  "git remote add"     "git remote add origin https://example.com/repo.git"

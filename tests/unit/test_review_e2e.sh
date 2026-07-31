@@ -24,14 +24,10 @@ BASE=$(git -C "$WT" rev-parse master)
 # Verify receipt exists.
 [[ -f "$REPO/.ownframework-loop/$RUN_DIR/BUILD_RECEIPT.json" ]] && pass "build receipt present" || fail "build receipt missing"
 
-# Transition to REVIEWING (required by transition table).
-python3 - <<PY
-import sys
-sys.path.insert(0, "/Users/mr.mrs.london/projects/plugins/ownframework-loop/lib")
-from ownframework_loop import state
-from pathlib import Path
-state.transition(Path("$REPO"), "$RUN_DIR", to_state="REVIEWING", actor="test", reason="claim")
-PY
+# Claim the review pass: this is the single durable owner of
+# review_pass_count and moves the state to REVIEWING. The finalizer
+# refuses to stamp when the count is 0.
+"$OFLOOP_BIN" review claim "$REPO" "$RUN_DIR" >/dev/null 2>&1 || true
 
 # Now create the assessment.
 ASSESS=$(mktemp)
@@ -92,7 +88,8 @@ EOF
 python3 - "$REPO" "$RUN2" <<'PY'
 import sys, json, subprocess
 from pathlib import Path
-sys.path.insert(0, "/Users/mr.mrs.london/projects/plugins/ownframework-loop/lib")
+import os as _os_for_path
+sys.path.insert(0, _os_for_path.environ.get('OFLOOP_LIB', '/path/to/ownframework-loop/lib'))
 from ownframework_loop import approval, state as state_mod
 canonical_repo = Path(sys.argv[1])
 run_id = sys.argv[2]
@@ -131,14 +128,8 @@ SHA2=$(git -C "$WT2" rev-parse HEAD)
 "$OFLOOP_BIN" build claim "$REPO" "$RUN2" >/dev/null
 "$OFLOOP_BIN" build finalize "$REPO" "$RUN2" >/dev/null 2>&1
 
-# Transition RUN2 to REVIEWING.
-python3 - <<PY
-import sys
-sys.path.insert(0, "/Users/mr.mrs.london/projects/plugins/ownframework-loop/lib")
-from ownframework_loop import state
-from pathlib import Path
-state.transition(Path("$REPO"), "$RUN2", to_state="REVIEWING", actor="test", reason="claim")
-PY
+# Claim the review pass for RUN2.
+"$OFLOOP_BIN" review claim "$REPO" "$RUN2" >/dev/null 2>&1 || true
 
 # Stale SHA in assessment.
 STALE_ASSESS=$(mktemp)

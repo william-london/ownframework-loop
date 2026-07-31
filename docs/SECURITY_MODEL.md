@@ -2,7 +2,7 @@
 
 ## Threat model
 
-The OwnFramework Loop is designed for a single operator (William) running
+The OwnFramework Loop is designed for a single operator (operator) running
 locally on Mac. Threats considered:
 
 1. **A model prompt-injection attempt from inside the repo** that tries to
@@ -34,7 +34,7 @@ opt out.
 - `PreToolUse` on Bash blocks forbidden command patterns
   (`git push`, `git merge`, `git reset --hard`, `git clean`,
   `git remote add`, `systemctl`, `docker compose up|down`,
-  `ssh horus|firelove`, `hermes`). Patterns are compiled
+  `ssh production-host-1|production-host-2`, <operator-blocked-executable>). Patterns are compiled
   regexes; chains like `git status && git push` are split on `&&`, `||`,
   `;`, `|` before matching.
 - `PreToolUse` on Write|Edit|MultiEdit|NotebookEdit blocks protected
@@ -252,12 +252,12 @@ is anything other than `human_only`, `delegated`, or `none`. The CLI
 rejects bad values at parse time. Hooks refuse push/merge/deploy
 regardless of what the packet says.
 
-## Why Codex is not wired
+## Why escalation is not wired
 
-`CODEX=manual_triggered_escalation`. The loop emits a durable
+`OFLOOP_ESCALATION_TRIGGER=manual_triggered_escalation`. The loop emits a durable
 recommendation in `REVIEW_VERDICT.json` and `EVENTS.log` when an
-escalation condition is observed. William invokes Codex as a separate
-manual lane. The loop never calls Codex automatically.
+escalation condition is observed. operator invokes escalation as a separate
+manual lane. The loop never calls escalation automatically.
 
 ## Auditability
 
@@ -280,9 +280,39 @@ WEBFETCH_AVAILABLE=yes
 PER_PASS_HUMAN_APPROVAL=no
 ```
 
-William's deliberate posture is `bypassPermissions` + broad tools +
+operator's deliberate posture is `bypassPermissions` + broad tools +
 no per-pass prompts. OwnFramework Loop is built to operate under
 that posture. The plugin does NOT modify any of these settings
 (`~/.claude/settings.json`, `~/.claude.json`, managed settings,
 project permission settings, sandbox settings, effort settings,
 provider settings, model settings).
+
+
+## v0.3.0 PROGRAM mode protections
+
+PROGRAM mode extends the security model with three additional invariants:
+
+1. **Frozen graph SHA** — `checkpoint_graph_sha256` is captured at
+   `program init` and recorded in `state.program`. Any subsequent
+   initialization attempt with a different graph SHA is refused
+   (`program_graph_sha_drift`). This prevents post-approval widening
+   (e.g., adding new checkpoints or raising caps after some CPs are
+   already approved).
+
+2. **Per-checkpoint approval guard** — `program.checkpoints[CP-N].state`
+   is finalised to `APPROVED` only after at least one build pass and
+   at least one review pass are recorded in the per-checkpoint counters.
+   The model cannot bulk-finalise without going through the bounded
+   builder/reviewer/finalizer cycle. The nonterminal exception
+   (`nonterminal_cp_approval_refused`) is raised at finalize time.
+
+3. **Cumulative source ceilings** — Even with per-checkpoint caps
+   satisfied, the program-level cumulative caps (sum of approved-CP
+   exact caps) and global source ceilings (500 files, 30,000 diff lines)
+   are re-checked at every checkpoint finalization. Exceeding a
+   cumulative cap is a hard `STOPPED` outcome and requires a new
+   packet/program.
+
+These invariants are deterministic in the Python core (no model
+judgment) and are exercised by the integration tests in
+`tests/integration/test_program_mode.sh`.

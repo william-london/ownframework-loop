@@ -12,7 +12,7 @@ activation path; the loop refuses to start without it.
 
 ```bash
 # Activate per-session. Safe — does NOT modify ~/.claude/settings.json.
-claude --plugin-dir /Users/mr.ms.london/.claude/skills/of-loop \
+claude --plugin-dir $HOME/.claude/skills/of-loop \
       --sandbox \
       --sandbox-fail-if-unavailable \
       --network-default deny

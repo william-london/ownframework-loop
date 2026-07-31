@@ -22,18 +22,10 @@ matrix_finalize() {
     echo "build finalize failed: $out"
   fi
 
-  # Move to REVIEWING (state should be READY_FOR_REVIEW after finalize).
-  python3 - "$repo" "$rid" <<'PY'
-import sys
-sys.path.insert(0, "/Users/mr.mrs.london/projects/plugins/ownframework-loop/lib")
-from ownframework_loop import state as state_mod
-from pathlib import Path
-canonical_repo = Path(sys.argv[1])
-run_id = sys.argv[2]
-cur = state_mod.load(canonical_repo, run_id)
-if cur.get("state") == "READY_FOR_REVIEW":
-    state_mod.transition(canonical_repo, run_id, to_state="REVIEWING", actor="test", reason="claim")
-PY
+  # Claim the review pass: this is the single durable owner of
+  # review_pass_count and moves the state to REVIEWING. The finalizer
+  # refuses to stamp when the count is 0.
+  "$OFLOOP_BIN" review claim "$repo" "$rid" >/dev/null 2>&1 || true
 
   # Get the candidate SHA from the receipt.
   local sha
@@ -100,7 +92,8 @@ PY
 python3 - "$M2" "$M2_RID" <<'PY'
 import sys, json, subprocess
 from pathlib import Path
-sys.path.insert(0, "/Users/mr.mrs.london/projects/plugins/ownframework-loop/lib")
+import os as _os_for_path
+sys.path.insert(0, _os_for_path.environ.get('OFLOOP_LIB', '/path/to/ownframework-loop/lib'))
 from ownframework_loop import approval
 canonical_repo = Path(sys.argv[1])
 run_id = sys.argv[2]
@@ -153,7 +146,8 @@ PY
 python3 - "$M3" "$M3_RID" <<'PY'
 import sys, json, subprocess
 from pathlib import Path
-sys.path.insert(0, "/Users/mr.mrs.london/projects/plugins/ownframework-loop/lib")
+import os as _os_for_path
+sys.path.insert(0, _os_for_path.environ.get('OFLOOP_LIB', '/path/to/ownframework-loop/lib'))
 from ownframework_loop import approval, state as state_mod
 canonical_repo = Path(sys.argv[1])
 run_id = sys.argv[2]

@@ -111,14 +111,35 @@ def get_event_chain_hash(events_log: Path) -> str | None:
 def compute_event_chain_hash(events_log: Path) -> str:
     """SHA-256 over the JSON-Lines tail of EVENTS.log.
 
-    Each event is serialized as ``json.dumps(ev, sort_keys=True)`` and
-    joined by newlines. Returns the SHA-256 of the joined bytes.
+    Each event is serialized using the canonical formatter (sort_keys=True,
+    separators=(",", ":")), matching the on-disk format written by
+    state.append_event. Events are joined by "\n" and the SHA covers the
+    UTF-8 bytes of the joined payload.
     """
     events = read_event_chain(events_log)
     if not events:
         return hashlib.sha256(b"").hexdigest()
-    payload = "\n".join(json.dumps(ev, sort_keys=True) for ev in events)
+    payload = "\n".join(canonical_json_dumps(ev) for ev in events)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def canonical_json_dumps(obj: Any) -> str:
+    """Canonical JSON serialization for all hash-bearing artifacts.
+
+    Used by:
+      - state.append_event (EVENTS.log line bytes)
+      - integrity.compute_event_chain_hash (recomputation for verification)
+      - integrity.verify_state_sha (state SHA embedded in events)
+      - integrity.verify_artifact_sha (artifact SHA embedded in events)
+
+    Constraints:
+      - UTF-8 bytes
+      - sort_keys=True (deterministic key ordering)
+      - separators=(",", ":") (compact, no whitespace)
+      - ensure_ascii=False would emit non-ASCII as Unicode escapes; we
+        default to ensure_ascii=True so the byte stream is portable.
+    """
+    return json.dumps(obj, sort_keys=True, separators=(",", ":"))
 
 
 def verify_state_sha(state_path: Path, events_log: Path) -> tuple[bool, str]:
