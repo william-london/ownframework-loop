@@ -19,15 +19,21 @@
 # Policy is implemented in lib/ownframework_loop/external_action.py
 # so the same classification can be unit-tested and reused by the
 # orchestrator.
+#
+# v0.3.4 hook bytecode suppression: export PYTHONDONTWRITEBYTECODE=1
+# BEFORE every Python invocation so this hook does NOT write .pyc files
+# into the active managed plugin cache tree. Every `python3` here is
+# also invoked with `-B`.
 
 set -eo pipefail
+export PYTHONDONTWRITEBYTECODE=1
 
 input="$(cat 2>/dev/null || true)"
 if [[ -z "$input" ]]; then
   exit 2
 fi
 
-parsed="$(printf '%s' "$input" | python3 -c '
+parsed="$(printf '%s' "$input" | python3 -B -c '
 import json, sys
 try:
     obj = json.loads(sys.stdin.read())
@@ -41,14 +47,14 @@ if [[ "$parsed" == "PARSE_ERROR"* ]]; then
   exit 2
 fi
 
-tool_name="$(printf '%s' "$parsed" | python3 -c 'import sys, json; print(json.loads(sys.stdin.read()).get("tool_name", ""))' 2>/dev/null || true)"
+tool_name="$(printf '%s' "$parsed" | python3 -B -c 'import sys, json; print(json.loads(sys.stdin.read()).get("tool_name", ""))' 2>/dev/null || true)"
 
 if [[ -z "$tool_name" ]]; then
   exit 0
 fi
 
 # Active run detection.
-cwd="$(printf '%s' "$parsed" | python3 -c 'import sys, json; print(json.loads(sys.stdin.read()).get("cwd", ""))' 2>/dev/null || true)"
+cwd="$(printf '%s' "$parsed" | python3 -B -c 'import sys, json; print(json.loads(sys.stdin.read()).get("cwd", ""))' 2>/dev/null || true)"
 if [[ -z "$cwd" ]]; then
   cwd="$(pwd 2>/dev/null || true)"
 fi
@@ -81,7 +87,7 @@ fi
 # Encode arguments safely via base64 to avoid shell quoting.
 encoded="$(printf '%s' "$parsed" | base64)"
 
-decision="$(CLAUDE_PLUGIN_ROOT="$CLAUDE_PLUGIN_ROOT" encoded_payload="$encoded" encoded_tool="$tool_name" python3 - <<'PY' 2>/dev/null || echo "ALLOW"
+decision="$(CLAUDE_PLUGIN_ROOT="$CLAUDE_PLUGIN_ROOT" encoded_payload="$encoded" encoded_tool="$tool_name" python3 -B - <<'PY' 2>/dev/null || echo "ALLOW"
 import sys, os, base64, json
 sys.path.insert(0, os.path.join(os.environ["CLAUDE_PLUGIN_ROOT"], "lib"))
 from ownframework_loop import external_action
@@ -105,7 +111,7 @@ fi
 
 if [[ "$decision" == "ALLOW_WITH_DIAGNOSTIC" ]]; then
   # Redacted diagnostic to a log file; do not block.
-  python3 - "$tool_name" "$active_run" <<'PY' 2>/dev/null || true
+  python3 -B - "$tool_name" "$active_run" <<'PY' 2>/dev/null || true
 import sys, os
 log_dir = os.path.join(os.environ.get("CLAUDE_PLUGIN_ROOT", ""), "logs")
 os.makedirs(log_dir, exist_ok=True)
@@ -121,7 +127,7 @@ code="$(printf '%s' "$decision" | head -n1 | tr -d ' ')"
 reason="$(printf '%s' "$decision" | tail -n +2)"
 # Pass reason via base64 to avoid shell quote injection.
 reason_b64="$(printf '%s' "$reason" | base64)"
-reason_b64="$reason_b64" code="$code" python3 - <<'PY'
+reason_b64="$reason_b64" code="$code" python3 -B - <<'PY'
 import json, os, base64
 reason = base64.b64decode(os.environ["reason_b64"]).decode("utf-8", errors="replace")
 code = os.environ["code"]

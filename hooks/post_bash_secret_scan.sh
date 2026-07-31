@@ -8,15 +8,21 @@
 # event so the orchestrator can refuse the next transition.
 #
 # Detection-only hook. The forbidden-bash guard runs in PreToolUse.
+#
+# v0.3.4 hook bytecode suppression: export PYTHONDONTWRITEBYTECODE=1
+# BEFORE every Python invocation so this hook does NOT write .pyc files
+# into the active managed plugin cache tree. Every `python3` here is
+# also invoked with `-B`.
 
 set -euo pipefail
+export PYTHONDONTWRITEBYTECODE=1
 
 input="$(cat 2>/dev/null || true)"
 if [[ -z "$input" ]]; then
   exit 0
 fi
 
-tool_name="$(printf '%s' "$input" | python3 -c 'import sys, json; print(json.load(sys.stdin).get("tool_name", ""))' 2>/dev/null || true)"
+tool_name="$(printf '%s' "$input" | python3 -B -c 'import sys, json; print(json.load(sys.stdin).get("tool_name", ""))' 2>/dev/null || true)"
 
 if [[ "$tool_name" != "Bash" ]]; then
   exit 0
@@ -24,7 +30,7 @@ fi
 
 # Pass the tool output through stdin so the secret material never
 # lands in any Python source as a string literal.
-output_b64="$(printf '%s' "$input" | python3 -c 'import sys, json, base64; print(base64.b64encode(json.load(sys.stdin).get("tool_output", "").encode("utf-8", errors="replace")).decode("ascii"))' 2>/dev/null || true)"
+output_b64="$(printf '%s' "$input" | python3 -B -c 'import sys, json, base64; print(base64.b64encode(json.load(sys.stdin).get("tool_output", "").encode("utf-8", errors="replace")).decode("ascii"))' 2>/dev/null || true)"
 if [[ -z "$output_b64" ]]; then
   exit 0
 fi
@@ -33,7 +39,7 @@ if [[ -z "${CLAUDE_PLUGIN_ROOT:-}" ]]; then
   exit 0
 fi
 
-CLAUDE_PLUGIN_ROOT="$CLAUDE_PLUGIN_ROOT" encoded="$output_b64" python3 - <<'PY' 2>/dev/null || true
+CLAUDE_PLUGIN_ROOT="$CLAUDE_PLUGIN_ROOT" encoded="$output_b64" python3 -B - <<'PY' 2>/dev/null || true
 import base64, json, os, sys
 from pathlib import Path
 sys.path.insert(0, os.path.join(os.environ["CLAUDE_PLUGIN_ROOT"], "lib"))

@@ -14,8 +14,15 @@
 # surfaces the stderr).
 #
 # V1 has NO operator escape hatch and NO model-controllable bypass.
+#
+# v0.3.4 hook bytecode suppression: export PYTHONDONTWRITEBYTECODE=1
+# BEFORE every Python invocation so this hook does NOT write .pyc files
+# into the active managed plugin cache tree. Every `python3` here is
+# also invoked with `-B` for belt-and-braces correctness when this hook
+# is launched in a child shell that has cleared the env.
 
 set -eo pipefail
+export PYTHONDONTWRITEBYTECODE=1
 
 input="$(cat 2>/dev/null || true)"
 if [[ -z "$input" ]]; then
@@ -23,7 +30,7 @@ if [[ -z "$input" ]]; then
 fi
 
 # Parse JSON robustly via Python (always available alongside this plugin).
-parsed="$(printf '%s' "$input" | python3 -c '
+parsed="$(printf '%s' "$input" | python3 -B -c '
 import json, sys
 try:
     obj = json.loads(sys.stdin.read())
@@ -38,20 +45,20 @@ if [[ "$parsed" == "PARSE_ERROR"* ]]; then
   exit 2
 fi
 
-tool_name="$(printf '%s' "$parsed" | python3 -c 'import sys, json; print(json.loads(sys.stdin.read()).get("tool_name", ""))' 2>/dev/null || true)"
+tool_name="$(printf '%s' "$parsed" | python3 -B -c 'import sys, json; print(json.loads(sys.stdin.read()).get("tool_name", ""))' 2>/dev/null || true)"
 
 if [[ "$tool_name" != "Bash" ]]; then
   exit 0
 fi
 
-command="$(printf '%s' "$parsed" | python3 -c 'import sys, json; print(json.loads(sys.stdin.read()).get("tool_input", {}).get("command", ""))' 2>/dev/null || true)"
+command="$(printf '%s' "$parsed" | python3 -B -c 'import sys, json; print(json.loads(sys.stdin.read()).get("tool_input", {}).get("command", ""))' 2>/dev/null || true)"
 
 if [[ -z "$command" ]]; then
   exit 0
 fi
 
 # Find cwd to scope protection to an active loop.
-cwd="$(printf '%s' "$parsed" | python3 -c 'import sys, json; print(json.loads(sys.stdin.read()).get("cwd", ""))' 2>/dev/null || true)"
+cwd="$(printf '%s' "$parsed" | python3 -B -c 'import sys, json; print(json.loads(sys.stdin.read()).get("cwd", ""))' 2>/dev/null || true)"
 if [[ -z "$cwd" ]]; then
   cwd="$(pwd 2>/dev/null || true)"
 fi
@@ -91,7 +98,7 @@ fi
 PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-${OFLOOP_PLUGIN_ROOT}}"
 export CLAUDE_PLUGIN_ROOT="$PLUGIN_ROOT"
 encoded_command="$(printf '%s' "$command" | base64)"
-result="$(python3 - "$encoded_command" 2>/dev/null <<'PY' || echo "CLASSIFY_ERROR"
+result="$(python3 -B - "$encoded_command" 2>/dev/null <<'PY' || echo "CLASSIFY_ERROR"
 import sys, os, base64
 sys.path.insert(0, os.path.join(os.environ.get("CLAUDE_PLUGIN_ROOT", ""), "lib"))
 from ownframework_loop import guards
@@ -119,7 +126,7 @@ if [[ "$severity" == "forbidden" ]]; then
   # Pass reasons via stdin (as base64) so shell quotes in the matched
   # command cannot break Python source parsing.
   reasons_b64="$(printf '%s' "$reasons" | base64)"
-  reasons_b64="$reasons_b64" python3 - <<'PY'
+  reasons_b64="$reasons_b64" python3 -B - <<'PY'
 import json, sys, base64, os
 reasons = base64.b64decode(os.environ["reasons_b64"]).decode("utf-8", errors="replace")
 print(json.dumps({

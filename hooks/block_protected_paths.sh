@@ -32,15 +32,21 @@
 #   - ordinary engineering tool                     -> allow
 #
 # This hook NEVER modifies permission settings, sandbox, or model routing.
+#
+# v0.3.4 hook bytecode suppression: export PYTHONDONTWRITEBYTECODE=1
+# BEFORE every Python invocation so this hook does NOT write .pyc files
+# into the active managed plugin cache tree. Every `python3` here is
+# also invoked with `-B`.
 
 set -eo pipefail
+export PYTHONDONTWRITEBYTECODE=1
 
 input="$(cat 2>/dev/null || true)"
 if [[ -z "$input" ]]; then
   exit 2
 fi
 
-parsed="$(printf '%s' "$input" | python3 -c '
+parsed="$(printf '%s' "$input" | python3 -B -c '
 import json, sys
 try:
     obj = json.loads(sys.stdin.read())
@@ -54,30 +60,30 @@ if [[ "$parsed" == "PARSE_ERROR"* ]]; then
   exit 2
 fi
 
-tool_name="$(printf '%s' "$parsed" | python3 -c 'import sys, json; print(json.loads(sys.stdin.read()).get("tool_name", ""))' 2>/dev/null || true)"
+tool_name="$(printf '%s' "$parsed" | python3 -B -c 'import sys, json; print(json.loads(sys.stdin.read()).get("tool_name", ""))' 2>/dev/null || true)"
 
 case "$tool_name" in
   Write|Edit|MultiEdit|NotebookEdit) ;;
   *) exit 0 ;;
 esac
 
-file_path="$(printf '%s' "$parsed" | python3 -c 'import sys, json; print(json.loads(sys.stdin.read()).get("tool_input", {}).get("file_path", ""))' 2>/dev/null || true)"
+file_path="$(printf '%s' "$parsed" | python3 -B -c 'import sys, json; print(json.loads(sys.stdin.read()).get("tool_input", {}).get("file_path", ""))' 2>/dev/null || true)"
 
 if [[ -z "$file_path" ]]; then
   exit 0
 fi
 
-cwd="$(printf '%s' "$parsed" | python3 -c 'import sys, json; print(json.loads(sys.stdin.read()).get("cwd", ""))' 2>/dev/null || true)"
+cwd="$(printf '%s' "$parsed" | python3 -B -c 'import sys, json; print(json.loads(sys.stdin.read()).get("cwd", ""))' 2>/dev/null || true)"
 if [[ -z "$cwd" ]]; then
   cwd="$(pwd 2>/dev/null || true)"
 fi
 
 # Resolve both paths to canonical absolute form (macOS /var/folders → /private/var/folders).
-abs_path="$(python3 -c 'import sys
+abs_path="$(python3 -B -c 'import sys
 from pathlib import Path
 p = sys.argv[1] if len(sys.argv) > 1 else ""
 print(str(Path(p).expanduser().resolve(strict=False))) if p else print("")' "$file_path" 2>/dev/null || echo "$file_path")"
-abs_cwd="$(python3 -c 'import sys
+abs_cwd="$(python3 -B -c 'import sys
 from pathlib import Path
 c = sys.argv[1] if len(sys.argv) > 1 else ""
 print(str(Path(c).expanduser().resolve(strict=False))) if c else print("")' "$cwd" 2>/dev/null || echo "$cwd")"
@@ -109,7 +115,7 @@ wt_root="$canonical_repo/.worktrees/ownframework-loop"
 emit_block() {
   local code="$1"
   local reason="$2"
-  python3 - "$code" "$reason" <<'PY'
+  python3 -B - "$code" "$reason" <<'PY'
 import json, sys
 code, reason = sys.argv[1], sys.argv[2]
 print(json.dumps({
@@ -199,7 +205,7 @@ if [[ "$abs_path" == "$canonical_repo"/* && "$abs_path" != "$run_root"/*" && "$a
   for rid in "${RUN_IDS[@]}"; do
     state_file="$run_root/$rid/STATE.json"
     if [[ -f "$state_file" ]]; then
-      cur_state="$(python3 -c 'import sys, json
+      cur_state="$(python3 -B -c 'import sys, json
 p = sys.argv[1] if len(sys.argv) > 1 else ""
 try:
     print(json.load(open(p)).get("state",""))

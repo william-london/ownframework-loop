@@ -1,5 +1,43 @@
 # Changelog
 
+## 0.3.4 — Hook bytecode closeout (2026-07-31)
+
+**Scope:** narrow, terminal release-closeout patch on top of v0.3.3.
+Hook behavior is unchanged. Only Python launch boundaries are touched.
+
+**Repair:**
+
+- **Hook bytecode suppression.** Every runtime Claude Code hook script
+  exports `PYTHONDONTWRITEBYTECODE=1` at the top and invokes `python3 -B`
+  at every Python launch boundary:
+  - `hooks/block_dangerous_bash.sh` (6 launch sites)
+  - `hooks/block_protected_paths.sh` (8 launch sites)
+  - `hooks/external_action_guard.sh` (6 launch sites)
+  - `hooks/post_bash_secret_scan.sh` (3 launch sites)
+
+  As a result, plugin activation no longer writes `.pyc` files or
+  `__pycache__/` directories into the active managed cache. The terminal
+  bytecode condition is now satisfied.
+
+**What v0.3.4 does NOT change:**
+
+- hook policy semantics (allow / deny / scan / external-action rules);
+- JSON parsing, stdin/stdout handling, exit codes, fail-closed posture;
+- hook configuration and matchers in `hooks/hooks.json`;
+- the v0.3.3 installed-cache discovery, bytecode-free validation, and
+  structural manifest count truth;
+- the v0.3.2 unified PROGRAM claim accounting and payload boundary;
+- public command surface (`/of-loop:spec`, `/of-loop:build`,
+  `/of-loop:review`);
+- packet, state, or worktree schemas.
+
+**Scope guard:** this is a patch release. No new packet schema, no new
+state schema, no new public slash command, no new agent role, no new
+checkpoint type, no new counter category, no registry framework, no
+daemon, no external queue, no auto-push/deploy, no generalized
+abstraction layer, no broad PROGRAM-mode refactor.
+
+
 ## 0.3.3 — Terminal-closeout: installed-cache discovery + bytecode-free validation + manifest count truth (2026-07-31)
 
 **Scope:** narrow, terminal release-closeout patch on top of v0.3.2. No new
