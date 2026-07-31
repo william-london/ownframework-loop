@@ -126,27 +126,52 @@ def _drive_review_cycle(canonical_repo: Path, run_id: str) -> dict[str, Any]:
     return out
 
 
+def _discover_run_id(canonical_repo: Path) -> str:
+    """Discover the latest run id under the canonical repo's run dir.
+
+    Used by the unattended single-mode when no run_id is provided.
+    Returns the run id whose mtime is greatest.
+    """
+    from . import state as state_mod
+    runs_root = Path(canonical_repo) / ".ownframework-loop"
+    if not runs_root.is_dir():
+        raise RuntimeError(f"no .ownframework-loop/ under {canonical_repo}")
+    candidates = [p for p in runs_root.iterdir() if p.is_dir() and p.name.startswith("run-")]
+    if not candidates:
+        raise RuntimeError(f"no runs found under {runs_root}")
+    candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    return candidates[0].name
+
+
 def run_single_mode(
     *,
     canonical_repo: Path,
-    mission: str,
+    run_id: str | None = None,
+    mission: str | None = None,
     max_repair_rounds: int | None = None,
 ) -> dict[str, Any]:
     """Run one complete unattended single-mode cycle.
 
-    Refuses to start unless the work packet has been approved by
-    the operator. Drives the build and review cycles until the
-    run reaches a terminal state or the repair-round cap is hit.
+    The operator must have already created the run via spec new
+    and pre-approved the work packet via spec approve. The
+    orchestrator finds the run, refuses if no approval marker exists,
+    and drives the build + review cycles until the run reaches a
+    terminal state or the repair-round cap is hit.
+
+    Args:
+      canonical_repo: path to the git repo
+      run_id: target run id (defaults to the most recently created run)
+      mission: deprecated — kept for CLI back-compat; ignored when run_id is set
+      max_repair_rounds: override packet.risk_budget.max_repair_rounds
     """
     canonical_repo = Path(canonical_repo).resolve(strict=False)
     if not canonical_repo.is_dir():
         raise RuntimeError(f"canonical repo not found: {canonical_repo}")
 
-    # 1. spec new → AWAITING_APPROVAL.
-    spec_out = _run_cli(["spec", "new", str(canonical_repo), mission])
-    run_id = spec_out["run_id"]
+    if run_id is None:
+        run_id = _discover_run_id(canonical_repo)
 
-    # 2. Refuse to start without an operator approval marker.
+    # Refuse to start without an operator approval marker.
     _require_approval_marker(canonical_repo, run_id)
 
     # 3. Drive cycles until terminal.

@@ -18,13 +18,13 @@ echo "TEST 1: CLI refusal of ofloop loop run without APPROVAL.json"
 R1="$(make_tmp_repo)"
 # Spec new alone creates an AWAITING_APPROVAL run.
 "$OFLOOP_BIN" spec new "$R1" "refusal-test" >/dev/null
+RID1="$(ls -1t "$R1/.ownframework-loop" | head -n1)"
 # Run the orchestrator against a fresh, unapproved repo.
-out="$(cd /tmp && "$OFLOOP_BIN" loop run "$R1" "refusal-test2" 2>&1 || true)"
+out="$(cd /tmp && "$OFLOOP_BIN" loop run "$R1" --run-id "$RID1" 2>&1 || true)"
 # The second spec new call creates a new run; check that no APPROVAL.json was created for it.
-LAST_RID="$(ls -1t "$R1/.ownframework-loop" | head -n1)"
-[[ ! -f "$R1/.ownframework-loop/$LAST_RID/APPROVAL.json" ]] \
+[[ ! -f "$R1/.ownframework-loop/$RID1/APPROVAL.json" ]] \
   && pass "orchestrator did NOT write APPROVAL.json for an unapproved run" \
-  || fail "orchestrator wrote APPROVAL.json without operator intervention: $LAST_RID"
+  || fail "orchestrator wrote APPROVAL.json without operator intervention: $RID1"
 assert_contains "$out" "refuse to start" "CLI refusal surfaces 'refuse to start'"
 assert_contains "$out" "APPROVAL.json" "CLI refusal mentions APPROVAL.json"
 

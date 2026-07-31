@@ -1034,6 +1034,7 @@ def _build_parser() -> argparse.ArgumentParser:
         repo = _repo_path(args.repo)
         out = orch_mod.run_single_mode(
             canonical_repo=repo,
+            run_id=args.run_id,
             mission=args.mission or '',
             max_repair_rounds=int(args.max_repair_rounds) if args.max_repair_rounds is not None else None,
         )
@@ -1043,6 +1044,8 @@ def _build_parser() -> argparse.ArgumentParser:
     l_sub = lp.add_subparsers(dest='loop_cmd', required=True)
     l_run = l_sub.add_parser('run', help='single-mode unattended run')
     l_run.add_argument('repo')
+    l_run.add_argument('--run-id', default=None,
+                       help='target run id (defaults to most recent)')
     l_run.add_argument('mission', nargs='?')
     l_run.add_argument('--max-repair-rounds', type=int, default=None,
                        help='override packet.risk_budget.max_repair_rounds')
