@@ -44,9 +44,12 @@ from typing import Any
 
 from . import (
     approval as approval_mod,
+    packet as packet_mod,
+    program as program_mod,
     state as state_mod,
     util,
 )
+from .program import ProgramStateError
 
 ORCHESTRATOR_AGENT = "of-loop-orchestrator"
 MAX_REPAIR_ROUNDS_DEFAULT = 3
@@ -81,7 +84,7 @@ def _run_cli(args: list[str], *, cwd: Path | None = None) -> dict[str, Any]:
     )
     if proc.returncode != 0:
         raise RuntimeError(
-            f"ofloop {' '.join(args)} failed: rc={proc.returncode} stderr={proc.stderr.strip()}"
+            f"ofloop {' '.join(args)} failed: rc={proc.returncode} stderr={proc.stderr.strip()} stdout={proc.stdout.strip()[:200]}"
         )
     try:
         return json.loads(proc.stdout)
@@ -255,3 +258,297 @@ def run_single_mode(
         "history": history,
         "reason": "repair_round_cap_reached",
     }
+
+
+
+def run_program_mode(
+    *,
+    canonical_repo: Path,
+    run_id: str | None = None,
+    max_repair_rounds: int | None = None,
+) -> dict[str, Any]:
+    """Drive a v3 program-mode packet to terminal APPROVED|BLOCKED|STOPPED.
+
+    One-at-a-time checkpoint selection. Each iteration:
+      1. read program state
+      2. pick the deterministic next claimable checkpoint (None ⇒ done)
+      3. drive one build cycle and one review cycle against it
+      4. finalize the checkpoint (APPROVED/BLOCKED/STOPPED)
+      5. advance to the next claimable cp or terminate
+
+    Refuses to start without an approval marker. Caller must have
+    already written APPROVAL.json and run `program init`.
+    """
+    canonical_repo = Path(canonical_repo).resolve(strict=False)
+    if not canonical_repo.is_dir():
+        raise RuntimeError(f"canonical repo not found: {canonical_repo}")
+    if run_id is None:
+        run_id = _discover_run_id(canonical_repo)
+
+    # Refuse without operator approval.
+    _require_approval_marker(canonical_repo, run_id)
+
+    # Load packet and program state.
+    state = _safe_load_state(canonical_repo, run_id)
+    if state is None:
+        raise RuntimeError(f"STATE.json missing for run {run_id}")
+    if not state_mod.is_program_state(state):
+        raise RuntimeError(
+            f"run {run_id} is not in program mode; use run_single_mode"
+        )
+
+    packet_path = state_mod.run_dir(canonical_repo, run_id) / "WORK_PACKET.md"
+    meta, _ = packet_mod.parse_packet_file(packet_path)
+    if not packet_mod.packet_is_program(meta):
+        raise RuntimeError(f"run {run_id} packet is not a v3 program-mode packet")
+
+    # Verify frozen graph (no post-approval widening).
+    program_state = state["program"]
+    ok, reason = program_mod.verify_frozen_graph(meta, program_state)
+    if not ok:
+        return _program_done(canonical_repo, run_id, ok=False, reason=reason,
+                             history=[{"phase": "verify_frozen_graph", "reason": reason}])
+
+    history: list[dict[str, Any]] = []
+    cap = max_repair_rounds if max_repair_rounds is not None else program_mod.MAX_CP_REPAIR_ROUNDS
+    # Walk checkpoints until terminal.
+    for round_idx in range(program_mod.MAX_CP_BUILD_PASSES + program_mod.MAX_CP_REVIEW_PASSES):
+        cur = _safe_load_state(canonical_repo, run_id)
+        if cur is None:
+            return _program_done(canonical_repo, run_id, ok=False,
+                                 reason="state_missing", history=history)
+        prog = cur.get("program") or {}
+        cp_id = program_mod.select_next_checkpoint(meta, prog)
+        if cp_id is None:
+            term, term_state = program_mod.is_program_terminal(prog)
+            if term:
+                return _program_done(
+                    canonical_repo, run_id,
+                    ok=term_state == "APPROVED",
+                    terminal_state=term_state,
+                    reason=program_mod.program_terminal_reason(prog),
+                    rounds=round_idx,
+                    history=history,
+                )
+            # No current and not terminal — bug.
+            return _program_done(canonical_repo, run_id, ok=False,
+                                 reason="no_current_no_terminal", history=history)
+
+        # One build + one review cycle against the candidate.
+        try:
+            _drive_build_cycle(canonical_repo, run_id)
+            history.append({"round": round_idx, "phase": "build", "cp_id": cp_id})
+        except Exception as e:
+            history.append({"round": round_idx, "phase": "build_error", "cp_id": cp_id, "error": str(e)})
+            return _program_done(canonical_repo, run_id, ok=False,
+                                 reason="build_cycle_failed", history=history)
+        try:
+            _drive_review_cycle(canonical_repo, run_id)
+            history.append({"round": round_idx, "phase": "review", "cp_id": cp_id})
+        except Exception as e:
+            history.append({"round": round_idx, "phase": "review_error", "cp_id": cp_id, "error": str(e)})
+            return _program_done(canonical_repo, run_id, ok=False,
+                                 reason="review_cycle_failed", history=history)
+
+        # Read post-cycle state. The deterministic finalizers set BLOCKED
+        # on hard refusals (e.g. secret leak, scope violation, stale
+        # sha). We treat any post-cycle BLOCKED as program-BLOCKED for
+        # this checkpoint.
+        cur = _safe_load_state(canonical_repo, run_id) or {}
+        post_state = cur.get("state")
+        if post_state == "BLOCKED":
+            # Stamp this checkpoint as BLOCKED + record evidence.
+            cp_terminal = "BLOCKED"
+        elif post_state == "CHANGES_REQUESTED":
+            # The reviewer requested changes — increment a no_progress
+            # streak and continue. If the streak hits the cp cap we
+            # cap-out as BLOCKED.
+            cp_terminal = None
+        elif post_state == "APPROVED":
+            cp_terminal = "APPROVED"
+        else:
+            cp_terminal = None
+
+        if cp_terminal:
+            # Bump per-checkpoint counters and global source accounting
+            # before finalize_checkpoint (which validates per-cp counts).
+            cp_packet = next(
+                cp for cp in meta["checkpoint_graph"]["checkpoints"]
+                if cp["id"] == cp_id
+            )
+            try:
+                new_prog = program_mod.increment_cp_counter(
+                    prog, cp_id=cp_id, counter="build_pass_count",
+                    packet_cp=cp_packet,
+                )
+                new_prog = program_mod.increment_cp_counter(
+                    new_prog, cp_id=cp_id, counter="review_pass_count",
+                    packet_cp=cp_packet,
+                )
+                # Source-tree accounting: guard global caps with the
+                # candidate-vs-baseline numstat.
+                try:
+                    acc = program_mod.source_tree_accounting(
+                        canonical_repo=canonical_repo,
+                        baseline_sha=cur.get("last_candidate_sha")
+                                       and program_state.get("source_sha_provenance", {}).get("baseline_sha")
+                                       or cur.get("last_candidate_sha"),
+                        candidate_sha=cur.get("last_candidate_sha") or "",
+                    )
+                    # Only update if we got valid SHAs.
+                    if cur.get("last_candidate_sha") and program_state.get(
+                        "source_sha_provenance", {}
+                    ).get("baseline_sha"):
+                        new_prog = program_mod.record_aggregate_change(
+                            new_prog,
+                            files_changed_unique_delta=acc["files_changed_unique"],
+                            diff_lines_delta=acc["diff_lines"],
+                        )
+                except (subprocess.CalledProcessError, ProgramStateError) as e:
+                    history.append({"phase": "source_accounting_skipped",
+                                     "reason": str(e)})
+            except program_mod.ProgramStateError as e:
+                history.append({"phase": "cp_counter_cap", "reason": str(e)})
+                cp_terminal = "BLOCKED"
+            new_prog = program_mod.finalize_checkpoint(
+                program_state=new_prog,
+                cp_id=cp_id,
+                terminal_state=cp_terminal,
+                evidence_manifest={"_packet": meta, "round": round_idx,
+                                    "candidate_sha": cur.get("last_candidate_sha")},
+            )
+            new_state = dict(cur)
+            new_state["program"] = new_prog
+            new_state["schema"] = state_mod.PROGRAM_STATE_SCHEMA_VERSION
+            state_mod.save(canonical_repo, run_id, new_state)
+            history.append({"round": round_idx, "phase": "finalize",
+                            "cp_id": cp_id, "terminal_state": cp_terminal})
+
+            # Per-build/review finalizers transitioned the top-level state
+            # (e.g. to APPROVED or BLOCKED). For program mode, transition it
+            # back to READY_TO_BUILD iff there is another claimable
+            # checkpoint — otherwise leave it terminal.
+            cur_after = _safe_load_state(canonical_repo, run_id) or {}
+            next_cp = program_mod.select_next_checkpoint(
+                meta, new_prog,
+            )
+            if next_cp is not None and cur_after.get("state") in ("APPROVED", "BLOCKED", "STOPPED"):
+                # Reset state machine so the next CP can claim. The single-
+                # mode FSM (assert_valid) refuses APPROVED->READY_TO_BUILD
+                # (APPROVED is terminal in single-mode). For program-mode,
+                # we record an override state and use state_mod.save() to
+                # persist the field directly. The deterministic finalizers
+                # never run on this field unless the program is fully
+                # terminated (PROGRAM_TERMINAL marker below gates that).
+                if cur_after.get("state") == "BLOCKED":
+                    # Keep BLOCKED; we already returned below for cp_terminal=BLOCKED.
+                    pass
+                else:
+                    new_reset = dict(cur_after)
+                    new_reset["state"] = "READY_TO_BUILD"
+                    new_reset["program"] = new_prog
+                    new_reset["schema"] = state_mod.PROGRAM_STATE_SCHEMA_VERSION
+                    new_reset["terminal_reason"] = None
+                    try:
+                        state_mod.save(canonical_repo, run_id, new_reset)
+                    except Exception as e:
+                        history.append({"phase": "state_reset_failed", "error": str(e)})
+                        return _program_done(canonical_repo, run_id, ok=False,
+                                             reason="state_reset_failed", history=history)
+
+        if cp_terminal == "BLOCKED":
+            # Programmatically mark program blocked; record + exit.
+            new_prog_blocked = program_mod.finalize_checkpoint(
+                program_state=(cur.get("program") or {}),
+                cp_id=cp_id, terminal_state="BLOCKED",
+                evidence_manifest={"_packet": meta, "round": round_idx},
+            )
+            new_state = dict(cur)
+            new_state["program"] = new_prog_blocked
+            new_state["state"] = "BLOCKED"
+            new_state["schema"] = state_mod.PROGRAM_STATE_SCHEMA_VERSION
+            state_mod.save(canonical_repo, run_id, new_state)
+            return _program_done(canonical_repo, run_id, ok=False,
+                                 terminal_state="BLOCKED",
+                                 reason=f"cp_blocked:{cp_id}", history=history)
+
+        # Repair-round per-cp cap check.
+        cp_meta = next(c for c in meta["checkpoint_graph"]["checkpoints"] if c["id"] == cp_id)
+        cp_live = next(c for c in (cur.get("program") or {}).get("checkpoints", [])
+                       if c["id"] == cp_id)
+        if cp_live["repair_round_count"] >= cp_meta["risk_budget"]["max_repair_rounds"]:
+            new_prog_blocked = program_mod.finalize_checkpoint(
+                program_state=cur.get("program") or {},
+                cp_id=cp_id, terminal_state="BLOCKED",
+                evidence_manifest={"_packet": meta, "round": round_idx,
+                                    "reason": "cp_repair_cap_reached"},
+            )
+            new_state = dict(cur)
+            new_state["program"] = new_prog_blocked
+            new_state["state"] = "BLOCKED"
+            state_mod.save(canonical_repo, run_id, new_state)
+            return _program_done(canonical_repo, run_id, ok=False,
+                                 terminal_state="BLOCKED",
+                                 reason=f"cp_repair_cap:{cp_id}", history=history)
+
+    return _program_done(canonical_repo, run_id, ok=False,
+                         reason="iteration_cap_reached", history=history)
+
+
+def _program_done(
+    canonical_repo: Path,
+    run_id: str,
+    *,
+    ok: bool,
+    terminal_state: str = "",
+    reason: str = "",
+    rounds: int = 0,
+    history: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    return {
+        "ok": ok,
+        "run_id": run_id,
+        "execution_mode": "program",
+        "terminal_state": terminal_state,
+        "rounds": rounds,
+        "history": history or [],
+        "reason": reason,
+    }
+
+
+def dispatch_run_mode(
+    *,
+    canonical_repo: Path,
+    run_id: str | None = None,
+    mission: str | None = None,
+    max_repair_rounds: int | None = None,
+) -> dict[str, Any]:
+    """Dispatch between single-mode and program-mode based on the run.
+
+    Inspects the packet for v3+execution_mode=program; if absent,
+    falls back to single-mode. Returns the unified envelope shape.
+    """
+    canonical_repo = Path(canonical_repo).resolve(strict=False)
+    if run_id is None:
+        run_id = _discover_run_id(canonical_repo)
+    packet_path = state_mod.run_dir(canonical_repo, run_id) / "WORK_PACKET.md"
+    if not packet_path.exists():
+        return run_single_mode(
+            canonical_repo=canonical_repo, run_id=run_id,
+            mission=mission, max_repair_rounds=max_repair_rounds,
+        )
+    try:
+        meta, _ = packet_mod.parse_packet_file(packet_path)
+        if packet_mod.packet_is_program(meta):
+            return run_program_mode(
+                canonical_repo=canonical_repo, run_id=run_id,
+                max_repair_rounds=max_repair_rounds,
+            )
+    except ProgramStateError:
+        raise
+    except Exception:
+        pass
+    return run_single_mode(
+        canonical_repo=canonical_repo, run_id=run_id,
+        mission=mission, max_repair_rounds=max_repair_rounds,
+    )

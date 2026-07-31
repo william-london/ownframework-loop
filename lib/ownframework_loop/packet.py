@@ -21,6 +21,8 @@ from .util import sha256_text
 
 SCHEMA_VERSION = "ownframework-work-packet/v2"
 LEGACY_SCHEMA_VERSION = "ownframework-work-packet/v1"
+PROGRAM_SCHEMA_VERSION = "ownframework-work-packet/v3"
+SUPPORTED_SCHEMA_VERSIONS = (LEGACY_SCHEMA_VERSION, SCHEMA_VERSION, PROGRAM_SCHEMA_VERSION)
 
 WORK_CLASSES = {
     "NEW_REPOSITORY", "FEATURE", "BUG", "DEBUG", "HARDENING",
@@ -64,13 +66,39 @@ def _extract_metadata_block(text: str) -> dict[str, Any]:
 
 
 def validate_packet_metadata(meta: dict[str, Any]) -> list[str]:
-    """Return list of validation errors (empty if valid)."""
+    """Return list of validation errors (empty if valid).
+
+    Dispatch by packet schema: v1/v2 use the standard contract; v3
+    additionally requires `execution_mode`, and (if `execution_mode ==
+    program`) `checkpoint_graph`, and (always optional) `promotion_policy`.
+    """
     errors: list[str] = []
+    schema = meta.get("schema")
+    if schema not in SUPPORTED_SCHEMA_VERSIONS:
+        errors.append(
+            f"schema must be one of {sorted(SUPPORTED_SCHEMA_VERSIONS)}, got {schema!r}"
+        )
+        # Even on schema mismatch, do not run downstream checks against
+        # potentially-mutated field set.
+        return errors
+
+    # v3 packets must additionally declare execution_mode.
+    if schema == PROGRAM_SCHEMA_VERSION and "execution_mode" not in meta:
+        errors.append("v3 packets must declare execution_mode (single|program)")
+    if schema == PROGRAM_SCHEMA_VERSION:
+        em = meta.get("execution_mode")
+        if em not in (None, "single", "program"):
+            errors.append(f"execution_mode must be single|program, got {em!r}")
+        pp = meta.get("promotion_policy")
+        if pp is not None and pp not in ("human_gate", "merge_on_approved"):
+            errors.append(f"promotion_policy invalid: {pp!r}")
+        if em == "program":
+            from .program import validate_checkpoint_graph as _validate_cg
+            errors.extend(_validate_cg(meta))
+
     for f in REQUIRED_FIELDS:
         if f not in meta:
             errors.append(f"missing required field: {f}")
-    if meta.get("schema") not in (SCHEMA_VERSION, LEGACY_SCHEMA_VERSION):
-        errors.append(f"schema must be {SCHEMA_VERSION} or legacy {LEGACY_SCHEMA_VERSION}")
     wc = meta.get("work_class")
     if wc not in WORK_CLASSES:
         errors.append(f"invalid work_class: {wc}")
@@ -188,3 +216,21 @@ def is_allowed_path(packet: dict[str, Any], file_path: str) -> bool:
         if fp == p or fp.startswith(p + "/"):
             return True
     return False
+
+
+def packet_is_program(meta: dict[str, Any]) -> bool:
+    """True iff the packet is a v3 PROGRAM-mode packet."""
+    return (
+        meta.get("schema") == PROGRAM_SCHEMA_VERSION
+        and meta.get("execution_mode") == "program"
+    )
+
+
+def packet_promotion_policy(meta: dict[str, Any]) -> str:
+    """Return "human_gate" (default) or "merge_on_approved"."""
+    p = meta.get("promotion_policy")
+    if p is None:
+        return "human_gate"
+    if p not in ("human_gate", "merge_on_approved"):
+        raise ValueError(f"invalid promotion_policy: {p!r}")
+    return p

@@ -18,6 +18,8 @@ from . import limits as limits_mod
 
 
 SCHEMA_VERSION = "ownframework-loop-state/v1"
+PROGRAM_STATE_SCHEMA_VERSION = "ownframework-loop-state/v2"
+SUPPORTED_STATE_SCHEMA_VERSIONS = (SCHEMA_VERSION, PROGRAM_STATE_SCHEMA_VERSION)
 
 
 def state_path(canonical_repo: Path, run_id: str) -> Path:
@@ -327,3 +329,28 @@ def _compute_chain_hash_for_append(
         h.update(b"\n")
     h.update(line.encode("utf-8"))
     return h.hexdigest()
+
+
+
+def is_program_state(s: dict[str, Any] | None) -> bool:
+    """True iff state has a `program` object (v2 program-mode)."""
+    return isinstance(s, dict) and isinstance(s.get("program"), dict)
+
+
+def require_program_state(s: dict[str, Any] | None) -> dict[str, Any]:
+    """Return the `program` object or raise.
+
+    Use this BEFORE any program-state mutation so callers don't have to
+    remember the v2 vs v1 distinction.
+    """
+    if not is_program_state(s):
+        raise RuntimeError(
+            "program state required (v2 with `program` key); "
+            f"got schema={s.get('schema') if s else None!r}"
+        )
+    return s["program"]
+
+
+def program_state_path(canonical_repo: Path, run_id: str) -> Path:
+    """Convenience path (no separate file)."""
+    return state_path(canonical_repo, run_id)

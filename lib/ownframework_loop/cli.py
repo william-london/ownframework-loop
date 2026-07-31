@@ -140,6 +140,109 @@ def cmd_spec_new(args: argparse.Namespace) -> None:
     })
 
 
+
+def cmd_program_init(args: argparse.Namespace) -> None:
+    """Materialize a v2 program-state block for an approved v3 packet.
+
+    Refused unless:
+      - packet schema is v3 and execution_mode == program
+      - APPROVAL.json validates the current packet bytes
+    """
+    from . import packet as packet_mod
+    from . import program as program_mod
+
+    repo = _repo_path(args.repo)
+    run_id = args.run_id
+    packet_path = state_mod.run_dir(repo, run_id) / "WORK_PACKET.md"
+    if not packet_path.exists():
+        _emit_error("WORK_PACKET.md missing", exit_code=2)
+    meta, _ = packet_mod.parse_packet_file(packet_path)
+    if not packet_mod.packet_is_program(meta):
+        _emit_error("packet is not a v3 program-mode packet", exit_code=2)
+
+    # Validate approval binding.
+    approval_doc = approval.load_approval(repo, run_id)
+    ok, msg = approval.validate_approval_binding(
+        canonical_repo=repo,
+        run_id=run_id,
+        approval=approval_doc,
+        packet=meta,
+        packet_path=packet_path,
+    )
+    if not ok:
+        _emit_error(f"approval binding invalid: {msg}", exit_code=3,
+                    classification="APPROVAL_INVALID")
+    import subprocess as _sp
+    baseline = _sp.run(
+        ["git", "-C", str(repo), "rev-parse", "HEAD"],
+        capture_output=True, text=True, check=False,
+    ).stdout.strip()
+    if not baseline:
+        _emit_error("repo has no HEAD", exit_code=2)
+    candidate_branch = f"factory/candidate/{run_id}"
+    program_state = program_mod.materialise_initial_program_state(
+        meta,
+        baseline_sha=baseline,
+        candidate_branch=candidate_branch,
+    )
+    s = state_mod.load(repo, run_id)
+    if s is None:
+        _emit_error(f"STATE.json missing for {run_id}", exit_code=2)
+    new = dict(s)
+    new["program"] = program_state
+    new["schema"] = state_mod.PROGRAM_STATE_SCHEMA_VERSION
+    state_mod.save(repo, run_id, new)
+    _emit({
+        "ok": True,
+        "run_id": run_id,
+        "schema": new["schema"],
+        "execution_mode": "program",
+        "candidate_branch": candidate_branch,
+        "baseline_sha": baseline,
+        "current_checkpoints": program_state["current_checkpoints"],
+        "cumulative_ceilings": program_state["cumulative_ceilings"],
+    })
+
+
+def cmd_program_status(args: argparse.Namespace) -> None:
+    """Return program-state summary (or absent if not program-mode)."""
+    from . import packet as packet_mod
+
+    repo = _repo_path(args.repo)
+    run_id = args.run_id
+    s = state_mod.load(repo, run_id)
+    if s is None:
+        _emit_error(f"run not found: {run_id}", exit_code=2)
+    prog = s.get("program")
+    if not isinstance(prog, dict):
+        _emit({
+            "ok": True,
+            "run_id": run_id,
+            "execution_mode": "single",
+            "is_program": False,
+        })
+        return
+    is_term, term_state = program_mod.is_program_terminal(prog) if False else (
+        __import__("ownframework_loop.program", fromlist=["is_program_terminal"]).is_program_terminal(prog)
+    )
+    _emit({
+        "ok": True,
+        "run_id": run_id,
+        "execution_mode": "program",
+        "is_program": True,
+        "promotion_policy": prog.get("promotion_policy"),
+        "current_checkpoints": prog.get("current_checkpoints"),
+        "finalized_count": len(prog.get("finalized_checkpoints", [])),
+        "is_terminal": is_term,
+        "terminal_state": term_state,
+        "cumulative_counters": prog.get("cumulative_counters"),
+        "cumulative_ceilings": prog.get("cumulative_ceilings"),
+        "baseline_sha_provenance": (
+            prog.get("source_sha_provenance", {}).get("baseline_sha")
+        ),
+    })
+
+
 def cmd_spec_status(args: argparse.Namespace) -> None:
     repo = _repo_path(args.repo)
     s = state_mod.load(repo, args.run_id)
@@ -958,6 +1061,17 @@ def _build_parser() -> argparse.ArgumentParser:
     s_aban.add_argument("repo")
     s_aban.add_argument("run_id")
     s_aban.set_defaults(func=cmd_spec_abandon)
+    program = sub.add_parser("program", help="program subcommands")
+    program_sub = program.add_subparsers(dest="program_sub", required=True)
+    p_init = program_sub.add_parser("init", help="materialise program state for v3 packet")
+    p_init.add_argument("repo")
+    p_init.add_argument("run_id")
+    p_init.set_defaults(func=cmd_program_init)
+    p_stat = program_sub.add_parser("status", help="program-state summary")
+    p_stat.add_argument("repo")
+    p_stat.add_argument("run_id")
+    p_stat.set_defaults(func=cmd_program_status)
+
     s_td = spec_sub.add_parser("teardown-branch", help="guarded candidate-branch teardown (packet-controlled)")
     s_td.add_argument("repo")
     s_td.add_argument("run_id")
@@ -1032,7 +1146,7 @@ def _build_parser() -> argparse.ArgumentParser:
     from . import orchestrator as orch_mod
     def cmd_loop_run(args: argparse.Namespace) -> None:
         repo = _repo_path(args.repo)
-        out = orch_mod.run_single_mode(
+        out = orch_mod.dispatch_run_mode(
             canonical_repo=repo,
             run_id=args.run_id,
             mission=args.mission or '',
@@ -1043,7 +1157,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     lp = sub.add_parser('loop', help='unattended loop orchestration')
     l_sub = lp.add_subparsers(dest='loop_cmd', required=True)
-    l_run = l_sub.add_parser('run', help='single-mode unattended run')
+    l_run = l_sub.add_parser('run', help='unattended loop orchestration (single OR program mode)')
     l_run.add_argument('repo')
     l_run.add_argument('--run-id', default=None,
                        help='target run id (defaults to most recent)')

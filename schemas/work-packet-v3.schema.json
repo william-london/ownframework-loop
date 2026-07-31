@@ -1,0 +1,219 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://ownframework.local/schemas/work-packet-v3.schema.json",
+  "title": "OwnFramework Loop Work Packet (v3)",
+  "description": "v3 packet — backward-compatible superset of v2. Adds execution_mode, checkpoint_graph, and promotion_policy. Single mode is the default when execution_mode is absent. Packet bytes are immutable after approval.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "packet_id",
+    "created_at",
+    "work_class",
+    "risk_class",
+    "title",
+    "target",
+    "acceptance_criteria",
+    "non_goals",
+    "allowed_paths",
+    "protected_paths",
+    "work_units",
+    "merge_authority",
+    "deploy_authority",
+    "push_authority",
+    "external_action_authority"
+  ],
+  "properties": {
+    "schema": { "const": "ownframework-work-packet/v3" },
+    "packet_id": { "type": "string", "pattern": "^[a-zA-Z0-9_-]+$", "minLength": 1, "maxLength": 64 },
+    "created_at": { "type": "string", "format": "date-time" },
+    "work_class": {
+      "type": "string",
+      "enum": [
+        "NEW_REPOSITORY", "FEATURE", "BUG", "DEBUG", "HARDENING",
+        "REFACTOR", "TESTING", "DOCUMENTATION", "CI_REPAIR",
+        "TRACKED_CONTRACT", "RUNTIME_CANDIDATE", "RESEARCH_SPIKE"
+      ]
+    },
+    "risk_class": { "type": "string", "enum": ["low", "medium", "high"] },
+    "authority_class": { "type": "string", "enum": ["low", "medium", "high"] },
+    "title": { "type": "string", "minLength": 1, "maxLength": 200 },
+    "target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repo", "branch", "classification"],
+      "properties": {
+        "repo": { "type": "string", "minLength": 1 },
+        "branch": { "type": "string", "minLength": 1 },
+        "classification": { "type": "string", "enum": ["local_only", "github_private", "github_public"] },
+        "expected_baseline_sha": { "type": "string", "pattern": "^[a-f0-9]{7,64}$" },
+        "candidate_branch_prefix": { "type": "string" }
+      }
+    },
+    "execution_mode": {
+      "type": "string",
+      "enum": ["single", "program"],
+      "default": "single",
+      "description": "single = single-checkpoint run (default); program = finite packet-bound checkpoint graph."
+    },
+    "checkpoint_graph": {
+      "type": "object",
+      "description": "Required iff execution_mode == program. Packet-bound; cannot be widened after approval.",
+      "additionalProperties": false,
+      "required": ["execution_order", "checkpoints"],
+      "properties": {
+        "execution_order": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "pattern": "^CP-[0-9]+$" },
+          "description": "Topological order of checkpoint ids. The engine executes a checkpoint only when all declared depends_on have reached terminal APPROVED."
+        },
+        "checkpoints": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "title", "scope", "risk_budget"],
+            "properties": {
+              "id": { "type": "string", "pattern": "^CP-[0-9]+$" },
+              "title": { "type": "string", "minLength": 1 },
+              "scope": { "type": "string", "minLength": 1 },
+              "depends_on": {
+                "type": "array",
+                "items": { "type": "string", "pattern": "^CP-[0-9]+$" }
+              },
+              "acceptance_criteria": {
+                "type": "array",
+                "items": { "type": "string" }
+              },
+              "risk_budget": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["max_build_passes", "max_review_passes", "max_repair_rounds"],
+                "properties": {
+                  "max_build_passes": { "type": "integer", "minimum": 1, "maximum": 8 },
+                  "max_review_passes": { "type": "integer", "minimum": 1, "maximum": 8 },
+                  "max_repair_rounds": { "type": "integer", "minimum": 1, "maximum": 3 }
+                }
+              }
+            }
+          }
+        },
+        "global_source_ceilings": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "max_unique_changed_files": { "type": "integer", "minimum": 1, "maximum": 500 },
+            "max_baseline_to_final_diff_lines": { "type": "integer", "minimum": 1, "maximum": 30000 }
+          }
+        }
+      }
+    },
+    "promotion_policy": {
+      "type": "string",
+      "enum": ["human_gate", "merge_on_approved"],
+      "default": "human_gate",
+      "description": "human_gate: terminal APPROVED stops before promotion; merge_on_approved: one guarded merge to baseline branch on APPROVED."
+    },
+    "acceptance_criteria": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "text"],
+        "properties": {
+          "id": { "type": "string", "pattern": "^AC-[0-9]+$" },
+          "text": { "type": "string", "minLength": 1 },
+          "verification": { "type": "string" }
+        }
+      }
+    },
+    "non_goals": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "text"],
+        "properties": {
+          "id": { "type": "string", "pattern": "^NG-[0-9]+$" },
+          "text": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "relevant_paths": { "type": "array", "items": { "type": "string" } },
+    "allowed_paths": { "type": "array", "minItems": 1, "items": { "type": "string" } },
+    "protected_paths": { "type": "array", "minItems": 1, "items": { "type": "string" } },
+    "sensitive_paths": { "type": "array", "items": { "type": "string" } },
+    "elevated_allowed_paths": { "type": "array", "items": { "type": "string" } },
+    "sensitive_path_reason": { "type": "string" },
+    "additional_review_required": { "type": "boolean" },
+    "required_validation": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "command", "kind"],
+        "properties": {
+          "name": { "type": "string" },
+          "command": { "type": "string" },
+          "kind": { "type": "string", "enum": ["fast", "full", "secret", "scope"] },
+          "expected_exit_code": { "type": "integer" },
+          "expected_marker": { "type": "string" }
+        }
+      }
+    },
+    "required_runtime_proof": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "description": { "type": "string" },
+        "max_runtime_seconds": { "type": "integer", "minimum": 1, "maximum": 1800 }
+      }
+    },
+    "risk_budget": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "max_build_passes": { "type": "integer", "minimum": 1, "maximum": 16 },
+        "max_review_passes": { "type": "integer", "minimum": 1, "maximum": 16 },
+        "max_repair_rounds": { "type": "integer", "minimum": 1, "maximum": 8 },
+        "max_diff_lines": { "type": "integer", "minimum": 1, "maximum": 50000 },
+        "max_files_changed": { "type": "integer", "minimum": 1, "maximum": 1000 },
+        "max_runtime_seconds": { "type": "integer", "minimum": 60, "maximum": 28800 },
+        "max_pass_runtime_seconds": { "type": "integer", "minimum": 60, "maximum": 1800 },
+        "max_consecutive_no_progress_passes": { "type": "integer", "minimum": 1, "maximum": 5 },
+        "max_identical_finding_repeats": { "type": "integer", "minimum": 1, "maximum": 5 }
+      }
+    },
+    "work_units": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "title", "scope"],
+        "properties": {
+          "id": { "type": "string", "pattern": "^UNIT-[0-9]+$" },
+          "title": { "type": "string" },
+          "scope": { "type": "string" },
+          "acceptance": { "type": "array", "items": { "type": "string" } }
+        }
+      }
+    },
+    "rollback_requirements": { "type": "string" },
+    "product_decisions": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "escalation_conditions": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "merge_authority": { "type": "string", "enum": ["human_only", "delegated"] },
+    "deploy_authority": { "type": "string", "enum": ["human_only", "delegated"] },
+    "push_authority": { "type": "string", "enum": ["human_only", "delegated"] },
+    "external_action_authority": { "type": "string", "enum": ["human_only", "delegated", "none"] }
+  }
+}
