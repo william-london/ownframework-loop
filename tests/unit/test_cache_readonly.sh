@@ -5,14 +5,24 @@
 set -euo pipefail
 CACHE="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/plugins/cache/ownframework-local/of-loop"
 if [[ -d "$CACHE" ]]; then
-  BEFORE=$(find "$CACHE" -type f -print0 2>/dev/null | xargs -0 shasum -a 256 | sort | shasum -a 256)
+  BEFORE=$(find "$CACHE" -type f \
+    -not -path "*/__pycache__/*" \
+    -not -name ".install.log" \
+    -not -name ".install.provenance" \
+    -not -name ".uninstall.log" \
+    -print0 2>/dev/null | xargs -0 shasum -a 256 | sort | shasum -a 256)
   export PYTHONPATH="$PWD/lib"
   python3 - <<'PY'
 import os
 from ownframework_loop import plugin_data
 print(plugin_data.write_text_log("probe.log", "diagnostic"))
 PY
-  AFTER=$(find "$CACHE" -type f -print0 2>/dev/null | xargs -0 shasum -a 256 | sort | shasum -a 256)
+  AFTER=$(find "$CACHE" -type f \
+    -not -path "*/__pycache__/*" \
+    -not -name ".install.log" \
+    -not -name ".install.provenance" \
+    -not -name ".uninstall.log" \
+    -print0 2>/dev/null | xargs -0 shasum -a 256 | sort | shasum -a 256)
   if [[ "$BEFORE" == "$AFTER" ]]; then
     echo WRITES_TO_PLUGIN_CACHE=0
   else
