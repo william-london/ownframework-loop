@@ -70,8 +70,8 @@ grep -F -q "PYTHONDONTWRITEBYTECODE" "$ROOT/bin/ofloop" || fail "Test 3: ofloop 
 grep -F -q "os.environ.setdefault" "$ROOT/bin/ofloop" && grep -F -q "PYTHONDONTWRITEBYTECODE" "$ROOT/bin/ofloop" || fail "Test 3: ofloop not using setdefault"
 pass "Test 3: bin/ofloop sets PYTHONDONTWRITEBYTECODE"
 
-# 4. ofloop-launcher runtime: PYTHONDONTWRITEBYTECODE is set.
-echo "Test 4: ofloop launcher sets PYTHONDONTWRITEBYTECODE before module imports"
+# 4. ofloop-launcher runtime: PYTHONDONTWRITEBYTECODE is set BEFORE the user-package import.
+echo "Test 4: ofloop sets PYTHONDONTWRITEBYTECODE before importing user modules"
 out=$(env -u PYTHONDONTWRITEBYTECODE python3 -c '
 import os, sys
 # Read the launcher source first to verify the setdefault.
@@ -94,8 +94,35 @@ for node in ast.walk(tree):
 print("LAUNCHER_DOES_NOT_SET_PYTHONDONTWRITEBYTECODE_1")
 sys.exit(1)
 ' 2>&1)
+# Verify ordering: setdefault call appears BEFORE the `from ownframework_loop import cli` line
+out2=$(python3 -c '
+import ast
+src = open("/Users/mr.mrs.london/projects/plugins/ownframework-loop/bin/ofloop").read()
+tree = ast.parse(src)
+setdefault_line = None
+user_import_line = None
+for node in ast.walk(tree):
+    if isinstance(node, ast.Call) and getattr(node.func, "attr", "") == "setdefault":
+        if (len(node.args) >= 2 and isinstance(node.args[0], ast.Constant)
+                and node.args[0].value == "PYTHONDONTWRITEBYTECODE"
+                and isinstance(node.args[1], ast.Constant)
+                and node.args[1].value == "1"):
+            setdefault_line = node.lineno
+    if isinstance(node, ast.ImportFrom) and node.module and node.module.startswith("ownframework_loop"):
+        if user_import_line is None or node.lineno < user_import_line:
+            user_import_line = node.lineno
+if setdefault_line is None:
+    print("NO_SETDEFAULT")
+elif user_import_line is None:
+    print("NO_USER_IMPORT")
+elif setdefault_line < user_import_line:
+    print(f"ORDER_OK setdefault_line={setdefault_line} user_import_line={user_import_line}")
+else:
+    print(f"ORDER_BAD setdefault_line={setdefault_line} user_import_line={user_import_line}")
+')
 echo "$out" | grep -q "CONFIRMED: PYTHONDONTWRITEBYTECODE=1" || fail "Test 4: $out"
-pass "Test 4: launcher sets PYTHONDONTWRITEBYTECODE=1 via setdefault"
+echo "$out2" | grep -q "ORDER_OK" || fail "Test 4 ordering: $out2"
+pass "Test 4: launcher sets PYTHONDONTWRITEBYTECODE=1 BEFORE user-package import"
 
 # 5. Validator classifies __pycache__/*.pyc as disposable runtime cache.
 echo "Test 5: validator classifies __pycache__/*.pyc as disposable"
@@ -181,8 +208,8 @@ echo "  validator: $out"
 echo "$out" | grep -q "unauthorised" || fail "Test 7: validator didn't detect injected: $out"
 pass "Test 7: extra unauthorised file detected"
 
-# 8. Validator rejects user-state files in active payload.
-echo "Test 8: validator rejects .ownframework-loop/ in active payload"
+# 8. Validator rejects user-state-shaped files appearing inside the active payload.
+echo "Test 8: validator rejects user-state file placed inside active payload"
 make_fake_cache "$TEST_ROOT/cache4"
 > "$TEST_ROOT/cache4/.payload.manifest"
 echo "# generated" >> "$TEST_ROOT/cache4/.payload.manifest"

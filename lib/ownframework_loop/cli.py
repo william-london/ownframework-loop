@@ -656,8 +656,23 @@ def cmd_build_transition(args: argparse.Namespace) -> None:
         commit_sha=getattr(args, "commit_sha", None),
     )
     if args.to == "CHANGES_REQUESTED":
-        # Increment repair round on every CHANGES_REQUESTED.
+        # Increment repair round. In program mode, route through the
+        # unified claim owner so per-cp, cumulative, and top-level mirror
+        # counters cannot desync (matches review_finalize.py repair path).
         cur = state_mod.load(repo, args.run_id)
+        if state_mod.is_program_state(cur):
+            meta, _approval_doc, _packet_path = _require_valid_approval(repo, args.run_id)
+            try:
+                program_mod.claim_repair_round(
+                    canonical_repo=repo,
+                    run_id=args.run_id,
+                    packet=meta,
+                )
+            except program_mod.ClaimRefused as e:
+                _emit_error(f"repair claim refused: {e}", exit_code=4)
+            _emit({"ok": True, "run_id": args.run_id, "state": args.to})
+            return
+        # Single-mode V1 path: direct increment.
         cur["repair_round"] = int(cur.get("repair_round", 0)) + 1
         cur["no_progress_streak"] = 0
         state_mod.save(repo, args.run_id, cur)

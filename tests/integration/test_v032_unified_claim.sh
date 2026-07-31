@@ -315,4 +315,91 @@ print(f"ok={ok} reason={reason}")
 echo "$out" | grep -q 'reason=post-approval_graph_drift' || fail "Test 13: $out"
 pass "Test 13: graph drift refused"
 
+# 14. Repair claim → next build claim interaction (Issue A regression).
+# Sequence: build_claim → CHANGES_REQUESTED → repair_claim → build_claim.
+# The next build_claim after repair MUST advance (not replay) because
+# review_finalize.py:544 returns CHANGES_REQUESTED and claim_repair_round
+# leaves state in CHANGES_REQUESTED (not BUILDING), so the next build
+# claim hits the cap path instead of the replay guard.
+echo "Test 14: repair_round → next build claim interact correctly"
+REPO="$TEST_ROOT/repo14"; make_repo "$REPO"
+RID="run-20260101T000000Z-v032014"
+setup_run "$REPO" "$RID" 1 4 4 1 3 3 3
+out=$(run_test "$REPO" "$RID" '
+import sys, json, os
+from pathlib import Path
+sys.path.insert(0, "lib")
+from ownframework_loop import cli, program, state as state_mod, packet as packet_mod
+import argparse
+repo = Path(os.environ["REPO"]); rid = os.environ["RID"]
+pkt_path = repo / ".ownframework-loop" / rid / "WORK_PACKET.md"
+meta, _ = packet_mod.parse_packet_file(pkt_path)
+# 1. claim build pass (state goes to BUILDING)
+cli.cmd_build_claim(argparse.Namespace(repo=str(repo), run_id=rid, actor="test"))
+s1 = state_mod.load(repo, rid)
+b1 = s1["build_pass_count"]
+c1 = s1["program"]["cumulative_counters"]["build_pass_count"]
+# 2. simulate review_finalize returning CHANGES_REQUESTED
+s1["state"] = "CHANGES_REQUESTED"
+state_mod.save(repo, rid, s1)
+# 3. claim repair round (state stays CHANGES_REQUESTED, repair_round_count bumps)
+program.claim_repair_round(canonical_repo=repo, run_id=rid, packet=meta)
+s2 = state_mod.load(repo, rid)
+r_per_cp = s2["program"]["checkpoints"][0]["repair_round_count"]
+r_cum = s2["program"]["cumulative_counters"]["repair_round_count"]
+r_top = s2.get("repair_round", 0)
+state_after_repair = s2["state"]
+# 4. claim next build pass (must NOT replay)
+res = program.claim_build_pass(canonical_repo=repo, run_id=rid, packet=meta)
+s3 = state_mod.load(repo, rid)
+b2 = s3["build_pass_count"]
+c2 = s3["program"]["cumulative_counters"]["build_pass_count"]
+print(json.dumps({
+    "b1": b1, "b2": b2, "c1": c1, "c2": c2,
+    "r_per_cp": r_per_cp, "r_cum": r_cum, "r_top": r_top,
+    "state_after_repair": state_after_repair,
+    "replayed": res["replayed"],
+    "build_advanced": b2 == b1 + 1 and c2 == c1 + 1,
+    "repair_advanced": r_per_cp == 1 and r_cum == 1 and r_top == 1,
+    "state_not_build_collision": state_after_repair == "CHANGES_REQUESTED",
+}))
+')
+echo "$out" | grep -q '"build_advanced": true' || fail "Test 14: build did not advance: $out"
+echo "$out" | grep -q '"repair_advanced": true' || fail "Test 14: repair did not advance: $out"
+echo "$out" | grep -q '"replayed": false' || fail "Test 14: build was replayed: $out"
+echo "$out" | grep -q '"state_not_build_collision": true' || fail "Test 14: state collided with BUILDING: $out"
+pass "Test 14: repair_round → build claim interact correctly"
+
+# 15. cmd_build_transition --to CHANGES_REQUESTED in program mode routes through unified claim.
+echo "Test 15: cmd_build_transition --to CHANGES_REQUESTED routes through unified claim in program mode"
+REPO="$TEST_ROOT/repo15"; make_repo "$REPO"
+RID="run-20260101T000000Z-v032015"
+setup_run "$REPO" "$RID" 1 4 4 1 3 3 3
+out=$(run_test "$REPO" "$RID" '
+import sys, json, os
+from pathlib import Path
+sys.path.insert(0, "lib")
+from ownframework_loop import cli, state as state_mod, packet as packet_mod
+import argparse
+repo = Path(os.environ["REPO"]); rid = os.environ["RID"]
+pkt_path = repo / ".ownframework-loop" / rid / "WORK_PACKET.md"
+meta, _ = packet_mod.parse_packet_file(pkt_path)
+# Set state to BUILDING so V1 FSM allows BUILDING → CHANGES_REQUESTED
+s = state_mod.load(repo, rid); s["state"] = "BUILDING"; state_mod.save(repo, rid, s)
+# First estimate the initial repair count
+before = state_mod.load(repo, rid)
+print("BEFORE:", json.dumps({"repair_round": before.get("repair_round", 0), "prog_cum_repair": before["program"]["cumulative_counters"]["repair_round_count"], "cp_repair": before["program"]["checkpoints"][0]["repair_round_count"]}))
+# Run cmd_build_transition --to CHANGES_REQUESTED
+cli.cmd_build_transition(argparse.Namespace(repo=str(repo), run_id=rid, actor="t", to="CHANGES_REQUESTED", reason="test", commit_sha=None))
+after = state_mod.load(repo, rid)
+print("AFTER:", json.dumps({"repair_round": after.get("repair_round", 0), "prog_cum_repair": after["program"]["cumulative_counters"]["repair_round_count"], "cp_repair": after["program"]["checkpoints"][0]["repair_round_count"]}))
+diff = {"repair_round": after.get("repair_round", 0) - before.get("repair_round", 0),
+        "prog_cum_repair": after["program"]["cumulative_counters"]["repair_round_count"] - before["program"]["cumulative_counters"]["repair_round_count"],
+        "cp_repair": after["program"]["checkpoints"][0]["repair_round_count"] - before["program"]["checkpoints"][0]["repair_round_count"]}
+print("DIFF:", json.dumps(diff))
+print("IN_SYNC:", diff["repair_round"] == diff["prog_cum_repair"] == diff["cp_repair"] == 1)
+')
+echo "$out" | grep -q 'IN_SYNC_IS: true' || fail "Test 15: cmd_build_transition desync: $out"
+pass "Test 15: cmd_build_transition routes through unified claim"
+
 echo "ALL V0.3.2 UNIFIED-CLAIM TESTS PASS"

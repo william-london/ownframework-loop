@@ -571,10 +571,16 @@ def _unified_claim_pass(
         "repair_round_count": "repair_round",
     }[counter]
 
+    # Repair replay state: CHANGES_REQUESTED (the state entered after
+    # review_finalize returns CHANGES_REQUESTED). Setting it to "BUILDING"
+    # would poison the next build claim's replay guard.
+    # After a successful claim_repair_round, the explicit post-hook forces
+    # state back to READY_TO_BUILD (or CHANGES_REQUESTED) so the next build
+    # claim is NOT replayed.
     replay_states = {
         "build_pass_count": "BUILDING",
         "review_pass_count": "REVIEWING",
-        "repair_round_count": "BUILDING",
+        "repair_round_count": "CHANGES_REQUESTED",
     }
 
     cap_key = {
@@ -600,10 +606,16 @@ def _unified_claim_pass(
         if not ok:
             raise ClaimRefused(f"frozen-graph drift: {reason}")
 
-        # Replay guard: if state already corresponds to the claimed pass,
-        # return existing counters without mutation.
+        # Replay guard: if state already corresponds to the claimed pass
+        # AND the cumulative counter has already been bumped since the
+        # state was set, return existing counters without mutation. This
+        # prevents double-increment on a retried/finalized claim while
+        # still allowing a fresh claim when the entrypoint state is
+        # already set (e.g. review_finalize returning CHANGES_REQUESTED
+        # before the orchestrator calls claim_repair_round).
         cur_state = cur.get("state")
-        if cur_state == replay_states[counter]:
+        existing_cum = int(program_state["cumulative_counters"].get(counter, 0))
+        if cur_state == replay_states[counter] and existing_cum > 0:
             cp_id_replay = select_next_checkpoint(packet, program_state)
             existing_top = int(cur.get(top_counter_name, 0) or 0)
             existing_cp = (
@@ -660,6 +672,10 @@ def _unified_claim_pass(
         new_state[top_counter_name] = int(cur.get(top_counter_name, 0) or 0) + 1
         new_state["updated_at"] = state_mod.utc_now_iso()
         new_state["last_actor"] = "of-loop-claim"
+        # Repair claim returns to CHANGES_REQUESTED (we just claimed a
+        # repair round on a CHANGES_REQUESTED state) so the next build
+        # claim is NOT replayed. Build/review claims stay in BUILDING/
+        # REVIEWING so legitimate replay returns idempotent.
         new_state["state"] = replay_states[counter]
         # Mirror build_pass_count into the program.state counter so
         # downstream readers (which check both v1 and v2 counters) stay
