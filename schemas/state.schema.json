@@ -26,7 +26,7 @@
         "additionalProperties": false,
         "required": ["from", "to", "at", "actor"],
         "properties": {
-          "from": { "type": "string" },
+          "from": { "type": ["string", "null"] },
           "to": { "type": "string" },
           "at": { "type": "string", "format": "date-time" },
           "actor": { "type": "string" },
@@ -42,7 +42,7 @@
     "started_at": { "type": "string", "format": "date-time" },
     "updated_at": { "type": "string", "format": "date-time" },
     "last_actor": { "type": "string" },
-    "terminal_reason": { "type": "string" },
-    "last_candidate_sha": { "type": "string", "pattern": "^[a-f0-9]{7,64}$" }
+    "terminal_reason": { "type": ["string", "null"] },
+    "last_candidate_sha": { "type": ["string", "null"], "pattern": "^[a-f0-9]{7,64}$" }
   }
 }

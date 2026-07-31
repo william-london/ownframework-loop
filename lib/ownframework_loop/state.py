@@ -47,7 +47,7 @@ def initial_state(run_id: str) -> dict[str, Any]:
         "run_id": run_id,
         "state": "AWAITING_APPROVAL",
         "state_history": [
-            {"from": None, "to": "AWAITING_APPROVAL", "at": now, "actor": "spec", "reason": "run created"}
+            {"from": "", "to": "AWAITING_APPROVAL", "at": now, "actor": "spec", "reason": "run created"}
         ],
         "transitions_count": 0,
         "build_pass_count": 0,
@@ -57,8 +57,8 @@ def initial_state(run_id: str) -> dict[str, Any]:
         "started_at": now,
         "updated_at": now,
         "last_actor": "spec",
-        "terminal_reason": None,
-        "last_candidate_sha": None,
+        "terminal_reason": "",
+        "last_candidate_sha": "",
     }
 
 

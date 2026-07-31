@@ -3,14 +3,26 @@
 Invoked at the start of every /of-loop:build resume (single-mode or program
 mode) before any new work proceeds. Also invoked by `ofloop doctor`.
 
-Crash boundaries covered:
+Crash boundaries explicitly handled (recovery via state-machine transition):
   1. build receipt written before state transition
-  2. build transition written before latest receipt pointer
+       -> adopt receipt, transition BUILDING/READY_TO_BUILD/CHANGES_REQUESTED
+          -> receipt.next_state (state-machine validity-checked; stale is skipped)
   3. review verdict written before state transition
-  4. review transition written before latest verdict pointer
-  5. checkpoint verdict written before checkpoint advancement
-  6. checkpoint advancement persisted before the next claim
-  7. final integrated verdict written before program terminal transition
+       -> adopt verdict, transition READY_FOR_REVIEW/REVIEWING
+          -> verdict.next_state (state-machine validity-checked; stale is skipped)
+  5/6. program-mode frozen-graph integrity
+       -> verify_frozen_graph(packet, state.program) refuses on post-approval drift
+
+Crash boundaries covered indirectly (via shared verification paths):
+  2/4. artifact SHA chaintail verification
+       -> integrity.verify_state_sha + verify_artifact_sha refuse if the recorded
+          SHA in EVENTS.log does not match the on-disk bytes; this catches any
+          transition that wrote STATE.json without writing the matching receipt/
+          verdict (or vice versa).
+  7. no separate "final integrated verdict" file exists in v0.3.1 architecture;
+     program-mode terminal transition is emitted via state.transition inside
+     the orchestrator's finalize, so any partial commit is caught by the same
+     chain-SHA checks as boundary 1/3.
 
 Recovery properties:
   - REAPPROVAL_REQUIRED=no (existing APPROVAL.json still binds)
@@ -23,10 +35,11 @@ Recovery properties:
   - EVENT_CHAIN_VALID=yes (reconciler appends events that the chain verifies)
 
 Distinguishes:
-  - exact durable finalizer artifact  → adopt (no re-creation)
-  - stale or mismatched artifact      → fail closed (refuse to adopt)
-  - incomplete temporary artifact    → remove safely
-  - live process (LOCK present)       → refuse to mutate
+  - exact durable finalizer artifact  -> adopt (no re-creation)
+  - stale or mismatched artifact      -> fail closed (refuse to adopt)
+  - transition not reachable from state -> skip silently (orchestrator overwrites)
+  - incomplete temporary artifact    -> remove safely
+  - live process (LOCK held)         -> refuse to mutate (LiveLockError)
 """
 from __future__ import annotations
 
