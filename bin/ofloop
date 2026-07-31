@@ -10,6 +10,12 @@ import os
 import sys
 from pathlib import Path
 
+# Suppress Python bytecode generation. The installed cache is treated as
+# a read-only source-of-truth pubkey; __pycache__/*.pyc are runtime
+# caches that would otherwise mutate on every import and cause false
+# tampering reports against the payload manifest.
+os.environ.setdefault("PYTHONDONTWRITEBYTECODE", "1")
+
 
 def _resolve_lib() -> Path:
     """Return the lib directory containing ownframework_loop/."""

@@ -60,8 +60,8 @@ from typing import Any
 
 from . import (
     approval, git_checks, integrity, limits as limits_mod,
-    packet as packet_mod, receipts, secrets_v2, state as state_mod,
-    transitions, util, verdicts, worktrees,
+    packet as packet_mod, program as program_mod, receipts, secrets_v2,
+    state as state_mod, transitions, util, verdicts, worktrees,
 )
 
 
@@ -542,9 +542,25 @@ def finalize_review(
             commit_sha=receipt_candidate_sha,
         )
         if next_state == "CHANGES_REQUESTED":
+            # v0.3.2: in program mode, route the repair-round increment
+            # through the unified claim owner so per-cp and cumulative
+            # caps are enforced and top-level mirror stays in sync.
+            # Single mode keeps the legacy direct mutation.
             cur = state_mod.load(canonical_repo, run_id)
-            cur["repair_round"] = int(cur.get("repair_round", 0)) + 1
-            cur["no_progress_streak"] = 0
-            state_mod.save(canonical_repo, run_id, cur)
+            if state_mod.is_program_state(cur):
+                try:
+                    program_mod.claim_repair_round(
+                        canonical_repo=canonical_repo,
+                        run_id=run_id,
+                        packet=meta,
+                    )
+                except program_mod.ClaimRefused as e:
+                    # Cap reached — leave the state and let the orchestrator
+                    # finalize the cp as BLOCKED on next round.
+                    pass
+            else:
+                cur["repair_round"] = int(cur.get("repair_round", 0)) + 1
+                cur["no_progress_streak"] = 0
+                state_mod.save(canonical_repo, run_id, cur)
 
     return new_verdict

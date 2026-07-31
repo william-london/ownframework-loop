@@ -144,7 +144,18 @@ fi
 # post-install tampering is detected on the next validation pass.
 log "step 2: capturing payload manifest for $EXPECTED_CACHE"
 MANIFEST="$EXPECTED_CACHE/.payload.manifest"
-PAYLOAD_FILES="$( ( cd "$EXPECTED_CACHE" && find . -type f -not -path "./logs/*" | LC_ALL=C sort ) )"
+# Exclude bytecode, .git/, .ownframework-loop/, logs/ from staged payload.
+# These are runtime caches, not source artifacts, and including them
+# causes false tampering reports when Python imports mutate __pycache__.
+PAYLOAD_FILES="$( ( cd "$EXPECTED_CACHE" && find . -type f \
+  -not -path "./logs/*" \
+  -not -path "./.git/*" \
+  -not -path "./.ownframework-loop/*" \
+  -not -path "*/__pycache__/*" \
+  -not -name "*.pyc" \
+  -not -name "*.pyo" \
+  -not -name "*.pyd" \
+  | LC_ALL=C sort ) )"
 {
   echo "# OwnFramework Loop payload manifest"
   echo "# generated_at_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"

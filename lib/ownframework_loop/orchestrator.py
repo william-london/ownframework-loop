@@ -426,15 +426,17 @@ def run_program_mode(
                 cp for cp in meta["checkpoint_graph"]["checkpoints"]
                 if cp["id"] == cp_id
             )
+            # v0.3.2: per-cp and cumulative build/review counters are
+            # already incremented by the unified claim path
+            # (program.claim_build_pass / program.claim_review_pass) which
+            # _drive_build_cycle / _drive_review_cycle invoke via the CLI.
+            # The orchestrator MUST NOT increment them again — doing so
+            # would double-count and the per-cp cap would refuse on the
+            # second cycle. We therefore read the latest program state
+            # directly from disk and run only the source-tree accounting
+            # and finalize steps below.
+            new_prog = (cur.get("program") or {})
             try:
-                new_prog = program_mod.increment_cp_counter(
-                    prog, cp_id=cp_id, counter="build_pass_count",
-                    packet_cp=cp_packet,
-                )
-                new_prog = program_mod.increment_cp_counter(
-                    new_prog, cp_id=cp_id, counter="review_pass_count",
-                    packet_cp=cp_packet,
-                )
                 # Source-tree accounting: ALWAYS run when we have a
                 # baseline+candidate SHA pair. If git diff fails or the
                 # record raises ProgramStateError (cap exceeded), we HARD
@@ -457,7 +459,7 @@ def run_program_mode(
                         diff_lines_delta=acc["diff_lines"],
                     )
             except program_mod.ProgramStateError as e:
-                history.append({"phase": "cp_counter_cap", "reason": str(e)})
+                history.append({"phase": "aggregate_cap", "reason": str(e)})
                 cp_terminal = "BLOCKED"
             new_prog = program_mod.finalize_checkpoint(
                 program_state=new_prog,

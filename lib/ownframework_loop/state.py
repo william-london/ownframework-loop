@@ -107,6 +107,111 @@ def save(canonical_repo: Path, run_id: str, payload: dict[str, Any]) -> None:
     )
 
 
+def _locked_state(canonical_repo: Path, run_id: str):
+    """Context manager: hold flock, yield current STATE.json.
+
+    Used by the unified PROGRAM claim (`program._unified_claim_pass`) to
+    perform validation, mutation, and persistence under one flock so the
+    per-cp counter, cumulative counter, and top-level mirror cannot
+    desync on a crash between reads and writes.
+    """
+    import contextlib
+
+    @contextlib.contextmanager
+    def _ctx():
+        with flock_exclusive(lock_path(canonical_repo, run_id)):
+            cur = read_json(state_path(canonical_repo, run_id))
+            yield cur
+    return _ctx()
+
+
+def _write_state_locked(
+    canonical_repo: Path,
+    run_id: str,
+    payload: dict[str, Any],
+) -> None:
+    """Persist STATE.json and append a state_saved event under flock.
+
+    Caller MUST already hold the flock (e.g. via `_locked_state`).
+    Uses `_append_event_locked` to avoid re-entrant flock acquisition
+    on the same LOCK file. The combined write keeps STATE.json and
+    EVENTS.log consistent for downstream SHA chain verification.
+    """
+    actor = str(payload.get("last_actor", "spec"))
+    atomic_write_json(state_path(canonical_repo, run_id), payload, mode=0o600)
+    ensure_mode(events_path(canonical_repo, run_id), 0o600)
+    try:
+        fsync_dir(state_path(canonical_repo, run_id).parent)
+    except OSError:
+        pass
+    _append_event_locked(
+        canonical_repo, run_id,
+        event_type="state_saved",
+        old_state=payload.get("state"),
+        new_state=payload.get("state"),
+        actor=actor,
+        commit_sha=payload.get("last_candidate_sha"),
+        reason="program_claim_unified_save",
+    )
+
+
+def _append_event_locked(
+    canonical_repo: Path,
+    run_id: str,
+    *,
+    event_type: str,
+    old_state: str | None,
+    new_state: str | None,
+    actor: str,
+    commit_sha: str | None = None,
+    reason: str | None = None,
+    extras: dict[str, Any] | None = None,
+) -> None:
+    """Append a JSON Lines event WITHOUT acquiring the flock.
+
+    Caller MUST already hold the flock (e.g. via `_locked_state`).
+    Re-entrant flock acquisition is not guaranteed safe across all POSIX
+    kernels, so the unified claim path holds one flock and uses this
+    helper for both STATE.json write and EVENTS.log append.
+    """
+    sp = state_path(canonical_repo, run_id)
+    ep = events_path(canonical_repo, run_id)
+    state_sha_now = integrity.sha256_file(sp) if sp.exists() else None
+
+    record: dict[str, Any] = {
+        "ts": utc_now_iso(),
+        "run_id": run_id,
+        "event_type": event_type,
+        "old_state": old_state,
+        "new_state": new_state,
+        "actor": actor,
+        "commit_sha": commit_sha,
+        "reason": reason,
+        "state_sha256": state_sha_now,
+        "event_chain_sha256": "0" * 64,
+    }
+    if extras:
+        record.update(extras)
+    line = _json_dumps(record)
+    chain_hash = _compute_chain_hash_for_append(ep, line, state_sha_now)
+    record["event_chain_sha256"] = chain_hash
+    line = _json_dumps(record)
+
+    ep.parent.mkdir(parents=True, exist_ok=True)
+    with open(ep, "a", encoding="utf-8") as f:
+        f.write(line + "\n")
+        f.flush()
+        try:
+            os.fsync(f.fileno())
+        except OSError:
+            pass
+    ensure_mode(ep, 0o600)
+    try:
+        fsync_dir(ep.parent)
+    except OSError:
+        pass
+
+
 def append_event(
     canonical_repo: Path,
     run_id: str,

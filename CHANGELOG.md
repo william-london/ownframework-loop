@@ -1,6 +1,73 @@
 # Changelog
 
 
+## 0.3.2 — Terminal repair: unified PROGRAM claims + payload boundary (2026-07-31)
+
+Repairs the two blockers that caused the v0.3.1 terminal closeout to
+correctly return FAIL. No telemetry, no scoping, no workflow changes —
+only the two engineering defects and their directly required tests,
+release evidence, version surfaces, and installation cleanup.
+
+### Fixed (Blocker 1: unified PROGRAM claim accounting)
+- `lib/ownframework_loop/program.py` — new `claim_build_pass`,
+  `claim_review_pass`, `claim_repair_round` and the private
+  `_unified_claim_pass` are the **only** functions allowed to mutate
+  program-build counters. They perform per-cp cap, cumulative cap,
+  top-level mirror, and persistence under one flock via
+  `state._locked_state` so a crash between any two writes cannot
+  desync the three counters.
+- New `ClaimRefused` exception class (subclass of `ProgramStateError`)
+  carrying a stable code and human message.
+- New `_bump_counter_one` is the single source of truth for cap
+  enforcement. Both `_unified_claim_pass` and the legacy
+  `increment_cp_counter` route through it.
+- `lib/ownframework_loop/cli.py` — `cmd_build_claim` and
+  `cmd_review_claim` now detect program-mode state and route to
+  `program.claim_build_pass` / `program.claim_review_pass`. Single-mode
+  V1 path unchanged.
+- `lib/ownframework_loop/orchestrator.py` — removed the duplicate
+  `increment_cp_counter` calls (the unified claim already incremented).
+- `lib/ownframework_loop/review_finalize.py` — repair-round increments
+  now route through `program.claim_repair_round` in program mode.
+- `lib/ownframework_loop/state.py` — new `_locked_state`,
+  `_write_state_locked`, `_append_event_locked` helpers. Re-entrant
+  flock acquisition is avoided by callers holding one flock and using
+  the locked helpers.
+
+### Fixed (Blocker 2: deterministic payload boundary)
+- `install.sh` — `PALOAD_FILES` `find` now excludes `__pycache__/`,
+  `*.pyc`, `*.pyo`, `*.pyd`, `.git/`, `.ownframework-loop/`, `logs/`
+  from the staged payload. The manifest therefore contains only
+  artifact-stable source files.
+- `bin/ofloop` — sets `PYTHONDONTWRITEBYTECODE=1` via
+  `os.environ.setdefault` before any other import, so installed
+  invocations never write `__pycache__/*.pyc` into the cache.
+- `scripts/verify_payload_manifest.py` — new `DISPOSABLE_GLOBS` and
+  `USER_STATE_GLOBS` classification. Active-payload boundary check
+  fails closed on stale-removed manifest entries, unauthorised extra
+  files, and user-state files appearing in the active payload.
+  Disposable bytecode is reported as runtime cache, not tampering.
+
+### Added (tests)
+- `tests/integration/test_v032_unified_claim.sh` — 13 connected tests
+  proving 9 cumulative claims succeed / 10th refused, per-cp caps,
+  repair caps, CLI vs direct path equivalence, orchestrator no
+  double-increment, replay idempotency, invalid-state refusal, V1
+  unchanged, post-approval graph drift refusal.
+- `tests/integration/test_v032_bytecode_boundary.sh` — 10 connected
+  tests proving install.sh manifest excludes bytecode, launcher
+  sets `PYTHONDONTWRITEBYTECODE=1`, validator classifies bytecode
+  as disposable, rejects stale/injected active files, rejects user-
+  state files in active payload, detects SHA-256 tampering, and
+  ignores bytecode mutation.
+
+### Notes
+- v0.3.1 history is preserved. The 5 `FINAL_SOURCE_PROMOTIONS=5`
+  process defect is recorded as historical fact; v0.3.2 produces
+  exactly one source promotion and one active installation.
+- All v0.3.2 tests are added to the canonical release gate exactly
+  once (no duplicate test execution).
+
 ## 0.3.0 — Program mode + checkpoints (2026-07-30)
 ### Added
 - v3 packet schema (`ownframework-work-packet/v3`) with `execution_mode`,

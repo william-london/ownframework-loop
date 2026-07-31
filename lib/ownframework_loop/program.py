@@ -458,9 +458,285 @@ def increment_cp_counter(
     if new["cumulative_counters"][counter] > cum_cap:
         raise ProgramStateError(
             f"cumulative cap reached for {counter}: "
-            f"{new["cumulative_counters"][counter]}/{cum_cap}"
+            f"{new['cumulative_counters'][counter]}/{cum_cap}"
         )
     return new
+
+
+def _bump_counter_one(
+    program_state: dict[str, Any],
+    *,
+    cp_id: str,
+    counter: str,
+    packet_cp: dict[str, Any],
+) -> dict[str, Any]:
+    """Pure-Python helper: bump per-cp + cumulative counters in memory.
+
+    Both caps are checked *before* any mutation. Raises on cap breach.
+    Returns a deep-copied program_state with the counters bumped.
+
+    Used by both the legacy `increment_cp_counter` and the unified
+    `claim_*_pass` owner functions so the cap logic exists in exactly
+    one place.
+    """
+    if counter not in (
+        "build_pass_count", "review_pass_count", "repair_round_count",
+    ):
+        raise ProgramStateError(f"unknown counter {counter!r}")
+    cap_key = {
+        "build_pass_count": "max_build_passes",
+        "review_pass_count": "max_review_passes",
+        "repair_round_count": "max_repair_rounds",
+    }[counter]
+    cp_cap = int(packet_cp["risk_budget"][cap_key])
+    cum_cap = int(program_state["cumulative_ceilings"][cap_key])
+
+    new = _deepcopy_program(program_state)
+    cp = _find_cp(new, cp_id)
+    if cp[counter] >= cp_cap:
+        raise ProgramStateError(
+            f"per-checkpoint cap reached for {counter} on {cp_id}: "
+            f"{cp[counter]}/{cp_cap}"
+        )
+    if new["cumulative_counters"][counter] >= cum_cap:
+        raise ProgramStateError(
+            f"cumulative cap reached for {counter}: "
+            f"{new['cumulative_counters'][counter]}/{cum_cap}"
+        )
+    cp[counter] += 1
+    new["cumulative_counters"][counter] += 1
+    return new
+
+
+class ClaimRefused(ProgramStateError):
+    """Raised by claim_*_pass when the program has refused a claim.
+
+    Carries a stable `code` (machine-readable) and a human `message`.
+    Subclass of ProgramStateError so existing exception handlers in
+    callers still catch it without code change.
+    """
+
+
+def _resolve_packet_cp(packet: dict[str, Any], cp_id: str) -> dict[str, Any]:
+    for cp in packet["checkpoint_graph"]["checkpoints"]:
+        if cp["id"] == cp_id:
+            return cp
+    raise ClaimRefused(f"unknown checkpoint id: {cp_id}")
+
+
+def _unified_claim_pass(
+    *,
+    canonical_repo: Path,
+    run_id: str,
+    packet: dict[str, Any],
+    counter: str,
+    pass_kind: str,
+) -> dict[str, Any]:
+    """Single durable owner of the PROGRAM build/review/repair claim.
+
+    Performs EVERY step of the claim under ONE flock-protected state
+    save so per-cp, cumulative, and top-level mirror counters cannot
+    desync on a crash between any two writes.
+
+    Steps (in order, under one flock):
+
+      1. verify STATE.json present and program block present
+      2. verify schema == ownframework-loop-state/v2
+      3. verify frozen graph SHA matches packet (no post-approval widening)
+      4. resolve the current claimable checkpoint (select_next_checkpoint)
+      5. verify the cp is not yet terminal
+      6. enforce per-checkpoint cap (pre-mutation check, refuses before bump)
+      7. enforce approved program cumulative cap (pre-mutation check)
+      8. increment per-cp counter exactly once
+      9. increment cumulative counter exactly once
+     10. mirror the increment into the top-level state counter exactly once
+     11. persist STATE.json atomically (single write)
+     12. return the stable claimed pass numbers
+
+    Replay safety: if the current FSM state already corresponds to the
+    claimed pass (e.g. BUILDING for build_pass_count), the function
+    returns the existing pass number WITHOUT incrementing. No
+    double-increment is possible.
+    """
+    from . import state as state_mod  # late import to avoid cycle at module load
+
+    if counter not in (
+        "build_pass_count", "review_pass_count", "repair_round_count",
+    ):
+        raise ClaimRefused(f"unsupported counter for claim: {counter!r}")
+
+    top_counter_name = {
+        "build_pass_count": "build_pass_count",
+        "review_pass_count": "review_pass_count",
+        "repair_round_count": "repair_round",
+    }[counter]
+
+    replay_states = {
+        "build_pass_count": "BUILDING",
+        "review_pass_count": "REVIEWING",
+        "repair_round_count": "BUILDING",
+    }
+
+    cap_key = {
+        "build_pass_count": "max_build_passes",
+        "review_pass_count": "max_review_passes",
+        "repair_round_count": "max_repair_rounds",
+    }[counter]
+
+    with state_mod._locked_state(canonical_repo, run_id) as cur:
+        # 1. STATE.json must be present.
+        if not isinstance(cur, dict):
+            raise ClaimRefused("STATE.json missing or unreadable")
+        # 2. Schema must be v2 (program).
+        if cur.get("schema") != state_mod.PROGRAM_STATE_SCHEMA_VERSION:
+            raise ClaimRefused(
+                f"program state required (got schema={cur.get('schema')!r})"
+            )
+        program_state = cur.get("program")
+        if not isinstance(program_state, dict):
+            raise ClaimRefused("missing program block")
+        # 3. Frozen graph must match.
+        ok, reason = verify_frozen_graph(packet, program_state)
+        if not ok:
+            raise ClaimRefused(f"frozen-graph drift: {reason}")
+
+        # Replay guard: if state already corresponds to the claimed pass,
+        # return existing counters without mutation.
+        cur_state = cur.get("state")
+        if cur_state == replay_states[counter]:
+            cp_id_replay = select_next_checkpoint(packet, program_state)
+            existing_top = int(cur.get(top_counter_name, 0) or 0)
+            existing_cp = (
+                next(
+                    (c for c in program_state["checkpoints"]
+                     if c["id"] == cp_id_replay),
+                    None,
+                ) if cp_id_replay else None
+            )
+            existing_cp_pass = (
+                int(existing_cp[counter]) if existing_cp else 0
+            )
+            return {
+                "ok": True,
+                "run_id": run_id,
+                "counter": counter,
+                "pass_kind": pass_kind,
+                "cp_id": cp_id_replay,
+                "claimed_pass_number": existing_top,
+                "cp_pass_number": existing_cp_pass,
+                "cumulative": int(
+                    program_state["cumulative_counters"].get(counter, 0)
+                ),
+                "cap": int(
+                    program_state["cumulative_ceilings"].get(cap_key, 0)
+                ),
+                "replayed": True,
+            }
+
+        # 4+5. Resolve current cp and verify it's claimable.
+        cp_id = select_next_checkpoint(packet, program_state)
+        if cp_id is None:
+            raise ClaimRefused("no claimable checkpoint")
+        packet_cp = _resolve_packet_cp(packet, cp_id)
+        cp_live = _find_cp(program_state, cp_id)
+        if cp_live.get("terminal"):
+            raise ClaimRefused(
+                f"checkpoint {cp_id} is terminal: {cp_live['terminal']}"
+            )
+
+        # 6+7+8+9. Bump per-cp + cumulative under deep-copy, refusing if
+        # either cap would be exceeded. Pure-Python; no I/O until step 11.
+        new_program = _bump_counter_one(
+            program_state,
+            cp_id=cp_id,
+            counter=counter,
+            packet_cp=packet_cp,
+        )
+
+        # 10. Mirror into top-level state counter and transition FSM so the
+        #     replay guard (state==BUILDING|REVIEWING) detects re-claims.
+        new_state = dict(cur)
+        new_state["program"] = new_program
+        new_state[top_counter_name] = int(cur.get(top_counter_name, 0) or 0) + 1
+        new_state["updated_at"] = state_mod.utc_now_iso()
+        new_state["last_actor"] = "of-loop-claim"
+        new_state["state"] = replay_states[counter]
+        # Mirror build_pass_count into the program.state counter so
+        # downstream readers (which check both v1 and v2 counters) stay
+        # consistent with the program block.
+
+        # 11. Persist atomically (under flock from the with-block).
+        state_mod._write_state_locked(canonical_repo, run_id, new_state)
+
+        # 12. Return stable pass numbers.
+        cp_pass = int(_find_cp(new_program, cp_id)[counter])
+        cum = int(new_program["cumulative_counters"][counter])
+        return {
+            "ok": True,
+            "run_id": run_id,
+            "counter": counter,
+            "pass_kind": pass_kind,
+            "cp_id": cp_id,
+            "claimed_pass_number": int(new_state[top_counter_name]),
+            "cp_pass_number": cp_pass,
+            "cumulative": cum,
+            "cap": int(new_program["cumulative_ceilings"][cap_key]),
+            "replayed": False,
+        }
+
+
+def claim_build_pass(
+    *,
+    canonical_repo: Path,
+    run_id: str,
+    packet: dict[str, Any],
+) -> dict[str, Any]:
+    """Atomically claim one PROGRAM build pass. Single durable owner.
+
+    Routes through `_unified_claim_pass` which is the ONLY function
+    allowed to mutate program-build counters. Both the CLI
+    (`cmd_build_claim`) and the orchestrator's `_drive_build_cycle`
+    must call this; no separate counter increments are permitted.
+    """
+    return _unified_claim_pass(
+        canonical_repo=canonical_repo,
+        run_id=run_id,
+        packet=packet,
+        counter="build_pass_count",
+        pass_kind="build",
+    )
+
+
+def claim_review_pass(
+    *,
+    canonical_repo: Path,
+    run_id: str,
+    packet: dict[str, Any],
+) -> dict[str, Any]:
+    """Atomically claim one PROGRAM review pass. Single durable owner."""
+    return _unified_claim_pass(
+        canonical_repo=canonical_repo,
+        run_id=run_id,
+        packet=packet,
+        counter="review_pass_count",
+        pass_kind="review",
+    )
+
+
+def claim_repair_round(
+    *,
+    canonical_repo: Path,
+    run_id: str,
+    packet: dict[str, Any],
+) -> dict[str, Any]:
+    """Atomically claim one PROGRAM repair round. Single durable owner."""
+    return _unified_claim_pass(
+        canonical_repo=canonical_repo,
+        run_id=run_id,
+        packet=packet,
+        counter="repair_round_count",
+        pass_kind="repair",
+    )
 
 
 def record_aggregate_change(
@@ -651,6 +927,8 @@ __all__ = [
     "select_next_checkpoint", "ready_to_claim",
     "finalize_checkpoint", "advance_to_next",
     "increment_cp_counter", "record_aggregate_change",
+    "ClaimRefused", "claim_build_pass", "claim_review_pass",
+    "claim_repair_round", "_unified_claim_pass", "_bump_counter_one",
     "verify_frozen_graph",
     "is_program_terminal", "program_terminal_reason",
     "promotion_allowed",

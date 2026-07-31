@@ -37,8 +37,8 @@ from pathlib import Path
 from typing import Any
 
 from . import (
-    git_checks, guards, packet as packet_mod, receipts, scheduling,
-    state as state_mod, transitions, util, verdicts, worktrees,
+    git_checks, guards, packet as packet_mod, program as program_mod, receipts,
+    scheduling, state as state_mod, transitions, util, verdicts, worktrees,
     integrity, limits as limits_mod, approval, build_finalize, review_finalize,
 )
 
@@ -490,13 +490,17 @@ def _require_valid_approval(repo: Path, run_id: str) -> tuple[dict[str, Any], di
 def cmd_build_claim(args: argparse.Namespace) -> None:
     """Claim a build pass. The single durable owner of build_pass_count.
 
-    - Increments build_pass_count exactly once per claim.
-    - Idempotent: a re-claim while in BUILDING does NOT re-increment.
-    - Refuses when run is not in {READY_TO_BUILD, CHANGES_REQUESTED}.
-    - Refuses when the cap would be exceeded.
-    - In program mode the top-level V1 cap does NOT apply; the cumulative
-      program ceiling (sum of approved checkpoint caps) is enforced
-      separately by ``program_mod.increment_cp_counter`` at finalize time.
+    Program mode (v2 state) routes through the unified claim owner
+    `program.claim_build_pass`, which performs per-cp cap, cumulative
+    cap, top-level mirror, and persistence under one flock so no
+    counter can desync on a crash between writes.
+
+    Single mode (v1) keeps the legacy path: V1 cap of 8 (or packet
+    override) is enforced, replay returns replayed=True, state is
+    transitioned to BUILDING.
+
+    Both paths emit the same shape: {ok, run_id, state, build_pass_count,
+    cp_id, replayed, cumulative, cap}.
     """
     repo = _repo_path(args.repo)
     try:
@@ -505,6 +509,30 @@ def cmd_build_claim(args: argparse.Namespace) -> None:
         _emit_error(str(e), exit_code=4)
     cur = state_mod.load(repo, args.run_id)
     cur_state = cur.get("state")
+
+    # PROGRAM mode: unified claim owner.
+    if state_mod.is_program_state(cur):
+        try:
+            r = program_mod.claim_build_pass(
+                canonical_repo=repo,
+                run_id=args.run_id,
+                packet=meta,
+            )
+        except program_mod.ClaimRefused as e:
+            _emit_error(f"build claim refused: {e}", exit_code=4)
+        _emit({
+            "ok": True,
+            "run_id": args.run_id,
+            "state": "BUILDING",
+            "build_pass_count": r["claimed_pass_number"],
+            "cp_id": r.get("cp_id"),
+            "cumulative": r["cumulative"],
+            "cap": r["cap"],
+            "replayed": r["replayed"],
+        })
+        return
+
+    # SINGLE mode: legacy V1 path.
     if cur_state not in ("READY_TO_BUILD", "CHANGES_REQUESTED", "BUILDING"):
         _emit_error(f"cannot claim in state {cur_state!r}", exit_code=2)
     # Idempotent re-claim: do not increment twice.
@@ -517,10 +545,6 @@ def cmd_build_claim(args: argparse.Namespace) -> None:
             "replayed": True,
         })
         return
-    # Program-mode runs use the packet's cumulative ceiling (not V1's
-    # single-mode cap of 8). The orchestrator enforces per-checkpoint
-    # and cumulative caps via program_mod.increment_cp_counter.
-    program_mode_active = state_mod.is_program_state(cur)
     try:
         state_mod.transition(
             repo, args.run_id, to_state="BUILDING",
@@ -530,7 +554,7 @@ def cmd_build_claim(args: argparse.Namespace) -> None:
         new_pass_count = state_mod.increment_counter(
             repo, args.run_id, counter="build_pass_count",
             actor="of-builder", packet=meta,
-            hard_cap=not program_mode_active,
+            hard_cap=True,
         )
     except limits_mod.RepairLimitExceeded as e:
         _emit_error(f"repair limit exceeded: {e}", exit_code=4)
@@ -550,13 +574,8 @@ def cmd_build_claim(args: argparse.Namespace) -> None:
 def cmd_review_claim(args: argparse.Namespace) -> None:
     """Claim a review pass. The single durable owner of review_pass_count.
 
-    - Increments review_pass_count exactly once per claim.
-    - Idempotent: a re-claim while in REVIEWING does NOT re-increment.
-    - Refuses when run is not in {READY_FOR_REVIEW, CHANGES_REQUESTED}.
-    - Refuses when the cap would be exceeded.
-    - In program mode the top-level V1 cap does NOT apply; the cumulative
-      program ceiling (sum of approved checkpoint caps) is enforced
-      separately by ``program_mod.increment_cp_counter`` at finalize time.
+    Program mode (v2 state) routes through the unified claim owner
+    `program.claim_review_pass`. Single mode keeps the legacy V1 path.
     """
     repo = _repo_path(args.repo)
     try:
@@ -565,6 +584,30 @@ def cmd_review_claim(args: argparse.Namespace) -> None:
         _emit_error(str(e), exit_code=4)
     cur = state_mod.load(repo, args.run_id)
     cur_state = cur.get("state")
+
+    # PROGRAM mode: unified claim owner.
+    if state_mod.is_program_state(cur):
+        try:
+            r = program_mod.claim_review_pass(
+                canonical_repo=repo,
+                run_id=args.run_id,
+                packet=meta,
+            )
+        except program_mod.ClaimRefused as e:
+            _emit_error(f"review claim refused: {e}", exit_code=4)
+        _emit({
+            "ok": True,
+            "run_id": args.run_id,
+            "state": "REVIEWING",
+            "review_pass_count": r["claimed_pass_number"],
+            "cp_id": r.get("cp_id"),
+            "cumulative": r["cumulative"],
+            "cap": r["cap"],
+            "replayed": r["replayed"],
+        })
+        return
+
+    # SINGLE mode: legacy V1 path.
     if cur_state not in ("READY_FOR_REVIEW", "CHANGES_REQUESTED", "REVIEWING"):
         _emit_error(f"cannot claim in state {cur_state!r}", exit_code=2)
     if cur_state == "REVIEWING":
@@ -576,9 +619,6 @@ def cmd_review_claim(args: argparse.Namespace) -> None:
             "replayed": True,
         })
         return
-    # Program-mode runs use the packet's cumulative ceiling (not V1's
-    # single-mode cap of 8).
-    program_mode_active = state_mod.is_program_state(cur)
     try:
         state_mod.transition(
             repo, args.run_id, to_state="REVIEWING",
@@ -588,7 +628,7 @@ def cmd_review_claim(args: argparse.Namespace) -> None:
         new_pass_count = state_mod.increment_counter(
             repo, args.run_id, counter="review_pass_count",
             actor="of-reviewer", packet=meta,
-            hard_cap=not program_mode_active,
+            hard_cap=True,
         )
     except limits_mod.RepairLimitExceeded as e:
         _emit_error(f"repair limit exceeded: {e}", exit_code=4)
