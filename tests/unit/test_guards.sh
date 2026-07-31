@@ -7,12 +7,15 @@
 # Case 35: secret-like fixture detection.
 
 export OFLOOP_BLOCKED_SSH_TARGETS="production-host-1 production-host-2"
+export OFLOOP_RECOGNIZED_AND_BLOCKED_EXECUTABLES="hermes codex"
+export OFLOOP_HIGH_RISK_EXECUTABLES="hermes codex"
 set -uo pipefail
 . "$(dirname "$0")/../_helpers.sh"
 
 python3 - <<'PY'
 import sys
-sys.path.insert(0, "/Users/mr.mrs.london/projects/plugins/ownframework-loop/lib")
+import os as _os_for_path
+sys.path.insert(0, _os_for_path.environ.get("OFLOOP_LIB", "/path/to/ownframework-loop/lib"))
 from ownframework_loop import guards
 
 # Forbidden commands.

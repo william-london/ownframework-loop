@@ -23,6 +23,7 @@ def new_verdict(
     *,
     run_id: str,
     packet_sha256: str,
+    approval_sha256: str,
     candidate_sha_reviewed: str,
     baseline_sha: str,
     review_pass_number: int,
@@ -30,22 +31,34 @@ def new_verdict(
     acceptance_results: list[dict[str, Any]],
     non_goal_results: list[dict[str, Any]],
     findings: list[dict[str, Any]],
+    tracked_mutation_check: dict[str, Any],
+    stale_sha_check: dict[str, Any],
+    integrity_check: dict[str, Any],
+    protected_path_check: dict[str, Any],
+    secret_scan_check: dict[str, Any],
+    scope_check: dict[str, Any],
+    sensitive_path_assessment: dict[str, Any],
     reviewer_identity: str,
     recommended_next_state: str,
-    tracked_mutation_check: dict[str, Any] | None = None,
-    stale_sha_check: dict[str, Any] | None = None,
+    failure_reason: str = "",
+    escalation_recommended: bool = False,
+    escalation_reason: str | None = None,
     validation_results: list[dict[str, Any]] | None = None,
     commands_executed: list[str] | None = None,
-    codex_escalation_recommended: bool = False,
-    codex_reason: str | None = None,
+    builder_pass_number_ref: int | None = None,
 ) -> dict[str, Any]:
-    """Build a review-verdict document. Does not write."""
+    """Build a review-verdict document. Does not write.
+
+    All required fields are accepted as positional kwargs; the verdict
+    is schema-valid by construction (additionalProperties: false).
+    """
     if verdict not in VERDICTS:
         raise ValueError(f"invalid verdict: {verdict}")
-    return {
+    out: dict[str, Any] = {
         "schema": SCHEMA_VERSION,
         "run_id": run_id,
         "packet_sha256": packet_sha256,
+        "approval_sha256": approval_sha256,
         "candidate_sha_reviewed": candidate_sha_reviewed,
         "baseline_sha": baseline_sha,
         "review_pass_number": review_pass_number,
@@ -53,21 +66,26 @@ def new_verdict(
         "acceptance_results": acceptance_results,
         "non_goal_results": non_goal_results,
         "findings": findings,
-        "commands_executed": commands_executed or [],
-        "validation_results": validation_results or [],
-        "tracked_mutation_check": tracked_mutation_check or {
-            "detected": False, "before_sha": candidate_sha_reviewed,
-            "after_sha": candidate_sha_reviewed, "changed_paths": []
-        },
-        "stale_sha_check": stale_sha_check or {
-            "sha_match": True, "receipt_match": True, "packet_hash_match": True,
-        },
+        "commands_executed": list(commands_executed or []),
+        "validation_results": list(validation_results or []),
+        "tracked_mutation_check": tracked_mutation_check,
+        "stale_sha_check": stale_sha_check,
+        "integrity_check": integrity_check,
+        "protected_path_check": protected_path_check,
+        "secret_scan_check": secret_scan_check,
+        "scope_check": scope_check,
+        "sensitive_path_assessment": sensitive_path_assessment,
         "reviewer_identity": reviewer_identity,
         "timestamp": utc_now_iso(),
         "recommended_next_state": recommended_next_state,
-        "codex_escalation_recommended": codex_escalation_recommended,
-        "codex_reason": codex_reason,
+        "failure_reason": failure_reason,
+        "escalation_recommended": escalation_recommended,
     }
+    if builder_pass_number_ref is not None:
+        out["builder_pass_number_ref"] = builder_pass_number_ref
+    if escalation_reason is not None:
+        out["escalation_reason"] = escalation_reason
+    return out
 
 
 def write_verdict(canonical_repo: Path, run_id: str, verdict: dict[str, Any]) -> Path:

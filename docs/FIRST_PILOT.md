@@ -13,13 +13,13 @@ deterministic test suite. The pilot does NOT touch:
 
 - `production-host-1`
 - `production-host-2`
-- `personal-project-tree`
-- `personal-project-tree`
-- `personal-project-tree`
+- `production-project-tree`
+- `production-project-tree`
+- `production-project-tree`
 - any production repository
 
 A disposable fixture repository is acceptable. The fixture must live
-under `/Users/mr.mrs.london/projects/<your-pilot-name>`.
+under `/path/to/repository
 
 ## Work class
 
@@ -34,9 +34,9 @@ Avoid `HARDENING`, `TRACKED_CONTRACT`, `RUNTIME_CANDIDATE`,
 
 ## Setup
 
-1. `bash /Users/mr.mrs.london/projects/plugins/ownframework-loop/install.sh`
-2. `cd /Users/mr.mrs.london/projects/<your-pilot-name>`
-3. `claude --plugin-dir /Users/mr.mrs.london/.claude/skills/of-loop`
+1. `bash /path/to/ownframework-loop/install.sh`
+2. `cd /path/to/repository
+3. `claude --plugin-dir $HOME/.claude/skills/of-loop`
 4. Run `/of-loop:spec "..."` and answer the spec questions.
 5. Inspect the generated `WORK_PACKET.md`. Tighten scope if needed.
 6. `/of-loop:spec approve <run-id>`.

@@ -6,12 +6,12 @@
 **Source commit:** `f8b99ad0849878290e685dac9b48f3f53236f465`
 **Source branch:** master
 **Source dirty at acceptance:** 0 files
-**Source root:** `/Users/mr.mrs.london/projects/plugins/ownframework-loop`
+**Source root:** `/path/to/ownframework-loop`
 **Source version:** 0.2.1
 **Plugin namespace:** `of-loop@ownframework-local`
-**Install path (managed):** `/Users/mr.mrs.london/.claude/plugins/cache/ownframework-local/of-loop/0.2.1`
+**Install path (managed):** `$HOME/.claude/plugins/cache/ownframework-local/of-loop/0.2.1`
 **Install path (legacy skills-dir backup, archived):** `~/.claude/ownframework-loop-mgmt-backup-<UTC>/`
-**Receipt path:** `/Users/mr.mrs.london/.claude/plugins/data/of-loop-ownframework-local`
+**Receipt path:** `$HOME/.claude/plugins/data/of-loop-ownframework-local`
 **Remotes:** 0
 **Plugin manifest version:** 0.2.1
 **Library `__version__`:** 0.2.1
@@ -467,8 +467,8 @@ From the V1 pilot contract:
   binding.
 - The reversible copy install preserves the V1 backup-and-replace
   discipline on every install.
-- No automatic Codex launch. No background daemon. No additional
-  queue server. No SQLite. No extension to Horus/FireLove/Video
+- No automatic escalation-target launch. No background daemon. No additional
+  queue server. No SQLite. No extension to production-host-1 / production-host-2/Video
   Factory.
 - The install does not modify `~/.claude/settings.json`,
   managed Claude settings, project permission settings,
@@ -497,13 +497,13 @@ SOURCE_COMMIT=f8b99ad0849878290e685dac9b48f3f53236f465
 SOURCE_BRANCH=master
 SOURCE_DIRTY=0
 SOURCE_REMOTES=0
-INSTALL_PATH_MANAGED=/Users/mr.mrs.london/.claude/plugins/cache/ownframework-local/of-loop/0.2.1
-INSTALL_PATH_SKILLS_BACKUP=/Users/mr.mrs.london/.claude/ownframework-loop-mgmt-backup-<UTC>/
+INSTALL_PATH_MANAGED=$HOME/.claude/plugins/cache/ownframework-local/of-loop/0.2.1
+INSTALL_PATH_SKILLS_BACKUP=$HOME/.claude//
 INSTALL_KIND=managed_marketplace
 MARKETPLACE_NAME=ownframework-local
 MARKETPLACE_VERSION=1.0.1
 ACTIVE_PLUGIN_IDENTITIES=1
-INSTALL_RECEIPT_DIR=/Users/mr.mrs.london/.claude/plugins/data/of-loop-ownframework-local
+INSTALL_RECEIPT_DIR=$HOME/.claude/plugins/data/of-loop-ownframework-local
 PACKET_SCHEMA=ownframework-work-packet/v2
 APPROVAL_SCHEMA=ownframework-loop-approval/v1
 STATE_SCHEMA=ownframework-loop-state/v1
@@ -571,9 +571,9 @@ REPORT_DATE=2026-07-23
 
 | Action | Command |
 |---|---|
-| Install (idempotent) | `bash /Users/mr.mrs.london/projects/plugins/ownframework-loop/install.sh` |
-| Validate installed copy | `bash /Users/mr.mrs.london/.claude/skills/of-loop/validate.sh` |
-| Single release gate | `bash /Users/mr.mrs.london/projects/plugins/ownframework-loop/tests/run_all.sh` |
-| Rollback to backup | `bash /Users/mr.mrs.london/projects/plugins/ownframework-loop/rollback.sh` |
-| Uninstall (restore backup if any) | `bash /Users/mr.mrs.london/projects/plugins/ownframework-loop/uninstall.sh` |
-| Source release gate | `bash /Users/mr.mrs.london/projects/plugins/ownframework-loop/release_gate.sh` |
+| Install (idempotent) | `bash /path/to/ownframework-loop/install.sh` |
+| Validate installed copy | `bash $HOME/.claude/skills/of-loop/validate.sh` |
+| Single release gate | `bash /path/to/ownframework-loop/tests/run_all.sh` |
+| Rollback to backup | `bash /path/to/ownframework-loop/rollback.sh` |
+| Uninstall (restore backup if any) | `bash /path/to/ownframework-loop/uninstall.sh` |
+| Source release gate | `bash /path/to/ownframework-loop/release_gate.sh` |

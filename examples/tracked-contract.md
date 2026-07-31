@@ -31,7 +31,7 @@ must be honored. `work_class: TRACKED_CONTRACT`.
   "work_units": [
     { "id": "UNIT-1", "title": "Endpoint + tests + admin token gate", "scope": "Add endpoint, JSONL serializer, integration tests, admin-token middleware", "acceptance": ["AC-1"] }
   ],
-  "codex_escalation_conditions": [
+  "escalation_conditions": [
     "data boundary change",
     "production infrastructure"
   ],

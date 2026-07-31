@@ -2,7 +2,7 @@
 schema: ownframework-loop-policy/v1
 version: 0.1.0
 factory:
-  source: /Users/mr.mrs.london/projects/plugins/ownframework-loop
+  source: /path/to/ownframework-loop
   version: 0.1.0
 risk_policy:
   default_risk: medium
@@ -12,9 +12,10 @@ risk_policy:
   max_runtime_seconds: 28800
   max_pass_runtime_seconds: 1800
 branch_policy:
-  expected_branch: master
+  expected_branch: <baseline-branch>
   work_branch_prefix: factory/candidate/
-  protected_branches: [master]
+  protected_branches:
+    - <baseline-branch>
 protected_paths:
   - AGENTS.md
   - CLAUDE.md

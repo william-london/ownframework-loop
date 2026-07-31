@@ -16,7 +16,7 @@ export OFLOOP_PERMISSIONS_PROFILE=enforce
 
 # Optional: enable Claude Bash sandbox in this session only:
 # (per official Claude Code docs, set via permission-rule settings or --sandbox flag)
-claude --plugin-dir /Users/mr.mrs.london/.claude/skills/of-loop \
+claude --plugin-dir $HOME/.claude/skills/of-loop \
       --permission-profile enforce
 ```
 
@@ -55,10 +55,10 @@ also checks. The exact rules, in documented Claude permission syntax:
       "Bash(/usr/bin/hermes:*)",
       "Bash(/usr/local/bin/hermes:*)",
       "Bash(codex:*)",
-      "Edit(/Users/mr.mrs.london/projects/plugins/production-host-1/**)",
-      "Edit(/Users/mr.mrs.london/projects/plugins/production-host-2/**)",
-      "Edit(/Users/mr.mrs.london/projects/plugins/personal-project-tree/**)",
-      "Edit(/Users/mr.mrs.london/projects/plugins/personal-project-tree/**)"
+      "Edit(/path/to/repository/production-host-1/**)",
+      "Edit(/path/to/repository/production-host-2/**)",
+      "Edit(/path/to/repository/production-project-tree/**)",
+      "Edit(/path/to/repository/production-project-tree/**)"
     ],
     "ask": [
       "Bash(ofloop *)"

@@ -197,7 +197,7 @@ else
 fi
 rm -rf "$ALT"
 
-CACHE=/Users/mr.mrs.london/.claude/plugins/cache/ownframework-local/of-loop/0.1.2
+CACHE=${HOME}/.claude/plugins/cache/ownframework-local/of-loop/0.1.2
 BEFORE=$(find "$CACHE" -type f -print0 2>/dev/null | xargs -0 shasum -a 256 2>/dev/null | sort | head -200)
 ALT=$(mktemp -d -t ofloop-cache-XXXXXX)
 T8_PROBE=$(mktemp -t ofloop-t8-XXXXXX.py)
@@ -247,7 +247,7 @@ rm -rf "$ALT"
 # Per env override: every environment may have a different archived path.
 # If unset, the test treats this as a SKIP rather than a FAIL because the
 # archived evidence is operator-private and not owned by this plugin.
-: "${OFLOOP_MIGRATION_ARCHIVE_ROOT:=/Users/mr.mrs.london/personal-project-tree/state/migration/ownframework-loop}"
+: "${OFLOOP_MIGRATION_ARCHIVE_ROOT:=${OFLOOP_MIGRATION_ARCHIVE_ROOT:-/path/to/operator-root/state/migration/ownframework-loop}}"
 ARCHIVE_DIR="$OFLOOP_MIGRATION_ARCHIVE_ROOT/legacy-receipts-archive/migrated-20260723T161000Z"
 ARCHIVE_MANIFEST="$OFLOOP_MIGRATION_ARCHIVE_ROOT/legacy-migration-manifest.json"
 PLUGIN_DATA_MANIFEST="$HOME/.claude/plugins/data/of-loop-ownframework-local/migration/legacy-migration-manifest.json"
@@ -297,12 +297,12 @@ else
 fi
 
 # ----- T10: legacy directory is removed -----
-if [[ ! -d /Users/mr.mrs.london/.claude/ownframework-loop-receipts ]]; then
+if [[ ! -d ${HOME}/.claude/ownframework-loop-receipts ]]; then
   pass_test "T10: source legacy path absent at canonical location"
 else
   fail_test "T10" "still present"
 fi
-ARCH=$(ls -dt /Users/mr.mrs.london/personal-project-tree/state/migration/ownframework-loop/legacy-receipts-archive/*/ 2>/dev/null | head -1)
+ARCH=$(ls -dt ${OFLOOP_MIGRATION_ARCHIVE_ROOT:-/path/to/operator-root/state/migration/ownframework-loop}/legacy-receipts-archive/*/ 2>/dev/null | head -1)
 if [[ -n "$ARCH" && -d "$ARCH" ]]; then
   pass_test "T10b: archive retained at $ARCH"
 elif [[ "$HAVE_ARCHIVE" -eq 1 ]]; then
@@ -324,7 +324,7 @@ if [[ "$OUT" == *"$ALT"* && "$OUT" != *ownframework-loop-receipts* ]]; then
 else
   fail_test "T11" "got=$OUT"
 fi
-LEGACY_AT_ROOT=$(find /Users/mr.mrs.london/.claude -type d -name "ownframework-loop-receipts" 2>/dev/null | head -1)
+LEGACY_AT_ROOT=$(find ${HOME}/.claude -type d -name "ownframework-loop-receipts" 2>/dev/null | head -1)
 if [[ -z "$LEGACY_AT_ROOT" ]]; then
   pass_test "T11b: legacy path absent from user tree"
 else
@@ -340,16 +340,16 @@ git init -q -b main
 git config user.name "T12"
 git config user.email "t12@ofloop.local"
 echo init > a.txt && git add a.txt && git commit -q -m init
-CACHE_CLI=/Users/mr.mrs.london/.claude/plugins/cache/ownframework-local/of-loop/0.1.2/bin/ofloop
+CACHE_CLI=${HOME}/.claude/plugins/cache/ownframework-local/of-loop/0.1.2/bin/ofloop
 LOG=$(mktemp -t ofloop-t12-XXXXXX.log)
 if [[ ! -x "$CACHE_CLI" ]]; then
   fail_test "T12" "managed cache CLI missing at $CACHE_CLI"
 else
   env -u CLAUDE_PLUGIN_DATA HOME=/tmp CLAUDE_CONFIG_DIR="$ALT" \
-    OFLOOP_PLUGIN_ROOT=/Users/mr.mrs.london/.claude/plugins/cache/ownframework-local/of-loop/0.1.2 \
+    OFLOOP_PLUGIN_ROOT=${HOME}/.claude/plugins/cache/ownframework-local/of-loop/0.1.2 \
     "$CACHE_CLI" spec new "$PROOFRUN" "Add marker" >"$LOG" 2>&1
   RUN_ID=$(grep -oE "run-[0-9TZ]+-[a-z0-9]+" "$LOG" | head -1)
-  LEGACY_AT_ROOT=$(find /Users/mr.mrs.london/.claude -type d -name "ownframework-loop-receipts" 2>/dev/null | head -1)
+  LEGACY_AT_ROOT=$(find ${HOME}/.claude -type d -name "ownframework-loop-receipts" 2>/dev/null | head -1)
   LEGACY_AT_ALT=$(find "$ALT" -type d -name "ownframework-loop-receipts" 2>/dev/null | head -1)
   if [[ -n "$RUN_ID" && -z "$LEGACY_AT_ROOT" && -z "$LEGACY_AT_ALT" ]]; then
     pass_test "T12: spec new lifecycle did not create legacy dir (run=$RUN_ID)"
@@ -377,7 +377,7 @@ fi
 rm -f /tmp/ofloop-t13.$$.log
 
 # Mark capability assertion
-if [[ -n "${CLAUDE_SCHEDULED_TASK_SUPPORTED:-}" || -d /Users/mr.mrs.london/.claude ]]; then
+if [[ -n "${CLAUDE_SCHEDULED_TASK_SUPPORTED:-}" || -d ${HOME}/.claude ]]; then
   pass_test "T13b: Claude scheduled-task context intact; CronList is the active proof path"
 fi
 

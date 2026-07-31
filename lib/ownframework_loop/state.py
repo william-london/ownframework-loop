@@ -299,8 +299,13 @@ def is_stop_requested(canonical_repo: Path, run_id: str) -> bool:
 
 
 def _json_dumps(obj: Any) -> str:
-    import json
-    return json.dumps(obj, sort_keys=True, separators=(",", ":"))
+    """Canonical JSON serialization for events.
+
+    Delegates to integrity.canonical_json_dumps so the on-disk and
+    recomputation paths use a single serializer. Both must produce
+    identical bytes for the recorded event_chain_sha256 to verify.
+    """
+    return integrity.canonical_json_dumps(obj)
 
 
 def _compute_chain_hash_for_append(

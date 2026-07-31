@@ -124,7 +124,7 @@ Stop the pass and emit `BLOCKED` if any of the following occurs:
 
 ## What you do NOT do
 
-- Call Codex automatically. If a Codex escalation is warranted, emit a
+- Call escalation automatically. If a escalation escalation is warranted, emit a
   durable recommendation in the receipt's `notes` field and the EVENTS log.
 - Modify the work packet.
 - Touch the reviewer's worktree.

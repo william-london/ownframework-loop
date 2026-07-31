@@ -22,47 +22,77 @@ def new_receipt(
     *,
     run_id: str,
     packet_sha256: str,
+    approval_sha256: str,
     work_unit_id: str,
     baseline_sha: str,
     candidate_sha: str,
     candidate_branch: str,
+    builder_worktree: str,
     builder_pass_number: int,
     repair_round: int,
     files_changed: int,
     added_lines: int,
     removed_lines: int,
+    changed_paths: list[str],
     validation: list[dict[str, Any]],
+    protected_path_check: dict[str, Any],
+    secret_scan_check: dict[str, Any],
+    scope_check: dict[str, Any],
+    sensitive_path_assessment: dict[str, Any],
+    additional_review_required: bool,
     builder_agent: str,
     next_state: str,
-    protected_path_check: dict[str, Any] | None = None,
-    secret_scan_check: dict[str, Any] | None = None,
-    scope_check: dict[str, Any] | None = None,
+    agent_summary: str | None = None,
+    blocker_reason: str | None = None,
+    escalation_recommended: bool = False,
+    escalation_reason: str | None = None,
+    review_pass_number_ref: int | None = None,
     notes: str | None = None,
 ) -> dict[str, Any]:
-    """Build a build-receipt document. Does not write."""
-    return {
+    """Build a build-receipt document. Does not write.
+
+    All fields are required to validate against schemas/build-receipt.schema.json,
+    which has additionalProperties: false. Pass-through fields are typed
+    dicts so the caller is responsible for shape conformance to the schema.
+    """
+    out: dict[str, Any] = {
         "schema": SCHEMA_VERSION,
         "run_id": run_id,
         "packet_sha256": packet_sha256,
+        "approval_sha256": approval_sha256,
         "work_unit_id": work_unit_id,
         "baseline_sha": baseline_sha,
         "candidate_sha": candidate_sha,
         "candidate_branch": candidate_branch,
-        "builder_worktree": "",  # filled in by caller
+        "builder_worktree": builder_worktree,
         "builder_pass_number": builder_pass_number,
         "repair_round": repair_round,
         "files_changed": files_changed,
         "added_lines": added_lines,
         "removed_lines": removed_lines,
+        "changed_paths": changed_paths,
         "validation": validation,
-        "protected_path_check": protected_path_check or {"result": "pass"},
-        "secret_scan_check": secret_scan_check or {"result": "pass"},
-        "scope_check": scope_check or {"result": "pass"},
+        "protected_path_check": protected_path_check,
+        "secret_scan_check": secret_scan_check,
+        "scope_check": scope_check,
+        "sensitive_path_assessment": sensitive_path_assessment,
+        "additional_review_required": additional_review_required,
         "timestamp": utc_now_iso(),
         "builder_agent": builder_agent,
         "next_state": next_state,
-        "notes": notes,
+        "escalation_recommended": escalation_recommended,
     }
+    if review_pass_number_ref is not None:
+        out["review_pass_number_ref"] = review_pass_number_ref
+    if agent_summary is not None:
+        out["agent_summary"] = agent_summary
+    if blocker_reason is not None:
+        out["blocker_reason"] = blocker_reason
+    if escalation_reason is not None:
+        out["escalation_reason"] = escalation_reason
+    if notes is not None:
+        out["notes"] = notes
+    return out
 
 
 def write_receipt(canonical_repo: Path, run_id: str, receipt: dict[str, Any]) -> Path:

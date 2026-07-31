@@ -141,7 +141,7 @@
       "type": "array",
       "items": { "type": "string" }
     },
-    "codex_escalation_conditions": {
+    "escalation_conditions": {
       "type": "array",
       "items": { "type": "string" }
     },

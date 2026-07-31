@@ -366,21 +366,39 @@ def _require_valid_approval(repo: Path, run_id: str) -> tuple[dict[str, Any], di
 
 
 def cmd_build_claim(args: argparse.Namespace) -> None:
+    """Claim a build pass. The single durable owner of build_pass_count.
+
+    - Increments build_pass_count exactly once per claim.
+    - Idempotent: a re-claim while in BUILDING does NOT re-increment.
+    - Refuses when run is not in {READY_TO_BUILD, CHANGES_REQUESTED}.
+    - Refuses when the cap would be exceeded.
+    """
     repo = _repo_path(args.repo)
     try:
         meta, _approval_doc, _packet_path = _require_valid_approval(repo, args.run_id)
     except RuntimeError as e:
         _emit_error(str(e), exit_code=4)
     cur = state_mod.load(repo, args.run_id)
-    if cur.get("state") not in ("READY_TO_BUILD", "CHANGES_REQUESTED"):
-        _emit_error(f"cannot claim in state {cur.get('state')!r}", exit_code=2)
+    cur_state = cur.get("state")
+    if cur_state not in ("READY_TO_BUILD", "CHANGES_REQUESTED", "BUILDING"):
+        _emit_error(f"cannot claim in state {cur_state!r}", exit_code=2)
+    # Idempotent re-claim: do not increment twice.
+    if cur_state == "BUILDING":
+        _emit({
+            "ok": True,
+            "run_id": args.run_id,
+            "state": "BUILDING",
+            "build_pass_count": int(cur.get("build_pass_count") or 0),
+            "replayed": True,
+        })
+        return
     try:
         state_mod.transition(
             repo, args.run_id, to_state="BUILDING",
             actor=args.actor or "of-builder",
             reason="claim build pass",
         )
-        state_mod.increment_counter(
+        new_pass_count = state_mod.increment_counter(
             repo, args.run_id, counter="build_pass_count",
             actor="of-builder", packet=meta,
         )
@@ -389,10 +407,60 @@ def cmd_build_claim(args: argparse.Namespace) -> None:
     state_mod.append_event(
         repo, args.run_id,
         event_type="build_claimed",
-        old_state="READY_TO_BUILD", new_state="BUILDING",
+        old_state=cur_state, new_state="BUILDING",
         actor=args.actor or "of-builder",
     )
-    _emit({"ok": True, "run_id": args.run_id, "state": "BUILDING"})
+def cmd_review_claim(args: argparse.Namespace) -> None:
+    """Claim a review pass. The single durable owner of review_pass_count.
+
+    - Increments review_pass_count exactly once per claim.
+    - Idempotent: a re-claim while in REVIEWING does NOT re-increment.
+    - Refuses when run is not in {READY_FOR_REVIEW, CHANGES_REQUESTED}.
+    - Refuses when the cap would be exceeded.
+    """
+    repo = _repo_path(args.repo)
+    try:
+        meta, _approval_doc, _packet_path = _require_valid_approval(repo, args.run_id)
+    except RuntimeError as e:
+        _emit_error(str(e), exit_code=4)
+    cur = state_mod.load(repo, args.run_id)
+    cur_state = cur.get("state")
+    if cur_state not in ("READY_FOR_REVIEW", "CHANGES_REQUESTED", "REVIEWING"):
+        _emit_error(f"cannot claim in state {cur_state!r}", exit_code=2)
+    if cur_state == "REVIEWING":
+        _emit({
+            "ok": True,
+            "run_id": args.run_id,
+            "state": "REVIEWING",
+            "review_pass_count": int(cur.get("review_pass_count") or 0),
+            "replayed": True,
+        })
+        return
+    try:
+        state_mod.transition(
+            repo, args.run_id, to_state="REVIEWING",
+            actor=args.actor or "of-reviewer",
+            reason="claim review pass",
+        )
+        new_pass_count = state_mod.increment_counter(
+            repo, args.run_id, counter="review_pass_count",
+            actor="of-reviewer", packet=meta,
+        )
+    except limits_mod.RepairLimitExceeded as e:
+        _emit_error(f"repair limit exceeded: {e}", exit_code=4)
+    state_mod.append_event(
+        repo, args.run_id,
+        event_type="review_claimed",
+        old_state=cur_state, new_state="REVIEWING",
+        actor=args.actor or "of-reviewer",
+    )
+    _emit({
+        "ok": True,
+        "run_id": args.run_id,
+        "state": "REVIEWING",
+        "review_pass_count": new_pass_count,
+        "replayed": False,
+    })
 
 
 def cmd_build_transition(args: argparse.Namespace) -> None:
@@ -887,9 +955,6 @@ def _build_parser() -> argparse.ArgumentParser:
     s_td.add_argument("repo")
     s_td.add_argument("run_id")
     s_td.set_defaults(func=cmd_teardown_branch)
-    s_td.add_argument("repo")
-    s_td.add_argument("run_id")
-    s_td.set_defaults(func=cmd_teardown_branch)
 
     # build
     bld = sub.add_parser("build", help="build subcommands")
@@ -936,16 +1001,21 @@ def _build_parser() -> argparse.ArgumentParser:
     r_wv.add_argument("run_id")
     r_wv.add_argument("verdict")
     r_wv.set_defaults(func=cmd_review_write_verdict)
+    r_claim = rev_sub.add_parser("claim", help="claim a review pass")
+    r_claim.add_argument("repo")
+    r_claim.add_argument("run_id")
+    r_claim.add_argument("--actor", default="of-reviewer")
+    r_claim.set_defaults(func=cmd_review_claim)
     r_fin = rev_sub.add_parser("finalize", help="deterministic review finalizer (V2)")
     r_fin.add_argument("repo")
     r_fin.add_argument("run_id")
     r_fin.add_argument("assessment", nargs="?", default=None,
                        help="path to REVIEW_AGENT_ASSESSMENT.json (semantic)")
+    r_fin.set_defaults(func=cmd_review_finalize)
     r_cln = rev_sub.add_parser("cleanup", help="remove per-run reviewer worktree (idempotent)")
     r_cln.add_argument("repo")
     r_cln.add_argument("run_id")
     r_cln.set_defaults(func=cmd_review_cleanup)
-    r_fin.set_defaults(func=cmd_review_finalize)
     r_mk = rev_sub.add_parser("marker", help="emit reviewer marker")
     r_mk.add_argument("repo")
     r_mk.add_argument("run_id")

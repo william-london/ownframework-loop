@@ -4,7 +4,7 @@
 **Source HEAD:** 740eee7 (loop-v1: tighten guards (quoted-arg-safe), fix protected-paths glob, expand bypass matrix)
 **Release gate:** PASS (74 markers, 0 WARN, 0 FAIL)
 **Test count:** 20 PASS / 0 FAIL
-**Installed copy:** `/Users/mr.mrs.london/.claude/skills/of-loop`
+**Installed copy:** `$HOME/.claude/skills/of-loop`
 **Rollback path:** `~/.claude/skills/of-loop.backup-20260723T065124Z`
 
 This document replays the audit's findings, the corrective patches, and the
@@ -156,7 +156,7 @@ enforced, validate.sh had no real `--installed` path.
 1. git-push family (10 forms: bare, --force, --force-with-lease, --no-verify, env-prefix, -C path, /usr/bin/git, command, quoted, redirect)
 2. Chains & pipelines (4 forms: &&, ;, ||, |)
 3. Indirection forms (5 forms: $() sees inner, eval sees inner, var-indirection deferred, Python subprocess deferred, redirect)
-4. Hermes-related (7 forms: 4 ALLOW + 3 BLOCK)
+4. production-orchestrator-related (7 forms: 4 ALLOW + 3 BLOCK)
 5. Deployment / production paths (5 forms: systemctl, docker compose up, docker compose down, ssh production-host-1, ssh production-host-2)
 6. Git remote mutations (4 forms: remote add, remote set-url, remote remove, worktree prune)
 7. Git reset / branch destructive (4 forms: reset --hard, branch -D, branch -d, clean -fdx)
@@ -226,8 +226,8 @@ State machine progression: AWAITING_APPROVAL → READY_TO_BUILD → BUILDING →
 This pilot run did NOT:
 - Create any remote (origin / upstream / anything)
 - Push, merge, or deploy anything
-- Auto-Codex
-- Touch production paths (Production-Host-1 / Production-Host-2 / Cockpit / Video Factory / VPS / personal-project-tree / personal-project-tree / personal-project-tree / personal-project-tree)
+- Auto-escalation-target
+- Touch production paths (Production-Host-1 / Production-Host-2 / Cockpit / Video Factory / production-host / production-project-tree / production-project-tree / production-project-tree / production-project-tree)
 - Modify operator's global `~/.claude/settings.json` silently
 
 Source HEAD before pilot: `740eee7`. Source HEAD after pilot: `740eee7`

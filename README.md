@@ -30,11 +30,11 @@ Reviewer session   --/loop /of-loop:review <run-id>--> verdict
 ```bash
 # 1. Install (idempotent; backups the existing copy if present). install.sh
 #    is a bash script with a bash shebang — invoked via `bash`.
-bash /Users/mr.mrs.london/projects/plugins/ownframework-loop/install.sh
+bash /path/to/ownframework-loop/install.sh
 
 # 2. Open Claude Code inside a target repo
-cd /Users/mr.mrs.london/projects/your-repo
-claude --plugin-dir /Users/mr.mrs.london/.claude/skills/of-loop
+cd /path/to/your-repository
+claude --plugin-dir $HOME/.claude/skills/of-loop
 
 # 3. Create the mission
 /of-loop:spec "add a per-IP rate limit to /api/sync"
@@ -48,7 +48,7 @@ claude --plugin-dir /Users/mr.mrs.london/.claude/skills/of-loop
 /loop /of-loop:build <run-id>      # builder
 /loop /of-loop:review <run-id>     # reviewer
 
-# 6. Wait for APPROVED, BLOCKED, STOPPED, or a Codex escalation marker.
+# 6. Wait for APPROVED, BLOCKED, STOPPED, or an escalation marker.
 # 7. Merge manually.
 ```
 
@@ -75,12 +75,11 @@ CLI:
 
 ## Hard rules
 
-- `master` is the only allowed final branch.
+- The canonical baseline branch is the repository's default branch; treat it as the only allowed final branch.
 - Local-only repositories must stay local-only.
 - The human merges. The human deploys. The loop never pushes, merges, or
   deploys.
-- Codex is invoked by the operator when an escalation marker appears. The
-  loop does not call Codex.
+- Escalation is operator-driven. When the artifact carries an escalation marker, the operator decides what to do manually. The loop does not invoke any external tool itself.
 - All state transitions go through `ofloop` with a file lock. Direct edits
   of `STATE.json` are refused by the hooks.
 

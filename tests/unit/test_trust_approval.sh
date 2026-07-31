@@ -53,7 +53,8 @@ APPROVAL="$T/.ownframework-loop/$RID/APPROVAL.json"
 python3 - "$T" "$RID" "$APPROVAL" "$PRE_SHA" <<'PY'
 import sys, json
 from pathlib import Path
-sys.path.insert(0, "/Users/mr.mrs.london/projects/plugins/ownframework-loop/lib")
+import os as _os_for_path
+sys.path.insert(0, _os_for_path.environ.get('OFLOOP_LIB', '/path/to/ownframework-loop/lib'))
 from ownframework_loop import approval
 canonical_repo = Path(sys.argv[1])
 run_id = sys.argv[2]
@@ -85,7 +86,8 @@ assert_eq "$ACTUAL_PACKET_SHA" "$PRE_SHA" "approval records exact packet SHA"
 
 # 3. whitespace mutation invalidates approval
 echo " " >> "$PP"
-ok_msg="$(python3 -c "import sys; sys.path.insert(0, '/Users/mr.mrs.london/projects/plugins/ownframework-loop/lib'); from ownframework_loop import approval, packet as p, util; from pathlib import Path; meta,_=p.parse_packet_file(Path('$PP')); doc=approval.load_approval(Path('$T'), '$RID'); ok,msg=approval.validate_approval_binding(canonical_repo=Path('$T'), run_id='$RID', approval=doc, packet=meta, packet_path=Path('$PP')); print('REFUSED' if not ok else 'ALLOWED:'+msg)")"
+ok_msg="$(python3 -c "import sys; import os as _os_for_path
+sys.path.insert(0, _os_for_path.environ.get('OFLOOP_LIB', '/path/to/ownframework-loop/lib')); from ownframework_loop import approval, packet as p, util; from pathlib import Path; meta,_=p.parse_packet_file(Path('$PP')); doc=approval.load_approval(Path('$T'), '$RID'); ok,msg=approval.validate_approval_binding(canonical_repo=Path('$T'), run_id='$RID', approval=doc, packet=meta, packet_path=Path('$PP')); print('REFUSED' if not ok else 'ALLOWED:'+msg)")"
 assert_contains "$ok_msg" "REFUSED" "whitespace mutation invalidates approval"
 
 # Restore packet bytes
@@ -98,13 +100,15 @@ PY
 
 # 4. metadata mutation invalidates approval (rewrite with different title)
 sed -i.bak2 's/"title": "approval test"/"title": "MUTATED"/' "$PP"
-ok_msg="$(python3 -c "import sys; sys.path.insert(0, '/Users/mr.mrs.london/projects/plugins/ownframework-loop/lib'); from ownframework_loop import approval, packet as p; from pathlib import Path; meta,_=p.parse_packet_file(Path('$PP')); doc=approval.load_approval(Path('$T'), '$RID'); ok,msg=approval.validate_approval_binding(canonical_repo=Path('$T'), run_id='$RID', approval=doc, packet=meta, packet_path=Path('$PP')); print('REFUSED' if not ok else 'ALLOWED:'+msg)")"
+ok_msg="$(python3 -c "import sys; import os as _os_for_path
+sys.path.insert(0, _os_for_path.environ.get('OFLOOP_LIB', '/path/to/ownframework-loop/lib')); from ownframework_loop import approval, packet as p; from pathlib import Path; meta,_=p.parse_packet_file(Path('$PP')); doc=approval.load_approval(Path('$T'), '$RID'); ok,msg=approval.validate_approval_binding(canonical_repo=Path('$T'), run_id='$RID', approval=doc, packet=meta, packet_path=Path('$PP')); print('REFUSED' if not ok else 'ALLOWED:'+msg)")"
 assert_contains "$ok_msg" "REFUSED" "metadata mutation invalidates approval"
 
 # 5. packet replacement invalidates approval
 sed -i.bak3 's/"title": "MUTATED"/"title": "approval test"/' "$PP"
 echo "completely different packet" > "$PP"
-ok_msg="$(python3 -c "import sys; sys.path.insert(0, '/Users/mr.mrs.london/projects/plugins/ownframework-loop/lib'); from ownframework_loop import approval, packet as p; from pathlib import Path; meta=None
+ok_msg="$(python3 -c "import sys; import os as _os_for_path
+sys.path.insert(0, _os_for_path.environ.get('OFLOOP_LIB', '/path/to/ownframework-loop/lib')); from ownframework_loop import approval, packet as p; from pathlib import Path; meta=None
 try:
     meta,_=p.parse_packet_file(Path('$PP'))
 except Exception:
@@ -144,7 +148,8 @@ NEW_SHA="$(shasum -a 256 "$PP" | awk '{print $1}')"
 python3 - "$T" "$RID" "$APPROVAL" "$NEW_SHA" <<'PY'
 import sys, json
 from pathlib import Path
-sys.path.insert(0, "/Users/mr.mrs.london/projects/plugins/ownframework-loop/lib")
+import os as _os_for_path
+sys.path.insert(0, _os_for_path.environ.get('OFLOOP_LIB', '/path/to/ownframework-loop/lib'))
 from ownframework_loop import approval
 canonical_repo = Path(sys.argv[1])
 run_id = sys.argv[2]
@@ -178,7 +183,8 @@ NEW_SHA="$(shasum -a 256 "$PP" | awk '{print $1}')"
 python3 - "$T" "$RID" "$APPROVAL" "$NEW_SHA" <<'PY'
 import sys, json
 from pathlib import Path
-sys.path.insert(0, "/Users/mr.mrs.london/projects/plugins/ownframework-loop/lib")
+import os as _os_for_path
+sys.path.insert(0, _os_for_path.environ.get('OFLOOP_LIB', '/path/to/ownframework-loop/lib'))
 from ownframework_loop import approval
 canonical_repo = Path(sys.argv[1])
 run_id = sys.argv[2]
@@ -211,7 +217,8 @@ NEW_SHA="$(shasum -a 256 "$PP" | awk '{print $1}')"
 python3 - "$T" "$RID" "$APPROVAL" "$NEW_SHA" <<'PY'
 import sys, json
 from pathlib import Path
-sys.path.insert(0, "/Users/mr.mrs.london/projects/plugins/ownframework-loop/lib")
+import os as _os_for_path
+sys.path.insert(0, _os_for_path.environ.get('OFLOOP_LIB', '/path/to/ownframework-loop/lib'))
 from ownframework_loop import approval
 canonical_repo = Path(sys.argv[1])
 run_id = sys.argv[2]
@@ -241,7 +248,8 @@ target = sys.argv[1]
 new_sha = sys.argv[2]
 import os
 os.chdir("/tmp")
-sys.path.insert(0, "/Users/mr.mrs.london/projects/plugins/ownframework-loop/lib")
+import os as _os_for_path
+sys.path.insert(0, _os_for_path.environ.get('OFLOOP_LIB', '/path/to/ownframework-loop/lib'))
 from ownframework_loop import approval
 d = json.loads(open(target).read())
 d["canonical_repo"] = "/tmp/this-path-does-not-exist"
@@ -256,7 +264,8 @@ NEW_SHA="$(shasum -a 256 "$PP" | awk '{print $1}')"
 python3 - "$T" "$RID" "$APPROVAL" "$NEW_SHA" "/tmp/wrong" <<'PY'
 import sys, json
 from pathlib import Path
-sys.path.insert(0, "/Users/mr.mrs.london/projects/plugins/ownframework-loop/lib")
+import os as _os_for_path
+sys.path.insert(0, _os_for_path.environ.get('OFLOOP_LIB', '/path/to/ownframework-loop/lib'))
 from ownframework_loop import approval
 canonical_repo = Path(sys.argv[1])
 run_id = sys.argv[2]
@@ -290,12 +299,14 @@ assert_contains "$out" "TTY" "noninteractive model approval is refused"
 
 # 11. human TTY approval succeeds in a safe fixture (use assume-tty with correct token)
 NEW_SHA="$(shasum -a 256 "$PP" | awk '{print $1}')"
-TOKEN="$(python3 -c "import sys; sys.path.insert(0, '/Users/mr.mrs.london/projects/plugins/ownframework-loop/lib'); from ownframework_loop import approval; print(approval.derive_confirmation_token('$NEW_SHA'))")"
+TOKEN="$(python3 -c "import sys; import os as _os_for_path
+sys.path.insert(0, _os_for_path.environ.get('OFLOOP_LIB', '/path/to/ownframework-loop/lib')); from ownframework_loop import approval; print(approval.derive_confirmation_token('$NEW_SHA'))")"
 # Drive request_human_approval with assume_tty=True using a heredoc-faked stdin won't pass tty check.
 # Use a subprocess to pipe the expected token.
 out="$(python3 - "$T" "$RID" "$NEW_SHA" "$TOKEN" <<'PY' 2>&1
 import sys, os, subprocess
-sys.path.insert(0, "/Users/mr.mrs.london/projects/plugins/ownframework-loop/lib")
+import os as _os_for_path
+sys.path.insert(0, _os_for_path.environ.get('OFLOOP_LIB', '/path/to/ownframework-loop/lib'))
 from ownframework_loop import approval
 canonical_repo, run_id, packet_sha, expected = sys.argv[1:5]
 packet_path = os.path.join(canonical_repo, ".ownframework-loop", run_id, "WORK_PACKET.md")

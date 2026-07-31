@@ -11,7 +11,7 @@ set -uo pipefail
 
 SMOKE_ROOT="${SMOKE_ROOT:-/tmp/ofloop-smoke-$(date -u +%Y%m%dT%H%M%SZ)}"
 PROJECT="${PROJECT:-ofloop-smoke-pilot-$(printf '%04x' $RANDOM)}"
-PLUGIN_DIR="${PLUGIN_DIR:-/Users/mr.mrs.london/.claude/skills/of-loop}"
+PLUGIN_DIR="${PLUGIN_DIR:-${HOME}/.claude/skills/of-loop}"
 MAX_TURNS="${MAX_TURNS:-30}"
 
 # Resolve plugin-data dir using the official storage doctrine.

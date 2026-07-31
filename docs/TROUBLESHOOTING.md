@@ -3,14 +3,14 @@
 ## The plugin does not appear in Claude Code
 
 ```bash
-ls -la /Users/mr.mrs.london/.claude/skills/of-loop
-ls /Users/mr.mrs.london/.claude/skills/of-loop/skills
+ls -la $HOME/.claude/skills/of-loop
+ls $HOME/.claude/skills/of-loop/skills
 ```
 
 If missing, run:
 
 ```bash
-bash /Users/mr.mrs.london/projects/plugins/ownframework-loop/install.sh
+bash /path/to/ownframework-loop/install.sh
 ```
 
 Inside the Claude session, run `/reload-plugins`.
@@ -37,7 +37,7 @@ Run the validator explicitly:
 
 ```bash
 python3 -c "
-import sys; sys.path.insert(0, '/Users/mr.mrs.london/.claude/skills/of-loop/lib')
+import sys; sys.path.insert(0, '$HOME/.claude/skills/of-loop/lib')
 from ownframework_loop import packet
 meta, _ = packet.parse_packet_file(__import__('pathlib').Path('WORK_PACKET.md'))
 print(packet.validate_packet_metadata(meta))

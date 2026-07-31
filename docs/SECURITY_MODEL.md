@@ -252,12 +252,12 @@ is anything other than `human_only`, `delegated`, or `none`. The CLI
 rejects bad values at parse time. Hooks refuse push/merge/deploy
 regardless of what the packet says.
 
-## Why Codex is not wired
+## Why escalation is not wired
 
 `CODEX=manual_triggered_escalation`. The loop emits a durable
 recommendation in `REVIEW_VERDICT.json` and `EVENTS.log` when an
-escalation condition is observed. operator invokes Codex as a separate
-manual lane. The loop never calls Codex automatically.
+escalation condition is observed. operator invokes escalation as a separate
+manual lane. The loop never calls escalation automatically.
 
 ## Auditability
 

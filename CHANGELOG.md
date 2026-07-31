@@ -86,10 +86,10 @@ on fourteen patches.
    silently during the active loop.
 6. **Broad tools + external-action guard** — the textual guard
    blocks `git push`/`git remote *`/`docker compose`/`systemctl`
-   and SSH access to Horus / FireLove. Detection covers bare forms,
+   and SSH access to production-host-1 / production-host-2. Detection covers bare forms,
    chains (`&&`, `;`, `||`), pipelines (`|`), `$(...)` and `eval`,
    and single-line redirects. Variable indirection is deferred to
-   the sandbox + post-pass review layers. Hermes, Kanban, Linear,
+   the sandbox + post-pass review layers. production-orchestrator, Kanban, Linear,
    Windmill, and SQLite are not added.
 7. **Safe secret handling** — secret scanner distinguishes
    `HARD_PATTERNS` (block: AWS keys, private keys, high-confidence

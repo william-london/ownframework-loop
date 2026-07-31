@@ -7,7 +7,7 @@ via `install.sh`. If you have not installed it, see the README quickstart.
 
 ```bash
 cd /path/to/target-repo
-claude --plugin-dir /Users/mr.mrs.london/.claude/skills/of-loop
+claude --plugin-dir $HOME/.claude/skills/of-loop
 ```
 
 Inside the Claude session:
@@ -162,7 +162,7 @@ recover when the cleanup scope is bounded to one run.
 ## 13. Roll back the plugin
 
 ```bash
-bash /Users/mr.mrs.london/projects/plugins/ownframework-loop/rollback.sh
+bash /path/to/ownframework-loop/rollback.sh
 ```
 
 Restores the previous installed copy from the timestamped backup. The
@@ -179,17 +179,17 @@ Returns `build_pass_count`, `review_pass_count`, `transitions_count`,
 spend is visible in the Claude Code session transcript; the plugin
 does not require a separate metering layer.
 
-## 15. Use Codex as a manual inspector
+## 15. Use escalation-target as a manual inspector
 
-When a verdict marks `codex_escalation_recommended: true` or
+When a verdict marks `escalation_recommended: true` or
 `EVENTS.log` shows a known escalation trigger:
 
-1. Open Codex in a separate session.
+1. Open escalation-target in a separate session.
 2. Provide it the packet SHA, the candidate SHA, the verdict, and the
    findings.
-3. Codex returns a manual investigation. You decide what to do.
+3. escalation-target returns a manual investigation. You decide what to do.
 
-The loop does not call Codex.
+The loop does not call escalation-target.
 
 ## 16. Local-only repositories
 
@@ -223,7 +223,7 @@ Open a separate pair of `/loop` tabs per project.
 Stop and inspect if any of:
 
 - The state is `BLOCKED` and you do not know why.
-- `EVENTS.log` shows a Codex escalation marker.
+- `EVENTS.log` shows a escalation-target escalation marker.
 - The reviewer wrote `verdict: HUMAN_REVIEW_REQUIRED`.
 - The packet SHA drifted after approval.
 - Hooks are firing on benign commands (verify hook config, not the
