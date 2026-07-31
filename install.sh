@@ -34,13 +34,33 @@ SOURCE_ROOT="$HERE"
 MARKETPLACE_ROOT="$(cd "$SOURCE_ROOT/.." && pwd)"
 PLUGIN_DIR_NAME="$(basename "$SOURCE_ROOT")"
 SOURCE_BRANCH="${SOURCE_BRANCH:-$(git -C "$SOURCE_ROOT" branch --show-current 2>/dev/null || echo unknown)}"
+SOURCE_SHA="${SOURCE_SHA:-$(git -C "$SOURCE_ROOT" rev-parse HEAD 2>/dev/null || echo unknown)}"
+SOURCE_DESC_DIRTY="$(git -C "$SOURCE_ROOT" status --porcelain 2>/dev/null | wc -l | tr -d ' ')"
 EXPECTED_VERSION="$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['version'])" "$SOURCE_ROOT/.claude-plugin/plugin.json")"
 MARKET_VERSION="$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['plugins'][0]['version'])" "$MARKETPLACE_ROOT/.claude-plugin/marketplace.json")"
 log() { echo "[install] $*"; }
 
-log "source: $SOURCE_ROOT (branch=${SOURCE_BRANCH})"
+log "source: $SOURCE_ROOT (branch=${SOURCE_BRANCH}, sha=${SOURCE_SHA}, dirty_files=${SOURCE_DESC_DIRTY})"
 log "expected version: $EXPECTED_VERSION"
 log "marketplace version: $MARKET_VERSION"
+
+# Provenance: refuse to install from a tree with uncommitted changes (dirty
+# installs are not reproducible). Persist source SHA + branch + version next
+# to the install log so the cache payload is auditable post-hoc.
+if [[ "$SOURCE_DESC_DIRTY" != "0" ]]; then
+  log "source tree is dirty (${SOURCE_DESC_DIRTY} unstaged/staged files); refusing"
+  exit 6
+fi
+
+PROVENANCE="$SOURCE_ROOT/.install.provenance"
+{
+  echo "source_branch=${SOURCE_BRANCH}"
+  echo "source_sha=${SOURCE_SHA}"
+  echo "expected_version=${EXPECTED_VERSION}"
+  echo "marketplace_version=${MARKET_VERSION}"
+  echo "installed_at_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+} > "$PROVENANCE"
+log "provenance: $PROVENANCE"
 
 if [[ "$EXPECTED_VERSION" != "$MARKET_VERSION" ]]; then
   log "version mismatch between source and marketplace; refusing"

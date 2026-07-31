@@ -193,3 +193,55 @@ is rejected with `InvalidTransitionError`.
 - **Exact-SHA reviewer**: prevents approving a candidate the reviewer did
   not actually review.
 - **Human merge and deploy**: no autonomous external action.
+
+
+## 10. PROGRAM mode (v0.3.0)
+
+For missions that span multiple bounded checkpoints, v3 work packets declare
+`execution_mode: program` plus a `checkpoint_graph`. Each checkpoint (CP-N)
+has its own `risk_budget` (max 1-8 build passes, 1-8 review passes, 1-3 repair
+rounds) and explicit `depends_on` edges forming a DAG.
+
+State schema v2 carries a `program` object alongside the existing single-run
+fields:
+
+```
+STATE.json
+├── program (v2 only, present iff packet is v3)
+│   ├── execution_mode: "program"
+│   ├── checkpoint_graph_sha256   # frozen at init; widening post-init refused
+│   ├── promotion_policy: "human_gate" | "merge_on_approved"
+│   ├── current_checkpoints: [CP-N, ...]   # ready-to-build now
+│   ├── finalized_checkpoints: [CP-N, ...]
+│   ├── cumulative_counters: {build_pass_count, review_pass_count, repair_round_count, ...}
+│   ├── cumulative_ceilings: {build_pass_count, ..., source churn caps}
+│   ├── checkpoints: { CP-N: {state, counters, finalized_at, terminal_state, evidence_manifest} }
+│   ├── blocked: [CP-N, ...]
+│   └── source_sha_provenance: { initial_baseline_sha, last_completed_checkpoint_sha, ... }
+└── (single-run fields, all still authoritative)
+```
+
+Global source ceilings apply to the union of all checkpoints:
+
+- 500 unique changed files across the whole program
+- 30,000 baseline->final diff lines across the whole program
+
+Each checkpoint's per-pass caps are bounded by packet's `risk_budget`; the
+cumulative caps are the sum of approved-checkpoint exact caps. Promotion
+(`merge_on_approved`) only fires once the program is terminal AND all
+approved-checkpoint exact caps are met AND no cap is exceeded.
+
+Frozen graph SHA at init prevents post-approval widening: re-running
+`ofloop program init` for an existing program refuses if the packet's
+`checkpoint_graph_sha256` differs from the recorded one.
+
+CLI additions:
+
+- `ofloop program init <repo> <run-id>` — materialise program state
+- `ofloop program status <repo> <run-id>` — read-only program state dump
+- `ofloop loop run <repo> [mission]` — drives one checkpoint per pass
+
+The orchestrator dispatches single-mode vs program-mode transparently based
+on the packet's `execution_mode` and decrements/increments per-checkpoint
+counters before each finalize. PROGRAM mode is product-agnostic — no
+domain-specific knowledge of any target system is encoded in the engine.

@@ -109,3 +109,12 @@ classifies the verdict as `BLOCKED` and records the changed paths.
 The reviewer may not delete or prune arbitrary worktrees; only the
 run-specific reviewer worktree may be cleaned up by an explicit
 operator command.
+
+
+## PROGRAM mode (v3 packets)
+
+The review pass is identical for single-mode and program-mode packets
+— the determinist finalizer asserts the same SHA. PROGRAM-mode drives
+the pass through `ofloop loop run`, which calls `ofloop review
+finalize` once per claimable checkpoint. This skill MUST NOT run more
+than one review pass per invocation regardless of mode.

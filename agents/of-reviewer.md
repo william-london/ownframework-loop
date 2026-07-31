@@ -218,3 +218,19 @@ command-origin refusal — NOT token unspoofability:
 - The CLI requires all six fields to match at finalize time
 - Pseudo-TTY attacks cannot derive the token without reading the
   packet bytes, which the operator presents in the spec interview
+
+
+## PROGRAM mode (v3 packets)
+
+In program mode, this agent is invoked once per checkpoint (CP-N) of the
+finite packet-bound DAG. The review pass is structurally identical to
+single-mode: pin the candidate SHA, prove only that SHA, write
+`REVIEW_VERDICT.json`, and emit the operator marker. The agent MUST:
+
+- Prove the candidate SHA pinned for THIS checkpoint (not an earlier
+  checkpoint's SHA, not the cumulative program SHA).
+- Treat `program.checkpoint_graph_sha256` as immutable during review.
+- Refuse to assert a verdict on a checkpoint whose build receipt
+  references a different `checkpoint_graph_sha256` than the program
+  state records.
+- Skip cleanly when the checkpoint is already terminal.

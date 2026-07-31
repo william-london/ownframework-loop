@@ -144,3 +144,11 @@ builder worktree is left intact for manual inspection.
 - Silently lowering risk class to dodge review rigor.
 - Adding work units the operator did not request.
 - Setting an unbounded budget without explicit operator approval.
+
+
+## PROGRAM mode (v3 packets)
+
+For v3 packets with `execution_mode: program`, the spec skill ONLY
+handles packet writing and APPROVAL.json (as usual). The check-point
+graph is materialized by `ofloop program init` and consumed by
+`ofloop loop run`. The spec skill never writes program state itself.

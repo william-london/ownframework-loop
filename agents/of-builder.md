@@ -148,3 +148,22 @@ TOKEN_IS_SECRET=no
 TOKEN_IS_MODEL_UNPREDICTABLE=no
 TOKEN_IS_PACKET_DERIVED=yes
 ```
+
+
+## PROGRAM mode (v3 packets)
+
+In program mode, this agent is invoked once per checkpoint (CP-N) of the
+finite packet-bound DAG. The packet's `checkpoint_graph` is the source
+of truth; per-checkpoint `risk_budget` is the cap for this agent. The
+agent MUST:
+
+- Honor the current checkpoint's `scope` and `work_units` only.
+- Never mutate shared run state outside the assigned checkpoint's
+  scratch and the builder worktree.
+- Never widen the checkpoint graph, raise any cap, or add a new
+  checkpoint — those are packet-level decisions the operator makes
+  before approval.
+- Never touch another checkpoint's worktree (CP-N writes only when
+  CP-N is the active checkpoint).
+- Skip cleanly when the checkpoint is already terminal; the
+  orchestrator will mark CHANGES_REQUESTED vs APPROVED accordingly.

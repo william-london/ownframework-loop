@@ -66,11 +66,19 @@ fi
 python3 - "$ROOT" <<'PY'
 import json, sys
 root = sys.argv[1]
+import re
 data = json.load(open(f"{root}/.claude-plugin/plugin.json"))
 assert data["name"] == "of-loop", f"plugin name must be of-loop, got {data.get('name')}"
 assert data["displayName"] == "OwnFramework Loop"
 assert "version" in data
-print("  PASS: plugin manifest has name=of-loop, displayName=OwnFramework Loop")
+ver = data["version"]
+m = re.match(r"^(\d+)\.(\d+)\.(\d+)$", ver)
+assert m, f"version must be semver, got {ver!r}"
+major = int(m.group(1)); minor = int(m.group(2)); patch = int(m.group(3))
+assert (major, minor, patch) >= (0, 3, 0), (
+    f"installed version must be >= 0.3.0 (got {ver})"
+)
+print(f"  PASS: plugin manifest valid (version={ver} >= 0.3.0)")
 PY
 
 # 2. Required files.
@@ -87,7 +95,9 @@ for f in \
   lib/ownframework_loop/limits.py \
   lib/ownframework_loop/integrity.py \
   schemas/work-packet.schema.json \
+  schemas/work-packet-v3.schema.json \
   schemas/state.schema.json \
+  schemas/state-v2.schema.json \
   schemas/build-receipt.schema.json \
   schemas/review-verdict.schema.json
 do
@@ -116,9 +126,9 @@ fi
 python3 - "$ROOT" <<'PY'
 import json, sys
 root = sys.argv[1]
-for s in ["work-packet.schema.json", "state.schema.json", "build-receipt.schema.json", "review-verdict.schema.json"]:
+for s in ["work-packet.schema.json", "work-packet-v3.schema.json", "state.schema.json", "state-v2.schema.json", "build-receipt.schema.json", "review-verdict.schema.json"]:
     json.load(open(f"{root}/schemas/{s}"))
-print("  PASS: all 4 schemas parse as JSON")
+print("  PASS: all 6 schemas parse as JSON")
 PY
 
 # 5. Python library imports.
@@ -129,7 +139,7 @@ sys.path.insert(0, '$LIB_DIR')
 from ownframework_loop import (
     cli, packet, state, transitions, worktrees, git_checks,
     guards, receipts, verdicts, scheduling, locking, util,
-    integrity, limits,
+    integrity, limits, orchestrator, program,
 )
 print('  PASS: Python core library imports cleanly')
 "

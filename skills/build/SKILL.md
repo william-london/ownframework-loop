@@ -107,3 +107,16 @@ edits `STATE.json` directly.
 - Letting the build session continue past one pass when launched under `/loop`.
 - Trusting a model-authored `next_state` from the agent result.
 - Issuing more than one build pass per invocation.
+
+
+## PROGRAM mode (v3 packets)
+
+When `WORK_PACKET.md` has `execution_mode: program`, the operator (NOT
+this skill) drives the checkpoint graph via:
+
+  - `ofloop program init <repo> <run-id>` — materialise `program` state
+  - `ofloop loop run <repo> [mission]` — drive one checkpoint per pass
+
+This skill remains the single pass-per-invocation entry for one
+checkpoint. It does NOT replace the orchestrator and MUST NOT be
+parallelized into a multi-checkpoint loop within one invocation.

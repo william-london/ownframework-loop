@@ -286,3 +286,33 @@ that posture. The plugin does NOT modify any of these settings
 (`~/.claude/settings.json`, `~/.claude.json`, managed settings,
 project permission settings, sandbox settings, effort settings,
 provider settings, model settings).
+
+
+## v0.3.0 PROGRAM mode protections
+
+PROGRAM mode extends the security model with three additional invariants:
+
+1. **Frozen graph SHA** — `checkpoint_graph_sha256` is captured at
+   `program init` and recorded in `state.program`. Any subsequent
+   initialization attempt with a different graph SHA is refused
+   (`program_graph_sha_drift`). This prevents post-approval widening
+   (e.g., adding new checkpoints or raising caps after some CPs are
+   already approved).
+
+2. **Per-checkpoint approval guard** — `program.checkpoints[CP-N].state`
+   is finalised to `APPROVED` only after at least one build pass and
+   at least one review pass are recorded in the per-checkpoint counters.
+   The model cannot bulk-finalise without going through the bounded
+   builder/reviewer/finalizer cycle. The nonterminal exception
+   (`nonterminal_cp_approval_refused`) is raised at finalize time.
+
+3. **Cumulative source ceilings** — Even with per-checkpoint caps
+   satisfied, the program-level cumulative caps (sum of approved-CP
+   exact caps) and global source ceilings (500 files, 30,000 diff lines)
+   are re-checked at every checkpoint finalization. Exceeding a
+   cumulative cap is a hard `STOPPED` outcome and requires a new
+   packet/program.
+
+These invariants are deterministic in the Python core (no model
+judgment) and are exercised by the integration tests in
+`tests/integration/test_program_mode.sh`.
