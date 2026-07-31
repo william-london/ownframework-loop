@@ -18,39 +18,146 @@
 # Honor:
 #   OFLOOP_VALIDATE_SOURCE_ROOT  - default source root (when not passing as arg)
 #   OFLOOP_VALIDATE_INSTALL_ROOT - default installed root for --installed
-
+#                                  (used only when --installed=<path> or
+#                                   --installed <path> is supplied; bare
+#                                   --installed ALWAYS queries the live
+#                                   Claude Code plugin registry)
+#
+# v0.3.3 Repair A: active installed-cache discovery
+# -----------------------------------------------
+# Bare `--installed` MUST discover the live active managed install via
+# `claude plugin list --json`. The legacy `~/.claude/skills/of-loop` path
+# is a rolled-back backup artifact (audit v0.3.3) and MUST NOT be selected
+# silently as the active install. Three argument forms are supported:
+#   bash validate.sh --installed
+#   bash validate.sh --installed /explicit/path
+#   bash validate.sh --installed=/explicit/path
+# When an explicit path is supplied, that path is used verbatim — but we
+# still warn (do not fail) if it does not match the live registry entry,
+# because operators may legitimately be validating a side-by-side cache
+# while the managed install is active. The warning is informational; the
+# explicit path is authoritative for that run.
+#
+# v0.3.3 Repair B: bytecode-free validation
+# ----------------------------------------
+# All outer Python launch boundaries in this script use
+# `PYTHONDONTWRITEBYTECODE=1` and `python3 -B`, so validation NEVER
+# creates .pyc files inside the cache tree it is inspecting.
 set -uo pipefail
 
 INSTALLED_MODE=0
 SKIP_TESTS=0
 ROOT=""
+EXPLICIT_INSTALL_PATH=""
 for arg in "$@"; do
   case "$arg" in
-    --installed) INSTALLED_MODE=1 ;;
-    --installed=*) INSTALLED_MODE=1 ;;
+    --installed)
+      INSTALLED_MODE=1
+      ;;
+    --installed=*)
+      INSTALLED_MODE=1
+      EXPLICIT_INSTALL_PATH="${arg#--installed=}"
+      ;;
     --skip-tests) SKIP_TESTS=1 ;;
     --help|-h)
       cat <<USAGE
 Usage:
   bash validate.sh                    # validate the SOURCE tree
-  bash validate.sh --installed        # validate the INSTALLED copy
+  bash validate.sh --installed        # validate the live INSTALLED copy
+                                       #   (discovered via
+                                       #    \`claude plugin list --json\`)
+  bash validate.sh --installed <path> # validate the INSTALLED copy at <path>
+  bash validate.sh --installed=<path> # same, equals form
 
 Source root : OFLOOP_VALIDATE_SOURCE_ROOT (or repo of this script)
-Install root: OFLOOP_VALIDATE_INSTALL_ROOT (or \$HOME/.claude/skills/of-loop)
+Install root: explicit path argument, OR the active managed install
+              reported by \`claude plugin list --json\` for
+              of-loop@ownframework-local (enabled, non-empty installPath).
+
+The legacy path \$HOME/.claude/skills/of-loop is a rolled-back backup
+artifact and is NEVER auto-selected as the active install.
 USAGE
       exit 0 ;;
-    *) ROOT="$arg" ;;
+    *)
+      if [[ "$INSTALLED_MODE" -eq 1 && -z "$EXPLICIT_INSTALL_PATH" && -z "$ROOT" ]]; then
+        EXPLICIT_INSTALL_PATH="$arg"
+      else
+        ROOT="$arg"
+      fi
+      ;;
   esac
 done
 
 ok() { echo "  PASS: $*"; }
 bad() { echo "  FAIL: $*"; exit 1; }
 
+# Active installed-cache discovery: query the Claude Code plugin registry
+# for the single enabled of-loop@ownframework-local entry. The legacy
+# skills-dir copy is intentionally NOT consulted as a fallback; if the
+# registry has no live entry, bare --installed fails closed with a clear
+# error.
+discover_active_install_path() {
+  if ! command -v claude >/dev/null 2>&1; then
+    echo ""
+    return 1
+  fi
+  local raw
+  raw="$(claude plugin list --json 2>/dev/null || true)"
+  [[ -z "$raw" ]] && { echo ""; return 1; }
+  # PYTHONDONTWRITEBYTECODE=1 + python3 -B prevents the discovery helper
+  # from polluting the cache tree with .pyc files (Repair B).
+  PYTHONDONTWRITEBYTECODE=1 python3 -B - "$raw" <<'PY'
+import json, sys
+try:
+    data = json.loads(sys.argv[1])
+except Exception:
+    sys.exit(0)
+matches = []
+for e in data or []:
+    if not isinstance(e, dict):
+        continue
+    if e.get("id") != "of-loop@ownframework-local":
+        continue
+    if not e.get("enabled", False):
+        continue
+    ip = e.get("installPath") or ""
+    if not ip:
+        continue
+    matches.append(ip)
+if len(matches) == 1:
+    print(matches[0])
+    sys.exit(0)
+if len(matches) > 1:
+    print("__AMBIGUOUS__:" + "\n".join(matches), file=sys.stderr)
+    sys.exit(2)
+print("")
+sys.exit(0)
+PY
+}
+
 if [[ "$INSTALLED_MODE" -eq 1 ]]; then
   echo "=== OwnFramework Loop V2 — validate (INSTALLED COPY) ==="
-  : "${OFLOOP_VALIDATE_INSTALL_ROOT:=$HOME/.claude/skills/of-loop}"
-  DEFAULT_ROOT="$OFLOOP_VALIDATE_INSTALL_ROOT"
-  ROOT="${ROOT:-$DEFAULT_ROOT}"
+  if [[ -n "$EXPLICIT_INSTALL_PATH" ]]; then
+    ROOT="$EXPLICIT_INSTALL_PATH"
+    echo "  using explicit --installed path: $ROOT"
+    # Informational cross-check: if the explicit path differs from the
+    # live registry entry, warn but do not fail.
+    discovered="$(discover_active_install_path || true)"
+    if [[ -n "$discovered" && "$discovered" != "$ROOT" ]]; then
+      echo "  NOTE: explicit --installed path differs from live registry entry"
+      echo "        explicit:  $ROOT"
+      echo "        registry:  $discovered"
+    fi
+  else
+    # Bare --installed: ALWAYS query the live registry. Never fall back
+    # to the legacy skills-dir path or to OFLOOP_VALIDATE_INSTALL_ROOT.
+    discovered="$(discover_active_install_path || true)"
+    if [[ -z "$discovered" ]]; then
+      bad "bare --installed requested but claude plugin list --json returned no enabled of-loop@ownframework-local entry; re-run install.sh"
+    fi
+    ROOT="$discovered"
+    echo "  discovered active install: $ROOT"
+  fi
 else
   echo "=== OwnFramework Loop V2 — validate (SOURCE TREE) ==="
   HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -63,7 +170,7 @@ if [[ ! -d "$ROOT" ]]; then
 fi
 
 # 1. Plugin manifest.
-python3 - "$ROOT" <<'PY'
+PYTHONDONTWRITEBYTECODE=1 python3 -B - "$ROOT" <<'PY'
 import json, sys
 root = sys.argv[1]
 import re
@@ -119,8 +226,15 @@ if [[ "$INSTALLED_MODE" -eq 1 ]]; then
   if [[ ! -f "$MANIFEST" ]]; then
     bad "installed copy is missing payload manifest at $MANIFEST — re-run install.sh"
   fi
-  if ! python3 "$ROOT/scripts/verify_payload_manifest.py" --root "$ROOT" --manifest "$MANIFEST"; then
+  if ! PYTHONDONTWRITEBYTECODE=1 python3 -B "$ROOT/scripts/verify_payload_manifest.py" --root "$ROOT" --manifest "$MANIFEST"; then
     bad "payload manifest verification FAILED — installed payload has drifted from manifest"
+  fi
+
+  # v0.3.3 Repair C: structural manifest count truth.
+  # Require header/file-entry count + active-file count to be reported
+  # and assert equality so a partial / over-large manifest is detected.
+  if ! PYTHONDONTWRITEBYTECODE=1 python3 -B "$ROOT/scripts/manifest_count_check.py" --root "$ROOT" --manifest "$MANIFEST"; then
+    bad "manifest count check FAILED — manifest header or active-file count inconsistent"
   fi
 
   # Harmless __pycache__ directory may exist (regenerated on import); document
@@ -133,7 +247,7 @@ if [[ "$INSTALLED_MODE" -eq 1 ]]; then
 fi
 
 # 4. JSON schemas parse.
-python3 - "$ROOT" <<'PY'
+PYTHONDONTWRITEBYTECODE=1 python3 -B - "$ROOT" <<'PY'
 import json, sys
 root = sys.argv[1]
 for s in ["work-packet.schema.json", "work-packet-v3.schema.json", "state.schema.json", "state-v2.schema.json", "build-receipt.schema.json", "review-verdict.schema.json"]:
@@ -143,7 +257,7 @@ PY
 
 # 5. Python library imports.
 LIB_DIR="$ROOT/lib"
-PYTHONPATH="$LIB_DIR" python3 -c "
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$LIB_DIR" python3 -B -c "
 import sys
 sys.path.insert(0, '$LIB_DIR')
 from ownframework_loop import (
@@ -160,18 +274,18 @@ print('  PASS: Python core library imports cleanly')
 # and the script eventually reported PASS).
 cd "$ROOT"
 if [[ "$INSTALLED_MODE" -eq 1 ]]; then
-  if python3 bin/ofloop --help >/dev/null 2>&1; then
+  if PYTHONDONTWRITEBYTECODE=1 python3 -B bin/ofloop --help >/dev/null 2>&1; then
     ok "installed ofloop CLI runs (python3 bin/ofloop)"
   else
     bad "installed ofloop CLI failed (python3 bin/ofloop)"
   fi
-  if ./bin/ofloop --help >/dev/null 2>&1; then
+  if PYTHONDONTWRITEBYTECODE=1 ./bin/ofloop --help >/dev/null 2>&1; then
     ok "installed ofloop CLI runs (./bin/ofloop)"
   else
     bad "installed ofloop CLI failed (./bin/ofloop)"
   fi
 else
-  if python3 bin/ofloop --help >/dev/null 2>&1; then
+  if PYTHONDONTWRITEBYTECODE=1 python3 -B bin/ofloop --help >/dev/null 2>&1; then
     ok "source ofloop CLI runs"
   else
     bad "source ofloop CLI failed"

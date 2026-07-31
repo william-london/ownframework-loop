@@ -43,8 +43,8 @@ if ! git -C "$SOURCE_ROOT" rev-parse --git-dir >/dev/null 2>&1; then
   exit 6
 fi
 SOURCE_DESC_DIRTY="$(git -C "$SOURCE_ROOT" status --porcelain 2>/dev/null | wc -l | tr -d ' ')"
-EXPECTED_VERSION="$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['version'])" "$SOURCE_ROOT/.claude-plugin/plugin.json")"
-MARKET_VERSION="$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['plugins'][0]['version'])" "$MARKETPLACE_ROOT/.claude-plugin/marketplace.json")"
+EXPECTED_VERSION="$(PYTHONDONTWRITEBYTECODE=1 python3 -B -c "import json,sys;print(json.load(open(sys.argv[1]))['version'])" "$SOURCE_ROOT/.claude-plugin/plugin.json")"
+MARKET_VERSION="$(PYTHONDONTWRITEBYTECODE=1 python3 -B -c "import json,sys;print(json.load(open(sys.argv[1]))['plugins'][0]['version'])" "$MARKETPLACE_ROOT/.claude-plugin/marketplace.json")"
 log() { echo "[install] $*"; }
 
 log "source: $SOURCE_ROOT (branch=${SOURCE_BRANCH}, sha=${SOURCE_SHA}, dirty_files=${SOURCE_DESC_DIRTY})"

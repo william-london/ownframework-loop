@@ -1,8 +1,8 @@
 {
   "name": "of-loop",
   "displayName": "OwnFramework Loop",
-  "description": "V0.3.2 - single-mode + finite packet-bound PROGRAM-mode checkpoints (terminal repair: unified PROGRAM claim accounting + deterministic payload boundary), deterministic approval, exact-SHA build/review finalizers, exact-run hook authority, broad engineering tools, external-action guard, deterministic automatic crash reconciliation, and atomic-install payload manifest.",
-  "version": "0.3.2",
+  "description": "V0.3.3 - terminal-closeout: active installed-cache discovery via `claude plugin list --json`, bytecode-free validation at all outer Python launch boundaries, structural manifest count truth (PAYLOAD_MANIFEST_HEADER_LINES / PAYLOAD_MANIFEST_FILE_ENTRIES / INSTALLED_ACTIVE_FILES + equality assertion). Builds on v0.3.2 single-mode + finite packet-bound PROGRAM-mode checkpoints, unified PROGRAM claim accounting + deterministic payload boundary, deterministic approval, exact-SHA build/review finalizers, exact-run hook authority, broad engineering tools, external-action guard, deterministic automatic crash reconciliation, and atomic-install payload manifest.",
+  "version": "0.3.3",
   "author": {
     "name": "OwnFramework"
   },

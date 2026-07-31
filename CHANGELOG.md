@@ -1,5 +1,51 @@
 # Changelog
 
+## 0.3.3 — Terminal-closeout: installed-cache discovery + bytecode-free validation + manifest count truth (2026-07-31)
+
+**Scope:** narrow, terminal release-closeout patch on top of v0.3.2. No new
+phase, no architectural change.
+
+**Repairs:**
+
+- **Repair A — active installed-cache discovery.** `validate.sh --installed`
+  now resolves the live active install via `claude plugin list --json`
+  rather than the legacy `~/.claude/skills/of-loop` path. Three forms:
+  - `bash validate.sh --installed`            (live registry)
+  - `bash validate.sh --installed <path>`     (explicit)
+  - `bash validate.sh --installed=<path>`     (explicit, equals form)
+
+  The legacy `~/.claude/skills/of-loop` path is a rolled-back backup
+  artifact and is NEVER auto-selected as the active install.
+
+- **Repair B — bytecode-free validation.** Every outer Python launch
+  boundary in `validate.sh`, `install.sh`, and `tests/run_all.sh` is now
+  prefixed with `PYTHONDONTWRITEBYTECODE=1` and uses `python3 -B`.
+  Validation no longer creates `.pyc` files inside the cache tree it is
+  inspecting (so payload-manifest tampering checks never see
+  self-inflicted bytecode).
+
+- **Repair C — structural manifest count truth.** New
+  `scripts/manifest_count_check.py` reports authoritative counts:
+  - `PAYLOAD_MANIFEST_HEADER_LINES`
+  - `PAYLOAD_MANIFEST_FILE_ENTRIES`
+  - `INSTALLED_ACTIVE_FILES`
+
+  and asserts `PAYLOAD_MANIFEST_FILE_ENTRIES == INSTALLED_ACTIVE_FILES`
+  (and that the declared `# file_count=` header matches). A truncated or
+  over-large manifest fails closed.
+
+- **Repair D — version bump.** All canonical version surfaces now read
+  `0.3.3`: `lib/ownframework_loop/__init__.py`, `.claude-plugin/plugin.json`,
+  and `.claude-plugin/marketplace.json`. v0.3.1 and v0.3.2 history is
+  unchanged.
+
+**Scope guard:** v0.3.2 unified PROGRAM claim accounting and v0.3.2
+payload boundary are preserved unchanged. No new packet schema, no new
+state schema, no new public slash commands, no new agent roles, no
+registry framework, no daemon, no auto-push/deploy, no generalized
+abstraction layer.
+
+
 
 ## 0.3.2 — Terminal repair: unified PROGRAM claims + payload boundary (2026-07-31)
 

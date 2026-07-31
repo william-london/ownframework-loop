@@ -34,7 +34,7 @@ TESTS=(
 echo "=== OwnFramework Loop V2 — release gate ==="
 echo "OF_LOOP_OPERATOR_MARKER"
 echo "OF_LOOP_RELEASE_GATE=single"
-OF_LOOP_PLUGIN_VERSION="$(python3 -c "import sys; sys.path.insert(0, '$LIB_DIR'); from ownframework_loop import __version__; print(__version__)")"
+OF_LOOP_PLUGIN_VERSION="$(PYTHONDONTWRITEBYTECODE=1 python3 -B -c "import sys; sys.path.insert(0, '$LIB_DIR'); from ownframework_loop import __version__; print(__version__)")"
 echo "OF_LOOP_PLUGIN_VERSION=$OF_LOOP_PLUGIN_VERSION"
 echo
 
