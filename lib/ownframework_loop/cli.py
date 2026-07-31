@@ -410,6 +410,13 @@ def cmd_build_claim(args: argparse.Namespace) -> None:
         old_state=cur_state, new_state="BUILDING",
         actor=args.actor or "of-builder",
     )
+    _emit({
+        "ok": True,
+        "run_id": args.run_id,
+        "state": "BUILDING",
+        "build_pass_count": new_pass_count,
+        "replayed": False,
+    })
 def cmd_review_claim(args: argparse.Namespace) -> None:
     """Claim a review pass. The single durable owner of review_pass_count.
 
@@ -1020,6 +1027,26 @@ def _build_parser() -> argparse.ArgumentParser:
     r_mk.add_argument("repo")
     r_mk.add_argument("run_id")
     r_mk.set_defaults(func=cmd_review_marker)
+
+    # loop run — single-mode unattended orchestrator
+    from . import orchestrator as orch_mod
+    def cmd_loop_run(args: argparse.Namespace) -> None:
+        repo = _repo_path(args.repo)
+        out = orch_mod.run_single_mode(
+            canonical_repo=repo,
+            mission=args.mission or '',
+            max_repair_rounds=int(args.max_repair_rounds) if args.max_repair_rounds is not None else None,
+        )
+        _emit(out)
+
+    lp = sub.add_parser('loop', help='unattended loop orchestration')
+    l_sub = lp.add_subparsers(dest='loop_cmd', required=True)
+    l_run = l_sub.add_parser('run', help='single-mode unattended run')
+    l_run.add_argument('repo')
+    l_run.add_argument('mission', nargs='?')
+    l_run.add_argument('--max-repair-rounds', type=int, default=None,
+                       help='override packet.risk_budget.max_repair_rounds')
+    l_run.set_defaults(func=cmd_loop_run)
 
     # doctor
     doc = sub.add_parser("doctor", help="inspect repo + run")
