@@ -399,7 +399,7 @@ diff = {"repair_round": after.get("repair_round", 0) - before.get("repair_round"
 print("DIFF:", json.dumps(diff))
 print("IN_SYNC:", diff["repair_round"] == diff["prog_cum_repair"] == diff["cp_repair"] == 1)
 ')
-echo "$out" | grep -q 'IN_SYNC_IS: true' || fail "Test 15: cmd_build_transition desync: $out"
+echo "$out" | grep -q 'IN_SYNC: True' || fail "Test 15: cmd_build_transition desync: $out"
 pass "Test 15: cmd_build_transition routes through unified claim"
 
 echo "ALL V0.3.2 UNIFIED-CLAIM TESTS PASS"
