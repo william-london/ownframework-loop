@@ -113,6 +113,16 @@ if [[ "$INSTALLED_MODE" -eq 1 ]]; then
   if [[ -e "$ROOT/.git" ]]; then
     bad "installed copy contains .git/ — install.sh excludes it"
   fi
+
+  # Payload manifest verification (atomic-install contract).
+  MANIFEST="$ROOT/.payload.manifest"
+  if [[ ! -f "$MANIFEST" ]]; then
+    bad "installed copy is missing payload manifest at $MANIFEST — re-run install.sh"
+  fi
+  if ! python3 "$ROOT/scripts/verify_payload_manifest.py" --root "$ROOT" --manifest "$MANIFEST"; then
+    bad "payload manifest verification FAILED — installed payload has drifted from manifest"
+  fi
+
   # Harmless __pycache__ directory may exist (regenerated on import); document
   # and allow. install.sh excludes it on initial copy, but validate may have
   # populated it. We do not fail here; we report.
@@ -139,7 +149,7 @@ sys.path.insert(0, '$LIB_DIR')
 from ownframework_loop import (
     cli, packet, state, transitions, worktrees, git_checks,
     guards, receipts, verdicts, scheduling, locking, util,
-    integrity, limits, orchestrator, program,
+    integrity, limits, orchestrator, program, reconcile,
 )
 print('  PASS: Python core library imports cleanly')
 "

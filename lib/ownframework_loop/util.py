@@ -54,9 +54,9 @@ def new_run_id() -> str:
     return f"run-{utc_now_compact()}-{short}"
 
 
-def run_dir(canonical_repo: Path, run_id: str) -> Path:
+def run_dir(canonical_repo: Path | str, run_id: str) -> Path:
     """Return the per-run state directory path."""
-    return canonical_repo / ".ownframework-loop" / run_id
+    return Path(canonical_repo) / ".ownframework-loop" / run_id
 
 
 def worktrees_dir(canonical_repo: Path) -> Path:

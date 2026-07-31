@@ -198,6 +198,31 @@ def run_single_mode(
     # Refuse to start without an operator approval marker.
     _require_approval_marker(canonical_repo, run_id)
 
+    # Phase 3: deterministic automatic crash reconciliation. Adopt any
+    # half-committed durable artifact (BUILD_RECEIPT, REVIEW_VERDICT)
+    # so the resumed cycle continues from the right state. Refuses if
+    # a live process owns the LOCK file.
+    try:
+        from . import reconcile as reconcile_mod
+        rr = reconcile_mod.reconcile_run(canonical_repo=canonical_repo, run_id=run_id)
+        if not rr.get("ok"):
+            return {
+                "ok": False,
+                "run_id": run_id,
+                "terminal_state": (_safe_load_state(canonical_repo, run_id) or {}).get("state"),
+                "reason": "reconcile_refused",
+                "reconcile": rr,
+                "history": [],
+            }
+    except reconcile_mod.LiveLockError as e:
+        return {
+            "ok": False,
+            "run_id": run_id,
+            "terminal_state": (_safe_load_state(canonical_repo, run_id) or {}).get("state"),
+            "reason": f"live_process:{e}",
+            "history": [],
+        }
+
     # 3. Drive cycles until terminal.
     cap = max_repair_rounds if max_repair_rounds is not None else MAX_REPAIR_ROUNDS_DEFAULT
     history: list[dict[str, Any]] = []
@@ -288,6 +313,21 @@ def run_program_mode(
     # Refuse without operator approval.
     _require_approval_marker(canonical_repo, run_id)
 
+    # Phase 3: deterministic automatic crash reconciliation.
+    try:
+        from . import reconcile as reconcile_mod
+        rr = reconcile_mod.reconcile_run(canonical_repo=canonical_repo, run_id=run_id)
+        if not rr.get("ok"):
+            return _program_done(
+                canonical_repo, run_id, ok=False,
+                reason="reconcile_refused", history=[{"phase": "reconcile", "rr": rr}],
+            )
+    except reconcile_mod.LiveLockError as e:
+        return _program_done(
+            canonical_repo, run_id, ok=False,
+            reason=f"live_process:{e}", history=[{"phase": "reconcile", "refused": str(e)}],
+        )
+
     # Load packet and program state.
     state = _safe_load_state(canonical_repo, run_id)
     if state is None:
@@ -311,8 +351,18 @@ def run_program_mode(
 
     history: list[dict[str, Any]] = []
     cap = max_repair_rounds if max_repair_rounds is not None else program_mod.MAX_CP_REPAIR_ROUNDS
-    # Walk checkpoints until terminal.
-    for round_idx in range(program_mod.MAX_CP_BUILD_PASSES + program_mod.MAX_CP_REVIEW_PASSES):
+    # Bound the loop on the cumulative ceilings (sum of approved cp caps),
+    # not a fixed 16. With 9 CPs at max_build=1 + max_review=1 each, the
+    # loop must allow >= 18 iterations. Add a +4 safety margin for the
+    # CHANGES_REQUESTED repair cycles that don't advance the counter.
+    _cumulative_ce = (program_state.get("cumulative_ceilings") or {})
+    _cum_build = int(_cumulative_ce.get("max_build_passes", 0)) or (
+        program_mod.MAX_CP_BUILD_PASSES + program_mod.MAX_CP_REVIEW_PASSES
+    )
+    _cum_review = int(_cumulative_ce.get("max_review_passes", 0)) or _cum_build
+    _cum_repair = int(_cumulative_ce.get("max_repair_rounds", 0)) or 0
+    _loop_bound = _cum_build + _cum_review + max(_cum_repair, 4) + 4
+    for round_idx in range(_loop_bound):
         cur = _safe_load_state(canonical_repo, run_id)
         if cur is None:
             return _program_done(canonical_repo, run_id, ok=False,

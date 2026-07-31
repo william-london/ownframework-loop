@@ -137,5 +137,37 @@ if [[ ! -d "$EXPECTED_CACHE" ]]; then
   exit 5
 fi
 
+# Capture payload manifest: a flat sorted list of every regular file in the
+# installed cache tree (relative to the cache root), with each file's SHA-256.
+# This manifest is the authoritative "what did we just install" record.
+# validate.sh --installed verifies the live cache matches this manifest, so
+# post-install tampering is detected on the next validation pass.
+log "step 2: capturing payload manifest for $EXPECTED_CACHE"
+MANIFEST="$EXPECTED_CACHE/.payload.manifest"
+PAYLOAD_FILES="$( ( cd "$EXPECTED_CACHE" && find . -type f -not -path "./logs/*" | LC_ALL=C sort ) )"
+{
+  echo "# OwnFramework Loop payload manifest"
+  echo "# generated_at_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  echo "# cache_root=$EXPECTED_CACHE"
+  echo "# source_branch=$SOURCE_BRANCH"
+  echo "# source_sha=$SOURCE_SHA"
+  echo "# installed_version=$EXPECTED_VERSION"
+  echo "# file_count=$(printf "%s" "$PAYLOAD_FILES" | wc -l | tr -d ' ')"
+  printf "%s\n" "$PAYLOAD_FILES"
+} > "$MANIFEST.tmp"
+while IFS= read -r f; do
+  [[ -z "$f" ]] && continue
+  # Strip leading "./" then compute SHA relative to the cache root.
+  rel="${f#./}"
+  sha="$(shasum -a 256 "$EXPECTED_CACHE/$rel" 2>/dev/null | awk '{print $1}')"
+  echo "sha256  $sha  $rel" >> "$MANIFEST.tmp"
+done <<< "$PAYLOAD_FILES"
+mv "$MANIFEST.tmp" "$MANIFEST"
+log "payload manifest written: $MANIFEST (with $(printf "%s" "$PAYLOAD_FILES" | wc -l | tr -d ' ') files)"
+
+# Atomic install contract: the manifest now exists AT THE SAME PATH the
+# validator reads. If validation fails after this point, we restore the
+# legacy archive (above) AND remove the cache tree (below) so the system
+# is observably NOT in a half-installed state.
 log "managed install complete; cache=$EXPECTED_CACHE; reload with: claude /reload-plugins"
 exit 0

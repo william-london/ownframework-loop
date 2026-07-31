@@ -17,13 +17,18 @@ set -euo pipefail
 : "${INSTALL_PARENT:=$(dirname "$INSTALL_ROOT")}"
 
 # Find candidate backups in time order (newest first). Accept both naming
-# conventions produced by historical versions of install.sh.
-mapfile -t BACKUPS < <(
-  {
-    ls -1dt "$INSTALL_PARENT"/of-loop.backup-*            2>/dev/null || true
-    ls -1dt "$INSTALL_PARENT"/ownframework-loop-mgmt-backup-* 2>/dev/null || true
-  } | awk '!seen[$0]++'
-)
+# conventions produced by historical versions of install.sh. Use a bash 3.2
+# compatible read loop instead of `mapfile` (mapfile requires bash 4+).
+BACKUPS=()
+TMP="$(mktemp -t ofloop_rollback.XXXXXX)"
+trap "rm -f \"$TMP\"" EXIT
+{
+  ls -1dt "$INSTALL_PARENT"/of-loop.backup-*               2>/dev/null || true
+  ls -1dt "$INSTALL_PARENT"/ownframework-loop-mgmt-backup-* 2>/dev/null || true
+} | awk '!seen[$0]++' > "$TMP"
+while IFS= read -r line; do
+  [[ -n "$line" ]] && BACKUPS+=("$line")
+done < "$TMP"
 
 if [[ ${#BACKUPS[@]} -eq 0 ]]; then
   echo "[rollback] no backups found under $INSTALL_PARENT"

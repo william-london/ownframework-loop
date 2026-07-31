@@ -494,6 +494,9 @@ def cmd_build_claim(args: argparse.Namespace) -> None:
     - Idempotent: a re-claim while in BUILDING does NOT re-increment.
     - Refuses when run is not in {READY_TO_BUILD, CHANGES_REQUESTED}.
     - Refuses when the cap would be exceeded.
+    - In program mode the top-level V1 cap does NOT apply; the cumulative
+      program ceiling (sum of approved checkpoint caps) is enforced
+      separately by ``program_mod.increment_cp_counter`` at finalize time.
     """
     repo = _repo_path(args.repo)
     try:
@@ -514,6 +517,10 @@ def cmd_build_claim(args: argparse.Namespace) -> None:
             "replayed": True,
         })
         return
+    # Program-mode runs use the packet's cumulative ceiling (not V1's
+    # single-mode cap of 8). The orchestrator enforces per-checkpoint
+    # and cumulative caps via program_mod.increment_cp_counter.
+    program_mode_active = state_mod.is_program_state(cur)
     try:
         state_mod.transition(
             repo, args.run_id, to_state="BUILDING",
@@ -523,6 +530,7 @@ def cmd_build_claim(args: argparse.Namespace) -> None:
         new_pass_count = state_mod.increment_counter(
             repo, args.run_id, counter="build_pass_count",
             actor="of-builder", packet=meta,
+            hard_cap=not program_mode_active,
         )
     except limits_mod.RepairLimitExceeded as e:
         _emit_error(f"repair limit exceeded: {e}", exit_code=4)
@@ -546,6 +554,9 @@ def cmd_review_claim(args: argparse.Namespace) -> None:
     - Idempotent: a re-claim while in REVIEWING does NOT re-increment.
     - Refuses when run is not in {READY_FOR_REVIEW, CHANGES_REQUESTED}.
     - Refuses when the cap would be exceeded.
+    - In program mode the top-level V1 cap does NOT apply; the cumulative
+      program ceiling (sum of approved checkpoint caps) is enforced
+      separately by ``program_mod.increment_cp_counter`` at finalize time.
     """
     repo = _repo_path(args.repo)
     try:
@@ -565,6 +576,9 @@ def cmd_review_claim(args: argparse.Namespace) -> None:
             "replayed": True,
         })
         return
+    # Program-mode runs use the packet's cumulative ceiling (not V1's
+    # single-mode cap of 8).
+    program_mode_active = state_mod.is_program_state(cur)
     try:
         state_mod.transition(
             repo, args.run_id, to_state="REVIEWING",
@@ -574,6 +588,7 @@ def cmd_review_claim(args: argparse.Namespace) -> None:
         new_pass_count = state_mod.increment_counter(
             repo, args.run_id, counter="review_pass_count",
             actor="of-reviewer", packet=meta,
+            hard_cap=not program_mode_active,
         )
     except limits_mod.RepairLimitExceeded as e:
         _emit_error(f"repair limit exceeded: {e}", exit_code=4)

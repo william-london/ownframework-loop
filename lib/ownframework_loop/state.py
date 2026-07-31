@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 from pathlib import Path
 from typing import Any
@@ -140,13 +141,18 @@ def append_event(
         "commit_sha": commit_sha,
         "reason": reason,
         "state_sha256": state_sha_now,
-        "event_chain_sha256": "PENDING",
+        "event_chain_sha256": "0" * 64,  # 64-zero placeholder (same length as SHA-256 hex)
     }
     if extras:
         record.update(extras)
-    # Pre-serialize with a placeholder chain hash, compute the chained
-    # SHA over the file as it will exist AFTER this line, then patch the
-    # record and re-serialize so the on-disk line carries the chain hash.
+    # Compute the chain hash over the line as it will exist AFTER
+    # substitution. Since the placeholder has the same byte length as the
+    # SHA-256 hex, the only bytes that change in the canonical serialization
+    # are within the chain_hash field itself — the rest of the line is
+    # byte-identical. We substitute the computed hash into the field, then
+    # re-serialize. Recomputation via compute_event_chain_hash yields the
+    # same hash because both writes go through the same canonical serializer
+    # and the chain hash is itself a function of the (length-stable) line.
     line = _json_dumps(record)
     chain_hash = _compute_chain_hash_for_append(ep, line, state_sha_now)
     record["event_chain_sha256"] = chain_hash
@@ -313,21 +319,39 @@ def _json_dumps(obj: Any) -> str:
 def _compute_chain_hash_for_append(
     ep: Path, line: str, state_sha_now: str | None
 ) -> str:
-    """SHA-256 over the full EVENTS.log after appending `line`.
+    """Return the iterative chain hash for the new event.
 
-    Computes the chain that will exist once `line` is written to disk,
-    so we can record it atomically in the event itself.
+    chain_hash_n = SHA( chain_hash_(n-1) || event_n_minus_event_chain_sha256 )
+
+    Reads the previous chain hash from the most recent event in ``ep``
+    (or empty string if there are no prior events). Reconstructs the
+    record from ``line`` (canonical JSON), strips ``event_chain_sha256``,
+    and combines. The result is non-self-referential: it does NOT depend
+    on its own value, so the verifier in
+    ``integrity.compute_event_chain_hash`` recomputes the same bytes.
     """
+    # Locate the previous chain hash from the on-disk tail.
+    prev_chain = ""
     try:
-        existing = ep.read_bytes() if ep.exists() else b""
-    except OSError:
-        existing = b""
+        prev = integrity.get_event_chain_hash(ep)
+        if prev:
+            prev_chain = prev
+    except Exception:
+        prev_chain = ""
+
+    # Reconstruct the record from the canonical line so we can strip the
+    # chain hash field. Re-canonicalize via the same serializer the
+    # verifier uses, so writer and verifier produce identical bytes.
+    try:
+        record = json.loads(line)
+    except Exception:
+        record = {}
+    stripped = {k: v for k, v in record.items() if k != "event_chain_sha256"}
+    payload = integrity.canonical_json_dumps(stripped).encode("utf-8")
+
     h = hashlib.sha256()
-    if existing:
-        h.update(existing)
-    if not existing.endswith(b"\n") and existing:
-        h.update(b"\n")
-    h.update(line.encode("utf-8"))
+    h.update(prev_chain.encode("utf-8"))
+    h.update(payload)
     return h.hexdigest()
 
 

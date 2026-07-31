@@ -109,18 +109,29 @@ def get_event_chain_hash(events_log: Path) -> str | None:
 
 
 def compute_event_chain_hash(events_log: Path) -> str:
-    """SHA-256 over the JSON-Lines tail of EVENTS.log.
+    """Iteratively recompute the SHA-256 event chain hash.
 
-    Each event is serialized using the canonical formatter (sort_keys=True,
-    separators=(",", ":")), matching the on-disk format written by
-    state.append_event. Events are joined by "\n" and the SHA covers the
-    UTF-8 bytes of the joined payload.
+    chain_hash_n = SHA( chain_hash_(n-1) || event_n_minus_event_chain_sha256 )
+
+    Where chain_hash_(-1) is the empty string (the first event's hash is
+    SHA( "" || event_0_stripped )). The ``event_chain_sha256`` field is
+    excluded from the per-event input so the chain is non-self-referential
+    and can be filled in after computation.
+
+    The result equals the ``event_chain_sha256`` value of the LAST event
+    recorded in ``events_log`` for any chain written by the same writer.
     """
+    import hashlib as _hashlib
     events = read_event_chain(events_log)
-    if not events:
-        return hashlib.sha256(b"").hexdigest()
-    payload = "\n".join(canonical_json_dumps(ev) for ev in events)
-    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    chain = ""
+    for ev in events:
+        stripped = {k: v for k, v in ev.items() if k != "event_chain_sha256"}
+        payload = canonical_json_dumps(stripped).encode("utf-8")
+        h = _hashlib.sha256()
+        h.update(chain.encode("utf-8"))
+        h.update(payload)
+        chain = h.hexdigest()
+    return chain
 
 
 def canonical_json_dumps(obj: Any) -> str:
