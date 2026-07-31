@@ -95,6 +95,13 @@ def _require_approval_marker(canonical_repo: Path, run_id: str) -> dict[str, Any
     The marker is APPROVAL.json written by spec approve. The
     orchestrator never writes it itself.
     """
+    # Check whether the run even exists before blaming the approval marker.
+    run_dir = canonical_repo / ".ownframework-loop" / run_id
+    if not run_dir.is_dir():
+        raise RuntimeError(
+            f"refuse to start: run directory not found for {run_id!r} under {canonical_repo}. "
+            "Operator must run: ofloop spec new <repo> <mission>"
+        )
     approval_doc = approval_mod.load_approval(canonical_repo, run_id)
     if approval_doc is None:
         raise RuntimeError(
@@ -124,6 +131,20 @@ def _drive_review_cycle(canonical_repo: Path, run_id: str) -> dict[str, Any]:
     _run_cli(["review", "claim", str(canonical_repo), run_id])
     out = _run_cli(["review", "finalize", str(canonical_repo), run_id])
     return out
+
+
+def _safe_load_state(canonical_repo: Path, run_id: str) -> dict[str, Any] | None:
+    """Load state.json for a run, returning None if missing/corrupt.
+
+    The earlier pattern of state_mod.load(...).get("state") would
+    crash with AttributeError when state.json is missing or corrupt.
+    Returning None lets the orchestrator surface a domain refusal
+    instead of a Python AttributeError.
+    """
+    s = state_mod.load(canonical_repo, run_id)
+    if not isinstance(s, dict):
+        return None
+    return s
 
 
 def _discover_run_id(canonical_repo: Path) -> str:
@@ -186,7 +207,7 @@ def run_single_mode(
             return {
                 "ok": False,
                 "run_id": run_id,
-                "terminal_state": state_mod.load(canonical_repo, run_id).get("state"),
+                "terminal_state": (_safe_load_state(canonical_repo, run_id) or {}).get("state"),
                 "history": history,
                 "reason": "build_cycle_failed",
             }
@@ -198,7 +219,7 @@ def run_single_mode(
             return {
                 "ok": False,
                 "run_id": run_id,
-                "terminal_state": state_mod.load(canonical_repo, run_id).get("state"),
+                "terminal_state": (_safe_load_state(canonical_repo, run_id) or {}).get("state"),
                 "history": history,
                 "reason": "review_cycle_failed",
             }
@@ -229,7 +250,7 @@ def run_single_mode(
     return {
         "ok": False,
         "run_id": run_id,
-        "terminal_state": state_mod.load(canonical_repo, run_id).get("state"),
+        "terminal_state": (_safe_load_state(canonical_repo, run_id) or {}).get("state"),
         "rounds": cap + 1,
         "history": history,
         "reason": "repair_round_cap_reached",

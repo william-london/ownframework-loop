@@ -22,7 +22,7 @@ STATES: FrozenSet[str] = frozenset({
 ALLOWED: Mapping[str, FrozenSet[str]] = {
     "AWAITING_APPROVAL": frozenset({"READY_TO_BUILD", "BLOCKED", "STOPPED"}),
     "READY_TO_BUILD":    frozenset({"BUILDING", "BLOCKED", "STOPPED"}),
-    "BUILDING":          frozenset({"READY_FOR_REVIEW", "BLOCKED", "STOPPED"}),
+    "BUILDING":          frozenset({"READY_FOR_REVIEW", "CHANGES_REQUESTED", "BLOCKED", "STOPPED"}),
     "READY_FOR_REVIEW":  frozenset({"REVIEWING", "BLOCKED", "STOPPED"}),
     "REVIEWING":         frozenset({
         "APPROVED", "CHANGES_REQUESTED", "BLOCKED", "STOPPED",

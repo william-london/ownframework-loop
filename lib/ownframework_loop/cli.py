@@ -1038,7 +1038,8 @@ def _build_parser() -> argparse.ArgumentParser:
             mission=args.mission or '',
             max_repair_rounds=int(args.max_repair_rounds) if args.max_repair_rounds is not None else None,
         )
-        _emit(out)
+        ok = bool(out.get("ok")) if isinstance(out, dict) else False
+        _emit(out, exit_code=0 if ok else 1)
 
     lp = sub.add_parser('loop', help='unattended loop orchestration')
     l_sub = lp.add_subparsers(dest='loop_cmd', required=True)
