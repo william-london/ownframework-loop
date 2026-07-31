@@ -156,6 +156,13 @@ PAYLOAD_FILES="$( ( cd "$EXPECTED_CACHE" && find . -type f \
   -not -name "*.pyo" \
   -not -name "*.pyd" \
   | LC_ALL=C sort ) )"
+# Iterate PAYLOAD_FILES ONCE, counting entries and writing SHA lines.
+# This guarantees PAYLOAD_MANIFEST_FILE_ENTRIES == INSTALLED_ACTIVE_FILES
+# == the count we publish in # file_count=. The previous approach used
+# `printf "%s" "$PAYLOAD_FILES" | wc -l` which undercounts by 1 because
+# `$(...)` strips the trailing newline of find/sort output, while the
+# SHA loop itself iterates one extra time on the unterminated last line.
+> "$MANIFEST.tmp"
 {
   echo "# OwnFramework Loop payload manifest"
   echo "# generated_at_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -163,18 +170,20 @@ PAYLOAD_FILES="$( ( cd "$EXPECTED_CACHE" && find . -type f \
   echo "# source_branch=$SOURCE_BRANCH"
   echo "# source_sha=$SOURCE_SHA"
   echo "# installed_version=$EXPECTED_VERSION"
-  echo "# file_count=$(printf "%s" "$PAYLOAD_FILES" | wc -l | tr -d ' ')"
-  printf "%s\n" "$PAYLOAD_FILES"
-} > "$MANIFEST.tmp"
+} >> "$MANIFEST.tmp"
+ENTRY_COUNT=0
 while IFS= read -r f; do
   [[ -z "$f" ]] && continue
-  # Strip leading "./" then compute SHA relative to the cache root.
   rel="${f#./}"
   sha="$(shasum -a 256 "$EXPECTED_CACHE/$rel" 2>/dev/null | awk '{print $1}')"
   echo "sha256  $sha  $rel" >> "$MANIFEST.tmp"
+  ENTRY_COUNT=$((ENTRY_COUNT+1))
 done <<< "$PAYLOAD_FILES"
+# Append the count header AFTER the loop so the declared count is
+# guaranteed to match the actual SHA256 entries.
+echo "# file_count=$ENTRY_COUNT" >> "$MANIFEST.tmp"
 mv "$MANIFEST.tmp" "$MANIFEST"
-log "payload manifest written: $MANIFEST (with $(printf "%s" "$PAYLOAD_FILES" | wc -l | tr -d ' ') files)"
+log "payload manifest written: $MANIFEST (with $ENTRY_COUNT files)"
 
 # Atomic install contract: the manifest now exists AT THE SAME PATH the
 # validator reads. If validation fails after this point, we restore the
