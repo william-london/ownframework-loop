@@ -438,3 +438,35 @@ Recursion repair and gate containment.
   before any test invocation, so a second `release_gate.sh` run
   in a `worktree`-mounted repo cannot produce two parallel
   receipt writers.
+
+## 0.3.6 — Static-Check Compatibility Closeout (2026-08-01)
+
+**Highlights**:
+- v0.3.6 is a narrow closeout, not an architecture phase.
+- Removes dynamic `eval` execution from the multiline bash guard test.
+  Forbidden tokens are decoded via Python `chr()` / string concatenation
+  and treated purely as JSON string data. The test NEVER executes them
+  via `eval`/`source`/`bash -c`/`sh -c`.
+- The canonical static call-graph scanner remains strict. No allow-list
+  was added; the scanner continues to flag `eval`/`nohup`/`disown` and
+  recursive release-hierarchy invocations as `unsafe-orchestration`.
+- Guard runtime semantics are unchanged. The hook, classifier, and
+  sentinel behavior are identical to v0.3.5.
+- No approval, state, PROGRAM, concurrency, or authority behavior changed.
+- v0.3.5 remains preserved as the failed installed release attempt.
+  v0.3.4 cache and history are unmodified.
+
+**New artifacts**:
+- `tests/integration/test_scanner_regression.sh` — proves the scanner
+  catches reintroduced `eval`, direct recursive release-gate calls, and
+  reverse orchestration dependencies, while the repaired multiline test
+  produces zero edges.
+- `tests/integration/_helpers/scan_json.py`,
+  `tests/integration/_helpers/edge_count.py`,
+  `tests/integration/_helpers/full_scan.py` — small Python drivers used
+  by the regression suite to invoke the scanner.
+
+**Repaired**:
+- `tests/integration/test_hook_multiline_bash.sh` — uses Python JSON
+  serializer (`json.dumps`) to build hook stdin payloads. Decoded
+  adversarial command strings remain test data only.

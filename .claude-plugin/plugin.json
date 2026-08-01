@@ -1,8 +1,8 @@
 {
   "name": "of-loop",
   "displayName": "OwnFramework Loop",
-  "description": "V0.3.5 - security and state stabilization: closes the six P0 audit blockers (AUD2-P0-1, A1-001, A1-002, A1-004, A1-005, F-4-01, F-4-02, A3-001) and the eight gate credibility defects (A6-F01..A6-F11) from the v0.3.4 production-readiness audit. Approval requires a genuine interactive TTY plus typed confirmation token — there is no automation override. Program-mode state transitions go through a single authoritative path. Event-chain appends are atomic under flock. Worktree creation is serialized. Bash guard processes complete multi-line input. Canonical test gate runs from a portable allow-list with timeout, ported root, and behavioral assertions. Builds on v0.3.4 hook bytecode closeout, v0.3.3 active installed-cache discovery, v0.3.2 unified PROGRAM claim accounting, and v0.3.1 deterministic approval.",
-  "version": "0.3.5",
+  "description": "V0.3.6 - static-check compatibility closeout: removes the dynamic eval-based fixture construction from the multiline bash guard test, restoring the canonical static call-graph scanner's acyclic invariant. Builds on v0.3.5 security and state stabilization; v0.3.5 is preserved as the failed installed release attempt. Guard runtime semantics, approval boundary, state transition authority, PROGRAM repair accounting, event-chain concurrency, and worktree concurrency are unchanged.",
+  "version": "0.3.6",
   "author": {
     "name": "OwnFramework"
   },
