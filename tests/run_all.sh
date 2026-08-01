@@ -46,10 +46,19 @@ while IFS= read -r rel; do
   TOTAL=$((TOTAL+1))
   name="$(basename "$full")"
   echo "--- $name ---"
-  if timeout 180 bash "$full"; then
+  if command -v timeout >/dev/null 2>&1; then
+    timeout 180 bash "$full"
+    rc=$?
+  elif command -v gtimeout >/dev/null 2>&1; then
+    gtimeout 180 bash "$full"
+    rc=$?
+  else
+    bash "$full"
+    rc=$?
+  fi
+  if [[ $rc -eq 0 ]]; then
     PASSED=$((PASSED+1))
   else
-    rc=$?
     FAILED=$((FAILED+1))
     FAILED_TESTS+=("$name (rc=$rc)")
   fi
