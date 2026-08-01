@@ -548,11 +548,21 @@ def finalize_review(
             # Single mode keeps the legacy direct mutation.
             cur = state_mod.load(canonical_repo, run_id)
             if state_mod.is_program_state(cur):
+                # v0.3.5 (F-4-01): use the candidate SHA from the
+                # verdict (or the current state) as the source evidence.
+                # Each repair round produces a fresh candidate SHA so
+                # the replay guard sees distinct evidence.
+                ev_sha = (
+                    new_verdict.get("candidate_sha")
+                    or (cur or {}).get("last_candidate_sha")
+                    or ""
+                )
                 try:
                     program_mod.claim_repair_round(
                         canonical_repo=canonical_repo,
                         run_id=run_id,
                         packet=meta,
+                        source_evidence_sha=ev_sha or None,
                     )
                 except program_mod.ClaimRefused as e:
                     # Cap reached — leave the state and let the orchestrator
@@ -562,5 +572,19 @@ def finalize_review(
                 cur["repair_round"] = int(cur.get("repair_round", 0)) + 1
                 cur["no_progress_streak"] = 0
                 state_mod.save(canonical_repo, run_id, cur)
+
+            # v0.3.5 (F-4-01): post-hook — transition CHANGES_REQUESTED
+            # back to READY_TO_BUILD so the next build pass is reachable.
+            # Idempotent: tolerate a no-edge refusal (state already
+            # transitioned by another post-hook).
+            try:
+                state_mod.transition(
+                    canonical_repo, run_id,
+                    to_state="READY_TO_BUILD",
+                    actor="review_finalize",
+                    reason="repair_round claimed; ready for next build",
+                )
+            except Exception:
+                pass
 
     return new_verdict

@@ -2,8 +2,8 @@
 # Phase V2: bytecode boundary (Blocker 2 closeout).
 # 10 connected tests prove install.sh manifest excludes bytecode,
 # launcher suppresses bytecode, and validator accepts/runs correctly.
-set -uo pipefail
-ROOT="/Users/mr.mrs.london/projects/plugins/ownframework-loop"
+set -euo pipefail
+ROOT="${OFLOOP_TEST_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 LIB="$ROOT/lib"
 TEST_ROOT="/tmp/v032_tests/bc_$$"
 mkdir -p "$TEST_ROOT/cache"

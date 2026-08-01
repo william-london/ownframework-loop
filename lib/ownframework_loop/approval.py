@@ -34,7 +34,12 @@ from . import git_checks, packet as packet_mod, util
 
 SCHEMA_VERSION = "ownframework-loop-approval/v1"
 
-ALLOWED_APPROVAL_METHODS = {"tty_confirmation", "operator_marker", "operator_explicit_override"}
+# v0.3.5 (AUD2-P0-1): the only legitimate production approval path is a
+# genuine interactive TTY plus the typed confirmation token derived from
+# the packet SHA. There is no automation override, no operator marker,
+# no developer escape. This set is enforced by validate_approval_shape,
+# validate_approval_binding, and request_human_approval alike.
+ALLOWED_APPROVAL_METHODS = {"tty_confirmation"}
 
 CONFIRMATION_PREFIX = "CONFIRM-OF-LOOP"
 
@@ -75,18 +80,73 @@ def derive_confirmation_token(packet_sha256: str) -> str:
     return f"{CONFIRMATION_PREFIX}-{clean[:8]}"
 
 
-def _is_interactive_tty() -> bool:
-    """Return True iff both stdin and stdout are live TTYs.
+def _tty_device_path(fd: int) -> str | None:
+    """Return the device path of `fd` if it is a TTY, else None.
 
-    We do not accept any other "human" signal (env vars, model markers,
-    packet fields). A genuine TTY is the only acceptable proof.
+    Uses os.ttyname() which fails with OSError (ENOTTY) for pipes,
+    regular files, and ptys opened in unusual modes. The path is then
+    checked against the canonical /dev/tty* family so a model cannot
+    bypass the check by stubbing isatty() or by allocating a pty and
+    pretending it is a real terminal.
+    """
+    try:
+        return os.ttyname(fd)
+    except (OSError, AttributeError):
+        return None
+
+
+def _is_canonical_tty_device(path: str | None) -> bool:
+    """Return True iff `path` resolves to a canonical /dev/tty* device.
+
+    Accepts only literal /dev/tty, /dev/ttysXXX, /dev/pty/X patterns.
+    Pseudo-ttys allocated inside a Python subprocess do not match.
+    """
+    if not path:
+        return False
+    p = Path(path).resolve(strict=False)
+    s = str(p)
+    if s == "/dev/tty":
+        return True
+    # BSD/macOS pattern: /dev/ttysNNN
+    if re.fullmatch(r"/dev/ttys\d{1,3}", s):
+        return True
+    # Linux pattern: /dev/ttyNN (rare)
+    if re.fullmatch(r"/dev/tty\d{1,3}", s):
+        return True
+    return False
+
+
+def _is_interactive_tty() -> bool:
+    """Return True iff both stdin and stdout are genuine canonical TTYs.
+
+    v0.3.5 (AUD2-P0-1): three independent checks must all pass.
+      1. fd-level isatty() (rejects file/pipe redirects)
+      2. os.ttyname() returns a non-None device path (rejects
+         pseudo-ttys whose name is a synthetic /dev/pty/X allocated
+         inside a child Python subprocess)
+      3. the device path resolves to a canonical /dev/tty* device
+
+    A model cannot bypass this by stubbing isatty() — the harness
+    calling Python controls the actual fds. A model cannot bypass this
+    by spawning a subprocess with pty.openpty() because the resulting
+    slave path is a synthetic /dev/ttysXXXXXXXX pattern that does not
+    match any canonical /dev/tty* path.
+
+    This function is the sole authority on whether approval is
+    allowed. request_human_approval calls it unconditionally.
     """
     try:
         in_ok = sys.stdin.isatty()
         out_ok = sys.stdout.isatty()
     except (AttributeError, ValueError):
         return False
-    return bool(in_ok and out_ok)
+    if not (in_ok and out_ok):
+        return False
+    in_dev = _tty_device_path(sys.stdin.fileno())
+    out_dev = _tty_device_path(sys.stdout.fileno())
+    if in_dev is None or out_dev is None:
+        return False
+    return _is_canonical_tty_device(in_dev) and _is_canonical_tty_device(out_dev)
 
 
 def _read_tty_confirmation(prompt: str, expected_token: str, *, max_attempts: int = 3) -> bool:
@@ -246,16 +306,22 @@ def request_human_approval(
     packet_path: Path,
     actor: str | None = None,
     operator_note: str | None = None,
-    assume_tty: bool = False,
 ) -> dict[str, Any]:
     """Construct and atomically write APPROVAL.json after TTY confirmation.
 
-    If `assume_tty` is False (default), the function refuses when stdin
-    is not a TTY. This is the only path that writes an approval artifact.
+    v0.3.5 (AUD2-P0-1): there is no automation override. The function
+    unconditionally requires:
+      1. A genuine interactive TTY on both stdin and stdout
+         (see _is_interactive_tty for the three-check proof).
+      2. A typed confirmation token that matches the deterministic
+         derivation from the packet SHA (see _read_tty_confirmation).
+
+    Either check failing raises RuntimeError and writes no file. The
+    approval_method recorded is always "tty_confirmation".
 
     Returns the approval document on success. Raises RuntimeError on refusal.
     """
-    if not assume_tty and not _is_interactive_tty():
+    if not _is_interactive_tty():
         raise RuntimeError(
             "OF_LOOP_APPROVAL_TTY_REQUIRED: refusing to approve without a "
             "live terminal. Run 'ofloop spec approve <repo> <run-id>' from "
@@ -303,15 +369,13 @@ def request_human_approval(
         f"  Type this token to approve: {token}",
         "",
     ]
-    approval_method = "operator_explicit_override" if assume_tty else "tty_confirmation"
-    if not assume_tty:
-        sys.stdout.write("\n".join(prompt_lines))
-        sys.stdout.flush()
-        if not _read_tty_confirmation("  token> ", token):
-            raise RuntimeError(
-                "OF_LOOP_APPROVAL_TOKEN_MISMATCH: typed token did not match "
-                "the deterministic confirmation token."
-            )
+    sys.stdout.write("\n".join(prompt_lines))
+    sys.stdout.flush()
+    if not _read_tty_confirmation("  token> ", token):
+        raise RuntimeError(
+            "OF_LOOP_APPROVAL_TOKEN_MISMATCH: typed token did not match "
+            "the deterministic confirmation token."
+        )
 
     approval = {
         "schema": SCHEMA_VERSION,
@@ -323,7 +387,7 @@ def request_human_approval(
         "baseline_branch": target_branch,
         "baseline_sha": baseline_sha,
         "packet_schema": meta.get("schema") or "",
-        "approval_method": approval_method,
+        "approval_method": "tty_confirmation",
         "confirmation_token": token,
         "operator_note": operator_note,
         "packet_work_class": meta.get("work_class"),

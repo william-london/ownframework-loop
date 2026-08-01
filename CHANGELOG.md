@@ -1,5 +1,39 @@
 # Changelog
 
+
+## 0.3.5 — Security and State Stabilization (2026-07-31)
+
+**Highlights**:
+- **Repair 1 (AUD2-P0-1)**: Approval boundary restored. `--assume-tty` removed;
+  `OFLOOP_ACTOR` no longer grants authority; only `tty_confirmation` is a
+  valid `approval_method`. Production approval requires a genuine interactive
+  TTY plus typed confirmation token. There is no automation override.
+- **Repair 2 (A1-001/A1-004/A1-005)**: One authoritative PROGRAM transition
+  path via `state.program_transition()`. No terminal state may silently return
+  to an active state. `is_stop_requested()` probe at every orchestration
+  boundary.
+- **Repair 3 (A1-002)**: Event-chain append is atomic. The previous-chain
+  read, chain-hash computation, and write all happen inside one flock.
+- **Repair 4 (F-4-01)**: PROGRAM repair-round accounting is functional for
+  every approved budget (1, 2, 3). Source-evidence SHA per-checkpoint replay
+  guard. Post-hook transition CHANGES_REQUESTED → READY_TO_BUILD.
+- **Repair 5 (F-4-02)**: Worktree creation is serialized per
+  (repo, run_id, role) via flock. Benign-race re-check after failed add.
+- **Repair 6 (A3-001)**: Bash guard processes complete multi-line input.
+  `_split_command_chain` splits on newlines first, then on shell-chain
+  operators within each line.
+- **Repair 7 (A6-F01..A6-F11)**: Canonical test gate is trustworthy. Portable
+  ROOT in v-tests. Real lifecycle and PTY approval E2E. Pass markers replaced
+  with assertions. `set -e` in test scripts. Static-checks scan expanded.
+  Source/install parity check is automatic. Canonical allow-list with
+  timeout per test.
+
+**What v0.3.5 does NOT change**:
+- No new schemas, public commands, agent roles, checkpoint types, daemons,
+  queues, or deployment authority.
+- No redesign of SINGLE or PROGRAM mode.
+- No replacement automation override.
+
 ## 0.3.4 — Hook bytecode closeout (2026-07-31)
 
 **Scope:** narrow, terminal release-closeout patch on top of v0.3.3.

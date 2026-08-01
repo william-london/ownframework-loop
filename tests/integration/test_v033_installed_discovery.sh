@@ -18,8 +18,8 @@
 #   6. Live discovery filter returns enabled install, ignores disabled.
 #   7. Discovery with no enabled install returns empty.
 #   8. bare --installed fails closed with no enabled install.
-set -uo pipefail
-ROOT="/Users/mr.mrs.london/projects/plugins/ownframework-loop"
+set -euo pipefail
+ROOT="${OFLOOP_TEST_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 LIB="$ROOT/lib"
 # Indirect the basename through concatenation so the recursion detector's
 # static regex (which forbids tests from referencing the release hierarchy

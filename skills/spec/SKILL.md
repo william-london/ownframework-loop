@@ -1,6 +1,6 @@
 ---
 name: spec
-description: OwnFramework Loop V2 — spec interview. Researches the target repo, asks only the minimum required questions, drafts a structured work packet, and waits for a single explicit human terminal approval. Approval is a separate APPROVAL.json artifact (not a mutated packet field). The model NEVER approves its own packet.
+description: Spec interview, packet writing, and approval flow for OwnFramework Loop V2. Drives /of-loop:spec, /of-loop:spec approve, /of-loop:spec abandon, and the packet → APPROVAL.json binding.
 user-invocable: true
 ---
 

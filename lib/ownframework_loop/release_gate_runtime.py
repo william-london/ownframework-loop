@@ -177,12 +177,32 @@ def main() -> int:
         _emit(output, f"OF_LOOP_GATE_VERIFIED_TOTAL={verified_total}")
         _emit(output, f"OF_LOOP_GATE_VERIFIED_PASSED={verified_passed}")
         _emit(output, "NARROW_TESTS=PASS")
-        install_root = os.environ.get("INSTALL_ROOT", "")
-        if install_root and Path(install_root).is_dir():
+        # v0.3.5 (A6-F07): source/install parity comparison.
+        # Always run the parity comparison when an active matching version
+        # exists in the installed cache, regardless of env. INSTALL_ROOT
+        # is treated as a fixture-mode override; --source-only suppresses
+        # the comparison for candidate-test runs.
+        skip_install_check = os.environ.get("OFLOOP_SOURCE_ONLY") == "1"
+        install_override = os.environ.get("INSTALL_ROOT", "")
+        install_root = ""
+        if install_override:
+            install_root = install_override
+        else:
+            # Auto-detect: scan ~/.claude/plugins/cache/ownframework-local/of-loop/*
+            cache_base = Path.home() / ".claude" / "plugins" / "cache" / "ownframework-local" / "of-loop"
+            if cache_base.is_dir():
+                versions = sorted([p for p in cache_base.iterdir() if p.is_dir()])
+                if versions:
+                    install_root = str(versions[-1])
+        if not skip_install_check and install_root and Path(install_root).is_dir():
             installed = _run(root, ["bash", str(root / "validate.sh"), "--installed", install_root, "--skip-tests"], MAX_VALIDATE, env)
             print(installed.stdout, end="", flush=True); output.extend(installed.stdout.splitlines())
             if installed.returncode != 0:
+                _emit(output, f"OF_LOOP_INSTALL_PARITY=FAIL root={install_root}")
                 return 1
+            _emit(output, f"OF_LOOP_INSTALL_PARITY=PASS root={install_root}")
+        else:
+            _emit(output, "OF_LOOP_INSTALL_PARITY=SKIPPED" if skip_install_check else "OF_LOOP_INSTALL_PARITY=NO_INSTALL")
         if shutil.which("claude"):
             probe = _run(root, ["claude", "plugin", "validate", str(root), "--strict"], 120, env)
             if probe.returncode == 0:

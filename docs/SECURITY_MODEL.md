@@ -127,20 +127,31 @@ recorded as `BLOCKED` with the changed paths.
 
 ### 10. Approval-security boundaries
 
-The approval architecture relies on **artifact binding plus tested
-command-origin refusal** — not on token cryptographic unspoofability.
+v0.3.5 (AUD2-P0-1) shrinks the approval architecture to a single
+authoritative path: **a genuine interactive TTY plus a typed
+confirmation token**. There is no automation override, no operator
+marker, no developer escape. A model cannot approve its own packet
+under any input.
+
+The approval architecture relies on **artifact binding plus
+genuine-TTY plus typed-token refusal** — not on token cryptographic
+unspoofability.
 
 | Property | Source |
 |---|---|
 | `PACKET_HASH_BOUND` | `packet_sha256` in APPROVAL.json must equal SHA-256 of current packet bytes |
 | `REPOSITORY_BOUND` | `canonical_repo` must resolve to active canonical repo |
 | `BASELINE_BOUND` | `baseline_sha` must match current HEAD of canonical branch |
-| `NONINTERACTIVE_APPROVAL=blocked` | CLI raises `OF_LOOP_APPROVAL_TTY_REQUIRED` when stdin is not a TTY |
-| `PSEUDO_TTY_APPROVAL=blocked` | Attacker's pseudo-TTY cannot derive the token without knowing the packet SHA |
+| `ALLOWED_APPROVAL_METHODS={"tty_confirmation"}` | The set is enforced by `validate_approval_shape`, `validate_approval_binding`, and `request_human_approval` |
+| `TTY_DEVICE_MUST_BE_CANONICAL` | `_is_interactive_tty` rejects pipes, file redirects, and pseudo-ttys whose device path is not `/dev/tty*` |
+| `NONINTERACTIVE_APPROVAL=blocked` | CLI raises `OF_LOOP_APPROVAL_TTY_REQUIRED` when stdin is not a canonical TTY |
+| `PSEUDO_TTY_APPROVAL=blocked` | `_is_interactive_tty` rejects pseudo-ttys whose slave path is synthetic `/dev/ttysXXXXXXXX` (the `pty.openpty()` pattern). Only `/dev/tty`, `/dev/ttysNNN`, and `/dev/ttyNN` match |
 | `DIRECT_FILE_APPROVAL=blocked` | Direct `APPROVAL.json` forgery refuses at build finalizer ("builder worktree missing") |
-| `DIRECT_LIBRARY_APPROVAL=blocked` | `request_human_approval(assume_tty=True)` is the documented developer escape; the model cannot invoke it because the hooks block the Bash call and the spec skill contract forbids self-approval |
+| `DIRECT_LIBRARY_APPROVAL=blocked` | `request_human_approval` has no `assume_tty` parameter; the function unconditionally calls `_is_interactive_tty` and `_read_tty_confirmation` |
+| `CLI_OVERRIDE_REMOVED` | `--assume-tty` argparse option was removed in v0.3.5; `OFLOOP_ACTOR` env no longer default-actor |
 | `PACKET_MUTATION_INVALIDATION=PASS` | Any byte mutation after approval invalidates the recorded SHA |
 | `TOKEN_SECRECY_CLAIM=absent` | The token is derived from the packet SHA (plaintext); it is not a secret |
+| `APPROVAL_METHOD_FABRICATION=blocked` | `validate_approval_shape` rejects `operator_marker` and `operator_explicit_override` outright |
 
 The **confirmation token is**:
 
@@ -152,10 +163,14 @@ where `<8hex>` is the first 8 hex characters of the packet SHA-256.
 Both the packet bytes and the SHA are not secret (they are the
 plaintext and its checksum). What the token proves is that the
 operator **acknowledged a specific approved packet**, not that the
-operator is cryptographically unspoofable. Pseudo-TTY attacks
-(`pty.spawn`, `/usr/bin/script`) CAN make stdin look like a TTY; they
-cannot derive the token without reading the packet bytes first,
-which the operator presents in the spec interview.
+operator is cryptographically unspoofable.
+
+A pseudo-TTY that opens a `/dev/ttysXXXXXXXX` slave via
+`pty.openpty()` would previously pass `isatty()`. v0.3.5 rejects
+this at the device-path layer: `_is_canonical_tty_device` accepts
+only literal `/dev/tty`, `/dev/ttysNNN`, or `/dev/ttyNN`. A child
+subprocess cannot manufacture a canonical device path because the
+kernel allocates pseudo-ttys in a synthetic range.
 
 The root of trust is therefore:
 
@@ -163,16 +178,22 @@ The root of trust is therefore:
   - APPROVAL.json binds run_id, canonical_repo, baseline_branch,
     baseline_sha, packet_sha256, confirmation_token together;
   - the CLI requires all five to match at finalize time;
-  - **pseudo-TTY attacks do NOT bypass the binding** because
-    they still need a valid token derived from the packet SHA,
-    which is one-way-fingerprinted by the operator's actions
-    during the spec interview.
+  - **the only path to write APPROVAL.json is through a genuine
+    canonical TTY plus the typed token**, with no CLI flag, env
+    variable, library parameter, or fabricated method able to
+    bypass either requirement.
 
 Required for any approval:
 
 - `TOKEN_IS_SECRET=no` — public.
 - `TOKEN_IS_MODEL_UNPREDICTABLE=no` — predictable from packet bytes.
 - `TOKEN_IS_PACKET_DERIVED=yes` — derived from packet SHA.
+- `APPROVAL_REQUIRES_CANONICAL_TTY=yes` — stdin and stdout must
+  both resolve to a `/dev/tty*` device; pseudo-ttys are rejected.
+- `APPROVAL_REQUIRES_TYPED_TOKEN=yes` — the typed token must
+  match the deterministic derivation; no automated fill-in is
+  accepted (a parent process typing into the master fd is not
+  accepted because the kernel sees the child as the writer).
 
 A future hardware-backed approval mode (e.g., Touch ID / Secure
 Enclave-attested token) may be documented as optional high-assurance
@@ -316,3 +337,23 @@ PROGRAM mode extends the security model with three additional invariants:
 These invariants are deterministic in the Python core (no model
 judgment) and are exercised by the integration tests in
 `tests/integration/test_program_mode.sh`.
+
+
+## v0.3.5 approval boundary
+
+Production approval requires a genuine interactive TTY plus typed
+confirmation token. There is no override:
+
+- `request_human_approval` has no `assume_tty` parameter and accepts no
+  automation override.
+- The only valid `approval_method` is `tty_confirmation`.
+- `--actor` records attribution but is not authority; the actor does
+  not bypass the TTY requirement.
+- `OFLOOP_ACTOR` is unset by default and is recorded as attribution.
+- A non-interactive subprocess (stdin=/dev/null, pipe, or non-TTY pty)
+  is refused.
+- `--assume-tty` has been removed from the CLI entirely.
+
+A model or subprocess cannot satisfy this gate by supplying a flag,
+environment variable, generated token, prewritten JSON, or direct
+library call.

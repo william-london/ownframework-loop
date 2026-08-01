@@ -124,3 +124,11 @@ See `docs/STATE_MACHINE.md`, `docs/SECURITY_MODEL.md`, and
 
 Proprietary — OwnFramework internal. See `THIRD_PARTY_NOTICES.md` for
 attribution to upstream MIT works used as architectural inspiration only.
+
+
+## v0.3.5 stabilization lane
+
+This release closes the six P0 audit blockers (AUD2-P0-1, A1-001,
+A1-002, A1-004, A1-005, F-4-01, F-4-02, A3-001) and the eight gate
+credibility defects (A6-F01 through A6-F11) identified in the
+v0.3.4 production-readiness audit. See `CHANGELOG.md` for the full list.

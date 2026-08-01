@@ -531,6 +531,7 @@ def _unified_claim_pass(
     packet: dict[str, Any],
     counter: str,
     pass_kind: str,
+    source_evidence_sha: str | None = None,
 ) -> dict[str, Any]:
     """Single durable owner of the PROGRAM build/review/repair claim.
 
@@ -554,9 +555,16 @@ def _unified_claim_pass(
      12. return the stable claimed pass numbers
 
     Replay safety: if the current FSM state already corresponds to the
-    claimed pass (e.g. BUILDING for build_pass_count), the function
-    returns the existing pass number WITHOUT incrementing. No
-    double-increment is possible.
+    claimed pass (e.g. BUILDING for build_pass_count) AND the source
+    evidence SHA matches the recorded evidence for that cp, the
+    function returns the existing pass number WITHOUT incrementing.
+
+    v0.3.5 (F-4-01): for repair_round_count, the replay guard is
+    keyed on `source_evidence_sha` rather than the (state, cum>0)
+    pair. Each repair round has different evidence (the candidate
+    SHA changes between rounds); a duplicate evidence SHA is a
+    genuine retry. This allows max_repair_rounds > 1 to actually
+    function.
     """
     from . import state as state_mod  # late import to avoid cycle at module load
 
@@ -606,28 +614,57 @@ def _unified_claim_pass(
         if not ok:
             raise ClaimRefused(f"frozen-graph drift: {reason}")
 
-        # Replay guard: if state already corresponds to the claimed pass
-        # AND the cumulative counter has already been bumped since the
-        # state was set, return existing counters without mutation. This
-        # prevents double-increment on a retried/finalized claim while
-        # still allowing a fresh claim when the entrypoint state is
-        # already set (e.g. review_finalize returning CHANGES_REQUESTED
-        # before the orchestrator calls claim_repair_round).
+        # Replay guard. Two cases:
+        #
+        # (a) build_pass_count / review_pass_count — keyed on the FSM
+        #     state. After a successful claim, the state is set to
+        #     BUILDING / REVIEWING. A retried claim sees the same
+        #     state and returns the existing pass number without
+        #     incrementing. This is the original guard.
+        #
+        # (b) repair_round_count — keyed on source_evidence_sha per-cp.
+        #     v0.3.5 (F-4-01): the FSM state alone is insufficient
+        #     because CHANGES_REQUESTED is the persistent state for
+        #     repair claims. Each repair round has different evidence
+        #     (the candidate SHA changes between rounds); a duplicate
+        #     evidence SHA is a genuine retry.
         cur_state = cur.get("state")
         existing_cum = int(program_state["cumulative_counters"].get(counter, 0))
-        if cur_state == replay_states[counter] and existing_cum > 0:
-            cp_id_replay = select_next_checkpoint(packet, program_state)
+        # Resolve the current cp id once so both guard branches use it.
+        cp_id_replay = select_next_checkpoint(packet, program_state)
+        existing_cp = (
+            next(
+                (c for c in program_state["checkpoints"]
+                 if c["id"] == cp_id_replay),
+                None,
+            ) if cp_id_replay else None
+        )
+        existing_cp_pass = (
+            int(existing_cp[counter]) if existing_cp else 0
+        )
+        # Per-cp evidence tracking: stores the source_evidence_sha
+        # of the last claim on this cp, keyed by counter.
+        last_evidence = (
+            (existing_cp or {}).get("last_evidence_sha_by_counter") or {}
+        )
+        last_evidence_for_counter = last_evidence.get(counter)
+
+        is_replay = False
+        if counter == "repair_round_count":
+            # Repair replay: same cp AND same evidence SHA = replay.
+            if (
+                existing_cp_pass > 0
+                and source_evidence_sha is not None
+                and source_evidence_sha == last_evidence_for_counter
+            ):
+                is_replay = True
+        else:
+            # Build/review replay: state must already match.
+            if cur_state == replay_states[counter] and existing_cum > 0:
+                is_replay = True
+
+        if is_replay:
             existing_top = int(cur.get(top_counter_name, 0) or 0)
-            existing_cp = (
-                next(
-                    (c for c in program_state["checkpoints"]
-                     if c["id"] == cp_id_replay),
-                    None,
-                ) if cp_id_replay else None
-            )
-            existing_cp_pass = (
-                int(existing_cp[counter]) if existing_cp else 0
-            )
             return {
                 "ok": True,
                 "run_id": run_id,
@@ -665,10 +702,20 @@ def _unified_claim_pass(
             packet_cp=packet_cp,
         )
 
+        # v0.3.5 (F-4-01): record the source_evidence_sha on the cp
+        # so the replay guard can distinguish a fresh repair round
+        # from a duplicate retry.
+        new_program_evidence = _deepcopy_program(new_program)
+        cp_new = _find_cp(new_program_evidence, cp_id)
+        ev_map = dict(cp_new.get("last_evidence_sha_by_counter") or {})
+        if source_evidence_sha is not None:
+            ev_map[counter] = source_evidence_sha
+        cp_new["last_evidence_sha_by_counter"] = ev_map
+
         # 10. Mirror into top-level state counter and transition FSM so the
         #     replay guard (state==BUILDING|REVIEWING) detects re-claims.
         new_state = dict(cur)
-        new_state["program"] = new_program
+        new_state["program"] = new_program_evidence
         new_state[top_counter_name] = int(cur.get(top_counter_name, 0) or 0) + 1
         new_state["updated_at"] = state_mod.utc_now_iso()
         new_state["last_actor"] = "of-loop-claim"
@@ -744,14 +791,23 @@ def claim_repair_round(
     canonical_repo: Path,
     run_id: str,
     packet: dict[str, Any],
+    source_evidence_sha: str | None = None,
 ) -> dict[str, Any]:
-    """Atomically claim one PROGRAM repair round. Single durable owner."""
+    """Atomically claim one PROGRAM repair round. Single durable owner.
+
+    v0.3.5 (F-4-01): accepts `source_evidence_sha` so the replay
+    guard can distinguish a fresh repair round (different evidence,
+    e.g. a new candidate SHA) from a duplicate retry (same evidence).
+    The caller should pass the candidate SHA from the most recent
+    build receipt so each round has fresh evidence.
+    """
     return _unified_claim_pass(
         canonical_repo=canonical_repo,
         run_id=run_id,
         packet=packet,
         counter="repair_round_count",
         pass_kind="repair",
+        source_evidence_sha=source_evidence_sha,
     )
 
 

@@ -260,18 +260,37 @@ def classify_bash_command(command: str) -> dict[str, Any]:
 
 
 def _split_command_chain(command: str) -> list[str]:
-    """Split a shell command into segments separated by &&, ||, ;, |.
+    """Split a shell command into segments separated by &&, ||, ;, |, and newlines.
 
     Naive but adequate — we are matching dangerous tokens, not parsing shell.
 
-    Returns [] for multiline commands so the caller can defer to the
-    post-pass verification layer instead of crashing the classifier.
+    v0.3.5 (A3-001): multiline commands are no longer returned as [].
+    Instead, each line is split on shell-chain operators and the union
+    of all segments is returned. This closes the bypass where a
+    forbidden action was hidden on a non-first line of a multiline
+    command (e.g. `echo harmless\\ngit push origin master`).
     """
-    if "\n" in command or "\r" in command:
-        # Multiline/heredoc input: text classifier can't safely parse this.
-        # The post-pass verification must catch any prohibited operation.
-        return []
+    if "\n" not in command and "\r" not in command:
+        return _split_single_line(command)
 
+    # Multiline: split on newlines, classify each line independently,
+    # union the segments. Skip empty lines and pure-comment lines.
+    parts: list[str] = []
+    for raw_line in re.split(r"[\r\n]+", command):
+        line = raw_line.strip()
+        if not line:
+            continue
+        # Strip leading shell comment markers (a line starting with #)
+        # but keep mid-line #s (used by git refspec). Comment-only lines
+        # are skipped entirely.
+        if line.startswith("#"):
+            continue
+        parts.extend(_split_single_line(line))
+    return parts
+
+
+def _split_single_line(command: str) -> list[str]:
+    """Split a single-line command on &&, ||, ;, |."""
     parts: list[str] = []
     buf: list[str] = []
     i = 0

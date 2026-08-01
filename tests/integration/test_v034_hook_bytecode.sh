@@ -8,8 +8,8 @@
 #   C. security behavior is unchanged — representative allow/deny/scan cases
 #   D. repeated hook execution remains clean
 #   E. existing release regression — re-runs v0.3.2/v0.3.3 focused tests
-set -uo pipefail
-ROOT="/Users/mr.mrs.london/projects/plugins/ownframework-loop"
+set -euo pipefail
+ROOT="${OFLOOP_TEST_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 
 pass() { echo "  PASS: $*"; }
 fail() { echo "  FAIL: $*"; exit 1; }

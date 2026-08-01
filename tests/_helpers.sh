@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Shared test helpers — sourced by every test_*.sh.
 
-set -uo pipefail
+set -euo pipefail
 
 # Resolve ROOT from the script that sourced us (assumes ../../ relative path).
 TEST_HELPERS_LOADED=1
@@ -152,7 +152,15 @@ approval_doc = {
     "baseline_branch": branch,
     "baseline_sha": baseline_sha,
     "packet_schema": "ownframework-work-packet/v2",
-    "approval_method": "operator_marker",
+    # v0.3.5 (AUD2-P0-1): helper records "tty_confirmation" because
+    # ALLOWED_APPROVAL_METHODS shrunk to {"tty_confirmation"} only.
+    # This helper simulates the POST-approval state for fixture setup;
+    # the actual interactive TTY approval is exercised by
+    # tests/unit/test_approval_pty_e2e.sh which spawns a real PTY and
+    # types the confirmation token. Production paths must NOT call
+    # this helper — they go through `ofloop spec approve` which is
+    # the only authority for writing APPROVAL.json.
+    "approval_method": "tty_confirmation",
     "confirmation_token": token,
 }
 Path(canonical_repo, ".ownframework-loop", run_id, "APPROVAL.json").write_text(
@@ -176,6 +184,50 @@ if cur.get("state") == "AWAITING_APPROVAL":
         reason="test helper: synthetic transition",
     )
 PY
+  echo "$rid"
+}
+
+# Make a fresh run in AWAITING_APPROVAL state (no APPROVAL.json).
+# v0.3.5 (A6-F03): tests that exercise the genuine-TTY approval path
+# need a clean AWAITING_APPROVAL run, not a pre-stamped approval.
+# Args: repo [work_class=BUG] [risk=low] [title=test] [branch=master]
+make_approved_run_unapproved() {
+  local repo="$1"
+  local wc="${2:-BUG}"
+  local risk="${3:-low}"
+  local title="${4:-test}"
+  local branch="${5:-master}"
+  "$OFLOOP_BIN" spec new "$repo" "$title" >/dev/null
+  local rid
+  rid="$(ls -1t "$repo/.ownframework-loop" | head -n1)"
+  local pp="$repo/.ownframework-loop/$rid/WORK_PACKET.md"
+  cat > "$pp" <<EOF
+\`\`\`json
+{
+  "schema": "ownframework-work-packet/v2",
+  "packet_id": "p-1",
+  "created_at": "2026-07-23T00:00:00Z",
+  "work_class": "$wc",
+  "risk_class": "$risk",
+  "title": "$title",
+  "target": {"repo": "$repo", "branch": "$branch", "classification": "local_only"},
+  "acceptance_criteria": [{"id": "AC-1", "text": "ok"}],
+  "non_goals": [],
+  "allowed_paths": ["src/"],
+  "protected_paths": [".ownframework-loop/"],
+  "work_units": [{"id": "UNIT-1", "title": "u", "scope": "s"}],
+  "merge_authority": "human_only",
+  "deploy_authority": "human_only",
+  "push_authority": "human_only",
+  "external_action_authority": "none",
+  "risk_budget": {
+    "max_files_changed": 25,
+    "max_diff_lines": 1000,
+    "max_repair_rounds": 3
+  }
+}
+\`\`\`
+EOF
   echo "$rid"
 }
 

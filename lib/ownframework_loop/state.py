@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from .locking import flock_exclusive
-from .transitions import assert_valid
+from . import transitions
 from .util import (
     atomic_write_json, read_json, run_dir, utc_now_iso, ensure_mode,
     fsync_dir,
@@ -231,39 +231,53 @@ def append_event(
     reads can verify the event chain by recomputing (see
     `integrity.compute_event_chain_hash`) and comparing it to the most
     recent recorded value.
+
+    v0.3.5 (A1-002): the previous-hash read and the chain-hash
+    computation now happen INSIDE the flock. Two concurrent appenders
+    can no longer interleave: one acquires the flock, reads the prior
+    chain hash, computes the new one, and appends; the other waits.
+
+    v0.3.5 (limitation): if the LAST event is removed, the chain still
+    validates because the chain hash of N-1 lines equals the recorded
+    chain hash of N-1 lines. Truncation detection requires an
+    external terminal anchor (out of scope for this patch).
     """
     sp = state_path(canonical_repo, run_id)
     ep = events_path(canonical_repo, run_id)
-    state_sha_now = integrity.sha256_file(sp) if sp.exists() else None
 
-    record: dict[str, Any] = {
-        "ts": utc_now_iso(),
-        "run_id": run_id,
-        "event_type": event_type,
-        "old_state": old_state,
-        "new_state": new_state,
-        "actor": actor,
-        "commit_sha": commit_sha,
-        "reason": reason,
-        "state_sha256": state_sha_now,
-        "event_chain_sha256": "0" * 64,  # 64-zero placeholder (same length as SHA-256 hex)
-    }
-    if extras:
-        record.update(extras)
-    # Compute the chain hash over the line as it will exist AFTER
-    # substitution. Since the placeholder has the same byte length as the
-    # SHA-256 hex, the only bytes that change in the canonical serialization
-    # are within the chain_hash field itself — the rest of the line is
-    # byte-identical. We substitute the computed hash into the field, then
-    # re-serialize. Recomputation via compute_event_chain_hash yields the
-    # same hash because both writes go through the same canonical serializer
-    # and the chain hash is itself a function of the (length-stable) line.
-    line = _json_dumps(record)
-    chain_hash = _compute_chain_hash_for_append(ep, line, state_sha_now)
-    record["event_chain_sha256"] = chain_hash
-    line = _json_dumps(record)
-
+    # Read the prior chain hash, current state SHA, and compute the
+    # new chain hash ALL under the flock. This closes the TOCTOU
+    # window where two concurrent appenders could both compute their
+    # chain hash from the same prior hash.
     with flock_exclusive(lock_path(canonical_repo, run_id)):
+        state_sha_now = integrity.sha256_file(sp) if sp.exists() else None
+        record: dict[str, Any] = {
+            "ts": utc_now_iso(),
+            "run_id": run_id,
+            "event_type": event_type,
+            "old_state": old_state,
+            "new_state": new_state,
+            "actor": actor,
+            "commit_sha": commit_sha,
+            "reason": reason,
+            "state_sha256": state_sha_now,
+            "event_chain_sha256": "0" * 64,  # 64-zero placeholder (same length as SHA-256 hex)
+        }
+        if extras:
+            record.update(extras)
+        # Compute the chain hash over the line as it will exist AFTER
+        # substitution. Since the placeholder has the same byte length as the
+        # SHA-256 hex, the only bytes that change in the canonical serialization
+        # are within the chain_hash field itself — the rest of the line is
+        # byte-identical. We substitute the computed hash into the field, then
+        # re-serialize. Recomputation via compute_event_chain_hash yields the
+        # same hash because both writes go through the same canonical serializer
+        # and the chain hash is itself a function of the (length-stable) line.
+        line = _json_dumps(record)
+        chain_hash = _compute_chain_hash_for_append(ep, line, state_sha_now)
+        record["event_chain_sha256"] = chain_hash
+        line = _json_dumps(record)
+
         ep.parent.mkdir(parents=True, exist_ok=True)
         with open(ep, "a", encoding="utf-8") as f:
             f.write(line + "\n")
@@ -409,6 +423,126 @@ def request_stop(canonical_repo: Path, run_id: str, *, reason: str, actor: str =
 
 def is_stop_requested(canonical_repo: Path, run_id: str) -> bool:
     return stop_path(canonical_repo, run_id).exists()
+
+
+def program_transition(
+    canonical_repo: Path,
+    run_id: str,
+    *,
+    to_state: str,
+    actor: str,
+    reason: str | None = None,
+    commit_sha: str | None = None,
+    extras: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Atomic PROGRAM-mode state transition + event append under one flock.
+
+    v0.3.5 (A1-001/A1-004/A1-005): the program-mode orchestrator no
+    longer bypasses the FSM via state_mod.save(). Every orchestrator-
+    initiated state transition goes through this function, which:
+
+      1. Acquires the per-run flock.
+      2. Reads STATE.json.
+      3. Validates against the program-mode FSM
+         (transitions.assert_valid_program).
+      4. Persists STATE.json atomically.
+      5. Appends the state_transition event with chain hash INSIDE
+         the same flock (using _append_event_locked).
+      6. Releases the flock.
+
+    The single-mode FSM table is consulted first; program-mode
+    escape hatches (APPROVED/BLOCKED -> READY_TO_BUILD) are permitted
+    ONLY when the run has more claimable checkpoints. Once the
+    program is fully terminated, this function falls back to
+    transitions.assert_valid behavior (terminal states cannot be left).
+
+    Use this function instead of state_mod.save() when changing the
+    top-level `state` field. For purely field updates that do NOT
+    change `state` (e.g., bumping the `schema` version or writing a
+    new `program` sub-object after a finalize_checkpoint call that
+    did NOT change `state`), use state_mod.save() directly.
+
+    Returns the new state document.
+    """
+    sp = state_path(canonical_repo, run_id)
+    ep = events_path(canonical_repo, run_id)
+    lp = lock_path(canonical_repo, run_id)
+
+    # Verify STATE.json SHA before reading.
+    ok, msg = integrity.verify_state_sha(sp, ep)
+    if not ok:
+        raise integrity.TamperingDetected(
+            f"program_transition refused: {msg}"
+        )
+
+    with flock_exclusive(lp):
+        current = read_json(sp)
+        if current is None or current == {}:
+            raise FileNotFoundError(
+                f"STATE.json missing for run {run_id}"
+            )
+        from_state = current["state"]
+        # Determine whether the run has more claimable checkpoints.
+        has_more_cps = False
+        prog = current.get("program")
+        if isinstance(prog, dict):
+            try:
+                from . import program as _program_mod  # local import
+                # The orchestrator's checkpoint graph lives in the
+                # packet, not the state. The state only knows about
+                # finalized checkpoints. The caller (orchestrator)
+                # controls the post-finalize decision; here we use
+                # a conservative default that allows the escape
+                # hatches when a `program` sub-object exists AND
+                # there is no PROGRAM_TERMINAL marker.
+                has_more_cps = not prog.get("program_terminated", False)
+            except Exception:
+                has_more_cps = False
+        transitions.assert_valid_program(
+            from_state, to_state,
+            has_more_checkpoints=has_more_cps,
+        )
+
+        now = utc_now_iso()
+        new = dict(current)
+        new["state"] = to_state
+        new["transitions_count"] = int(current.get("transitions_count", 0)) + 1
+        new["updated_at"] = now
+        new["last_actor"] = actor
+        if commit_sha:
+            new["last_candidate_sha"] = commit_sha
+        if to_state in ("APPROVED", "BLOCKED", "STOPPED"):
+            new["terminal_reason"] = reason
+        history = list(current.get("state_history", []))
+        history.append({
+            "from": from_state, "to": to_state, "at": now,
+            "actor": actor, "reason": reason,
+        })
+        new["state_history"] = history
+        if extras:
+            new.update(extras)
+
+        atomic_write_json(sp, new, mode=0o600)
+        ensure_mode(ep, 0o600)
+
+        # Append the event under the SAME flock using the locked
+        # helper. This closes the A1-002 window where the previous-
+        # hash read was outside the flock.
+        _append_event_locked(
+            canonical_repo, run_id,
+            event_type="state_transition",
+            old_state=from_state,
+            new_state=to_state,
+            actor=actor,
+            commit_sha=commit_sha,
+            reason=reason,
+        )
+
+    try:
+        fsync_dir(sp.parent)
+    except OSError:
+        pass
+    return new
 
 
 def _json_dumps(obj: Any) -> str:

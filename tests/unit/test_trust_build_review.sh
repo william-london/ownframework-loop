@@ -38,7 +38,7 @@ doc = {
     "baseline_branch": branch,
     "baseline_sha": baseline_sha,
     "packet_schema": "ownframework-work-packet/v2",
-    "approval_method": "operator_marker",
+    "approval_method": "tty_confirmation",
     "confirmation_token": token,
 }
 Path(canonical_repo, ".ownframework-loop", run_id, "APPROVAL.json").write_text(
@@ -382,16 +382,16 @@ pass "reviewer verdict cannot be downgraded by agent"
 # ---------- ISOLATION TESTS 36-43 ----------
 
 # 36. run A cannot write run B state
-pass "run A cannot write run B state (covered by hook)"
+[[ -x "$ROOT_DIR/hooks/block_protected_paths.sh" ]] && pass "run A cannot write run B state: hook script present and executable" || fail "run A/B cross-run hook missing"
 
 # 37-43. hook scripts present and executable
 [[ -x "$ROOT_DIR/hooks/block_protected_paths.sh" ]] && pass "block_protected_paths.sh is executable" || fail "block_protected_paths.sh missing"
 [[ -x "$ROOT_DIR/hooks/external_action_guard.sh" ]] && pass "external_action_guard.sh is executable" || fail "external_action_guard.sh missing"
-pass "builder cannot write canonical checkout (covered by hook)"
-pass "reviewer cannot write candidate source (covered by hook)"
-pass "builder can write its own worktree (covered by hook)"
-pass "reviewer can write approved scratch (covered by hook)"
-pass "direct state-file Write/Edit is blocked (covered by hook)"
+grep -q "CANONICAL_CHECKOUT_WRITE_DURING_BUILD" "$ROOT_DIR/hooks/block_protected_paths.sh" && pass "canonical-checkout-during-build block is implemented" || fail "canonical-checkout block missing from hook"
+grep -q "REVIEWER_SOURCE_WRITE" "$ROOT_DIR/hooks/block_protected_paths.sh" && pass "reviewer-source-write block is implemented" || fail "reviewer-source-write block missing from hook"
+grep -q "Builder worktree: allow any path inside it" "$ROOT_DIR/hooks/block_protected_paths.sh" && pass "builder-worktree-allow is implemented" || fail "builder-worktree-allow missing"
+grep -q "scratch/reviewer" "$ROOT_DIR/hooks/block_protected_paths.sh" && pass "reviewer-scratch-allow is implemented" || fail "reviewer-scratch-allow missing"
+grep -q "AUTHORITATIVE_ARTIFACT_VIA_WRITE" "$ROOT_DIR/hooks/block_protected_paths.sh" && pass "authoritative-artifact-via-write block is implemented" || fail "authoritative-artifact-via-write block missing"
 pass "official CLI state write succeeds"
 
 # ---------- TOOLS AND AUTONOMY TESTS 44-50 ----------
@@ -563,8 +563,8 @@ print('STOP' if a == 'STOP' else 'RESCHEDULE')
 assert_contains "$out68" "STOP" "no-work reviewer emits STOP marker"
 
 # 69-70. terminal builder/reviewer launch no agent
-pass "terminal builder launches no agent (covered by scheduling)"
-pass "terminal reviewer launches no agent (covered by scheduling)"
+[[ -f "$ROOT_DIR/agents/builder.md" ]] && grep -q "ready_to_build\|terminal\|approved" "$ROOT_DIR/agents/builder.md" && pass "builder agent spec present" || fail "builder agent spec missing"
+[[ -f "$ROOT_DIR/agents/reviewer.md" ]] && grep -q "ready_for_review\|terminal\|approved" "$ROOT_DIR/agents/reviewer.md" && pass "reviewer agent spec present" || fail "reviewer agent spec missing"
 
 # 71. invalid state transition is rejected
 out71="$(python3 -c "

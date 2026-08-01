@@ -325,10 +325,11 @@ def cmd_spec_approve(args: argparse.Namespace) -> None:
     errors = packet_mod.validate_packet_metadata(meta)
     if errors:
         _emit_error("packet invalid", exit_code=2, errors=errors)
-    import os as _os
-    actor = args.actor or _os.environ.get("OFLOOP_ACTOR") or "operator"
+    # v0.3.5 (AUD2-P0-1): actor is recorded as attribution only; it is
+    # NOT authority. The CLI no longer accepts OFLOOP_ACTOR env as a
+    # fallback — operators must pass --actor explicitly.
+    actor = args.actor or "operator"
     note = args.note
-    assume_tty = bool(getattr(args, "assume_tty", False))
     try:
         approval_doc = approval.request_human_approval(
             canonical_repo=repo,
@@ -336,7 +337,6 @@ def cmd_spec_approve(args: argparse.Namespace) -> None:
             packet_path=packet_path,
             actor=actor,
             operator_note=note,
-            assume_tty=assume_tty,
         )
     except RuntimeError as e:
         state_mod.append_event(
@@ -659,17 +659,40 @@ def cmd_build_transition(args: argparse.Namespace) -> None:
         # Increment repair round. In program mode, route through the
         # unified claim owner so per-cp, cumulative, and top-level mirror
         # counters cannot desync (matches review_finalize.py repair path).
+        # v0.3.5 (F-4-01): pass source_evidence_sha so the replay guard
+        # distinguishes fresh repair rounds from duplicate retries.
         cur = state_mod.load(repo, args.run_id)
         if state_mod.is_program_state(cur):
             meta, _approval_doc, _packet_path = _require_valid_approval(repo, args.run_id)
+            ev_sha = (
+                getattr(args, "commit_sha", None)
+                or (cur or {}).get("last_candidate_sha")
+                or ""
+            )
             try:
                 program_mod.claim_repair_round(
                     canonical_repo=repo,
                     run_id=args.run_id,
                     packet=meta,
+                    source_evidence_sha=ev_sha or None,
                 )
             except program_mod.ClaimRefused as e:
                 _emit_error(f"repair claim refused: {e}", exit_code=4)
+            # v0.3.5 (F-4-01): post-hook — transition CHANGES_REQUESTED
+            # back to READY_TO_BUILD so the next build pass is not
+            # classified as a replay of the previous repair.
+            try:
+                state_mod.transition(
+                    repo, args.run_id,
+                    to_state="READY_TO_BUILD",
+                    actor=args.actor or "operator",
+                    reason="repair_round claimed; ready for next build",
+                )
+            except Exception:
+                pass  # Idempotent: if state is already READY_TO_BUILD, the
+                      # FSM refuses (no edge from CHANGES_REQUESTED in
+                      # single-mode). Tolerate this race; the next build
+                      # claim will start from the current state.
             _emit({"ok": True, "run_id": args.run_id, "state": args.to})
             return
         # Single-mode V1 path: direct increment.
@@ -1125,12 +1148,17 @@ def _build_parser() -> argparse.ArgumentParser:
     s_app = spec_sub.add_parser("approve", help="approve the work packet (TTY required)")
     s_app.add_argument("repo")
     s_app.add_argument("run_id")
-    s_app.add_argument("--actor", default=os.environ.get("OFLOOP_ACTOR", "operator"),
-                        help="operator identifier recorded in APPROVAL.json; defaults to $OFLOOP_ACTOR or 'operator'")
+    # v0.3.5 (AUD2-P0-1): OFLOOP_ACTOR env is no longer accepted as a
+    # defaulting fallback. Operator must pass --actor explicitly; the
+    # default value "operator" is a literal placeholder, not a claim of
+    # identity. recorded as attribution only, not authority.
+    s_app.add_argument("--actor", default="operator",
+                        help="operator identifier recorded in APPROVAL.json as attribution (not authority)")
     s_app.add_argument("--note", default=None,
                        help="optional operator note recorded in APPROVAL.json")
-    s_app.add_argument("--assume-tty", action="store_true",
-                       help="skip TTY probe (used only by trusted automation; printed token must still match)")
+    # v0.3.5 (AUD2-P0-1): --assume-tty removed entirely. Approval
+    # requires a genuine interactive TTY. There is no automation
+    # override.
     s_app.set_defaults(func=cmd_spec_approve)
     s_legacy = spec_sub.add_parser("inspect-legacy", help="inspect a run for legacy V1 approval fields")
     s_legacy.add_argument("repo")

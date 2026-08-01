@@ -127,14 +127,20 @@ If a `/loop` session crashed mid-pass:
    `READY_FOR_REVIEW` to force a fresh review:
    `ofloop build transition <repo> <run-id> --to READY_FOR_REVIEW --reason recovered`.
 
-## 10. Resume after stop
+## 10. Recovery from a terminal state
 
-`STOP` is terminal. To resume:
+`STOPPED` and `BLOCKED` are terminal. There is no in-place resume.
 
-1. `rm <repo>/.ownframework-loop/<run-id>/STOP`
-2. Transition back to `READY_TO_BUILD` or `READY_FOR_REVIEW` based on
-   whether a build receipt exists.
-3. Re-run `/of-loop:build <run-id>` or `/of-loop:review <run-id>`.
+To recover a terminal run:
+
+1. Run `ofloop loop run --teardown <repo> <run-id>` to clean up
+   worktrees and stop markers associated with the run.
+2. Inspect the run's `STATE.json` and `EVENTS.log` in
+   `<repo>/.ownframework-loop/<run-id>/` to understand why the run
+   terminated.
+3. Start a fresh run with `ofloop spec new <repo> <mission>`. The new
+   run gets its own `run-id` and its own packet; the terminated run's
+   artifacts are retained for audit.
 
 ## 11. Archive a run
 

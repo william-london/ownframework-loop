@@ -109,7 +109,7 @@ doc = {
     "baseline_branch": "master",
     "baseline_sha": baseline,
     "packet_schema": "ownframework-work-packet/v2",
-    "approval_method": "operator_marker",
+    "approval_method": "tty_confirmation",
     "confirmation_token": approval.derive_confirmation_token(sha),
 }
 Path(canonical_repo, ".ownframework-loop", run_id, "APPROVAL.json").write_text(

@@ -14,8 +14,8 @@ not listed in the allowed map is rejected by `lib/ownframework_loop/transitions.
 | `REVIEWING` | The reviewer has claimed this pass. Builder cannot claim. |
 | `CHANGES_REQUESTED` | The reviewer returned a verdict with must-fix findings. Builder will repair. |
 | `APPROVED` | Terminal. The human merges. |
-| `BLOCKED` | Terminal. The human reads the events and decides. |
-| `STOPPED` | Terminal. The human explicitly stopped the loop. |
+| `BLOCKED` | Terminal (no outbound edges except to a fresh run via teardown). The human reads the events and decides. |
+| `STOPPED` | Terminal (no outbound edges except to a fresh run via teardown). The human explicitly stopped the loop. |
 
 ## Allowed transitions
 
@@ -129,3 +129,13 @@ The orchestrator guarantees invariants on the per-checkpoint lifecycle:
 3. The source-tree accounting (unique changed files, diff lines) is computed
    baseline->final per checkpoint AND cumulatively across the program.
    Cumulative caps come from the sum of approved-checkpoint exact caps.
+
+
+## v0.3.5: program-mode transitions
+
+In program-mode, the orchestrator may legitimately transition
+`APPROVED` → `READY_TO_BUILD` when another checkpoint is claimable.
+This extension is invoked only by `state.program_transition()` and
+requires `has_more_checkpoints=True` to be passed. Once the program is
+fully terminated (no more checkpoints), the run is terminal and the
+transition is refused.

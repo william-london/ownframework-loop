@@ -384,6 +384,17 @@ def run_program_mode(
             return _program_done(canonical_repo, run_id, ok=False,
                                  reason="no_current_no_terminal", history=history)
 
+        # v0.3.5 (A1-004): STOP observation at every safe orchestration
+        # boundary. If the operator has created a STOP marker file,
+        # exit the loop without dispatching another cycle.
+        if state_mod.is_stop_requested(canonical_repo, run_id):
+            history.append({"round": round_idx, "phase": "stop_observed",
+                            "cp_id": cp_id})
+            return _program_done(canonical_repo, run_id, ok=False,
+                                 terminal_state="STOPPED",
+                                 reason="stop_observed",
+                                 rounds=round_idx, history=history)
+
         # One build + one review cycle against the candidate.
         try:
             _drive_build_cycle(canonical_repo, run_id)
@@ -392,6 +403,16 @@ def run_program_mode(
             history.append({"round": round_idx, "phase": "build_error", "cp_id": cp_id, "error": str(e)})
             return _program_done(canonical_repo, run_id, ok=False,
                                  reason="build_cycle_failed", history=history)
+
+        # v0.3.5 (A1-004): re-check STOP between cycles.
+        if state_mod.is_stop_requested(canonical_repo, run_id):
+            history.append({"round": round_idx, "phase": "stop_observed_after_build",
+                            "cp_id": cp_id})
+            return _program_done(canonical_repo, run_id, ok=False,
+                                 terminal_state="STOPPED",
+                                 reason="stop_observed",
+                                 rounds=round_idx, history=history)
+
         try:
             _drive_review_cycle(canonical_repo, run_id)
             history.append({"round": round_idx, "phase": "review", "cp_id": cp_id})
@@ -485,39 +506,51 @@ def run_program_mode(
             )
             if next_cp is not None and cur_after.get("state") in ("APPROVED", "BLOCKED", "STOPPED"):
                 # Reset state machine so the next CP can claim. The single-
-                # mode FSM (assert_valid) refuses APPROVED->READY_TO_BUILD
-                # (APPROVED is terminal in single-mode). For program-mode,
-                # we record an override state and use state_mod.save() to
-                # persist the field directly. The deterministic finalizers
-                # never run on this field unless the program is fully
-                # terminated (PROGRAM_TERMINAL marker below gates that).
+                # v0.3.5 (A1-001/A1-004/A1-005): the program-mode
+                # orchestrator no longer bypasses the FSM via
+                # state_mod.save(). program_transition validates the
+                # APPROVED -> READY_TO_BUILD escape hatch against the
+                # program-mode FSM table (transitions.assert_valid_program),
+                # which permits the transition ONLY when the run has
+                # more claimable checkpoints.
                 if cur_after.get("state") == "BLOCKED":
                     # Keep BLOCKED; we already returned below for cp_terminal=BLOCKED.
                     pass
                 else:
-                    new_reset = dict(cur_after)
-                    new_reset["state"] = "READY_TO_BUILD"
-                    new_reset["program"] = new_prog
-                    new_reset["schema"] = state_mod.PROGRAM_STATE_SCHEMA_VERSION
-                    new_reset["terminal_reason"] = None
                     try:
-                        state_mod.save(canonical_repo, run_id, new_reset)
+                        state_mod.program_transition(
+                            canonical_repo, run_id,
+                            to_state="READY_TO_BUILD",
+                            actor="orchestrator",
+                            reason=f"checkpoint {cp_id} done; advancing",
+                            extras={
+                                "program": new_prog,
+                                "schema": state_mod.PROGRAM_STATE_SCHEMA_VERSION,
+                            },
+                        )
                     except Exception as e:
                         history.append({"phase": "state_reset_failed", "error": str(e)})
                         return _program_done(canonical_repo, run_id, ok=False,
                                              reason="state_reset_failed", history=history)
 
         if cp_terminal == "BLOCKED":
-            # The checkpoint was already finalized via finalise_checkpoint
-            # above (which set new_prog = ...). The DOUBLE-finalize in the
-            # bug here (audit v0.3.0-C5) appended the cp_id twice to
-            # finalized_checkpoints and let the orchestrator reconcile
-            # stale snapshots. Use the already-finalized new_prog instead.
-            new_state = dict(cur)
-            new_state["program"] = new_prog
-            new_state["state"] = "BLOCKED"
-            new_state["schema"] = state_mod.PROGRAM_STATE_SCHEMA_VERSION
-            state_mod.save(canonical_repo, run_id, new_state)
+            # v0.3.5 (A1-001/A1-004/A1-005): replace direct state_mod.save()
+            # with program_transition so the BLOCKED terminal is validated
+            # against the FSM. The deterministic finalizers never run on
+            # this state unless the program is fully terminated.
+            try:
+                state_mod.program_transition(
+                    canonical_repo, run_id,
+                    to_state="BLOCKED",
+                    actor="orchestrator",
+                    reason=f"cp_blocked:{cp_id}",
+                    extras={
+                        "program": new_prog,
+                        "schema": state_mod.PROGRAM_STATE_SCHEMA_VERSION,
+                    },
+                )
+            except Exception as e:
+                history.append({"phase": "block_transition_failed", "error": str(e)})
             return _program_done(canonical_repo, run_id, ok=False,
                                  terminal_state="BLOCKED",
                                  reason=f"cp_blocked:{cp_id}", history=history)
@@ -533,10 +566,19 @@ def run_program_mode(
                 evidence_manifest={"_packet": meta, "round": round_idx,
                                     "reason": "cp_repair_cap_reached"},
             )
-            new_state = dict(cur)
-            new_state["program"] = new_prog_blocked
-            new_state["state"] = "BLOCKED"
-            state_mod.save(canonical_repo, run_id, new_state)
+            # v0.3.5 (A1-001/A1-004/A1-005): replace direct state_mod.save()
+            # with program_transition so the BLOCKED terminal is validated
+            # against the FSM.
+            try:
+                state_mod.program_transition(
+                    canonical_repo, run_id,
+                    to_state="BLOCKED",
+                    actor="orchestrator",
+                    reason=f"cp_repair_cap:{cp_id}",
+                    extras={"program": new_prog_blocked},
+                )
+            except Exception as e:
+                history.append({"phase": "repair_cap_block_failed", "error": str(e)})
             return _program_done(canonical_repo, run_id, ok=False,
                                  terminal_state="BLOCKED",
                                  reason=f"cp_repair_cap:{cp_id}", history=history)

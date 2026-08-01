@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from .locking import flock_exclusive
 from .util import (
     atomic_write_json, builder_worktree, reviewer_worktree,
     run_subprocess, short_sha, utc_now_iso, worktrees_dir,
@@ -27,6 +28,20 @@ def list_worktrees(canonical_repo: Path) -> list[dict[str, Any]]:
     return worktree_list(canonical_repo)
 
 
+def _wt_lock_path(canonical_repo: Path, run_id: str, role: str) -> Path:
+    """Per-(repo, run_id, role) flock path for serializing worktree creation.
+
+    v0.3.5 (F-4-02): the exists-check + git worktree add sequence is a
+    TOCTOU window without serialization. Multiple concurrent callers can
+    both see "no worktree yet" and both call `git worktree add`, which
+    fails for the second caller. This lockfile is local to the worktree
+    directory so it does not contend with the run-state LOCK.
+    """
+    parent = worktrees_dir(canonical_repo) / ".locks"
+    parent.mkdir(parents=True, exist_ok=True)
+    return parent / f"wt-{role}-{run_id}.lock"
+
+
 def add_builder_worktree(
     canonical_repo: Path,
     run_id: str,
@@ -37,30 +52,44 @@ def add_builder_worktree(
     """Create a fresh builder worktree on a candidate branch.
 
     If the branch already exists with a worktree, return that worktree info.
+
+    v0.3.5 (F-4-02): the exists-check + git worktree add sequence is
+    serialized via flock on a per-(repo, run_id, role) lockfile. On
+    acquire, the exists-check is re-run; if a valid worktree now
+    exists, return it deterministically with existed=True.
     """
     wt = builder_worktree(canonical_repo, run_id)
     parent = ensure_worktree_parent(canonical_repo)
     parent.mkdir(parents=True, exist_ok=True)
 
-    if wt.exists():
+    lock = _wt_lock_path(canonical_repo, run_id, "builder")
+    with flock_exclusive(lock):
+        if wt.exists():
+            head = current_head(wt)
+            return {"path": str(wt), "branch": branch, "head": head, "existed": True}
+
+        # Base sha: the receiver picks; default to current HEAD of canonical.
+        if base_sha is None:
+            base_sha = current_head(canonical_repo)
+        if base_sha is None:
+            raise WorktreeError("cannot create builder worktree: canonical repo has no HEAD")
+
+        cmd = [
+            "git", "-C", str(canonical_repo), "worktree", "add",
+            "-b", branch, str(wt), base_sha,
+        ]
+        r = run_subprocess(cmd, timeout=30)
+        if r.returncode != 0:
+            # v0.3.5 (F-4-02): the previous caller may have just created
+            # the worktree between our pre-flock exists-check and the
+            # git invocation. Re-check inside the flock and reclassify
+            # the failure if it is a benign race.
+            if wt.exists():
+                head = current_head(wt)
+                return {"path": str(wt), "branch": branch, "head": head, "existed": True}
+            raise WorktreeError(f"git worktree add failed: {r.stderr.strip()}")
         head = current_head(wt)
-        return {"path": str(wt), "branch": branch, "head": head, "existed": True}
-
-    # Base sha: the receiver picks; default to current HEAD of canonical.
-    if base_sha is None:
-        base_sha = current_head(canonical_repo)
-    if base_sha is None:
-        raise WorktreeError("cannot create builder worktree: canonical repo has no HEAD")
-
-    cmd = [
-        "git", "-C", str(canonical_repo), "worktree", "add",
-        "-b", branch, str(wt), base_sha,
-    ]
-    r = run_subprocess(cmd, timeout=30)
-    if r.returncode != 0:
-        raise WorktreeError(f"git worktree add failed: {r.stderr.strip()}")
-    head = current_head(wt)
-    return {"path": str(wt), "branch": branch, "head": head, "existed": False}
+        return {"path": str(wt), "branch": branch, "head": head, "existed": False}
 
 
 def add_reviewer_worktree(
@@ -81,52 +110,68 @@ def add_reviewer_worktree(
     external drift: a HEAD change where `before == expected_setup_sha`
     and `after == candidate_sha` is the legitimate reviewer re-pin, not
     a mutation.
+
+    v0.3.5 (F-4-02): the exists-check + tear-down + git worktree add
+    sequence is serialized via flock on a per-(repo, run_id, role)
+    lockfile. Concurrent callers cannot interleave the tear-down with
+    another caller's add.
     """
     wt = reviewer_worktree(canonical_repo, run_id)
     ensure_worktree_parent(canonical_repo)
 
-    existing_sha = None
-    if wt.exists():
-        existing_sha = current_head(wt)
+    lock = _wt_lock_path(canonical_repo, run_id, "reviewer")
+    with flock_exclusive(lock):
+        existing_sha = None
+        if wt.exists():
+            existing_sha = current_head(wt)
 
-    if existing_sha and existing_sha.startswith(candidate_sha[:7]):
+        if existing_sha and existing_sha.startswith(candidate_sha[:7]):
+            return {
+                "path": str(wt),
+                "head": existing_sha,
+                "existed": True,
+                "setup_candidate_sha": expected_setup_sha,
+            }
+
+        if wt.exists():
+            # Tear down the existing reviewer worktree before re-adding.
+            r = run_subprocess(
+                ["git", "-C", str(canonical_repo), "worktree", "remove", "--force", str(wt)],
+                timeout=30,
+            )
+            # Belt-and-suspenders: if the directory still exists (e.g., remove
+            # succeeded at the registration level but left a stale path), remove
+            # it manually so `git worktree add` does not refuse.
+            if wt.exists():
+                import shutil
+                shutil.rmtree(wt, ignore_errors=True)
+            if r.returncode != 0:
+                # The directory may already be gone; only fail if re-add will.
+                pass
+
+        cmd = [
+            "git", "-C", str(canonical_repo), "worktree", "add",
+            "--detach", str(wt), candidate_sha,
+        ]
+        r = run_subprocess(cmd, timeout=30)
+        if r.returncode != 0:
+            # v0.3.5 (F-4-02): benign-race check after the add.
+            if wt.exists():
+                head = current_head(wt)
+                return {
+                    "path": str(wt),
+                    "head": head,
+                    "existed": True,
+                    "setup_candidate_sha": expected_setup_sha,
+                }
+            raise WorktreeError(f"git worktree add (detached) failed: {r.stderr.strip()}")
+        head = current_head(wt)
         return {
             "path": str(wt),
-            "head": existing_sha,
-            "existed": True,
+            "head": head,
+            "existed": False,
             "setup_candidate_sha": expected_setup_sha,
         }
-
-    if wt.exists():
-        # Tear down the existing reviewer worktree before re-adding.
-        r = run_subprocess(
-            ["git", "-C", str(canonical_repo), "worktree", "remove", "--force", str(wt)],
-            timeout=30,
-        )
-        # Belt-and-suspenders: if the directory still exists (e.g., remove
-        # succeeded at the registration level but left a stale path), remove
-        # it manually so `git worktree add` does not refuse.
-        if wt.exists():
-            import shutil
-            shutil.rmtree(wt, ignore_errors=True)
-        if r.returncode != 0:
-            # The directory may already be gone; only fail if re-add will.
-            pass
-
-    cmd = [
-        "git", "-C", str(canonical_repo), "worktree", "add",
-        "--detach", str(wt), candidate_sha,
-    ]
-    r = run_subprocess(cmd, timeout=30)
-    if r.returncode != 0:
-        raise WorktreeError(f"git worktree add (detached) failed: {r.stderr.strip()}")
-    head = current_head(wt)
-    return {
-        "path": str(wt),
-        "head": head,
-        "existed": False,
-        "setup_candidate_sha": expected_setup_sha,
-    }
 
 
 def cleanup_reviewer_worktree(canonical_repo: Path, run_id: str) -> tuple[bool, str]:

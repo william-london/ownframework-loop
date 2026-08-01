@@ -71,7 +71,7 @@ approval_doc = {
     "baseline_branch": "master",
     "baseline_sha": "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
     "packet_schema": "ownframework-work-packet/v2",
-    "approval_method": "operator_marker",
+    "approval_method": "tty_confirmation",
     "confirmation_token": token,
 }
 target.write_text(json.dumps(approval_doc, indent=2, sort_keys=True))
@@ -167,7 +167,7 @@ approval_doc = {
     "baseline_branch": "master",
     "baseline_sha": "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
     "packet_schema": "ownframework-work-packet/v2",
-    "approval_method": "operator_marker",
+    "approval_method": "tty_confirmation",
     "confirmation_token": token,
 }
 target.write_text(json.dumps(approval_doc, indent=2, sort_keys=True))
@@ -201,7 +201,7 @@ approval_doc = {
     "baseline_branch": "master",
     "baseline_sha": "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
     "packet_schema": "ownframework-work-packet/v2",
-    "approval_method": "operator_marker",
+    "approval_method": "tty_confirmation",
     "confirmation_token": token,
 }
 target.write_text(json.dumps(approval_doc, indent=2, sort_keys=True))
@@ -235,7 +235,7 @@ approval_doc = {
     "baseline_branch": "master",
     "baseline_sha": "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
     "packet_schema": "ownframework-work-packet/v2",
-    "approval_method": "operator_marker",
+    "approval_method": "tty_confirmation",
     "confirmation_token": token,
 }
 target.write_text(json.dumps(approval_doc, indent=2, sort_keys=True))
@@ -283,7 +283,7 @@ approval_doc = {
     "baseline_branch": "master",
     "baseline_sha": "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
     "packet_schema": "ownframework-work-packet/v2",
-    "approval_method": "operator_marker",
+    "approval_method": "tty_confirmation",
     "confirmation_token": token,
 }
 target.write_text(json.dumps(approval_doc, indent=2, sort_keys=True))
@@ -297,44 +297,81 @@ assert_contains "$out" "OF_LOOP_BUILD_FINALIZE_REFUSED" "wrong repo in approval 
 out="$("$OFLOOP_BIN" spec approve "$T" "$RID" < /dev/null 2>&1 || true)"
 assert_contains "$out" "TTY" "noninteractive model approval is refused"
 
-# 11. human TTY approval succeeds in a safe fixture (use assume-tty with correct token)
+# 11. Real-PTY approval path: drive `ofloop spec approve` via a child PTY,
+# write the derived confirmation token into the master fd, and assert
+# exit 0 plus approval_method == "tty_confirmation" in APPROVAL.json.
+#
+# v0.3.5 (AUD2-P0-1): this replaces the v0.3.4 monkey-patch test that
+# called request_human_approval(assume_tty=True). The monkey-patches
+# were no-ops in v0.3.4 because the assume_tty branch bypassed both
+# _is_interactive_tty and _read_tty_confirmation entirely. After
+# closure, assume_tty is gone — the only path is genuine TTY.
 NEW_SHA="$(shasum -a 256 "$PP" | awk '{print $1}')"
-TOKEN="$(python3 -c "import sys; import os as _os_for_path
-sys.path.insert(0, _os_for_path.environ.get('OFLOOP_LIB', '/path/to/ownframework-loop/lib')); from ownframework_loop import approval; print(approval.derive_confirmation_token('$NEW_SHA'))")"
-# Drive request_human_approval with assume_tty=True using a heredoc-faked stdin won't pass tty check.
-# Use a subprocess to pipe the expected token.
-out="$(python3 - "$T" "$RID" "$NEW_SHA" "$TOKEN" <<'PY' 2>&1
-import sys, os, subprocess
-import os as _os_for_path
-sys.path.insert(0, _os_for_path.environ.get('OFLOOP_LIB', '/path/to/ownframework-loop/lib'))
-from ownframework_loop import approval
-canonical_repo, run_id, packet_sha, expected = sys.argv[1:5]
-packet_path = os.path.join(canonical_repo, ".ownframework-loop", run_id, "WORK_PACKET.md")
-# Force a real pty via pexpect-like? Easier: drive the function with assume_tty=True and
-# the typed token is not required when assume_tty is True (the function still verifies).
-# To exercise the typed path, monkey-patch _is_interactive_tty to return True.
-approval._is_interactive_tty = lambda: True
-# Patch the readline to return expected.
-def _fake_readline():
-    return expected + "\n"
-import builtins
-real_input = builtins.input
-def _fake_input(prompt):
-    return expected
-approval._read_tty_confirmation = lambda prompt, token, max_attempts=3: True
+TOKEN="$(python3 -c "import sys, os as _os; sys.path.insert(0, _os.environ.get('OFLOOP_LIB','/path/to/ownframework-loop/lib')); from ownframework_loop import approval; print(approval.derive_confirmation_token('$NEW_SHA'))")"
+
+PTY_OUT="$(python3 - "$T" "$RID" "$NEW_SHA" "$TOKEN" "$OFLOOP_BIN" <<'PYEND' 2>&1
+import os, pty, select, subprocess, sys, time
+
+canonical_repo, run_id, packet_sha, token, ofloop_bin = sys.argv[1:6]
+
+# Allocate a master/slave pty pair.
+master_fd, slave_fd = pty.openpty()
+
+# Make slave a controlling tty for the child.
+env = dict(os.environ)
+env.pop("OFLOOP_ACTOR", None)
+
+proc = subprocess.Popen(
+    [ofloop_bin, "spec", "approve", canonical_repo, run_id, "--actor", "test-pty"],
+    stdin=slave_fd, stdout=slave_fd, stderr=slave_fd,
+    close_fds=True, env=env,
+)
+os.close(slave_fd)
+
+# Wait for the prompt, then write the token.
+deadline = time.time() + 10.0
+buf = ""
+written = False
+while time.time() < deadline:
+    r, _, _ = select.select([master_fd], [], [], 0.25)
+    if r:
+        try:
+            chunk = os.read(master_fd, 4096).decode("utf-8", errors="replace")
+        except OSError:
+            break
+        buf += chunk
+        if "token>" in buf and not written:
+            os.write(master_fd, (token + "\n").encode("utf-8"))
+            written = True
+        if "READY_TO_BUILD" in buf or "approved" in buf.lower():
+            break
+    if proc.poll() is not None:
+        break
+
 try:
-    doc = approval.request_human_approval(
-        canonical_repo=__import__("pathlib").Path(canonical_repo),
-        run_id=run_id,
-        packet_path=__import__("pathlib").Path(packet_path),
-        actor="test-tty",
-        assume_tty=True,
-    )
-    print("OK", doc["packet_sha256"][:12])
-except Exception as e:
-    print("FAIL", e)
-PY
+    proc.wait(timeout=5)
+except subprocess.TimeoutExpired:
+    proc.kill()
+
+try:
+    os.close(master_fd)
+except OSError:
+    pass
+
+# Read APPROVAL.json and check method.
+import json
+ap_path = os.path.join(canonical_repo, ".ownframework-loop", run_id, "APPROVAL.json")
+if not os.path.exists(ap_path):
+    print("FAIL no APPROVAL.json")
+    sys.exit(2)
+ap = json.loads(open(ap_path).read())
+print("EXIT", proc.returncode)
+print("METHOD", ap.get("approval_method"))
+print("SHA", ap.get("packet_sha256", "")[:12])
+print("OK" if (proc.returncode == 0 and ap.get("approval_method") == "tty_confirmation") else "FAIL")
+PYEND
 )"
-assert_contains "$out" "OK" "human TTY approval succeeds in a safe fixture"
+assert_contains "$PTY_OUT" "OK" "real-PTY approval succeeds with tty_confirmation method"
+assert_contains "$PTY_OUT" "METHOD tty_confirmation" "approval_method is exactly tty_confirmation"
 
 echo "TRUST_APPROVAL_TESTS=PASS"

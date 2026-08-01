@@ -1,3 +1,5 @@
+<!-- HISTORICAL SNAPSHOT: This report reflects the test count as of release SHA at time of writing. Current release-health authority is `tests/run_all.sh` output at the master HEAD. Do NOT edit historical counts. -->
+
 # OwnFramework Loop V2 — Implementation Report
 
 **Date:** 2026-07-23
