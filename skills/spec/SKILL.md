@@ -1,6 +1,6 @@
 ---
 name: spec
-description: Spec interview, packet writing, and approval flow for OwnFramework Loop V2. Drives /of-loop:spec, /of-loop:spec approve, /of-loop:spec abandon, and the packet → APPROVAL.json binding.
+description: Spec interview, packet writing, and approval flow for OwnFramework Loop V2. Drives /of-loop:spec (mission interview → packet), /of-loop:spec approve (TTY-bound human approval that binds the packet SHA), and /of-loop:spec abandon. Approval produces APPROVAL.json with approval_method=tty_confirmation only — there is no automation override. Subsequent lifecycle stages (build via /of-loop:build, review via /of-loop:review) consume the approved packet.
 user-invocable: true
 ---
 
