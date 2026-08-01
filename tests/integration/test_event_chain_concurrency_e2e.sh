@@ -77,9 +77,9 @@ fi
 
 # Run the integrity verifier (canonical recomputation).
 python3 - "$RUN_DIR" <<'PYEND'
-import json, sys
+import json, os, sys
 from pathlib import Path
-sys.path.insert(0, "/Users/mr.mrs.london/projects/plugins/ownframework-loop/lib")
+sys.path.insert(0, os.environ["OFLOOP_LIB"])
 from ownframework_loop import integrity
 run_dir = Path(sys.argv[1])
 ep = run_dir / "EVENTS.log"
@@ -158,9 +158,9 @@ PYEND
 # If actual != recorded after mutation, exit 0 (mutation detected).
 # If actual == recorded, the mutation went undetected -> exit 1.
 if python3 - "$EV" <<'PYEND'
-import sys
+import os, sys
 from pathlib import Path
-sys.path.insert(0, "/Users/mr.mrs.london/projects/plugins/ownframework-loop/lib")
+sys.path.insert(0, os.environ["OFLOOP_LIB"])
 from ownframework_loop import integrity
 ep = Path(sys.argv[1])
 events = integrity.read_event_chain(ep)

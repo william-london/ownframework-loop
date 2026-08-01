@@ -46,6 +46,9 @@ while IFS= read -r rel; do
   TOTAL=$((TOTAL+1))
   name="$(basename "$full")"
   echo "--- $name ---"
+  # Portable 180s timeout: try `timeout`, then `gtimeout`, then a
+  # POSIX-only shell alarm fallback. The alarm fallback uses `kill -0`
+  # polling at 1s intervals so a hung test is always detected.
   if command -v timeout >/dev/null 2>&1; then
     timeout 180 bash "$full"
     rc=$?
@@ -53,8 +56,25 @@ while IFS= read -r rel; do
     gtimeout 180 bash "$full"
     rc=$?
   else
-    bash "$full"
-    rc=$?
+    bash "$full" &
+    pid=$!
+    elapsed=0
+    rc=0
+    while kill -0 "$pid" 2>/dev/null; do
+      if [[ "$elapsed" -ge 180 ]]; then
+        kill -TERM "$pid" 2>/dev/null
+        sleep 1
+        kill -KILL "$pid" 2>/dev/null
+        rc=124  # conventional timeout exit code
+        break
+      fi
+      sleep 1
+      elapsed=$((elapsed+1))
+    done
+    if [[ "$rc" == "0" ]]; then
+      wait "$pid"
+      rc=$?
+    fi
   fi
   if [[ $rc -eq 0 ]]; then
     PASSED=$((PASSED+1))

@@ -228,8 +228,6 @@ replay = data['replay']
 over_cap = data['over_cap']
 drift = data['drift']
 
-# === Repair round assertions ===
-# Claims 1..mr succeed.
 for i in range(1, mr + 1):
     r = [x for x in results if x['iter'] == i]
     assert r, f'no result for iter {i}'
@@ -239,7 +237,6 @@ for i in range(1, mr + 1):
         print(f'  FAIL: max={mr} iter={i} expected ok (got {r[0]})')
         sys.exit(1)
 
-# Claim mr+1 fails.
 r = [x for x in results if x['iter'] == mr + 1]
 assert r, f'no result for iter {mr+1}'
 if not r[0]['ok'] and 'frozen-graph drift' not in r[0].get('error', ''):
@@ -248,11 +245,9 @@ elif r[0]['ok']:
     print(f'  FAIL: max={mr} iter={mr+1} succeeded but should have been refused')
     sys.exit(1)
 else:
-    # If refused because of frozen-graph drift, that's a bug -- over-cap should be the reason, not drift
     print(f'  FAIL: max={mr} iter={mr+1} rejected for wrong reason: {r[0].get('error', '')[:80]}')
     sys.exit(1)
 
-# Replay must be idempotent (replayed=True, no increment).
 if replay.get('ok') and replay.get('replayed'):
     print(f'  PASS: max={mr} replay is idempotent')
 elif replay.get('ok') and not replay.get('replayed'):
@@ -262,22 +257,33 @@ else:
     print(f'  FAIL: max={mr} replay returned failure: {replay}')
     sys.exit(1)
 
-# Over-cap after replay must fail.
 if not over_cap.get('ok'):
     print(f'  PASS: max={mr} over-cap refused: {over_cap.get('error')[:60]}')
 else:
     print(f'  FAIL: max={mr} over-cap succeeded but should fail: {over_cap}')
     sys.exit(1)
 
-# Drift test: mutating checkpoint_graph_sha256 must be rejected with frozen-graph drift.
 if not drift.get('ok') and drift.get('rejected'):
     print(f'  PASS: max={mr} frozen-graph drift correctly detected')
 else:
     print(f'  FAIL: max={mr} drift test failed: {drift}')
     sys.exit(1)
-"
+" | tee -a /tmp/_repair_budget_out.log
 done
-
-echo "ASSERTIONS_EXECUTED=$((ASSERTIONS + 9))"
+assertions=$(grep -c '^  PASS:' /tmp/_repair_budget_out.log || true)
+failures=$(grep -c '^  FAIL:' /tmp/_repair_budget_out.log || true)
+# 5 assertions per max value, 3 values = 15 total.
+expected=18
+if [[ "$assertions" -ne "$expected" ]]; then
+  echo "FAIL: expected $expected assertions, got $assertions"
+  echo "TEST_RESULT=FAIL"
+  exit 1
+fi
+if [[ "$failures" -ne 0 ]]; then
+  echo "FAIL: $failures assertion failures detected"
+  echo "TEST_RESULT=FAIL"
+  exit 1
+fi
+echo "ASSERTIONS_EXECUTED=$assertions"
 echo "TEST_RESULT=PASS"
 exit 0

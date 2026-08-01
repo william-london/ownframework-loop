@@ -483,19 +483,31 @@ def program_transition(
             )
         from_state = current["state"]
         # Determine whether the run has more claimable checkpoints.
+        # We compare the program state's finalized_checkpoints list
+        # against the execution_order in the packet. If every CP in
+        # execution_order is finalized (or the run has no program
+        # sub-object), there are no more checkpoints and the run is
+        # terminal. Otherwise, the program-mode escape hatches
+        # (APPROVED/BLOCKED -> READY_TO_BUILD) remain available.
         has_more_cps = False
         prog = current.get("program")
         if isinstance(prog, dict):
             try:
-                from . import program as _program_mod  # local import
-                # The orchestrator's checkpoint graph lives in the
-                # packet, not the state. The state only knows about
-                # finalized checkpoints. The caller (orchestrator)
-                # controls the post-finalize decision; here we use
-                # a conservative default that allows the escape
-                # hatches when a `program` sub-object exists AND
-                # there is no PROGRAM_TERMINAL marker.
-                has_more_cps = not prog.get("program_terminated", False)
+                finalized = set(prog.get("finalized_checkpoints") or [])
+                # Read the packet to find execution_order. If the
+                # packet is unavailable (e.g. legacy state), fall
+                # back to the conservative default of "no more cps".
+                pp = canonical_repo / ".ownframework-loop" / run_id / "WORK_PACKET.md"
+                order: list[str] = []
+                if pp.exists():
+                    from . import packet as _packet_mod
+                    _meta, _ = _packet_mod.parse_packet_file(pp)
+                    cg = (_meta or {}).get("checkpoint_graph") or {}
+                    order = list(cg.get("execution_order") or [])
+                if order:
+                    has_more_cps = any(
+                        cid not in finalized for cid in order
+                    )
             except Exception:
                 has_more_cps = False
         transitions.assert_valid_program(
