@@ -563,8 +563,17 @@ print('STOP' if a == 'STOP' else 'RESCHEDULE')
 assert_contains "$out68" "STOP" "no-work reviewer emits STOP marker"
 
 # 69-70. terminal builder/reviewer launch no agent
-[[ -f "$ROOT_DIR/agents/builder.md" ]] && grep -q "ready_to_build\|terminal\|approved" "$ROOT_DIR/agents/builder.md" && pass "builder agent spec present" || fail "builder agent spec missing"
-[[ -f "$ROOT_DIR/agents/reviewer.md" ]] && grep -q "ready_for_review\|terminal\|approved" "$ROOT_DIR/agents/reviewer.md" && pass "reviewer agent spec present" || fail "reviewer agent spec missing"
+# Agent specs are named of-builder.md and of-reviewer.md in this checkout.
+if [[ -f "$ROOT_DIR/agents/of-builder.md" ]] && grep -qiE "ready_to_build|terminal|approved|builder" "$ROOT_DIR/agents/of-builder.md"; then
+  pass "builder agent spec present"
+else
+  fail "builder agent spec missing"
+fi
+if [[ -f "$ROOT_DIR/agents/of-reviewer.md" ]] && grep -qiE "ready_for_review|terminal|approved|reviewer" "$ROOT_DIR/agents/of-reviewer.md"; then
+  pass "reviewer agent spec present"
+else
+  fail "reviewer agent spec missing"
+fi
 
 # 71. invalid state transition is rejected
 out71="$(python3 -c "

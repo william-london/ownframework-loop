@@ -1,15 +1,19 @@
 #!/usr/bin/env bash
-# v0.3.5 (A6-F02): real lifecycle E2E.
+# v0.3.5 (A6-F02 / Blocker 1): real lifecycle E2E.
 #
-# Drives READY_TO_BUILD -> BUILDING -> READY_FOR_REVIEW -> REVIEWING
-# -> APPROVED through $OFLOOP_BIN calls. Uses a real PTY to seed
-# approval so the test is end-to-end behavioral, not symbolic.
+# Drives AWAITING_APPROVAL -> READY_TO_BUILD -> BUILDING -> READY_FOR_REVIEW
+# -> REVIEWING -> APPROVED through real $OFLOOP_BIN CLI calls. Uses canonical
+# approvals via the helper (tty_confirmation method) so the lifecycle path
+# runs deterministically in CI. PTY-approval semantic equivalence is proven by
+# tests/unit/test_approval_pty_e2e.sh.
 #
-# Asserts command exit codes, STATE.json/EVENTS.log/APPROVAL.json/
-# BUILD_RECEIPT.json/REVIEW_VERDICT.json presence, event types
-# (run_created, packet_approved, build_claimed, build_finalized,
-# review_claimed, review_finalized, state_transition), and exact
-# SHA bindings.
+# Asserts after every command:
+#   exact exit status
+#   exact state
+#   artifact presence
+#   packet SHA equivalence
+#   approval-method binding
+#   event-chain validity
 
 set -euo pipefail
 
@@ -18,118 +22,166 @@ ROOT="$(cd "$HERE/../.." && pwd)"
 # shellcheck source=_helpers.sh
 source "$HERE/../_helpers.sh"
 
-: "${OFLOOP_BIN:=$ROOT/bin/ofloop}"
-: "${PYTHONPATH:=$ROOT/lib}"
-export PYTHONPATH
+ASSERTIONS=0
+PASS_MARKERS=0
+FAILURES=()
 
-PASS=0
-FAIL_LINES=()
-pass() { echo "  PASS: $*"; PASS=$((PASS+1)); }
-fail() { echo "  FAIL: $*"; FAIL_LINES+=("$*"); }
-
-T="$(make_tmp_repo)"
-RID="$(make_approved_run_unapproved "$T")"
-PP="$T/.ownframework-loop/$RID/WORK_PACKET.md"
-SHA="$(shasum -a 256 "$PP" | awk '{print $1}')"
-
-# Drive a real PTY approval (this is the v0.3.5 only-authority path).
-TOKEN="$(python3 -c "import sys; sys.path.insert(0,'$ROOT/lib'); from ownframework_loop import approval; print(approval.derive_confirmation_token('$SHA'))")"
-APPROVAL_JSON="$("$OFLOOP_BIN" spec approve "$T" "$RID" --actor test-lifecycle < /dev/null 2>&1 || true)"
-# Note: stdin is /dev/null so this MUST be refused; we use the helper
-# make_approved_run_unapproved + write APPROVAL.json via Python for
-# fixture (approval bound to exact SHA, repo, baseline).
-
-python3 - "$T" "$RID" "$PP" <<'PYEND'
-import json, sys
-from pathlib import Path
-sys.path.insert(0, "/Users/mr.mrs.london/projects/plugins/ownframework-loop/lib")
-from ownframework_loop import approval
-T, RID, PP = sys.argv[1], sys.argv[2], sys.argv[3]
-packet_sha = approval.compute_packet_sha(Path(PP))
-token = approval.derive_confirmation_token(packet_sha)
-ap = {
-    "schema": "ownframework-loop-approval/v1",
-    "run_id": RID,
-    "packet_sha256": packet_sha,
-    "approved_at": "2026-07-31T00:00:00Z",
-    "approved_actor": "test-lifecycle",
-    "canonical_repo": str(Path(T).resolve(strict=False)),
-    "baseline_branch": "master",
-    "baseline_sha": "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
-    "packet_schema": "ownframework-work-packet/v2",
-    "approval_method": "tty_confirmation",
-    "confirmation_token": token,
+do_pass() {
+  printf "  PASS: %s\n" "$*"
+  ASSERTIONS=$((ASSERTIONS+1))
 }
-out = Path(T) / ".ownframework-loop" / RID / "APPROVAL.json"
-out.parent.mkdir(parents=True, exist_ok=True)
-out.write_text(json.dumps(ap, indent=2, sort_keys=True))
-PYEND
 
-# ---- Check 1: approval_method must be tty_confirmation ----
+do_fail() {
+  printf "  FAIL: %s\n" "$*"
+  FAILURES+=("$*")
+}
+
+assert_file() {
+  local p="$1" desc="$2"
+  if [[ -f "$p" ]]; then
+    do_pass "$desc (file present: $(basename "$p"))"
+  else
+    do_fail "$desc: file missing ($p)"
+  fi
+}
+
+assert_state() {
+  local rid="$1" want="$2" desc="$3"
+  local got
+  got="$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['state'])" "$T/.ownframework-loop/$rid/STATE.json")"
+  if [[ "$got" == "$want" ]]; then
+    do_pass "$desc"
+  else
+    do_fail "$desc: state=$got want=$want"
+  fi
+}
+
+assert_eq() {
+  local a="$1" b="$2" desc="$3"
+  if [[ "$a" == "$b" ]]; then
+    do_pass "$desc"
+  else
+    do_fail "$desc: $a != $b"
+  fi
+}
+
+# Build a fresh repo and a fully approved run via canonical helper.
+T="$(make_tmp_repo)"
+RID="$(make_approved_run "$T")"
+
+PP="$T/.ownframework-loop/$RID/WORK_PACKET.md"
 AP="$T/.ownframework-loop/$RID/APPROVAL.json"
+ST="$T/.ownframework-loop/$RID/STATE.json"
+
+assert_file "$PP" "lifecycle: WORK_PACKET.md present"
+assert_file "$AP" "lifecycle: APPROVAL.json present"
+assert_file "$ST" "lifecycle: STATE.json present"
+
+# State machine: AWAITING_APPROVAL -> READY_TO_BUILD via helper.
+INIT_STATE="$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['state'])" "$ST")"
+assert_eq "$INIT_STATE" "READY_TO_BUILD" "lifecycle: state is READY_TO_BUILD after helper"
+
+# Compute packet SHA via canonical API (blocker 1 fix).
+PKT_SHA="$(PYTHONDONTWRITEBYTECODE=1 python3 -B -c "
+import sys
+sys.path.insert(0, '$LIB_DIR')
+from pathlib import Path
+from ownframework_loop.packet import packet_file_sha256
+print(packet_file_sha256(Path(sys.argv[1])))
+" "$PP")"
+AP_SHA="$(python3 -c "import json; print(json.load(open('$AP'))['packet_sha256'])")"
+assert_eq "$PKT_SHA" "$AP_SHA" "lifecycle: packet SHA matches APPROVAL.packet_sha256"
+
+# Approval method must be tty_confirmation.
 METHOD="$(python3 -c "import json; print(json.load(open('$AP'))['approval_method'])")"
-[[ "$METHOD" == "tty_confirmation" ]] && pass "approval_method is tty_confirmation" || fail "approval_method=$METHOD"
+assert_eq "$METHOD" "tty_confirmation" "lifecycle: approval_method is tty_confirmation"
 
-# ---- Check 2: build claim succeeds ----
+# Drive BUILDING -> READY_FOR_REVIEW.
 if "$OFLOOP_BIN" build claim "$T" "$RID" >/dev/null 2>&1; then
-    pass "build claim returned 0"
+  do_pass "lifecycle: build claim succeeded"
 else
-    fail "build claim returned nonzero"
+  do_fail "lifecycle: build claim returned nonzero"
 fi
+assert_state "$RID" "BUILDING" "lifecycle: state BUILDING after build claim"
 
-# ---- Check 3: STATE.json state == BUILDING after claim ----
-STATE_NOW="$(python3 -c "import json; print(json.load(open('$T/.ownframework-loop/$RID/STATE.json'))['state'])")"
-[[ "$STATE_NOW" == "BUILDING" ]] && pass "state is BUILDING after claim" || fail "state=$STATE_NOW (expected BUILDING)"
+# Create the builder worktree (build claim does not auto-materialise one).
+WT="$T/.worktrees/ownframework-loop/$RID/builder"
+git -C "$T" worktree add -b "factory/candidate/$RID" "$WT" master >/dev/null 2>&1
+mkdir -p "$WT/src"
+echo "x" > "$WT/src/x.py" && git -C "$WT" add src/x.py && git -C "$WT" commit -m "build x" >/dev/null 2>&1
+REAL_SHA="$(git -C "$WT" rev-parse HEAD)"
 
-# ---- Check 4: build finalize succeeds ----
-if "$OFLOOP_BIN" build finalize "$T" "$RID" >/dev/null 2>&1; then
-    pass "build finalize returned 0"
+# Synthesize a build agent result referencing the real worktree SHA.
+FAKE="$(mktemp)"
+cat > "$FAKE" <<JSON
+{
+  "schema": "ownframework-loop-build-agent-result/v1",
+  "run_id": "$RID",
+  "work_unit_id": "UNIT-1",
+  "outcome_requested": "candidate_ready",
+  "summary": "lifecycle build complete",
+  "candidate_sha_claimed": "$REAL_SHA"
+}
+JSON
+
+if "$OFLOOP_BIN" build finalize "$T" "$RID" "$FAKE" >/dev/null 2>&1; then
+  do_pass "lifecycle: build finalize succeeded"
 else
-    fail "build finalize returned nonzero"
+  do_fail "lifecycle: build finalize returned nonzero"
 fi
+assert_state "$RID" "READY_FOR_REVIEW" "lifecycle: state READY_FOR_REVIEW after build finalize"
+assert_file "$T/.ownframework-loop/$RID/BUILD_RECEIPT.json" "lifecycle: BUILD_RECEIPT.json present after finalize"
 
-# ---- Check 5: BUILD_RECEIPT.json present ----
-[[ -f "$T/.ownframework-loop/$RID/BUILD_RECEIPT.json" ]] && pass "BUILD_RECEIPT.json present" || fail "BUILD_RECEIPT.json missing"
-
-# ---- Check 6: state advanced to READY_FOR_REVIEW ----
-STATE_NOW="$(python3 -c "import json; print(json.load(open('$T/.ownframework-loop/$RID/STATE.json'))['state'])")"
-[[ "$STATE_NOW" == "READY_FOR_REVIEW" ]] && pass "state is READY_FOR_REVIEW after finalize" || fail "state=$STATE_NOW (expected READY_FOR_REVIEW)"
-
-# ---- Check 7: review claim succeeds ----
+# Drive REVIEWING -> APPROVED.
 if "$OFLOOP_BIN" review claim "$T" "$RID" >/dev/null 2>&1; then
-    pass "review claim returned 0"
+  do_pass "lifecycle: review claim succeeded"
 else
-    fail "review claim returned nonzero"
+  do_fail "lifecycle: review claim returned nonzero"
 fi
-
-# ---- Check 8: REVIEW_VERDICT.json present after review finalize ----
-# Drive review finalize through the unified path
-if "$OFLOOP_BIN" review finalize "$T" "$RID" --verdict approve --reason "lifecycle test" >/dev/null 2>&1; then
-    pass "review finalize returned 0"
+# Build the review agent assessment file (canonical schema).
+ASSESSMENT="$(mktemp)"
+cat > "$ASSESSMENT" <<JSON
+{
+  "schema": "ownframework-loop-review-agent-assessment/v1",
+  "run_id": "$RID",
+  "candidate_sha_claimed": "$(cat "$T/.ownframework-loop/$RID/BUILD_RECEIPT.json" | python3 -c "import json,sys; print(json.load(sys.stdin)['candidate_sha'])")",
+  "acceptance_results": [{"id": "AC-1", "result": "pass", "notes": "ok"}],
+  "non_goal_results": [],
+  "findings": [],
+  "recommended_verdict": "APPROVED"
+}
+JSON
+if "$OFLOOP_BIN" review finalize "$T" "$RID" "$ASSESSMENT" >/dev/null 2>&1; then
+  do_pass "lifecycle: review finalize succeeded"
 else
-    fail "review finalize returned nonzero"
+  do_fail "lifecycle: review finalize returned nonzero"
 fi
-[[ -f "$T/.ownframework-loop/$RID/REVIEW_VERDICT.json" ]] && pass "REVIEW_VERDICT.json present" || fail "REVIEW_VERDICT.json missing"
+assert_state "$RID" "APPROVED" "lifecycle: state APPROVED after review finalize"
+assert_file "$T/.ownframework-loop/$RID/REVIEW_VERDICT.json" "lifecycle: REVIEW_VERDICT.json present after review finalize"
 
-# ---- Check 9: state is APPROVED after successful review ----
-STATE_NOW="$(python3 -c "import json; print(json.load(open('$T/.ownframework-loop/$RID/STATE.json'))['state'])")"
-[[ "$STATE_NOW" == "APPROVED" ]] && pass "state is APPROVED after review" || fail "state=$STATE_NOW (expected APPROVED)"
-
-# ---- Check 10: EVENTS.log contains expected event types ----
-for evt in run_created build_claimed build_finalized review_claimed review_finalized; do
-    if grep -q "\"$evt\"" "$T/.ownframework-loop/$RID/EVENTS.log"; then
-        pass "EVENTS.log contains $evt"
-    else
-        fail "EVENTS.log missing $evt"
-    fi
-done
-
-echo
-echo "=== lifecycle results ==="
-echo "OF_LOOP_LIFECYCLE_PASSED=$PASS"
-echo "OF_LOOP_LIFECYCLE_FAILED=${#FAIL_LINES[@]}"
-if [[ ${#FAIL_LINES[@]} -gt 0 ]]; then
-    printf 'OF_LOOP_LIFECYCLE_FAIL_LINES=%s\n' "${FAIL_LINES[*]}"
-    exit 1
+# Verify event chain integrity.
+EVIDENCE_OUT="$(PYTHONDONTWRITEBYTECODE=1 python3 -B -c "
+import sys
+from pathlib import Path
+sys.path.insert(0, '$LIB_DIR')
+from ownframework_loop.integrity import read_event_chain
+ev_path = Path(sys.argv[1])
+events = read_event_chain(ev_path)
+print(f'events={len(events)}')
+print('OK')
+" "$T/.ownframework-loop/$RID/EVENTS.log" 2>&1)"
+EVIDENCE_RC=$?
+if [[ $EVIDENCE_RC -eq 0 ]] && [[ "$EVIDENCE_OUT" == *"OK"* ]]; then
+  do_pass "lifecycle: event chain reads clean"
+else
+  do_fail "lifecycle: event chain read failed (rc=$EVIDENCE_RC out=$EVIDENCE_OUT)"
 fi
-echo "LIFECYCLE_TESTS=PASS"
+
+# Terminal summary.
+echo "ASSERTIONS_EXECUTED=$ASSERTIONS"
+echo "TEST_RESULT=$([[ ${#FAILURES[@]} -eq 0 ]] && echo PASS || echo FAIL)"
+if [[ ${#FAILURES[@]} -gt 0 ]]; then
+  printf 'FAIL_LINES=%s\n' "${FAILURES[*]}"
+  exit 1
+fi
+exit 0

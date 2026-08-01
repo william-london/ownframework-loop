@@ -146,7 +146,8 @@ echo "# generated" >> "$TEST_ROOT/cache/.payload.manifest"
     sha="$(shasum -a 256 "$TEST_ROOT/cache/$rel" 2>/dev/null | awk '{print $1}')"
     echo "sha256  $sha  $rel" >> "$TEST_ROOT/cache/.payload.manifest"
   done)
-out=$(python3 "$ROOT/scripts/verify_payload_manifest.py" --root "$TEST_ROOT/cache" --manifest "$TEST_ROOT/cache/.payload.manifest" 2>&1)
+set +e
+  out=$(python3 "$ROOT/scripts/verify_payload_manifest.py" --root "$TEST_ROOT/cache" --manifest "$TEST_ROOT/cache/.payload.manifest" 2>&1)
 echo "  validator: $out"
 echo "$out" | grep -q "PASS" || fail "Test 5: validator did not pass: $out"
 pass "Test 5: validator accepts manifest + ignores disposable bytecode"
@@ -174,7 +175,8 @@ echo "# generated" >> "$TEST_ROOT/cache2/.payload.manifest"
   done)
 # Now remove an active file AFTER the manifest is built
 rm "$TEST_ROOT/cache2/lib/ownframework_loop/b.py"
-out=$(python3 "$ROOT/scripts/verify_payload_manifest.py" --root "$TEST_ROOT/cache2" --manifest "$TEST_ROOT/cache2/.payload.manifest" 2>&1)
+set +e
+  out=$(python3 "$ROOT/scripts/verify_payload_manifest.py" --root "$TEST_ROOT/cache2" --manifest "$TEST_ROOT/cache2/.payload.manifest" 2>&1)
 echo "  validator: $out"
 echo "$out" | grep -q "stale-removed" || fail "Test 6: validator didn't detect stale removal: $out"
 echo "$out" | grep -q "FAIL" || fail "Test 6: validator didn't fail"
@@ -203,7 +205,8 @@ echo "# generated" >> "$TEST_ROOT/cache3/.payload.manifest"
     sha="$(shasum -a 256 "$TEST_ROOT/cache3/$rel" 2>/dev/null | awk '{print $1}')"
     echo "sha256  $sha  $rel" >> "$TEST_ROOT/cache3/.payload.manifest"
   done)
-out=$(python3 "$ROOT/scripts/verify_payload_manifest.py" --root "$TEST_ROOT/cache3" --manifest "$TEST_ROOT/cache3/.payload.manifest" 2>&1)
+set +e
+  out=$(python3 "$ROOT/scripts/verify_payload_manifest.py" --root "$TEST_ROOT/cache3" --manifest "$TEST_ROOT/cache3/.payload.manifest" 2>&1)
 echo "  validator: $out"
 echo "$out" | grep -q "unauthorised" || fail "Test 7: validator didn't detect injected: $out"
 pass "Test 7: extra unauthorised file detected"
@@ -231,7 +234,8 @@ echo "# generated" >> "$TEST_ROOT/cache4/.payload.manifest"
   done)
 # Stuck a state file INSIDE the active payload (not under .ownframework-loop/)
 echo "state" > "$TEST_ROOT/cache4/lib/ownframework_loop/EVENTS.log"
-out=$(python3 "$ROOT/scripts/verify_payload_manifest.py" --root "$TEST_ROOT/cache4" --manifest "$TEST_ROOT/cache4/.payload.manifest" 2>&1)
+set +e
+  out=$(python3 "$ROOT/scripts/verify_payload_manifest.py" --root "$TEST_ROOT/cache4" --manifest "$TEST_ROOT/cache4/.payload.manifest" 2>&1)
 echo "  validator: $out"
 echo "$out" | grep -q "unauthorised" || fail "Test 8: validator didn't reject EVENTS.log in active: $out"
 pass "Test 8: user-state file in active payload rejected"
@@ -259,7 +263,8 @@ echo "# generated" >> "$TEST_ROOT/cache5/.payload.manifest"
   done)
 # Tamper: change active source file
 echo "tampered" > "$TEST_ROOT/cache5/lib/ownframework_loop/a.py"
-out=$(python3 "$ROOT/scripts/verify_payload_manifest.py" --root "$TEST_ROOT/cache5" --manifest "$TEST_ROOT/cache5/.payload.manifest" 2>&1)
+set +e
+  out=$(python3 "$ROOT/scripts/verify_payload_manifest.py" --root "$TEST_ROOT/cache5" --manifest "$TEST_ROOT/cache5/.payload.manifest" 2>&1)
 echo "  validator: $out"
 echo "$out" | grep -q "tamper:" || fail "Test 9: validator didn't detect tamper: $out"
 pass "Test 9: tampered active file detected"
@@ -288,7 +293,8 @@ echo "# generated" >> "$TEST_ROOT/cache6/.payload.manifest"
 # Mutate bytecode (typical Python import behaviour)
 echo "mutated bytecode" > "$TEST_ROOT/cache6/lib/ownframework_loop/__pycache__/a.cpython-312.pyc"
 echo "more bytecode" > "$TEST_ROOT/cache6/lib/ownframework_loop/b.pyo"
-out=$(python3 "$ROOT/scripts/verify_payload_manifest.py" --root "$TEST_ROOT/cache6" --manifest "$TEST_ROOT/cache6/.payload.manifest" 2>&1)
+set +e
+  out=$(python3 "$ROOT/scripts/verify_payload_manifest.py" --root "$TEST_ROOT/cache6" --manifest "$TEST_ROOT/cache6/.payload.manifest" 2>&1)
 echo "  validator: $out"
 echo "$out" | grep -q "PASS" || fail "Test 10: validator failed on bytecode mutation: $out"
 pass "Test 10: bytecode mutation ignored (no false tampering)"

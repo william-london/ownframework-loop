@@ -325,7 +325,7 @@ def transition(
         if current is None or current == {}:
             raise FileNotFoundError(f"STATE.json missing for run {run_id}")
         from_state = current["state"]
-        assert_valid(from_state, to_state)
+        transitions.assert_valid(from_state, to_state)
 
         now = utc_now_iso()
         new = dict(current)

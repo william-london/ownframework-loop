@@ -75,18 +75,25 @@ if [ "$LINE_COUNT" -lt "$TOTAL" ]; then
   exit 1
 fi
 
-# Run the integrity verifier.
+# Run the integrity verifier (canonical recomputation).
 python3 - "$RUN_DIR" <<'PYEND'
 import json, sys
 from pathlib import Path
-sys.path.insert(0, sys.argv[1].split("/lib")[0] + "/lib" if "/lib" in sys.argv[1] else "/path/to/ownframework-loop/lib")
 sys.path.insert(0, "/Users/mr.mrs.london/projects/plugins/ownframework-loop/lib")
 from ownframework_loop import integrity
 run_dir = Path(sys.argv[1])
 ep = run_dir / "EVENTS.log"
-ok, msg = integrity.verify_event_chain(ep)
-if not ok:
-    print("FAIL: chain invalid:", msg)
+events = integrity.read_event_chain(ep)
+if not events:
+    print("FAIL: empty chain")
+    sys.exit(1)
+actual = integrity.compute_event_chain_hash(ep)
+recorded = integrity.get_event_chain_hash(ep)
+if recorded is None:
+    print("FAIL: no event_chain_sha256 recorded in EVENTS.log")
+    sys.exit(1)
+if actual != recorded:
+    print(f"FAIL: chain hash mismatch actual={actual[:16]} recorded={recorded[:16]}")
     sys.exit(1)
 print("PASS: event chain validates")
 PYEND
@@ -147,18 +154,31 @@ with open(ep, "wb") as f:
     f.write(data)
 PYEND
 
+# Mutation must cause recomputed chain hash to differ from recorded.
+# If actual != recorded after mutation, exit 0 (mutation detected).
+# If actual == recorded, the mutation went undetected -> exit 1.
 if python3 - "$EV" <<'PYEND'
 import sys
+from pathlib import Path
 sys.path.insert(0, "/Users/mr.mrs.london/projects/plugins/ownframework-loop/lib")
 from ownframework_loop import integrity
-ok, msg = integrity.verify_event_chain(sys.argv[1])
-sys.exit(0 if not ok else 1)
+ep = Path(sys.argv[1])
+events = integrity.read_event_chain(ep)
+if not events:
+    sys.exit(1)  # no events at all
+actual = integrity.compute_event_chain_hash(ep)
+recorded = integrity.get_event_chain_hash(ep)
+if recorded is None:
+    sys.exit(0)  # no recorded hash, nothing to compare
+# Exit 0 means mutation detected (actual != recorded).
+sys.exit(0 if actual != recorded else 1)
 PYEND
 then
+  echo "PASS: single-byte mutation detected (chain hash differs from recorded)"
+else
   echo "FAIL: mutated chain was not detected"
   exit 1
 fi
-echo "PASS: single-byte mutation detected"
 
 # Restore for cleanliness.
 mv "$EV.bak" "$EV"

@@ -293,7 +293,7 @@ assert_contains "$out" "OF_LOOP_BUILD_FINALIZE_REFUSED" "wrong repo in approval 
 
 # 10. noninteractive model approval is refused
 # Run the approve command with stdin redirected (no TTY).
-"$OFLOOP_BIN" spec approve "$T" "$RID" < /dev/null >/dev/null 2>&1
+"$OFLOOP_BIN" spec approve "$T" "$RID" < /dev/null >/dev/null 2>&1 || true
 out="$("$OFLOOP_BIN" spec approve "$T" "$RID" < /dev/null 2>&1 || true)"
 assert_contains "$out" "TTY" "noninteractive model approval is refused"
 
