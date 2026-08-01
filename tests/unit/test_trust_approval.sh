@@ -374,4 +374,11 @@ PYEND
 assert_contains "$PTY_OUT" "OK" "real-PTY approval succeeds with tty_confirmation method"
 assert_contains "$PTY_OUT" "METHOD tty_confirmation" "approval_method is exactly tty_confirmation"
 
+# Gate-visible failure: exit non-zero if PTY output is missing required markers.
+# (assert_contains itself does not exit on failure.)
+if [[ "$PTY_OUT" != *"OK"* ]] || [[ "$PTY_OUT" != *"METHOD tty_confirmation"* ]]; then
+  echo "TRUST_APPROVAL_TESTS=FAIL: PTY assertions missing required markers"
+  exit 1
+fi
+
 echo "TRUST_APPROVAL_TESTS=PASS"

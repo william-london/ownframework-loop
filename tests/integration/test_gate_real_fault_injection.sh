@@ -25,8 +25,35 @@ SRC_COPY="$(mktemp -d -t ofloop_fault_XXXXXX)"
 trap 'rm -rf "$SRC_COPY"' EXIT
 rsync -a --exclude='__pycache__' --exclude='install_logs' "$ROOT/" "$SRC_COPY/"
 
+# Portable 180s gate wrapper. Uses GNU timeout if available; otherwise
+# falls back to the same POSIX kill -0 alarm pattern as tests/run_all.sh
+# so the wrapper works on macOS hosts that ship neither binary.
 run_gate() {
-  ( cd "$SRC_COPY" && timeout 180 bash tests/run_all.sh >/tmp/fault_gate.log 2>&1; echo "EXIT=$?" )
+  if command -v timeout >/dev/null 2>&1; then
+    ( cd "$SRC_COPY" && timeout 180 bash tests/run_all.sh >/tmp/fault_gate.log 2>&1; echo "EXIT=$?" )
+  elif command -v gtimeout >/dev/null 2>&1; then
+    ( cd "$SRC_COPY" && gtimeout 180 bash tests/run_all.sh >/tmp/fault_gate.log 2>&1; echo "EXIT=$?" )
+  else
+    ( cd "$SRC_COPY" && bash tests/run_all.sh >/tmp/fault_gate.log 2>&1 &
+      pid=$!
+      elapsed=0
+      while kill -0 "$pid" 2>/dev/null; do
+        if [[ "$elapsed" -ge 180 ]]; then
+          kill -TERM "$pid" 2>/dev/null
+          sleep 1
+          kill -KILL "$pid" 2>/dev/null
+          echo "EXIT=124"
+          break
+        fi
+        sleep 1
+        elapsed=$((elapsed+1))
+      done
+      if [[ "$elapsed" -lt 180 ]]; then
+        wait "$pid" 2>/dev/null
+        echo "EXIT=$?"
+      fi
+    )
+  fi
 }
 
 assert_gate_fails() {
@@ -121,12 +148,19 @@ python3 - "$SRC_COPY/lib/ownframework_loop/program.py" <<'PY'
 import sys
 p = sys.argv[1]
 src = open(p).read()
-needle = "if cp[counter] >= cp_cap:\n        raise ProgramStateError("
-if needle in src:
-    src = src.replace(needle, "if False and cp[counter] >= cp_cap:\n        raise ProgramStateError(")
-    open(p, "w").write(src)
+# Bypass BOTH per-cp cap and cumulative cap. Repair_round_budget test
+# passed with only the per-cp cap bypassed because cumulative cap still
+# caught the N+1 claim. To make the gate actually fail, both must be
+# bypassed.
+p1 = "if cp[counter] >= cp_cap:\n        raise ProgramStateError("
+p2 = 'if new["cumulative_counters"][counter] >= cum_cap:\n        raise ProgramStateError('
+if p1 in src:
+    src = src.replace(p1, "if False and cp[counter] >= cp_cap:\n        raise ProgramStateError(")
+if p2 in src:
+    src = src.replace(p2, "if False and new[\"cumulative_counters\"][counter] >= cum_cap:\n        raise ProgramStateError(")
+open(p, "w").write(src)
 PY
-assert_gate_fails "fault 5: per-cp cap removed"
+assert_gate_fails "fault 5: per-cp and cumulative cap both removed"
 cp "$ROOT/lib/ownframework_loop/program.py" "$SRC_COPY/lib/ownframework_loop/program.py"
 
 # Fault 6: bash guard segments bypass
@@ -181,8 +215,9 @@ python3 - "$SRC_COPY/hooks/block_dangerous_bash.sh" <<'PY'
 import sys
 p = sys.argv[1]
 src = open(p).read()
-# Remove bytecode suppression flag.
-src = src.replace("PYTHONDONTWRITEBYTECODE=1", "PYTHONDONTWRITEBYTECODE=", 1)
+# Replace ALL occurrences so the v034 grep pattern cannot be satisfied
+# by a leftover second occurrence.
+src = src.replace("PYTHONDONTWRITEBYTECODE=1", "PYTHONDONTWRITEBYTECODE=")
 open(p, "w").write(src)
 PY
 assert_gate_fails "fault 8: bytecode suppression removed from hook"
@@ -193,11 +228,16 @@ python3 - "$SRC_COPY/tests/unit/test_trust_approval.sh" <<'PY'
 import sys
 p = sys.argv[1]
 src = open(p).read()
-# Replace the PTY assertion with a no-op.
-src = src.replace(
-    'assert_contains "$PTY_OUT" "OK"',
-    'echo "  PASS: skipped" #FAULT',
-)
+# Replace the entire PTY invocation block with a single no-op assignment.
+# Use a different sentinel: 'PTY_OUT="$(python3 - "$T" "$RID"' distinguishes
+# the start WITHOUT triggering the inner heredoc terminator.
+start = 'PTY_OUT="$(python3 - "$T" "$RID"'
+end = 'PYEND\n)"'
+i = src.find(start)
+if i >= 0:
+    j = src.find(end, i)
+    if j >= 0:
+        src = src[:i] + 'PTY_OUT="NEUTERED" #FAULT' + src[j+len(end):]
 open(p, "w").write(src)
 PY
 assert_gate_fails "fault 9: trust_approval PTY test neutered"

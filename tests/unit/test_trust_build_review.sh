@@ -620,4 +620,53 @@ else
   fail "event-chain machinery failed: $out73"
 fi
 
+# 74. POST-HOOK: state.transition() refuses an invalid FSM transition pair.
+# This is the test that fault 4 (FSM bypass in state.transition) must break:
+# bypassing transitions.assert_valid inside state.transition would let an
+# APPROVED -> BUILDING transition succeed.
+T16="$(make_tmp_repo)"
+RID16="$(make_approved_run "$T16" BUG low "fsm-bypass-test")"
+# Drive to APPROVED via the lifecycle path. Each step swallows its
+# own exit code so a faulty setup doesn't kill the test before the
+# final assertion can run.
+"$OFLOOP_BIN" build claim "$T16" "$RID16" >/dev/null 2>&1 || true
+WT16="$T16/.worktrees/ownframework-loop/$RID16/builder"
+git -C "$T16" worktree add -b "factory/candidate/$RID16" "$WT16" master >/dev/null 2>&1
+mkdir -p "$WT16/src" && echo "z" > "$WT16/src/z.py" && git -C "$WT16" add src/z.py && git -C "$WT16" commit -m z >/dev/null 2>&1
+BR16="$(git -C "$WT16" rev-parse HEAD)"
+# Use a fake build result with the real worktree SHA.
+FAKE16="$(mktemp)"
+cat > "$FAKE16" <<JSON
+{
+  "schema": "ownframework-loop-build-agent-result/v1",
+  "run_id": "$RID16",
+  "work_unit_id": "UNIT-1",
+  "outcome_requested": "candidate_ready",
+  "summary": "fsm bypass test",
+  "candidate_sha_claimed": "$BR16"
+}
+JSON
+"$OFLOOP_BIN" build finalize "$T16" "$RID16" "$FAKE16" >/dev/null 2>&1 || true
+"$OFLOOP_BIN" review claim "$T16" "$RID16" >/dev/null 2>&1
+A16="$(mktemp)"
+cat > "$A16" <<JSON
+{
+  "schema": "ownframework-loop-review-agent-assessment/v1",
+  "run_id": "$RID16",
+  "candidate_sha_claimed": "$BR16",
+  "acceptance_results": [{"id": "AC-1", "result": "pass", "notes": "ok"}],
+  "non_goal_results": [],
+  "findings": [],
+  "recommended_verdict": "APPROVED"
+}
+JSON
+"$OFLOOP_BIN" review finalize "$T16" "$RID16" "$A16" >/dev/null 2>&1 || true
+# Now attempt an invalid transition: APPROVED -> BUILDING.
+out74="$("$OFLOOP_BIN" build transition "$T16" "$RID16" --to BUILDING 2>&1 || true)"
+if echo "$out74" | grep -Eq "REFUSED|InvalidTransition|refused|transition not allowed|invalid transition"; then
+  pass "FSM bypass prevented: state.transition refuses invalid pair"
+else
+  fail "FSM bypass allowed: state.transition accepted APPROVED->BUILDING (out=$out74)"
+fi
+
 echo "TRUST_BUILD_REVIEW_TESTS=PASS"

@@ -18,6 +18,9 @@
 
 set -euo pipefail
 
+: "${REPAIR_BUDGET_LOG:="$(mktemp -t repair_budget_XXXXXX)"}"
+trap 'rm -f "$REPAIR_BUDGET_LOG"' EXIT
+
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/../.." && pwd)"
 # shellcheck source=_helpers.sh
@@ -268,10 +271,10 @@ if not drift.get('ok') and drift.get('rejected'):
 else:
     print(f'  FAIL: max={mr} drift test failed: {drift}')
     sys.exit(1)
-" | tee -a /tmp/_repair_budget_out.log
+" | tee -a $REPAIR_BUDGET_LOG
 done
-assertions=$(grep -c '^  PASS:' /tmp/_repair_budget_out.log || true)
-failures=$(grep -c '^  FAIL:' /tmp/_repair_budget_out.log || true)
+assertions=$(grep -c '^  PASS:' $REPAIR_BUDGET_LOG || true)
+failures=$(grep -c '^  FAIL:' $REPAIR_BUDGET_LOG || true)
 # 5 assertions per max value, 3 values = 15 total.
 expected=18
 if [[ "$assertions" -ne "$expected" ]]; then
