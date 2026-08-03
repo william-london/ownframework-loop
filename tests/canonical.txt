@@ -19,3 +19,5 @@ tests/integration/test_repair_round_budget.sh
 tests/integration/test_worktree_concurrency.sh
 tests/integration/test_hook_multiline_bash.sh
 tests/integration/test_gate_fault_injection.sh
+tests/integration/test_program_mode.sh
+tests/integration/test_plumbing_autonomy.sh

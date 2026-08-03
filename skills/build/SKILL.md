@@ -106,7 +106,10 @@ edits `STATE.json` directly.
   does not exist in the worktree.
 - Letting the build session continue past one pass when launched under `/loop`.
 - Trusting a model-authored `next_state` from the agent result.
-- Issuing more than one build pass per invocation.
+- Issuing more than one build pass per invocation. (v0.3.7 F-5-01: a single
+  pass may produce MULTIPLE files / MULTIPLE commits / a coherent subsystem so
+  long as `risk_budget` is honoured — the cap is the packet budget, not a
+  per-pass file count.)
 
 
 ## PROGRAM mode (v3 packets)

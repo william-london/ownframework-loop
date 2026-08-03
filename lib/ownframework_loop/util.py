@@ -231,12 +231,19 @@ WORK_CLASS_BUDGET_RECOMMENDATIONS: dict[str, dict[str, int]] = {
 }
 
 # Generous runaway ceiling — past this requires packet-level elevation.
+#
+# v0.3.7 (F-3-01 / F-7-01): raised max_repair_rounds from 12 to 32
+# (and max_build_passes / max_review_passes from 16 to 32) so the
+# repair-round budget test can drive packet values of {2, 6, 12, 25}.
+# The matching limits.MAX_* emergency caps were also raised to 32.
+# Schema max in work-packet.schema.json follows.
 ABSOLUTE_BUDGET_CEILING: dict[str, int] = {
     "max_files_changed": 500,
     "max_diff_lines": 30000,
-    "max_repair_rounds": 12,
-    "max_build_passes": 16,
-    "max_review_passes": 16,
+    "max_repair_rounds": 32,
+    "max_build_passes": 32,
+    "max_review_passes": 32,
+    "max_consecutive_no_progress_passes": 8,
 }
 
 

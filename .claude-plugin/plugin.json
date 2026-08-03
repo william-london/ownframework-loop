@@ -1,8 +1,8 @@
 {
   "name": "of-loop",
   "displayName": "OwnFramework Loop",
-  "description": "V0.3.6 - static-check compatibility closeout: removes the dynamic eval-based fixture construction from the multiline bash guard test, restoring the canonical static call-graph scanner's acyclic invariant. Builds on v0.3.5 security and state stabilization; v0.3.5 is preserved as the failed installed release attempt. Guard runtime semantics, approval boundary, state transition authority, PROGRAM repair accounting, event-chain concurrency, and worktree concurrency are unchanged.",
-  "version": "0.3.6",
+  "description": "V0.3.7 - plumbing-autonomy closeout. Fixes seven narrow repairs in state.py:495 (PROGRAM checkpoint ID extraction), transitions.py (STOPPED absorbing, BLOCKED cannot become APPROVED), limits.py (packet-controlled repair ceiling, removed arbitrary floor), build_finalize.py (progress-sensitive continuation using exact SHA), agent/SKILL docs (substantial builder passes), and cli.py:985 (ofloop doctor argument mismatch). Adds tests/integration/test_plumbing_autonomy.sh. Builds on v0.3.6 closeout and v0.3.5 plumbing; v0.3.5 and v0.3.6 are preserved in git history. Real-world autonomy is unchanged at this layer; large real-repository testing is a separate exercise.",
+  "version": "0.3.7",
   "author": {
     "name": "OwnFramework"
   },

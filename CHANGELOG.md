@@ -1,6 +1,20 @@
 # Changelog
 
 
+## 0.3.7 — Plumbing-Autonomy Closeout (2026-08-02)
+
+**Highlights** (seven narrow plumbing repairs; large real-repository testing remains a separate exercise):
+
+- **Repair 1 (F-1-01) — PROGRAM checkpoints**: `state.program_transition()` no longer calls `set()` on the dict records that `finalize_checkpoint()` stores. Checkpoint IDs are extracted explicitly from `{fc["id"]}` with `isinstance(fc, dict)` / `isinstance(cid, str)` guards. The bare `except Exception` that silently swallowed the TypeError and forced `has_more_cps=False` (which broke the program-mode APPROVED → READY_TO_BUILD escape hatch after the first checkpoint) is removed. The frozen approved checkpoint graph is preserved, dependency-ready checkpoints are selected deterministically, and the run advances automatically after a checkpoint finalizes.
+- **Repair 2 (F-2-01 / F-2-02 / F-2-03) — Monotonic terminal precedence**: `STOPPED` is absorbing at the FSM level (no single-mode or program-mode escape). `BLOCKED` cannot transition to `APPROVED` in either mode. `APPROVED` is reachable only from a legal review state. `transitions.assert_valid_program()` gains a `bound_candidate_sha` keyword that pins the transition to the exact candidate SHA, preventing stale or overwritten candidates from being re-approved.
+- **Repair 3 (F-3-01) — Per-packet repair ceiling**: `limits.packet_lowers_cap()` no longer raises when the packet declares a budget higher than the V1 emergency cap. `MAX_REPAIR_ROUNDS` (and the build/review/no-progress siblings) is now an emergency fuse (`32`), not a floor. `effective_cap()` precedence is: packet override → `util.ABSOLUTE_BUDGET_CEILING` → V1 fuse. The absolute ceiling was raised to `32` so values 2 / 6 / 12 / 25 all work; `MAX_CP_REPAIR_ROUNDS` and `work-packet.schema.json` were lifted in lockstep.
+- **Repair 4 (F-4-01) — Progress-sensitive continuation**: `build_finalize` no-progress comparison now uses the full candidate SHA (`last_candidate != candidate_sha`) instead of the lossy 7-character prefix. Productive passes (any new SHA) continue indefinitely; only identical-no-progress stops at the configured threshold (default `limits.MAX_CONSECUTIVE_NO_PROGRESS_PASSES=8`).
+- **Repair 5 (F-5-01) — Substantial builder passes**: `of-builder` and `skills/build/SKILL.md` document that a single pass may produce multiple files, multiple commits, or a coherent subsystem so long as `risk_budget` is honoured. The cap is the packet budget, not a per-pass file count.
+- **Repair 6 (F-6-01) — `ofloop doctor`**: `cli.cmd_doctor` called `_reconcile_crashes()` with 7 positional args but the function accepts 6. The extra `packet_path` argument is removed; the remaining six args line up with the signature.
+- **Repair 7 (F-7-01) — Canonical gate coverage**: `tests/integration/test_program_mode.sh` and the new `tests/integration/test_plumbing_autonomy.sh` are added to `tests/canonical.txt`. `test_repair_round_budget.sh` now drives `max_repair_rounds` over `{2, 6, 12, 25}` (was `{1, 2, 3}`).
+
+**Real-world autonomy is unchanged at this layer.** These are plumbing repairs required before the system can be trusted to drive large real-repository missions end-to-end; the system is not yet proven on such missions by these fixture tests. The next step is real use, not another audit.
+
 ## 0.3.5 — Security and State Stabilization (2026-07-31)
 
 **Highlights**:

@@ -13,9 +13,9 @@ not listed in the allowed map is rejected by `lib/ownframework_loop/transitions.
 | `READY_FOR_REVIEW` | The builder produced a candidate SHA. Reviewer may claim the next pass. |
 | `REVIEWING` | The reviewer has claimed this pass. Builder cannot claim. |
 | `CHANGES_REQUESTED` | The reviewer returned a verdict with must-fix findings. Builder will repair. |
-| `APPROVED` | Terminal. The human merges. |
-| `BLOCKED` | Terminal (no outbound edges except to a fresh run via teardown). The human reads the events and decides. |
-| `STOPPED` | Terminal (no outbound edges except to a fresh run via teardown). The human explicitly stopped the loop. |
+| `APPROVED` | Terminal. The human merges. v0.3.7: in program mode, the orchestrator may transition APPROVED back to READY_TO_BUILD when there are more claimable checkpoints. |
+| `BLOCKED` | Terminal (no outbound edges except to a fresh run via teardown). The human reads the events and decides. v0.3.7: BLOCKED cannot become APPROVED; program mode may resume to READY_TO_BUILD only. |
+| `STOPPED` | Terminal (no outbound edges except to a fresh run via teardown). The human explicitly stopped the loop. v0.3.7: STOPPED is absorbing at the FSM level; no single-mode or program-mode escape. |
 
 ## Allowed transitions
 

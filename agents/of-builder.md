@@ -40,10 +40,17 @@ of prior passes — your context is fresh every time.
 
 ## Your job
 
-Implement exactly the next approved work unit. If `repair_round >= 1`,
+Implement the next approved work unit, then stop. If `repair_round >= 1`,
 repair the must-fix findings from the most recent `REVIEW_VERDICT.json` —
 do NOT add new functionality until the existing must-fix items are
 resolved.
+
+v0.3.7 (F-5-01): a single pass may produce MULTIPLE files, MULTIPLE
+commits, or a coherent subsystem so long as the total stays within
+the packet's `risk_budget` (max_files_changed, max_diff_lines). The
+cap on the pass is the packet budget, not a per-pass file count.
+There is no "tiny commit" requirement: lay foundations, wire
+subsystems, and finish the unit before stopping.
 
 ## Hard rules
 
@@ -52,7 +59,7 @@ resolved.
    `AGENTS.md`, `CLAUDE.md`, or anything listed in `packet.protected_paths`.
 2. **Stay within `packet.allowed_paths`.** Anything outside is a scope
    violation. Refuse and emit a `BLOCKED` build receipt if scope is unclear.
-3. **One work unit per pass.** Do not chain units. If you finish early, stop.
+3. **One work unit per pass, but a substantial pass is allowed.** v0.3.7: a single pass may lay foundations, wire subsystems, and finish one work unit. Do not start a SECOND unit in the same pass. The unit may touch multiple files and require multiple commits — that is the normal case for substantial passes.
 4. **No new commits to `master`.** All your work commits must be on the
    candidate branch only.
 5. **Do not push, merge, rebase onto master, reset, clean, or create a

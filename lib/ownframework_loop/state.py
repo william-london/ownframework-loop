@@ -492,27 +492,47 @@ def program_transition(
         has_more_cps = False
         prog = current.get("program")
         if isinstance(prog, dict):
-            try:
-                finalized = set(prog.get("finalized_checkpoints") or [])
-                # Read the packet to find execution_order. If the
-                # packet is unavailable (e.g. legacy state), fall
-                # back to the conservative default of "no more cps".
-                pp = canonical_repo / ".ownframework-loop" / run_id / "WORK_PACKET.md"
-                order: list[str] = []
-                if pp.exists():
-                    from . import packet as _packet_mod
-                    _meta, _ = _packet_mod.parse_packet_file(pp)
-                    cg = (_meta or {}).get("checkpoint_graph") or {}
-                    order = list(cg.get("execution_order") or [])
-                if order:
-                    has_more_cps = any(
-                        cid not in finalized for cid in order
-                    )
-            except Exception:
-                has_more_cps = False
+            # v0.3.7 (F-1-01): finalize_checkpoint() stores entries as
+            # dicts ({"id": cp_id, ...}). The previous code called
+            # set() directly on dict entries (TypeError); a bare
+            # `except Exception` then forced has_more_cps=False and
+            # broke the program-mode APPROVED -> READY_TO_BUILD
+            # escape hatch after the first checkpoint. Extract IDs
+            # explicitly and never swallow malformed evidence.
+            finalized: set[str] = set()
+            for fc in prog.get("finalized_checkpoints") or []:
+                if isinstance(fc, dict):
+                    cid = fc.get("id")
+                    if isinstance(cid, str):
+                        finalized.add(cid)
+            pp = canonical_repo / ".ownframework-loop" / run_id / "WORK_PACKET.md"
+            order: list[str] = []
+            if pp.exists():
+                from . import packet as _packet_mod
+                _meta, _ = _packet_mod.parse_packet_file(pp)
+                cg = (_meta or {}).get("checkpoint_graph") or {}
+                order = list(cg.get("execution_order") or [])
+            if order:
+                has_more_cps = any(
+                    cid not in finalized for cid in order
+                )
+        # v0.3.7 (F-2-03): bind the transition to the exact candidate SHA.
+        # If a commit_sha was provided and it differs from the run's bound
+        # candidate (`last_candidate_sha`), refuse the transition. This
+        # prevents a stale or overwritten candidate from being re-approved
+        # across the TOCTOU window between review verdict commit and the
+        # state transition. The transitions.assert_valid_program keyword
+        # is also accepted (see transitions.py:135) for callers that want
+        # to plumb the bound explicitly.
+        if commit_sha and current.get("last_candidate_sha") and commit_sha != current["last_candidate_sha"]:
+            raise transitions.InvalidTransitionError(
+                f"bound_candidate_sha mismatch: provided={commit_sha[:12]} "
+                f"last={current['last_candidate_sha'][:12]}"
+            )
         transitions.assert_valid_program(
             from_state, to_state,
             has_more_checkpoints=has_more_cps,
+            bound_candidate_sha=commit_sha or None,
         )
 
         now = utc_now_iso()

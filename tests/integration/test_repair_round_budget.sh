@@ -176,6 +176,10 @@ def safe_claim(ev):
 
 # Drive max_rounds+1 repair claims, distinct evidence SHA each.
 results = []
+# v0.3.7 (F-3-01 / F-7-01): drives max_rounds+1 distinct evidence
+# SHAs and asserts the +1 attempt is refused. Works for max in {2,6,12,25}
+# because limits.py now allows packet overrides up to the absolute ceiling
+# and util.ABSOLUTE_BUDGET_CEILING.max_repair_rounds=32.
 for i in range(max_rounds + 1):
     ev = f"evidence-round-{i+1}"
     r = safe_claim(ev)
@@ -219,7 +223,7 @@ PYEND
 }
 
 # === Run for max_repair_rounds in {1, 2, 3} ===
-for max in 1 2 3; do
+for max in 2 6 12 25; do
   echo "--- max_repair_rounds=$max ---"
   RES="$(drive_repair_budget "$max")"
   echo "$RES" | python3 -c "
@@ -231,14 +235,12 @@ replay = data['replay']
 over_cap = data['over_cap']
 drift = data['drift']
 
-for i in range(1, mr + 1):
-    r = [x for x in results if x['iter'] == i]
-    assert r, f'no result for iter {i}'
-    if r[0]['ok'] and not r[0].get('replayed'):
-        print(f'  PASS: max={mr} iter={i} succeeded (cumulative=' + str(r[0].get('cumulative')) + ')')
-    else:
-        print(f'  FAIL: max={mr} iter={i} expected ok (got {r[0]})')
-        sys.exit(1)
+# v0.3.7 (F-3-01 / F-7-01): assert that every iter 1..max_rounds
+# succeeded, without printing one line per iter (which would explode
+# the assertion count for max_rounds=25). One summary PASS per max.
+succeeded = sum(1 for x in results if x['ok'] and not x.get('replayed'))
+assert succeeded == mr, f'max={mr} expected {mr} successful iters, got {succeeded} ({results})'
+print(f'  PASS: max={mr} drove {succeeded}/{mr+1} repair rounds successfully')
 
 r = [x for x in results if x['iter'] == mr + 1]
 assert r, f'no result for iter {mr+1}'
@@ -275,8 +277,8 @@ else:
 done
 assertions=$(grep -c '^  PASS:' $REPAIR_BUDGET_LOG || true)
 failures=$(grep -c '^  FAIL:' $REPAIR_BUDGET_LOG || true)
-# 5 assertions per max value, 3 values = 15 total.
-expected=18
+# 5 assertions per max value, 4 values = 20 total.
+expected=20
 if [[ "$assertions" -ne "$expected" ]]; then
   echo "FAIL: expected $expected assertions, got $assertions"
   echo "TEST_RESULT=FAIL"

@@ -51,9 +51,13 @@ from .integrity import canonical_json_dumps
 
 PROGRAM_SCHEMA_VERSION = "ownframework-work-packet/v3"
 STATE_PROGRAM_KEY = "program"
-MAX_CP_BUILD_PASSES = 8
-MAX_CP_REVIEW_PASSES = 8
-MAX_CP_REPAIR_ROUNDS = 3
+# v0.3.7 (F-3-01 / F-7-01): per-cp caps lifted to match the
+# limits.MAX_* emergency caps. The packet is still authoritative for
+# the per-cp risk_budget; the per-cp caps here are only the
+# validation-time fallback when a packet omits a per-cp value.
+MAX_CP_BUILD_PASSES = 32
+MAX_CP_REVIEW_PASSES = 32
+MAX_CP_REPAIR_ROUNDS = 32
 GLOBAL_MAX_UNIQUE_CHANGED_FILES = 500
 GLOBAL_MAX_BASELINE_TO_FINAL_DIFF_LINES = 30000
 

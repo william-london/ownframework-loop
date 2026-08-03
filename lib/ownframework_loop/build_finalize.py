@@ -375,10 +375,18 @@ def finalize_build(
     # 16. Determine exit-code failures.
     validation_pass = all(v["exit_code"] == (meta.get("expected_exit_code") or 0) for v in validations) if validations else True
 
-    # 17. No-progress detection.
+    # 17. No-progress detection (v0.3.7 F-4-01: progress-sensitive).
+    #
+    # The streak advances only when the candidate SHA matches the
+    # previous run's candidate SHA EXACTLY. Any difference — even a
+    # single character — is real progress and resets the streak to 0.
+    # The threshold comes from packet.risk_budget.max_consecutive_no_progress_passes
+    # (default: limits.MAX_CONSECUTIVE_NO_PROGRESS_PASSES=8) and acts as
+    # an emergency fuse, not a normal stop. Productive passes continue
+    # indefinitely; identical-no-progress only stops at the threshold.
     last_candidate = state.get("last_candidate_sha")
     no_progress_streak = int(state.get("no_progress_streak") or 0)
-    progress_made = (last_candidate is None) or (not last_candidate.startswith(candidate_sha[:7]))
+    progress_made = (not last_candidate) or (last_candidate != candidate_sha)
     if not progress_made:
         no_progress_streak += 1
     else:
@@ -424,7 +432,7 @@ def finalize_build(
         next_state = "STOPPED"
     elif cap_repair is not None and new_repair_round >= cap_repair:
         next_state = "BLOCKED"
-    elif no_progress_streak >= int(budget.get("max_consecutive_no_progress_passes") or 2):
+    elif no_progress_streak >= limits_mod.effective_cap("no_progress_streak", meta):
         next_state = "BLOCKED"
     else:
         next_state = "READY_FOR_REVIEW"

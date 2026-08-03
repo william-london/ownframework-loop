@@ -107,6 +107,10 @@ enforced, validate.sh had no real `--installed` path.
 - New `lib/ownframework_loop/limits.py` — V1 caps with packet-overridable effective caps:
   - `MAX_BUILD_PASSES=8`, `MAX_REVIEW_PASSES=8`, `MAX_REPAIR_ROUNDS=3`,
     `MAX_CONSECUTIVE_NO_PROGRESS_PASSES=2`, `MAX_IDENTICAL_FINDING_REPEATS=2`.
+- **v0.3.7 update**: the V1 caps are now emergency fuses (raised to 32 / 32 / 32 / 16 / 8),
+  not floors. Packet `risk_budget.*` overrides are authoritative up to
+  `util.ABSOLUTE_BUDGET_CEILING`; values 2 / 6 / 12 / 25 all work for `max_repair_rounds`.
+  See Repair 3 (F-3-01) in `CHANGELOG.md`.
 - `state.increment_counter()` raises `RepairLimitExceeded` when cap hit.
 - `validate.sh --installed <path>` is a real code path: verifies path is not a symlink, no `.git/`, runs tests against installed root.
 - `util.atomic_write_json()` calls `fsync_dir()` after rename for durability.

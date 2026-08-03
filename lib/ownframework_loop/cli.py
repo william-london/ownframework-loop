@@ -980,10 +980,9 @@ def cmd_doctor(args: argparse.Namespace) -> None:
             # Crash reconciliation: detect receipt-written-but-not-transitioned,
             # event-chain-vs-state mismatch, and verifier-cache inconsistencies.
             state_obj = info["state"] if isinstance(info["state"], dict) else None
-            cur_state = state_obj.get("state") if state_obj else None
             events_path = run_dir / "EVENTS.log"
             info["crash_reconciliation"] = _reconcile_crashes(
-                repo, args.run_id, state_obj, packet_path,
+                repo, args.run_id, state_obj,
                 run_dir / "BUILD_RECEIPT.json",
                 run_dir / "REVIEW_VERDICT.json",
                 events_path,

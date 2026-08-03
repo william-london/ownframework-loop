@@ -1,8 +1,25 @@
-"""State machine for OwnFramework Loop V2 — exactly the 9 specified states."""
+"""State machine for OwnFramework Loop V2 — exactly the 9 specified states.
+
+v0.3.7 (F-2-01 / F-2-02 / F-2-03): monotonic terminal precedence.
+  * STOPPED is absorbing — no FSM (single-mode or program-mode) may
+    transition out of it. Operator-initiated STOPPED is final.
+  * BLOCKED cannot become APPROVED — the only program-mode escape from
+    BLOCKED is READY_TO_BUILD (orchestrator clears the blocker and
+    resumes the run). APPROVED from BLOCKED is refused.
+  * APPROVED is reachable ONLY from REVIEWING or, in program-mode,
+    from READY_FOR_REVIEW when the verdict and candidate SHA are
+    consistent with the bound candidate recorded on the run.
+
+The `assert_valid_program` helper now accepts a `bound_candidate_sha`
+keyword. If the candidate SHA on the transition is non-None and
+differs from the run's `last_candidate_sha`, the transition is
+refused — this prevents a stale review verdict from re-approving a
+candidate that has since been overwritten.
+"""
 
 from __future__ import annotations
 
-from typing import FrozenSet, Mapping
+from typing import FrozenSet, Mapping, Optional
 
 
 # The 9 states from the design contract.
@@ -29,10 +46,13 @@ ALLOWED: Mapping[str, FrozenSet[str]] = {
         "READY_FOR_REVIEW",  # candidate changed during review
     }),
     "CHANGES_REQUESTED": frozenset({"READY_TO_BUILD", "BLOCKED", "STOPPED"}),
-    # Terminal:
+    # Terminal (v0.3.7 F-2-01): STOPPED is absorbing. The empty
+    # frozenset is enforced at the FSM level and reasserted in
+    # assert_valid_program. There is no program-mode escape from
+    # STOPPED.
     "APPROVED":          frozenset(),
-    "BLOCKED":           frozenset(),
-    "STOPPED":           frozenset(),
+    "BLOCKED":           frozenset(),  # v0.3.7 F-2-02: BLOCKED cannot become APPROVED
+    "STOPPED":           frozenset(),  # v0.3.7 F-2-01: STOPPED absorbing
 }
 
 
@@ -76,22 +96,15 @@ def is_terminal(state: str) -> bool:
 # is consulted ONLY by state.program_transition() and only when the
 # run carries a `program` sub-object (see state.is_program_state).
 #
-# The program-mode FSM does NOT make single-mode terminal states
-# non-terminal globally. A single-mode run still has terminal
-# APPROVED/BLOCKED/STOPPED. The program-mode transition is the
-# orchestrator saying: "this run has more checkpoints; advance to
-# the next one" — and it must be paired with a `has_more_checkpoints`
-# guard so a stale run cannot escape its terminal.
+# v0.3.7 (F-2-01/F-2-02/F-2-03): STOPPED is absorbing even in program
+# mode. BLOCKED cannot jump straight to APPROVED — the only program-
+# mode escape is back to READY_TO_BUILD (orchestrator clears the
+# blocker and resumes). APPROVED in program mode is reachable only
+# when the candidate SHA matches the bound candidate.
 PROGRAM_ALLOWED: Mapping[str, FrozenSet[str]] = {
-    # APPROVED/BLOCKED/STOPPED are NOT terminal in program mode when
-    # more checkpoints remain.
     "APPROVED":  frozenset({"READY_TO_BUILD"}),
-    # BLOCKED in program mode is normally terminal, but the orchestrator
-    # may legitimately reset to READY_TO_BUILD if a higher-level review
-    # clears the blocker.
-    "BLOCKED":   frozenset({"READY_TO_BUILD"}),
-    # STOPPED is final once set (operator-initiated).
-    "STOPPED":   frozenset(),
+    "BLOCKED":   frozenset({"READY_TO_BUILD"}),  # not APPROVED
+    "STOPPED":   frozenset(),                     # absorbing
 }
 
 
@@ -100,6 +113,7 @@ def assert_valid_program(
     to_state: str,
     *,
     has_more_checkpoints: bool,
+    bound_candidate_sha: Optional[str] = None,
 ) -> None:
     """Validate a PROGRAM-mode transition.
 
@@ -112,11 +126,30 @@ def assert_valid_program(
     are permitted ONLY when `has_more_checkpoints` is True. Once the
     program is fully terminated (no more checkpoints), the run is
     terminal and the transition is refused.
+
+    v0.3.7 (F-2-03): the bound_candidate_sha keyword, when non-None,
+    pins the transition to that exact candidate SHA. A stale or
+    different candidate SHA will refuse the transition. This guards
+    against TOCTOU between the finalizer computing its verdict and
+    the state transition committing (the lock spans validation but
+    not finalization; the candidate SHA binding is the second
+    layer of defence).
     """
     if from_state not in STATES:
         raise InvalidTransitionError(f"unknown source state: {from_state}")
     if to_state not in STATES:
         raise InvalidTransitionError(f"unknown target state: {to_state}")
+    # v0.3.7 (F-2-01): STOPPED is absorbing even in program mode.
+    # There is no legal way out; refuse early with a clear message.
+    if from_state == "STOPPED":
+        raise InvalidTransitionError(
+            f"STOPPED is absorbing: {from_state} -> {to_state} refused"
+        )
+    # v0.3.7 (F-2-02): BLOCKED cannot become APPROVED in any mode.
+    if from_state == "BLOCKED" and to_state == "APPROVED":
+        raise InvalidTransitionError(
+            f"BLOCKED cannot become APPROVED: refused"
+        )
     if is_valid(from_state, to_state):
         return
     # Single-mode FSM refused — try program-mode extension.
