@@ -37,15 +37,20 @@ either product-envelope rules (what this repo's runtime must not
 do) or engineering quality rules (how work in this repo should be
 done).
 
-### Local-only remote policy
+### Canonical remote policy
 
-This repo has no canonical remote configured. Work here is local-only
-by design. The operating agent commits locally; `PUSH_MADE=no` is
-the expected closeout field when no canonical remote exists.
+As of 2026-08-10 this repo has a canonical remote configured under
+the `PepasLokasTv` GitHub org. The operating agent commits locally and
+pushes to the canonical remote when coherent validated work is ready,
+unless William excludes the push.
 
-The operating agent does **not** add a canonical remote solely for
-this rollout. If a future lane authorizes a remote, that lane
-updates the inventory and the closeout accordingly.
+The expected closeout field is `PUSH_MADE=yes` when a push occurred,
+`PUSH_MADE=no` when the work stayed local. Local-only runs (commits
+without a push) are explicitly authorized and do not require a remote
+to be configured.
+
+Reverting this policy to a local-only stance is an explicit task-scope
+event and is called out in the closeout block when applied.
 
 ### Synthetic / non-customer data
 
@@ -92,9 +97,11 @@ If any fails, the change is not done.
 
 - One local commit per coherent slice.
 - Commit message style: `ownframework-loop: <verb> <slice>`.
-- Push to a canonical remote when one is configured and coherent
-  validated work is ready, unless William excludes the push. Until
-  then, `PUSH_MADE=no` is the expected closeout field.
+- Push to the canonical remote when coherent validated work is ready,
+  unless William excludes the push. `PUSH_MADE=yes` is the expected
+  closeout field when the work was pushed. Local-only commits
+  (`PUSH_MADE=no`) are explicitly authorized and do not require the
+  absence of a remote.
 - Force-push, `--tags`, `--all`, `--mirror`, pushes to non-named
   branches, and destructive cleanup remain explicit task-scope
   concerns and must be called out in the closeout block when used.
