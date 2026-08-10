@@ -1,14 +1,16 @@
 # Third-Party Notices
 
-OwnFramework Loop V1 is a clean-room implementation built on
-Claude Code (Anthropic), POSIX file locking, and the Python standard
-library. It does not bundle or copy any third-party source code.
+OwnFramework Loop is a clean-room implementation built on Claude Code
+(Anthropic), POSIX file locking, and the Python standard library. It
+does not bundle or copy any third-party source code.
 
 ## Architectural inspiration
 
 The OwnFramework Loop architecture is inspired in part by the
-**Finn-loop** project (MIT license), inspected at
-`/tmp/audit-finn-20260723/` (commit `7941b62c946154d15c11b7f24931bb8b6e155f01`).
+**Finn-loop** project (MIT license), inspected at the upstream commit
+`7941b62c946154d15c11b7f24931bb8b6e155f01`. The architectural
+patterns (two-loop, exact-SHA review, work-packet binding) were
+studied as references; no source code was reproduced.
 
 Upstream MIT notice:
 
@@ -38,8 +40,8 @@ SOFTWARE.
 
 No source code from Finn-loop is reproduced in this repository. The
 implementation, state machine, schemas, agents, hooks, and CLI are
-written from the OwnFramework Native Two-Loop V1 design contract and
-do not copy any upstream text or code.
+written from the OwnFramework Loop design contract and do not copy
+any upstream text or code.
 
 ## Standard library only
 

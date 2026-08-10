@@ -172,7 +172,7 @@ enforced, validate.sh had no real `--installed` path.
 
 ## Full-cycle model proof
 
-End-to-end run on a fresh test repo at `/private/var/folders/r5/_0bfjyj129953ndp19ms9j9r0000gn/T/ofloop-cycproof.XXXXXX.16zqXFxgqj`:
+End-to-end run on a fresh test repo at a temporary scratch directory:
 
 ```
 RUN_ID=run-20260723T064928Z-d362f764

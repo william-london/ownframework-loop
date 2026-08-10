@@ -1,10 +1,10 @@
 {
   "name": "of-loop",
   "displayName": "OwnFramework Loop",
-  "description": "V0.3.7 - plumbing-autonomy closeout. Fixes seven narrow repairs in state.py:495 (PROGRAM checkpoint ID extraction), transitions.py (STOPPED absorbing, BLOCKED cannot become APPROVED), limits.py (packet-controlled repair ceiling, removed arbitrary floor), build_finalize.py (progress-sensitive continuation using exact SHA), agent/SKILL docs (substantial builder passes), and cli.py:985 (ofloop doctor argument mismatch). Adds tests/integration/test_plumbing_autonomy.sh. Builds on v0.3.6 closeout and v0.3.5 plumbing; v0.3.5 and v0.3.6 are preserved in git history. Real-world autonomy is unchanged at this layer; large real-repository testing is a separate exercise.",
+  "description": "Human-gated engineering workflow for Claude Code with approved work packets, bounded build/review cycles, exact-SHA verification, and manual promotion.",
   "version": "0.3.7",
   "author": {
     "name": "OwnFramework"
   },
-  "license": "Proprietary"
+  "license": "Apache-2.0"
 }
