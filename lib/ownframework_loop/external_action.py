@@ -1,6 +1,6 @@
 """External-action policy module.
 
-OwnFramework Loop V2 allows broad engineering tools (read, write within
+OwnFramework Loop allows broad engineering tools (read, write within
 authority, shell, web search) but blocks external-side-effect tools
 during an active run. The policy is implemented in one module so the
 hooks and the orchestrator can share one set of rules.

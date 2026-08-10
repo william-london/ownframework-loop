@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# OwnFramework Loop V2 — PostToolUse Bash secret scan.
+# OwnFramework Loop — PostToolUse Bash secret scan.
 #
 # Inspects the output of a Bash command for secret-shaped content using
 # the REDACTED scanner. The literal matched value is NEVER persisted.

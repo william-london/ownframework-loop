@@ -1,4 +1,4 @@
-# OwnFramework Loop V2 — Audit Replay & Pilot-Readiness Report
+# OwnFramework Loop — Audit Replay & Pilot-Readiness Report
 
 **Date:** 2026-07-23
 **Source HEAD:** 740eee7 (loop-v1: tighten guards (quoted-arg-safe), fix protected-paths glob, expand bypass matrix)

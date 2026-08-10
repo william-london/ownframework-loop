@@ -1,4 +1,4 @@
-"""State machine for OwnFramework Loop V2 — exactly the 9 specified states.
+"""State machine for OwnFramework Loop — exactly the 9 specified states.
 
 v0.3.7 (F-2-01 / F-2-02 / F-2-03): monotonic terminal precedence.
   * STOPPED is absorbing — no FSM (single-mode or program-mode) may

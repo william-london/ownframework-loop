@@ -65,34 +65,92 @@ human is always the merge and deploy authority.
 
 ## Quickstart
 
+This repository is self-contained: a fresh `git clone` of
+`william-london/ownframework-loop` is the entire deliverable. There
+is no private sibling repository, no parent marketplace catalog, and
+no William-specific filesystem assumption.
+
+### A. Direct local trial (one command, no install)
+
+Use Anthropic's `--plugin-dir` to point Claude Code at the cloned
+repository. The skills, agents, and hooks are loaded for the session
+only — nothing is written to `~/.claude/`.
+
 ```bash
-# 1. Install. install.sh is a bash script with a bash shebang, so
-#    it is invoked explicitly via `bash`.
-bash /path/to/ownframework-loop/install.sh
-
-# 2. Open Claude Code inside a target repository
-cd /path/to/your-repository
-claude --plugin-dir $HOME/.claude/skills/of-loop
-
-# 3. Create the mission
-/of-loop:spec "add a per-IP rate limit to /api/sync"
-
-# 4. Review the packet at
-#    .ownframework-loop/<run-id>/WORK_PACKET.md
-#    Then approve it explicitly:
-/of-loop:spec approve <run-id>
-
-# 5. Open two terminal tabs and run:
-/loop /of-loop:build <run-id>      # builder
-/loop /of-loop:review <run-id>     # reviewer
-
-# 6. Wait for APPROVED, BLOCKED, or STOPPED.
-# 7. Merge manually.
+git clone https://github.com/william-london/ownframework-loop.git
+cd ownframework-loop
+claude --plugin-dir . --plugin-dir /path/to/your-target-repository
 ```
 
-The install script copies this repository into a managed location and
-registers the skills, agents, hooks, and `ofloop` CLI. It does not
-require any private OwnFramework infrastructure to operate.
+Inside the Claude Code session:
+
+```
+/of-loop:spec "add a per-IP rate limit to /api/sync"
+/of-loop:spec approve <run-id>
+/loop /of-loop:build <run-id>
+/loop /of-loop:review <run-id>
+```
+
+This is the recommended path for first-time evaluation.
+
+### B. Persistent installation (managed marketplace)
+
+This repository ships a self-contained Claude Code marketplace at
+`.claude-plugin/marketplace.json`. `install.sh` registers the
+marketplace and installs the plugin through the official plugin
+manager.
+
+```bash
+git clone https://github.com/william-london/ownframework-loop.git
+cd ownframework-loop
+bash install.sh
+```
+
+What `install.sh` does:
+
+1. Verifies the source is a clean git checkout on a tracked branch.
+2. Registers the `ownframework` marketplace pointing at the clone.
+3. Runs `claude plugin install of-loop@ownframework --scope user`.
+4. Captures a payload manifest at the installed cache root so
+   post-install tampering is detectable.
+
+After install:
+
+```bash
+claude plugin list                  # shows of-loop@ownframework
+claude plugin marketplace list      # shows ownframework -> <clone path>
+```
+
+To uninstall:
+
+```bash
+bash uninstall.sh                   # removes the plugin only
+REMOVE_MARKETPLACE=1 bash uninstall.sh   # also removes the marketplace
+```
+
+### C. Running on a target repository
+
+After either A or B, change into the repository you want the loop
+to operate on and start Claude Code:
+
+```bash
+cd /path/to/your-target-repository
+claude
+```
+
+Then the loop skills (`/of-loop:spec`, `/of-loop:build`,
+`/of-loop:review`) are available regardless of which install path
+you used.
+
+### D. Verifying an install
+
+```bash
+bash validate.sh                    # 14/14 PASS expected
+bash release_gate.sh                # PASS expected
+```
+
+Both scripts run from the repository root and require no external
+services.
 
 ---
 
@@ -197,9 +255,9 @@ dependency, no system service, and no network dependency.
 
 ## Project status
 
-Current release line: **0.3.7**
+Current release line: **0.3.8**
 
-This is an early public release. The state machine, packet binding,
+This is the first hardened public release. The state machine, packet binding,
 exact-SHA review, and serialized transitions have been exercised
 against a focused test suite. Performance and behaviour against large
 real-world repositories is an empirical matter — the loop makes no

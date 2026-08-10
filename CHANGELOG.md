@@ -1,5 +1,74 @@
 # Changelog
 
+## 0.3.8 — First Public Release / Distribution & Release-Gate Hardening (2026-08-10)
+
+**Scope.** This is a packaging and distribution hardening pass over the
+0.3.7 public-release commit. No core state-machine, packet-binding,
+exact-SHA review, or authority semantics have changed.
+
+**Distribution hardening**
+
+- **Self-contained public marketplace.** This repository now ships its
+  own `.claude-plugin/marketplace.json` declaring a marketplace named
+  `ownframework` with a single plugin entry `of-loop`. A first-time user
+  no longer depends on a parent repository, sibling catalog, or any
+  private OwnFramework infrastructure.
+- **Rewritten `install.sh`.** The installer registers the marketplace
+  pointing at the local clone (`claude plugin marketplace add <path>`)
+  and installs through the official plugin manager
+  (`claude plugin install of-loop@ownframework --scope user`). The
+  previous `ownframework-local` marketplace name and the implicit
+  `~/.claude/skills/of-loop` skills-dir copy are no longer assumed.
+- **Rewritten `uninstall.sh`.** The uninstaller removes the plugin
+  via the official plugin manager and optionally removes the
+  marketplace registration (`REMOVE_MARKETPLACE=1`).
+- **`rollback.sh` scoped to its actual support surface.** The script
+  now documents that it only restores timestamped skills-dir backup
+  directories produced by historical versions of the installer. For
+  managed installs, the canonical rollback is to install a different
+  version through the marketplace.
+
+**Release-gate hardening**
+
+- **`lib/ownframework_loop/release_gate_runtime.py` preflight repaired.**
+  The expected release branch now defaults to `master` (was `main`).
+  Remote presence is no longer a preflight failure condition; the
+  reported `SOURCE_REMOTES` field reflects the actual remote count.
+  Dirty source and a wrong release branch still fail closed. The
+  `OFLOOP_RELEASE_GATE_EXPECTED_BRANCH` environment variable overrides
+  the default branch.
+- **Five-test preflight regression.** `tests/integration/test_release_gate_preflight.sh`
+  was added and added to `tests/canonical.txt`. It proves clean-master
+  + remote-OK PASSES, dirty FAILS, wrong-branch FAILS, override WORKS,
+  and multi-remote does not fail.
+
+**Public-surface cleanup**
+
+- README, AGENTS.md, and all current-facing docs have been re-scanned
+  for stale `OwnFramework Loop V1` / `OwnFramework Loop V2` generational
+  branding; all hits have been replaced with the timeless
+  `OwnFramework Loop` name. Version-marker code comments and
+  CHANGELOG history were preserved.
+- AGENTS.md no longer references a private-mission "Phase 10 evidence"
+  section; the public-leak scan instruction is now self-contained.
+- The root-level `REPORT.md` and `LOOP_REPAIR_MISSION_REPORT.md` have
+  been removed; their byte-identical copies remain in
+  `docs/history/` with a `docs/history/README.md` explaining their
+  preserved-engineering-snapshot status.
+- `THIRD_PARTY_NOTICES.md` no longer claims a "clean-room
+  implementation"; it states the factual relationship with the
+  upstream Finn-loop project and retains the required MIT attribution.
+- The root `LICENSE` is the canonical Apache License 2.0 text from
+  apache.org, verbatim. The customized Appendix boilerplate is gone;
+  no `NOTICE` file was added.
+
+**Version surfaces updated to 0.3.8**
+
+- `.claude-plugin/plugin.json`
+- `.claude-plugin/marketplace.json`
+- `lib/ownframework_loop/__init__.py` (`__version__`)
+- `README.md` project status
+- `SECURITY.md` supported release posture
 
 ## 0.3.7 — Plumbing-Autonomy Closeout (2026-08-02)
 

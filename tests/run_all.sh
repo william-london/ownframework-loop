@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# OwnFramework Loop V2 — release gate (single execution).
+# OwnFramework Loop — release gate (single execution).
 #
 # This is the single, authoritative release gate. It runs every
 # canonical test listed in tests/canonical.txt and reports PASS/FAIL
@@ -32,7 +32,7 @@ if [[ ! -f "$CANONICAL_LIST" ]]; then
   exit 1
 fi
 
-echo "=== OwnFramework Loop V2 — release gate ==="
+echo "=== OwnFramework Loop — release gate ==="
 echo "OF_LOOP_OPERATOR_MARKER"
 echo "OF_LOOP_RELEASE_GATE=single"
 OF_LOOP_PLUGIN_VERSION="$(PYTHONDONTWRITEBYTECODE=1 python3 -B -c "import sys; sys.path.insert(0, '$LIB_DIR'); from ownframework_loop import __version__; print(__version__)")"

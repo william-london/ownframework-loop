@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# OwnFramework Loop V1 — integrity (tampering detection) + repair-limit tests.
+# OwnFramework Loop — integrity (tampering detection) + repair-limit tests.
 #
 # - Case A: STATE.json direct edit is detected by SHA chain on next transition.
 # - Case B: BUILD_RECEIPT.json direct edit is detected.

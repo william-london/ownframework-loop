@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# OwnFramework Loop V2 — validate.
+# OwnFramework Loop — validate.
 #
 # Two distinct code paths:
 #
@@ -136,7 +136,7 @@ PY
 }
 
 if [[ "$INSTALLED_MODE" -eq 1 ]]; then
-  echo "=== OwnFramework Loop V2 — validate (INSTALLED COPY) ==="
+  echo "=== OwnFramework Loop — validate (INSTALLED COPY) ==="
   if [[ -n "$EXPLICIT_INSTALL_PATH" ]]; then
     ROOT="$EXPLICIT_INSTALL_PATH"
     echo "  using explicit --installed path: $ROOT"
@@ -159,7 +159,7 @@ if [[ "$INSTALLED_MODE" -eq 1 ]]; then
     echo "  discovered active install: $ROOT"
   fi
 else
-  echo "=== OwnFramework Loop V2 — validate (SOURCE TREE) ==="
+  echo "=== OwnFramework Loop — validate (SOURCE TREE) ==="
   HERE="$(cd "$(dirname "$0")" && pwd)"
   : "${OFLOOP_VALIDATE_SOURCE_ROOT:=$HERE}"
   ROOT="${ROOT:-$OFLOOP_VALIDATE_SOURCE_ROOT}"

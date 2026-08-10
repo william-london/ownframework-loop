@@ -1,5 +1,5 @@
 <!--
-WORK_PACKET.md template for OwnFramework Loop V2.
+WORK_PACKET.md template for OwnFramework Loop.
 
 The metadata block is JSON inside a triple-backtick fence. Do NOT depend on
 YAML parsing. The body sections are Markdown for human review.

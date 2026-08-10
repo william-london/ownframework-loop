@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# OwnFramework Loop V2 — version-truth gate.
+# OwnFramework Loop — version-truth gate.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/../.." && pwd)"

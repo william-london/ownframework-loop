@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# OwnFramework Loop V1 — bounded real-model smoke.
+# OwnFramework Loop — bounded real-model smoke.
 #
 # Disposable temp repo. Real /of-loop:spec, /of-loop:build, /of-loop:review.
 # Real MiniMax M3 route. Hard ceiling $3.00. Bounded wall-clock.

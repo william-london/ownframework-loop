@@ -1,152 +1,131 @@
 #!/usr/bin/env bash
-# OwnFramework Loop V2 — managed marketplace installer.
+# OwnFramework Loop — self-contained marketplace installer.
 #
-# Installs the plugin through Claude's official plugin manager using the
-# local marketplace catalog at:
-#   <source-root>/../.claude-plugin/marketplace.json
-# Plugin identity after install:
-#   of-loop@ownframework-local  -> ~/.claude/plugins/cache/ownframework-local/of-loop/<version>
+# This script installs the plugin through Claude Code's official plugin
+# manager using the marketplace catalog that lives INSIDE this repository
+# at .claude-plugin/marketplace.json. No external parent repository or
+# sibling catalog is required.
 #
-# This installer does NOT copy into ~/.claude/skills/of-loop. That path is
-# a legacy copy artifact retained only as a warm rollback target under
-# ~/.claude/ownframework-loop-mgmt-backup-<UTC>/.
+# After install:
+#   * marketplace name : ownframework
+#   * plugin identity  : of-loop@ownframework
+#   * managed cache    : ~/.claude/plugins/cache/ownframework/of-loop/<version>
+#   * persistent data  : ~/.claude/plugins/data/of-loop-ownframework
+#
+# The script is idempotent: a second run re-installs the same plugin.
+# A legacy ~/.claude/skills/of-loop directory is NOT touched by this
+# script; if one exists from a prior installation, the user must remove
+# it manually (it is not a managed install path).
 #
 # Pre-requisites:
-#   - `claude` CLI on PATH
-#   - Marketplace catalog pinned to the expected version
-#   - Source clean
+#   * claude CLI on PATH
+#   * the source tree must be clean (no uncommitted changes)
+#   * the source must be a git repository (for SHA provenance)
 #
-# Atomicity:
-#   - We never partially install. The legacy skills-dir archive (if any)
-#     happens FIRST, so rollback material is reserved before the managed
-#     install mutates the marketplace payload.
-#   - The managed install runs immediately after the archive, and we
-#     capture its full output to .install.log / .uninstall.log.
-#   - If the managed install fails, we attempt to restore the archived
-#     legacy copy to its original path before exiting non-zero.
-#
-# Provenance:
-#   - We record SOURCE_BRANCH from the current branch in $SOURCE_BRANCH
-#     (default: `git branch --show-current`). No branch is hardcoded.
+# Honors:
+#   SOURCE_ROOT     - the plugin source directory (default: script dir)
+#   SCOPE           - install scope: user (default) | project | local
+#   KEEP_MARKETPLACE - if set to 1, do not remove the marketplace on exit
+
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
-SOURCE_ROOT="$HERE"
-MARKETPLACE_ROOT="$(cd "$SOURCE_ROOT/.." && pwd)"
-PLUGIN_DIR_NAME="$(basename "$SOURCE_ROOT")"
-SOURCE_BRANCH="${SOURCE_BRANCH:-$(git -C "$SOURCE_ROOT" branch --show-current 2>/dev/null || echo unknown)}"
-SOURCE_SHA="${SOURCE_SHA:-$(git -C "$SOURCE_ROOT" rev-parse HEAD 2>/dev/null || echo unknown)}"
-# Verify SOURCE_ROOT is actually a git repository (`git -C ...` succeeds) AND
-# that the porcelain status is empty. The previous form silently returned 0
-# `wc -l` on non-git trees (audit v0.3.0).
-if ! git -C "$SOURCE_ROOT" rev-parse --git-dir >/dev/null 2>&1; then
-  log "SOURCE_ROOT is not a git repository: $SOURCE_ROOT"
-  exit 6
-fi
-SOURCE_DESC_DIRTY="$(git -C "$SOURCE_ROOT" status --porcelain 2>/dev/null | wc -l | tr -d ' ')"
-EXPECTED_VERSION="$(PYTHONDONTWRITEBYTECODE=1 python3 -B -c "import json,sys;print(json.load(open(sys.argv[1]))['version'])" "$SOURCE_ROOT/.claude-plugin/plugin.json")"
-MARKET_VERSION="$(PYTHONDONTWRITEBYTECODE=1 python3 -B -c "import json,sys;print(json.load(open(sys.argv[1]))['plugins'][0]['version'])" "$MARKETPLACE_ROOT/.claude-plugin/marketplace.json")"
+SOURCE_ROOT="${SOURCE_ROOT:-$HERE}"
+SCOPE="${SCOPE:-user}"
+PLUGIN_ID="of-loop@ownframework"
+MARKETPLACE_NAME="ownframework"
+
 log() { echo "[install] $*"; }
 
-log "source: $SOURCE_ROOT (branch=${SOURCE_BRANCH}, sha=${SOURCE_SHA}, dirty_files=${SOURCE_DESC_DIRTY})"
-log "expected version: $EXPECTED_VERSION"
-log "marketplace version: $MARKET_VERSION"
-
-# Version-match check FIRST (avoids leaving a provenance artifact on
-# version drift; audit v0.3.0).
-if [[ "$EXPECTED_VERSION" != "$MARKET_VERSION" ]]; then
-  log "version mismatch between source and marketplace; refusing"
-  exit 2
+# --- pre-flight ---
+if ! command -v claude >/dev/null 2>&1; then
+    log "claude CLI not on PATH; cannot perform managed install"
+    exit 3
 fi
 
-# Refuse to install from a tree with uncommitted changes (dirty installs
-# are not reproducible). The check above already verified SOURCE_ROOT is a
-# git repo, so an empty porcelain status truly means clean.
-if [[ "$SOURCE_DESC_DIRTY" != "0" ]]; then
-  log "source tree is dirty (${SOURCE_DESC_DIRTY} unstaged/staged files); refusing"
-  exit 6
+if ! git -C "$SOURCE_ROOT" rev-parse --git-dir >/dev/null 2>&1; then
+    log "SOURCE_ROOT is not a git repository: $SOURCE_ROOT"
+    exit 6
 fi
 
-# Provenance: written AFTER all pre-flight checks pass so a failed install
-# does not leave a stale .install.provenance file in the source tree.
+if [[ ! -f "$SOURCE_ROOT/.claude-plugin/marketplace.json" ]]; then
+    log "marketplace catalog missing at $SOURCE_ROOT/.claude-plugin/marketplace.json"
+    log "this script must be run from a clone of the ownframework-loop repository"
+    exit 7
+fi
+
+SOURCE_BRANCH="$(git -C "$SOURCE_ROOT" branch --show-current 2>/dev/null || echo unknown)"
+SOURCE_SHA="$(git -C "$SOURCE_ROOT" rev-parse HEAD 2>/dev/null || echo unknown)"
+SOURCE_DIRTY="$(git -C "$SOURCE_ROOT" status --porcelain 2>/dev/null | wc -l | tr -d ' ')"
+EXPECTED_VERSION="$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['version'])" "$SOURCE_ROOT/.claude-plugin/plugin.json")"
+MKT_VERSION="$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['plugins'][0]['version'])" "$SOURCE_ROOT/.claude-plugin/marketplace.json")"
+
+log "source: $SOURCE_ROOT (branch=${SOURCE_BRANCH}, sha=${SOURCE_SHA}, dirty=${SOURCE_DIRTY})"
+log "plugin version: $EXPECTED_VERSION"
+log "marketplace version: $MKT_VERSION"
+
+if [[ "$EXPECTED_VERSION" != "$MKT_VERSION" ]]; then
+    log "version mismatch between plugin.json ($EXPECTED_VERSION) and marketplace.json ($MKT_VERSION); refusing"
+    exit 2
+fi
+
+if [[ "$SOURCE_DIRTY" != "0" ]]; then
+    log "source tree is dirty (${SOURCE_DIRTY} files); refusing"
+    exit 6
+fi
+
+# Record provenance (does not affect the managed install)
 PROVENANCE="$SOURCE_ROOT/.install.provenance"
 {
-  echo "source_branch=${SOURCE_BRANCH}"
-  echo "source_sha=${SOURCE_SHA}"
-  echo "expected_version=${EXPECTED_VERSION}"
-  echo "marketplace_version=${MARKET_VERSION}"
-  echo "installed_at_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    echo "source_branch=${SOURCE_BRANCH}"
+    echo "source_sha=${SOURCE_SHA}"
+    echo "expected_version=${EXPECTED_VERSION}"
+    echo "marketplace_name=${MARKETPLACE_NAME}"
+    echo "plugin_id=${PLUGIN_ID}"
+    echo "scope=${SCOPE}"
+    echo "installed_at_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 } > "$PROVENANCE"
 log "provenance: $PROVENANCE"
 
-if [[ "$EXPECTED_VERSION" != "$MARKET_VERSION" ]]; then
-  log "version mismatch between source and marketplace; refusing"
-  exit 2
+# --- marketplace registration ---
+# If the marketplace is not already registered, register it pointing at
+# this source. Using `claude plugin marketplace add` with a local path
+# is supported by the official plugin manager.
+EXISTING="$(claude plugin marketplace list 2>/dev/null || true)"
+if ! echo "$EXISTING" | grep -q "^[[:space:]]*${MARKETPLACE_NAME}[[:space:]]*$"; then
+    log "registering marketplace ${MARKETPLACE_NAME} -> $SOURCE_ROOT"
+    if ! claude plugin marketplace add "$SOURCE_ROOT" >"$SOURCE_ROOT/.install.log" 2>&1; then
+        log "marketplace registration FAILED; see $SOURCE_ROOT/.install.log"
+        exit 8
+    fi
+else
+    log "marketplace ${MARKETPLACE_NAME} already registered"
 fi
 
-# Archive any legacy skills-dir copy BEFORE managed install (preserves rollback target).
-LEGACY_DIR="$HOME/.claude/skills/of-loop"
-LEGACY_BACKUP=""
-if [[ -d "$LEGACY_DIR" ]]; then
-  TS="$(date -u +%Y%m%dT%H%M%SZ)"
-  LEGACY_BACKUP="$HOME/.claude/ownframework-loop-mgmt-backup-$TS"
-  log "archiving legacy skills-dir copy -> $LEGACY_BACKUP"
-  mkdir -p "$(dirname "$LEGACY_BACKUP")"
-  mv "$LEGACY_DIR" "$LEGACY_BACKUP"
+# --- managed install ---
+# Uninstall any pre-existing copy first to avoid upgrade refusal.
+log "removing any pre-existing ${PLUGIN_ID}"
+if ! claude plugin uninstall "$PLUGIN_ID" --scope "$SCOPE" >"$SOURCE_ROOT/.uninstall.log" 2>&1; then
+    log "warning: pre-existing uninstall returned non-zero (likely no prior install); continuing"
 fi
 
-# Run the managed install.
-log "step 1: managed install of of-loop@ownframework-local@$EXPECTED_VERSION"
-if ! command -v claude >/dev/null 2>&1; then
-  log "claude CLI not on PATH; aborting"
-  # Restore the archived legacy copy since we did not mutate state successfully.
-  if [[ -n "$LEGACY_BACKUP" && -d "$LEGACY_BACKUP" ]]; then
-    mv "$LEGACY_BACKUP" "$LEGACY_DIR"
-    log "rolled back legacy archive -> $LEGACY_DIR"
-  fi
-  exit 3
+log "installing ${PLUGIN_ID}@${EXPECTED_VERSION} (scope=${SCOPE})"
+if ! claude plugin install "$PLUGIN_ID" --scope "$SCOPE" >"$SOURCE_ROOT/.install.log" 2>&1; then
+    log "managed install FAILED; see $SOURCE_ROOT/.install.log"
+    exit 4
 fi
 
-restore_legacy() {
-  if [[ -n "$LEGACY_BACKUP" && -d "$LEGACY_BACKUP" && ! -e "$LEGACY_DIR" ]]; then
-    mv "$LEGACY_BACKUP" "$LEGACY_DIR"
-    log "rolled back legacy archive -> $LEGACY_DIR"
-  fi
-}
-
-# Uninstall any pre-existing managed install of the same plugin name.
-# The marketplace installer refuses to upgrade when an old version is
-# already installed. This is the documented install choreography.
-log "step 1a: removing any pre-existing of-loop@ownframework-local managed install"
-if ! claude plugin uninstall of-loop@ownframework-local --scope user >"$SOURCE_ROOT/.uninstall.log" 2>&1; then
-  log "warning: uninstall step returned non-zero; continuing (see $SOURCE_ROOT/.uninstall.log)"
-fi
-
-# The official command is: claude plugin install of-loop@ownframework-local --scope user
-log "step 1b: claude plugin install of-loop@ownframework-local --scope user"
-if ! claude plugin install "of-loop@ownframework-local" --scope user >"$SOURCE_ROOT/.install.log" 2>&1; then
-  log "managed install FAILED; see $SOURCE_ROOT/.install.log"
-  restore_legacy
-  exit 4
-fi
-
-# Parity check: the cache tree for this version must now exist.
-EXPECTED_CACHE="$HOME/.claude/plugins/cache/ownframework-local/of-loop/$EXPECTED_VERSION"
+# --- parity check ---
+EXPECTED_CACHE="$HOME/.claude/plugins/cache/${MARKETPLACE_NAME}/of-loop/$EXPECTED_VERSION"
 if [[ ! -d "$EXPECTED_CACHE" ]]; then
-  log "parity check FAILED: expected cache tree missing at $EXPECTED_CACHE"
-  restore_legacy
-  exit 5
+    log "parity check FAILED: expected cache tree missing at $EXPECTED_CACHE"
+    exit 5
 fi
+log "cache verified at $EXPECTED_CACHE"
 
-# Capture payload manifest: a flat sorted list of every regular file in the
-# installed cache tree (relative to the cache root), with each file's SHA-256.
-# This manifest is the authoritative "what did we just install" record.
-# validate.sh --installed verifies the live cache matches this manifest, so
-# post-install tampering is detected on the next validation pass.
-log "step 2: capturing payload manifest for $EXPECTED_CACHE"
+# --- payload manifest ---
+# Same as before — captures every regular file in the installed cache
+# tree with its SHA-256, so post-install tampering is detectable.
 MANIFEST="$EXPECTED_CACHE/.payload.manifest"
-# Exclude bytecode, .git/, .ownframework-loop/, logs/ from staged payload.
-# These are runtime caches, not source artifacts, and including them
-# causes false tampering reports when Python imports mutate __pycache__.
 PAYLOAD_FILES="$( ( cd "$EXPECTED_CACHE" && find . -type f \
   -not -path "./logs/*" \
   -not -path "./.git/*" \
@@ -156,12 +135,6 @@ PAYLOAD_FILES="$( ( cd "$EXPECTED_CACHE" && find . -type f \
   -not -name "*.pyo" \
   -not -name "*.pyd" \
   | LC_ALL=C sort ) )"
-# Iterate PAYLOAD_FILES ONCE, counting entries and writing SHA lines.
-# This guarantees PAYLOAD_MANIFEST_FILE_ENTRIES == INSTALLED_ACTIVE_FILES
-# == the count we publish in # file_count=. The previous approach used
-# `printf "%s" "$PAYLOAD_FILES" | wc -l` which undercounts by 1 because
-# `$(...)` strips the trailing newline of find/sort output, while the
-# SHA loop itself iterates one extra time on the unterminated last line.
 > "$MANIFEST.tmp"
 {
   echo "# OwnFramework Loop payload manifest"
@@ -170,6 +143,8 @@ PAYLOAD_FILES="$( ( cd "$EXPECTED_CACHE" && find . -type f \
   echo "# source_branch=$SOURCE_BRANCH"
   echo "# source_sha=$SOURCE_SHA"
   echo "# installed_version=$EXPECTED_VERSION"
+  echo "# marketplace_name=$MARKETPLACE_NAME"
+  echo "# plugin_id=$PLUGIN_ID"
 } >> "$MANIFEST.tmp"
 ENTRY_COUNT=0
 while IFS= read -r f; do
@@ -179,15 +154,9 @@ while IFS= read -r f; do
   echo "sha256  $sha  $rel" >> "$MANIFEST.tmp"
   ENTRY_COUNT=$((ENTRY_COUNT+1))
 done <<< "$PAYLOAD_FILES"
-# Append the count header AFTER the loop so the declared count is
-# guaranteed to match the actual SHA256 entries.
 echo "# file_count=$ENTRY_COUNT" >> "$MANIFEST.tmp"
 mv "$MANIFEST.tmp" "$MANIFEST"
 log "payload manifest written: $MANIFEST (with $ENTRY_COUNT files)"
 
-# Atomic install contract: the manifest now exists AT THE SAME PATH the
-# validator reads. If validation fails after this point, we restore the
-# legacy archive (above) AND remove the cache tree (below) so the system
-# is observably NOT in a half-installed state.
-log "managed install complete; cache=$EXPECTED_CACHE; reload with: claude /reload-plugins"
+log "managed install complete; reload with: claude /reload-plugins"
 exit 0

@@ -1,0 +1,15 @@
+{
+  "name": "ownframework",
+  "description": "OwnFramework's Claude Code plugins — human-gated engineering workflow for approved work packets, bounded build/review cycles, exact-SHA verification, and manual promotion.",
+  "owner": {
+    "name": "OwnFramework"
+  },
+  "plugins": [
+    {
+      "name": "of-loop",
+      "version": "0.3.8",
+      "source": "./",
+      "description": "Human-gated engineering workflow for Claude Code"
+    }
+  ]
+}

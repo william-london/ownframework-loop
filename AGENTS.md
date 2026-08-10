@@ -145,8 +145,8 @@ If any of those fail, the change is not done.
 When the change touches the public-surface set (`README.md`,
 `AGENTS.md`, `CONTRIBUTING.md`, `SECURITY.md`, `CHANGELOG.md`,
 `LICENSE`, `THIRD_PARTY_NOTICES.md`, `.claude-plugin/plugin.json`),
-also re-run the full public-leak scan (Phase 10 evidence below)
-and the README internal-link check.
+also re-run a complete public-surface scan for the new private/internal leakage patterns
+, the README internal-link check, and the standard secret scan.
 
 ---
 

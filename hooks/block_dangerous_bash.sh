@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# OwnFramework Loop V2 — PreToolUse Bash guard.
+# OwnFramework Loop — PreToolUse Bash guard.
 #
 # Receives the hook input as JSON on stdin. Emits an empty stdout and
 # exit code 0 when allowed; emits a JSON decision object on stdout when

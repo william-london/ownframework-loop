@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# OwnFramework Loop V2 — External Action Guard.
+# OwnFramework Loop — External Action Guard.
 #
 # During an active OwnFramework Loop run, this hook blocks tool calls
 # that would have external side effects: emails, SMS, DMs, calendar

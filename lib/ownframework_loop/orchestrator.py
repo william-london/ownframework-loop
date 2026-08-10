@@ -1,4 +1,4 @@
-"""OwnFramework Loop V1 — single-mode unattended orchestrator.
+"""OwnFramework Loop — single-mode unattended orchestrator.
 
 Drives one complete spec → build → review cycle end-to-end without
 human in-the-loop approval. The operator must pre-approve the work

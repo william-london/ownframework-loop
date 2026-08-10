@@ -1,6 +1,6 @@
 ---
 name: build
-description: OwnFramework Loop V2 — build pass. One invocation performs at most one bounded build or repair pass. Validates APPROVAL.json, claims the build, invokes a fresh `of-builder` agent (broad engineering tools), collects a semantic agent result, then calls the deterministic build finalizer. Safe to invoke under `/loop`.
+description: OwnFramework Loop — build pass. One invocation performs at most one bounded build or repair pass. Validates APPROVAL.json, claims the build, invokes a fresh `of-builder` agent (broad engineering tools), collects a semantic agent result, then calls the deterministic build finalizer. Safe to invoke under `/loop`.
 user-invocable: true
 ---
 

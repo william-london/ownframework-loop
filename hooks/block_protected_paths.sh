@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# OwnFramework Loop V2 — PreToolUse Write/Edit/MultiEdit/NotebookEdit guard.
+# OwnFramework Loop — PreToolUse Write/Edit/MultiEdit/NotebookEdit guard.
 #
 # Exact-run / exact-role scoping:
 #

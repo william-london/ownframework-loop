@@ -1,8 +1,8 @@
 # Third-Party Notices
 
-OwnFramework Loop is a clean-room implementation built on Claude Code
-(Anthropic), POSIX file locking, and the Python standard library. It
-does not bundle or copy any third-party source code.
+OwnFramework Loop is built on Claude Code (Anthropic), POSIX file
+locking, and the Python standard library. It does not bundle or copy
+any third-party source code.
 
 ## Architectural inspiration
 

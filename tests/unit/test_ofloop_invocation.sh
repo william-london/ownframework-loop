@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# OwnFramework Loop V1 — ofloop CLI invocation contract.
+# OwnFramework Loop — ofloop CLI invocation contract.
 #
 # Pins the supported invocations and rejects the broken `bash bin/ofloop`
 # form that treats Python source as Bash.

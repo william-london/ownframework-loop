@@ -1,22 +1,36 @@
 #!/usr/bin/env bash
-# OwnFramework Loop V2 — managed uninstall.
+# OwnFramework Loop — self-contained marketplace uninstall.
 #
-# Removes the managed plugin via Claude's official plugin manager:
-#   claude plugin uninstall of-loop@ownframework-local --scope user
+# Removes the managed plugin via Claude Code's official plugin manager.
+# Preserves the marketplace registration so re-installing is a no-op for
+# the marketplace step. Use the --remove-marketplace flag to also remove
+# the marketplace entry.
 #
-# Preserves:
-#   - persistent plugin data at ~/.claude/plugins/data/of-loop-ownframework-local
-#   - archived legacy skills-dir at ~/.claude/ownframework-loop-mgmt-backup-*
-#   - source repo (preserved at its original location, not modified by this script)
+# Honors:
+#   SCOPE - install scope: user (default) | project | local
+#   PLUGIN_ID - override the plugin identity (default: of-loop@ownframework)
+#   MARKETPLACE_NAME - override the marketplace name (default: ownframework)
 
 set -euo pipefail
+SCOPE="${SCOPE:-user}"
+PLUGIN_ID="${PLUGIN_ID:-of-loop@ownframework}"
+MARKETPLACE_NAME="${MARKETPLACE_NAME:-ownframework}"
 
 if ! command -v claude >/dev/null 2>&1; then
-  echo "[uninstall] claude CLI not on PATH; cannot run managed uninstall"
-  exit 2
+    echo "[uninstall] claude CLI not on PATH; cannot run managed uninstall"
+    exit 2
 fi
 
-echo "[uninstall] running: claude plugin uninstall of-loop@ownframework-local --scope user"
-claude plugin uninstall of-loop@ownframework-local --scope user 2>&1
-echo "[uninstall] complete; plugin data and backup dir retained"
+echo "[uninstall] running: claude plugin uninstall ${PLUGIN_ID} --scope ${SCOPE}"
+if ! claude plugin uninstall "$PLUGIN_ID" --scope "$SCOPE"; then
+    echo "[uninstall] managed uninstall returned non-zero; the plugin may not have been installed"
+    exit 1
+fi
+echo "[uninstall] complete; persistent plugin data and the marketplace registration are preserved"
+
+if [[ "${REMOVE_MARKETPLACE:-0}" == "1" ]]; then
+    echo "[uninstall] removing marketplace ${MARKETPLACE_NAME}"
+    claude plugin marketplace remove "$MARKETPLACE_NAME" || true
+fi
+
 exit 0

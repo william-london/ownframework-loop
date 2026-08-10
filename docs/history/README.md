@@ -20,7 +20,7 @@ sources above win.
 ## Files
 
 - `IMPLEMENTATION_REPORT_2026-07-23.md` — implementation report from
-  the v0.2.x line (preserved from `REPORT.md`).
+  the v0.2.x line (renamed from the previous root `REPORT.md`).
 - `LOOP_REPAIR_MISSION_REPORT_2026-07-30.md` — loop-repair and
-  autonomy mission report from the v0.3.0 line (preserved from
-  `LOOP_REPAIR_MISSION_REPORT.md`).
+  autonomy mission report from the v0.3.0 line (renamed from the
+  previous root `LOOP_REPAIR_MISSION_REPORT.md`).

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# OwnFramework Loop V1 — bypass matrix.
+# OwnFramework Loop — bypass matrix.
 export OFLOOP_BLOCKED_SSH_TARGETS="production-host-1 production-host-2"
 export OFLOOP_RECOGNIZED_AND_BLOCKED_EXECUTABLES="hermes codex"
 export OFLOOP_HIGH_RISK_EXECUTABLES="hermes codex"

@@ -1,4 +1,4 @@
-"""Command-line interface for OwnFramework Loop V2.
+"""Command-line interface for OwnFramework Loop.
 
 Thin wrapper around the Python library. Used by skills, agents, hooks, tests,
 and installers. Stable, JSON-friendly output.

@@ -1,0 +1,19 @@
+# Gitleaks allowlist for the ownframework-loop repository.
+#
+# The two findings under tests/ are intentional synthetic test fixtures
+# used to verify the secret scanner works. They contain no live credentials
+# or private-key material. They are part of test_trust_secrets_isolation.sh
+# and test_approval_pty_e2e.sh respectively, and are the negative-test
+# inputs that the secret scanner is designed to catch.
+title = "ownframework-loop gitleaks config"
+
+[allowlist]
+description = "Synthetic test fixtures used to verify the secret scanner works"
+paths = [
+    '''tests/unit/test_trust_secrets_isolation\.sh$''',
+    '''tests/unit/test_approval_pty_e2e\.sh$''',
+]
+regexes = [
+    '''WRONGTOKENXXX''',
+    '''MIIBOgIBAAJBAKj34GkxFhD90vcNLYLInFEX6Ppy1tPf9Cnzj4p4WGeKLs1Pt8Qu''',  # synthetic test PEM prefix
+]

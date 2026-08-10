@@ -1,6 +1,6 @@
 # State Machine
 
-OwnFramework Loop V2 uses exactly **nine** states. Any state transition
+OwnFramework Loop uses exactly **nine** states. Any state transition
 not listed in the allowed map is rejected by `lib/ownframework_loop/transitions.py`.
 
 ## States

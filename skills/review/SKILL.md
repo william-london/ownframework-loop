@@ -1,6 +1,6 @@
 ---
 name: review
-description: OwnFramework Loop V2 — review pass. One invocation reviews and proves one exact candidate SHA. Validates APPROVAL.json and the build receipt, creates a detached reviewer worktree at the candidate SHA, invokes a fresh `of-reviewer` agent (broad inspection tools), collects a semantic assessment, then calls the deterministic review finalizer. Safe to invoke under `/loop`.
+description: OwnFramework Loop — review pass. One invocation reviews and proves one exact candidate SHA. Validates APPROVAL.json and the build receipt, creates a detached reviewer worktree at the candidate SHA, invokes a fresh `of-reviewer` agent (broad inspection tools), collects a semantic assessment, then calls the deterministic review finalizer. Safe to invoke under `/loop`.
 user-invocable: true
 ---
 

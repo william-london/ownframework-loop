@@ -1,10 +1,12 @@
 """OwnFramework Loop release-gate runtime with bounded ownership.
 
 The canonical root is derived from this file's location, not hardcoded. The
-expected baseline branch is configurable via OFLOOP_RELEASE_GATE_EXPECTED_BRANCH
-(default: ``main``); the gate refuses only when the source tree is dirty or
-has remotes — actual branch identity is the operator's call, not a hardcoded
-universal.
+expected release branch defaults to ``master`` and may be overridden via the
+OFLOOP_RELEASE_GATE_EXPECTED_BRANCH environment variable. The gate fails
+closed on a dirty source tree or a release branch other than the expected one;
+presence of normal ``origin`` remotes is expected for public-source clones and
+does not, on its own, fail the gate. Actual branch identity remains the
+operator's call, not a hardcoded universal.
 """
 from __future__ import annotations
 
@@ -50,10 +52,12 @@ def _preflight(root: Path) -> tuple[bool, str, dict[str, str]]:
     branch = _git(root, "branch", "--show-current")
     remotes = _git(root, "remote").splitlines()
     dirty = _git(root, "status", "--porcelain")
-    # Branch identity is operator/packet-configurable (default `main`). The
-    # gate refuses only on dirty tree or remote presence — both universal.
-    expected_branch = os.environ.get("OFLOOP_RELEASE_GATE_EXPECTED_BRANCH", "main")
-    if branch != expected_branch or remotes or dirty:
+    # Release-branch identity is operator/packet-configurable; the project default
+    # is `master`. The gate fails only on (a) wrong release branch or (b) a
+    # dirty source tree. Remote presence (e.g. a normal `origin`) is expected
+    # for any public-source clone and does not, on its own, fail the gate.
+    expected_branch = os.environ.get("OFLOOP_RELEASE_GATE_EXPECTED_BRANCH", "master")
+    if branch != expected_branch or dirty:
         return False, "PLUGIN_GATE_REPOSITORY_IDENTITY=FAIL", {"branch": branch, "expected_branch": expected_branch, "remotes": str(len(remotes)), "dirty": dirty}
     try:
         load = os.getloadavg()
@@ -63,7 +67,7 @@ def _preflight(root: Path) -> tuple[bool, str, dict[str, str]]:
     free = shutil.disk_usage(str(root)).free
     if free < 1024**3 or load[0] > max(8.0, cpu * 4.0):
         return False, "OFLOOP_RESOURCE_PRESSURE", {"cpu": str(cpu), "load1": f"{load[0]:.2f}", "disk_free": str(free)}
-    return True, "", {"branch": branch, "expected_branch": expected_branch, "remotes": "0", "dirty": "", "cpu": str(cpu), "load1": f"{load[0]:.2f}", "load5": f"{load[1]:.2f}", "load15": f"{load[2]:.2f}", "disk_free": str(free)}
+    return True, "", {"branch": branch, "expected_branch": expected_branch, "remotes": str(len(remotes)), "dirty": "", "cpu": str(cpu), "load1": f"{load[0]:.2f}", "load5": f"{load[1]:.2f}", "load15": f"{load[2]:.2f}", "disk_free": str(free)}
 
 
 def _emit(lines: list[str], text: str) -> None:
@@ -138,11 +142,11 @@ def main() -> int:
 
     old = {sig: signal.signal(sig, stop) for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)}
     try:
-        _emit(output, f"=== OwnFramework Loop V2 release gate {stamp} ===")
+        _emit(output, f"=== OwnFramework Loop release gate {stamp} ===")
         _emit(output, f"SOURCE_HEAD={head}")
         _emit(output, f"SOURCE_BRANCH={branch}")
         _emit(output, f"SOURCE_BRANCH_EXPECTED={facts.get('expected_branch', 'unknown')}")
-        _emit(output, "SOURCE_REMOTES=0")
+        _emit(output, f"SOURCE_REMOTES={facts.get('remotes', '0')}")
         _emit(output, "MAX_RELEASE_GATE_INSTANCES=1")
         _emit(output, f"MAC_LOAD_BEFORE={facts.get('load1', 'unknown')}")
         if not ok:
