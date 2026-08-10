@@ -13,6 +13,7 @@ tests/unit/test_lifecycle.sh
 # Integration tests
 tests/integration/test_v032_bytecode_boundary.sh
 tests/integration/test_release_gate_preflight.sh
+tests/integration/test_version_truth.sh
 tests/integration/test_v033_installed_discovery.sh
 tests/integration/test_v034_hook_bytecode.sh
 tests/integration/test_event_chain_concurrency_e2e.sh

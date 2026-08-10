@@ -1,19 +1,42 @@
-# Gitleaks allowlist for the ownframework-loop repository.
+# Gitleaks configuration for the ownframework-loop repository.
 #
-# The two findings under tests/ are intentional synthetic test fixtures
-# used to verify the secret scanner works. They contain no live credentials
-# or private-key material. They are part of test_trust_secrets_isolation.sh
-# and test_approval_pty_e2e.sh respectively, and are the negative-test
-# inputs that the secret scanner is designed to catch.
+# Inherit Gitleaks' default detection rules and narrowly allowlist only
+# the two intentional synthetic test fixtures that the secret scanner
+# is meant to catch. Whole test files are NOT exempt -- each allowlist
+# is scoped to a single regex on a single path with AND semantics so
+# an unrelated secret in the same file is still detected.
+
 title = "ownframework-loop gitleaks config"
 
-[allowlist]
-description = "Synthetic test fixtures used to verify the secret scanner works"
+[extend]
+useDefault = true
+
+# Synthetic approval-token fixture used to verify the scanner catches
+# approval-token mismatches. The literal synthetic token WRONGTOKENXXX
+# only appears in tests/unit/test_approval_pty_e2e.sh as a negative
+# test input, and the WRONG_RESULT variable name on that same line
+# captures the result of the approval attempt for assertion.
+[[allowlists]]
+description = "Synthetic approval-token fixture (WRONGTOKENXXX + WRONG_RESULT line)"
+condition = "AND"
+regexTarget = "line"
 paths = [
-    '''tests/unit/test_trust_secrets_isolation\.sh$''',
-    '''tests/unit/test_approval_pty_e2e\.sh$''',
+  '''tests/unit/test_approval_pty_e2e\.sh$''',
 ]
 regexes = [
-    '''WRONGTOKENXXX''',
-    '''MIIBOgIBAAJBAKj34GkxFhD90vcNLYLInFEX6Ppy1tPf9Cnzj4p4WGeKLs1Pt8Qu''',  # synthetic test PEM prefix
+  '''WRONGTOKENXXX''',
+]
+
+# Synthetic PEM fixture used to verify the scanner catches private
+# keys. The exact prefix below is a known non-live test vector that
+# appears only in tests/unit/test_trust_secrets_isolation.sh.
+[[allowlists]]
+description = "Synthetic PEM fixture"
+condition = "AND"
+regexTarget = "line"
+paths = [
+  '''tests/unit/test_trust_secrets_isolation\.sh$''',
+]
+regexes = [
+  '''MIIBOgIBAAJBAKj34GkxFhD90vcNLYLInFEX6Ppy1tPf9Cnzj4p4WGeKLs1Pt8Qu''',
 ]

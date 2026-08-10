@@ -8,8 +8,8 @@ against arbitrary real-world inputs.
 
 ## Supported release posture
 
-- The currently supported release line is **0.3.7**.
-- Earlier release lines (0.2.x, 0.3.0–0.3.6) are preserved in the
+- The currently supported release line is **0.3.8**.
+- Earlier release lines (0.2.x, 0.3.0–0.3.7) are preserved in the
   git history but are no longer receiving fixes.
 
 ## Reporting a vulnerability

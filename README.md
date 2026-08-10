@@ -70,17 +70,31 @@ This repository is self-contained: a fresh `git clone` of
 is no private sibling repository, no parent marketplace catalog, and
 no William-specific filesystem assumption.
 
-### A. Direct local trial (one command, no install)
+### A. Direct local trial (`--plugin-dir`, session-local)
 
-Use Anthropic's `--plugin-dir` to point Claude Code at the cloned
-repository. The skills, agents, and hooks are loaded for the session
-only — nothing is written to `~/.claude/`.
+Use Anthropic's `--plugin-dir` flag to point Claude Code at the
+cloned ownframework-loop repository. The skills, agents, and hooks
+are loaded for the duration of that Claude session only — nothing is
+written to `~/.claude/`.
+
+**`--plugin-dir` is session-local.** A subsequent plain `claude`
+invocation without `--plugin-dir` will NOT have the loop loaded,
+even from the same shell. Either keep the same Claude session open
+or re-launch with `--plugin-dir` on every invocation.
 
 ```bash
-git clone https://github.com/william-london/ownframework-loop.git
-cd ownframework-loop
-claude --plugin-dir . --plugin-dir /path/to/your-target-repository
+# 1. Clone ownframework-loop somewhere stable
+git clone https://github.com/william-london/ownframework-loop.git /path/to/ownframework-loop
+
+# 2. cd into the TARGET repository you want the loop to operate on
+cd /path/to/your-target-repository
+
+# 3. launch claude with ownframework-loop as the ONLY plugin directory
+claude --plugin-dir /path/to/ownframework-loop
 ```
+
+Do not pass the target repository as a `--plugin-dir`. The target
+repository is the working directory, not a plugin.
 
 Inside the Claude Code session:
 
@@ -144,13 +158,23 @@ you used.
 
 ### D. Verifying an install
 
-```bash
-bash validate.sh                    # 14/14 PASS expected
-bash release_gate.sh                # PASS expected
-```
-
 Both scripts run from the repository root and require no external
 services.
+
+```bash
+bash validate.sh
+bash release_gate.sh
+```
+
+Stable expected markers (the exact strings the canonical scripts
+emit on success):
+
+* `OF_LOOP_FAILED=0`
+* `OF_LOOP_RELEASE_GATE_RESULT=PASS`
+* `RELEASE_GATE=PASS`
+
+The total test count is intentionally not pinned here; it changes as
+new tests are added.
 
 ---
 
