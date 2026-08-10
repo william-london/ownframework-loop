@@ -144,17 +144,45 @@ REMOVE_MARKETPLACE=1 bash uninstall.sh   # also removes the marketplace
 
 ### C. Running on a target repository
 
-After either A or B, change into the repository you want the loop
-to operate on and start Claude Code:
+The correct way to launch Claude on a target repository depends
+entirely on which install path you used in A or B. The two cases
+behave very differently.
+
+#### Direct trial (Path A) — `--plugin-dir` is session-local
+
+You are already inside the target repository. You launched Claude
+with `claude --plugin-dir /path/to/ownframework-loop`. That Claude
+session has the loop loaded.
+
+**Stay in that Claude session.** If you exit Claude and start a new
+plain `claude` invocation, the loop will NOT be loaded. A new session
+must again be launched with `--plugin-dir`:
+
+```bash
+cd /path/to/your-target-repository
+claude --plugin-dir /path/to/ownframework-loop
+```
+
+The plugin is NOT registered with the manager in Path A; only the
+specific Claude process you started with `--plugin-dir` saw it.
+
+#### Persistent install (Path B) — plugin available normally
+
+You ran `bash install.sh` from a clone of this repository, which
+registered the `ownframework` marketplace and installed
+`of-loop@ownframework` via the official plugin manager. The plugin
+is now part of your Claude environment.
+
+Open Claude in any target repository with a plain launch:
 
 ```bash
 cd /path/to/your-target-repository
 claude
 ```
 
-Then the loop skills (`/of-loop:spec`, `/of-loop:build`,
-`/of-loop:review`) are available regardless of which install path
-you used.
+The loop skills (`/of-loop:spec`, `/of-loop:build`, `/of-loop:review`)
+are available because the plugin is registered globally for your
+user account, not because of any flag on this particular invocation.
 
 ### D. Verifying an install
 
