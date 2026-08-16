@@ -9,10 +9,10 @@ The approval artifact is *separate* from the packet bytes it authenticates:
   baseline SHA that bind the approval to one specific execution context.
 - The CLI refuses to construct APPROVAL.json without a genuine terminal
   interaction (a typed confirmation token derived from the packet hash).
-- The model cannot approve its own packet: the confirmation token is
-  computed deterministically from the packet SHA plus a session-salted
-  prefix that the operator must echo back. Echoing the token requires a
-  human at a TTY (the CLI block-detects non-interactive stdin and refuses).
+- Interactive TTY confirmation is an operator-intent mechanism. It is not,
+  by itself, an OS-level identity boundary against arbitrary code running as
+  the same user. Hardened agent adapters must separately block agent invocation
+  of the approval command while preserving the human-operated terminal path.
 
 The build and review finalizers always re-validate APPROVAL.json against
 the current WORK_PACKET.md before any state transition. A single byte
@@ -34,11 +34,10 @@ from . import git_checks, packet as packet_mod, util
 
 SCHEMA_VERSION = "ownframework-loop-approval/v1"
 
-# v0.3.5 (AUD2-P0-1): the only legitimate production approval path is a
-# genuine interactive TTY plus the typed confirmation token derived from
-# the packet SHA. There is no automation override, no operator marker,
-# no developer escape. This set is enforced by validate_approval_shape,
-# validate_approval_binding, and request_human_approval alike.
+# Approval artifacts are created only through the interactive TTY confirmation
+# path. The TTY check establishes an interactive operator surface; hardened host
+# adapters are responsible for preventing an agent tool call from invoking that
+# human-only command. There is no non-interactive core override.
 ALLOWED_APPROVAL_METHODS = {"tty_confirmation"}
 
 CONFIRMATION_PREFIX = "CONFIRM-OF-LOOP"
@@ -83,11 +82,9 @@ def derive_confirmation_token(packet_sha256: str) -> str:
 def _tty_device_path(fd: int) -> str | None:
     """Return the device path of `fd` if it is a TTY, else None.
 
-    Uses os.ttyname() which fails with OSError (ENOTTY) for pipes,
-    regular files, and ptys opened in unusual modes. The path is then
-    checked against the canonical /dev/tty* family so a model cannot
-    bypass the check by stubbing isatty() or by allocating a pty and
-    pretending it is a real terminal.
+    Uses os.ttyname() which fails with OSError (ENOTTY) for pipes and
+    regular files. The returned path is checked against supported interactive
+    terminal device families on macOS/BSD and Linux.
     """
     try:
         return os.ttyname(fd)
@@ -98,8 +95,8 @@ def _tty_device_path(fd: int) -> str | None:
 def _is_canonical_tty_device(path: str | None) -> bool:
     """Return True iff `path` resolves to a canonical /dev/tty* device.
 
-    Accepts only literal /dev/tty, /dev/ttysXXX, /dev/pty/X patterns.
-    Pseudo-ttys allocated inside a Python subprocess do not match.
+    Accepts literal /dev/tty, macOS/BSD /dev/ttysN, Linux /dev/ttyN,
+    and the standard Linux pseudo-terminal family /dev/pts/N.
     """
     if not path:
         return False
@@ -110,30 +107,24 @@ def _is_canonical_tty_device(path: str | None) -> bool:
     # BSD/macOS pattern: /dev/ttysNNN
     if re.fullmatch(r"/dev/ttys\d{1,3}", s):
         return True
-    # Linux pattern: /dev/ttyNN (rare)
+    # Linux virtual console pattern: /dev/ttyNN.
     if re.fullmatch(r"/dev/tty\d{1,3}", s):
+        return True
+    # Linux interactive pseudo-terminal pattern used by SSH, terminal
+    # emulators, containers, and GitHub-hosted runner PTY tests.
+    if re.fullmatch(r"/dev/pts/\d+", s):
         return True
     return False
 
 
 def _is_interactive_tty() -> bool:
-    """Return True iff both stdin and stdout are genuine canonical TTYs.
+    """Return True iff stdin and stdout are supported interactive TTY devices.
 
-    v0.3.5 (AUD2-P0-1): three independent checks must all pass.
-      1. fd-level isatty() (rejects file/pipe redirects)
-      2. os.ttyname() returns a non-None device path (rejects
-         pseudo-ttys whose name is a synthetic /dev/pty/X allocated
-         inside a child Python subprocess)
-      3. the device path resolves to a canonical /dev/tty* device
-
-    A model cannot bypass this by stubbing isatty() — the harness
-    calling Python controls the actual fds. A model cannot bypass this
-    by spawning a subprocess with pty.openpty() because the resulting
-    slave path is a synthetic /dev/ttysXXXXXXXX pattern that does not
-    match any canonical /dev/tty* path.
-
-    This function is the sole authority on whether approval is
-    allowed. request_human_approval calls it unconditionally.
+    This rejects pipes/files and accepts normal macOS/BSD and Linux terminal
+    device families. It establishes the interactive approval surface but does
+    not claim that an arbitrary same-user process cannot allocate a PTY. Host
+    adapter hardening must separately prevent agent invocation of the human-only
+    approval command.
     """
     try:
         in_ok = sys.stdin.isatty()
@@ -309,12 +300,11 @@ def request_human_approval(
 ) -> dict[str, Any]:
     """Construct and atomically write APPROVAL.json after TTY confirmation.
 
-    v0.3.5 (AUD2-P0-1): there is no automation override. The function
-    unconditionally requires:
-      1. A genuine interactive TTY on both stdin and stdout
-         (see _is_interactive_tty for the three-check proof).
-      2. A typed confirmation token that matches the deterministic
-         derivation from the packet SHA (see _read_tty_confirmation).
+    There is no non-interactive core override. The function requires:
+      1. A supported interactive TTY on both stdin and stdout.
+      2. A typed confirmation token matching the deterministic derivation from
+         the packet SHA. Hardened adapters additionally block agent invocation
+         of this human-operated command.
 
     Either check failing raises RuntimeError and writes no file. The
     approval_method recorded is always "tty_confirmation".
@@ -408,10 +398,10 @@ def approval_required_methods_match(approval: dict[str, Any]) -> bool:
 def model_can_self_approve() -> bool:
     """Always returns False.
 
-    The model cannot approve its own packet under any input. Approval
-    requires a real TTY interaction. This function exists so the
-    README and tests can call it as a positive assertion of the
-    invariant.
+    This is the protocol declaration exposed to tests and docs: adapters
+    must not grant model approval authority. The core requires interactive TTY
+    confirmation; hardened adapters additionally block agent invocation of the
+    approval command.
     """
     return False
 

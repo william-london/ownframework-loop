@@ -1,12 +1,15 @@
 #!/usr/bin/env bash
-# v0.3.8: Release-gate preflight regression test.
+# v0.4.0: Release-gate preflight regression test.
 #
-# Proves the five contracts required by the post-public-release corrective pass:
+# Proves the five contracts required by the public-source release gate:
 #   1. clean `master` checkout with one normal `origin` remote passes preflight;
 #   2. dirty tree fails;
 #   3. incorrect branch fails;
 #   4. explicit expected-branch override behaves as documented;
 #   5. remote presence alone does not fail.
+#
+# Default-behavior cases deliberately clear OFLOOP_RELEASE_GATE_EXPECTED_BRANCH
+# so an outer release-gate invocation cannot contaminate the regression test.
 
 set -euo pipefail
 HERE="${OFLOOP_TEST_HERE:-$(cd "$(dirname "$0")" && pwd)}"
@@ -34,16 +37,17 @@ REMOTE="$WORK/remote.git"
 git init --bare -q "$REMOTE"
 git -C "$SRC" remote add origin "$REMOTE"
 git -C "$SRC" add -A
-git -C "$SRC" commit -q -m 'init' 
+git -C "$SRC" commit -q -m 'init'
 
-# Helper: invoke _preflight from $SRC using its OWN runtime module
+# Helper: invoke _preflight from $SRC using its OWN runtime module.
+# Clear any outer branch override because these cases prove the default contract.
 run_preflight() {
-    (cd "$SRC" && python3 -c "
+    (cd "$SRC" && env -u OFLOOP_RELEASE_GATE_EXPECTED_BRANCH python3 -c "
 import sys
 sys.path.insert(0, 'lib')
 from ownframework_loop.release_gate_runtime import _preflight
 from pathlib import Path
-ok, reason, facts = _preflight(Path('.').resolve())
+ok, reason, facts = _preflight(Path('.').resolve(), check_resource_pressure=False)
 print(repr((ok, reason, facts.get('remotes',''), facts.get('branch',''), facts.get('expected_branch',''), bool(facts.get('dirty')))))
 ")
 }
@@ -83,7 +87,7 @@ import sys
 sys.path.insert(0, 'lib')
 from ownframework_loop.release_gate_runtime import _preflight
 from pathlib import Path
-ok, reason, facts = _preflight(Path('.').resolve())
+ok, reason, facts = _preflight(Path('.').resolve(), check_resource_pressure=False)
 print(repr((ok, reason, facts.get('remotes',''), facts.get('branch',''), facts.get('expected_branch',''))))
 ")"
 git -C "$SRC" checkout -q master
@@ -93,8 +97,7 @@ else
     fail "Test 4: expected (True, '', '1', 'not-master', 'not-master'), got $OUT"
 fi
 
-# Test 5: remote presence alone does not fail (proven by Test 1 which passed with remotes=1)
-# Add an additional remote to be explicit
+# Test 5: remote presence alone does not fail.
 git -C "$SRC" remote add upstream "$REMOTE"
 OUT="$(run_preflight)"
 git -C "$SRC" remote remove upstream

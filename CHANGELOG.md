@@ -1,5 +1,39 @@
 # Changelog
 
+## 0.4.0 — Agent-Agnostic Core (2026-08-10)
+
+**Scope.** OwnFramework Loop is now structured as a deterministic, human-gated engineering protocol with agent-host adapters. Claude Code remains the stable reference adapter and preserves the public v0.3.8 command/install experience.
+
+**Agent-neutral protocol**
+
+- Added a public adapter contract and capability model separating deterministic core authority from host-specific agent UX.
+- Added portable Agent Skills under `.agents/skills/` for spec, build, review, and status.
+- Added deterministic `ofloop adapter list/show/doctor` inspection without provider API calls or credential ownership.
+- Added adapter conformance tests that enforce vendor-neutral core imports and preserve the stable Claude skill/plugin surface.
+
+**Claude Code compatibility**
+
+- Claude Code remains the stable/reference adapter with `of-loop@ownframework`, `/of-loop:spec`, `/of-loop:build`, `/of-loop:review`, custom agents, and native hooks.
+- The Claude Bash guard now explicitly blocks agent invocation of the human-only `ofloop spec approve` command during an active run.
+
+**Codex portability**
+
+- Added an experimental Codex adapter surface using the portable Agent Skills plus repository `AGENTS.md`.
+- Codex remains `hardened=false` and `live_verified=false` until a real Codex environment proves discovery and a disposable lifecycle. Static files alone are not treated as live support.
+
+**Cross-platform approval correction**
+
+- Interactive approval now recognizes standard Linux `/dev/pts/N` terminals in addition to macOS/BSD and Linux console TTY families.
+- Documentation now states the correct security boundary: TTY confirmation is the portable interactive operator mechanism, while hardened adapters separately block agent invocation of the approval command.
+
+**CI / contributor surface**
+
+- Added Linux + macOS GitHub Actions coverage across Python 3.12 and 3.13, adapter conformance, portability/doctor checks, and Gitleaks.
+- Added public adapter-development documentation so future host integrations can reuse the same core rather than fork the state machine.
+
+**Non-goals.** v0.4.0 does not add automatic cross-vendor agent spawning, an always-on orchestrator, provider credential storage, or loop-owned push/merge/deploy authority.
+
+
 ## 0.3.8 — First Public Release / Distribution & Release-Gate Hardening (2026-08-10)
 
 **Scope.** This is a packaging and distribution hardening pass over the

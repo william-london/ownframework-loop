@@ -18,6 +18,7 @@
 
 set -uo pipefail
 TESTS_DIR="$(cd "$(dirname "$0")" && pwd)"
+ROOT="$(cd "$TESTS_DIR/../.." && pwd)"
 . "$TESTS_DIR/../_helpers.sh"
 
 PASS=0
@@ -30,7 +31,6 @@ echo "Test 1: PROGRAM checkpoints — IDs extracted from dict records"
 echo "============================================================"
 PYTHONPATH="$LIB_DIR" python3 - <<'PY'
 import sys
-sys.path.insert(0, "/Users/mr.mrs.london/projects/plugins/ownframework-loop/lib")
 from ownframework_loop import state as state_mod
 import inspect
 src = inspect.getsource(state_mod.program_transition)
@@ -49,7 +49,6 @@ echo "Test 2: Monotonic terminal precedence"
 echo "============================================================"
 PYTHONPATH="$LIB_DIR" python3 - <<'PY'
 import sys
-sys.path.insert(0, "/Users/mr.mrs.london/projects/plugins/ownframework-loop/lib")
 from ownframework_loop import transitions
 # STOPPED is absorbing
 try:
@@ -105,7 +104,6 @@ echo "Test 3: Repair-round ceiling per packet (2/6/12/25)"
 echo "============================================================"
 PYTHONPATH="$LIB_DIR" python3 - <<'PY'
 import sys
-sys.path.insert(0, "/Users/mr.mrs.london/projects/plugins/ownframework-loop/lib")
 from ownframework_loop import limits
 # All four values should now be reachable as effective_cap
 for max_rounds in (2, 6, 12, 25):
@@ -132,7 +130,6 @@ echo "Test 4: Progress-sensitive continuation"
 echo "============================================================"
 PYTHONPATH="$LIB_DIR" python3 - <<'PY'
 import sys
-sys.path.insert(0, "/Users/mr.mrs.london/projects/plugins/ownframework-loop/lib")
 from ownframework_loop import limits
 # MAX_CONSECUTIVE_NO_PROGRESS_PASSES is a non-trivial fuse
 assert limits.MAX_CONSECUTIVE_NO_PROGRESS_PASSES >= 8, "no-progress fuse too small"
@@ -146,7 +143,6 @@ PY
 # Also assert the build_finalize comparison uses full SHA not 7-char prefix
 PYTHONPATH="$LIB_DIR" python3 - <<'PY'
 import sys
-sys.path.insert(0, "/Users/mr.mrs.london/projects/plugins/ownframework-loop/lib")
 import inspect
 from ownframework_loop import build_finalize
 src = inspect.getsource(build_finalize)
@@ -161,12 +157,12 @@ echo ""
 echo "============================================================"
 echo "Test 5: Substantial builder passes allowed"
 echo "============================================================"
-if grep -q "F-5-01" /Users/mr.mrs.london/projects/plugins/ownframework-loop/agents/of-builder.md; then
+if grep -q "F-5-01" $ROOT/agents/of-builder.md; then
   pass "of-builder.md notes substantial-pass allowance"
 else
   fail "of-builder.md does not mention F-5-01 substantial-pass allowance"
 fi
-if grep -q "F-5-01" /Users/mr.mrs.london/projects/plugins/ownframework-loop/skills/build/SKILL.md; then
+if grep -q "F-5-01" $ROOT/skills/build/SKILL.md; then
   pass "skills/build/SKILL.md notes substantial-pass allowance"
 else
   fail "skills/build/SKILL.md does not mention F-5-01 substantial-pass allowance"
@@ -196,8 +192,8 @@ echo "============================================================"
 for t in tests/integration/test_program_mode.sh \
          tests/integration/test_repair_round_budget.sh \
          tests/integration/test_plumbing_autonomy.sh; do
-  if [[ -f "/Users/mr.mrs.london/projects/plugins/ownframework-loop/$t" ]]; then
-    if grep -qxF "$t" /Users/mr.mrs.london/projects/plugins/ownframework-loop/tests/canonical.txt; then
+  if [[ -f "$ROOT/$t" ]]; then
+    if grep -qxF "$t" $ROOT/tests/canonical.txt; then
       pass "$t is in canonical.txt"
     else
       fail "$t exists but is NOT in canonical.txt"

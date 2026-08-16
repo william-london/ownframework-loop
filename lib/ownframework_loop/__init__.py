@@ -1,6 +1,4 @@
-"""OwnFramework Loop — Python core library.
+"""OwnFramework Loop — deterministic human-gated engineering protocol."""
 
-Deterministic, stdlib-only building blocks for the OwnFramework Loop plugin.
-"""
-
-__version__ = "0.3.8"
+__version__ = "0.4.0"
+__all__ = ["__version__"]

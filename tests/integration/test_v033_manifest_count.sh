@@ -4,7 +4,7 @@
 # PAYLOAD_MANIFEST_HEADER_LINES, PAYLOAD_MANIFEST_FILE_ENTRIES,
 # INSTALLED_ACTIVE_FILES and asserts file_entries == active_files.
 set -uo pipefail
-ROOT="/Users/mr.mrs.london/projects/plugins/ownframework-loop"
+ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 TEST_ROOT="/tmp/v033_count_$$"
 mkdir -p "$TEST_ROOT"
 trap 'rm -rf "$TEST_ROOT"' EXIT

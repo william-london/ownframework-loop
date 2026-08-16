@@ -8,7 +8,7 @@ export ROOT
 python3 -B <<'PYEOF'
 import json, os, re, sys
 ROOT = os.environ["ROOT"]
-EXPECTED = "0.3.8"
+EXPECTED = "0.4.0"
 failures = []
 
 def check(label, ok, detail=""):

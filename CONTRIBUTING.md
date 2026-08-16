@@ -1,8 +1,8 @@
 # Contributing to OwnFramework Loop
 
-Thanks for your interest in OwnFramework Loop. This project is a
-small, focused workflow for Claude Code, and the most useful
-contributions are tightly scoped.
+Thanks for your interest in OwnFramework Loop. This project is a focused,
+human-gated engineering protocol for AI coding agents, and the most useful
+contributions are tightly scoped and evidence-backed.
 
 ## Supported contribution flow
 
@@ -19,12 +19,13 @@ contributions are tightly scoped.
    `uninstall.sh`, `rollback.sh`, `validate.sh`, `release_gate.sh`,
    and the helpers under `bin/`, `lib/`, `scripts/`, and `hooks/` are
    the canonical local surfaces. Prefer them over ad-hoc shell.
-5. **Keep the public surface coherent.** Public-surface files are
+5. **Keep the public surface coherent.** Public-surface files include
    `README.md`, `AGENTS.md`, `CONTRIBUTING.md`, `SECURITY.md`,
-   `CHANGELOG.md`, `LICENSE`, `THIRD_PARTY_NOTICES.md`, and
-   `.claude-plugin/plugin.json`. If your change touches any of these,
-   re-run the public-leak scan and confirm no private references
-   have been introduced.
+   `CHANGELOG.md`, `LICENSE`, `THIRD_PARTY_NOTICES.md`, adapter and
+   architecture docs, and the agent-host metadata under `.claude-plugin/`
+   and `.agents/skills/`. If your change touches these, re-run the
+   public-leak/checkout-portability checks and confirm no private or
+   developer-machine references have been introduced.
 
 ## Tests
 
@@ -32,6 +33,7 @@ contributions are tightly scoped.
 - `./release_gate.sh` is the canonical release-gate lane.
 - The focused test suite under `tests/` covers each boundary.
 - `git diff --check` must report no whitespace or conflict markers.
+- Adapter work should run `tests/run_adapter_conformance.sh` and the relevant adapter portability/doctor checks.
 
 If any of those fail, the change is not ready.
 
@@ -64,6 +66,17 @@ documentation, and test contributions.
   repositories outside this one.
 - Autonomous-software-company framing or guarantees of correctness,
   safety, or coverage.
-- Heavyweight external dependencies. OwnFramework Loop currently
-  uses only the Python standard library and the public Claude Code
-  plugin API.
+- Heavyweight provider SDK dependencies in the deterministic core.
+  The core remains Python-standard-library based; agent-host adapters
+  use their host's supported skill/plugin/instruction surfaces and
+  must not create a second approval/state/SHA/verdict protocol.
+
+## Agent adapters
+
+New agent-host adapters must reuse the deterministic core rather than create a
+parallel approval/state/SHA/verdict path. Read
+[`docs/ADAPTER_DEVELOPMENT.md`](docs/ADAPTER_DEVELOPMENT.md) and
+[`docs/architecture/ADAPTER_CONTRACT.md`](docs/architecture/ADAPTER_CONTRACT.md)
+before opening a PR. New adapters begin experimental and should include a
+capability declaration, deterministic conformance evidence, and live-host proof
+appropriate to the support claim.

@@ -59,6 +59,9 @@ FORBIDDEN_PATTERNS: list[tuple[re.Pattern[str], str, str]] = [
     (re.compile(r"\bgit\s+remote\s+add\b"), "remote creation is prohibited", "subcommand"),
     (re.compile(r"\bgit\s+remote\s+set-url\b"), "remote modification is prohibited", "subcommand"),
     (re.compile(r"\bgit\s+remote\s+remove\b"), "remote deletion is prohibited", "subcommand"),
+    # Human approval is intentionally outside the Claude agent tool surface.
+    (re.compile(r"\b(?:\S*/)?ofloop\s+spec\s+approve\b"), "agent invocation of human approval is prohibited", "subcommand"),
+    (re.compile(r"\bownframework_loop(?:\.cli)?\b.*\bspec\s+approve\b"), "agent invocation of human approval is prohibited", "subcommand"),
     # system / container mutations on production
     (re.compile(r"\bsystemctl\s+(start|stop|restart|reload)\b"), "systemctl is prohibited", "subcommand"),
     (re.compile(r"\bdocker\s+compose\s+(up|down|restart)\b"), "production docker mutation is prohibited", "subcommand"),

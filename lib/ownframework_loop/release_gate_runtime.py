@@ -42,7 +42,7 @@ def _git(root: Path, *args: str) -> str:
     return subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True, check=False, timeout=10).stdout.strip()
 
 
-def _preflight(root: Path) -> tuple[bool, str, dict[str, str]]:
+def _preflight(root: Path, *, check_resource_pressure: bool = True) -> tuple[bool, str, dict[str, str]]:
     real = root.resolve(strict=False)
     expected = _canonical_root()
     if real != expected:
@@ -59,15 +59,17 @@ def _preflight(root: Path) -> tuple[bool, str, dict[str, str]]:
     expected_branch = os.environ.get("OFLOOP_RELEASE_GATE_EXPECTED_BRANCH", "master")
     if branch != expected_branch or dirty:
         return False, "PLUGIN_GATE_REPOSITORY_IDENTITY=FAIL", {"branch": branch, "expected_branch": expected_branch, "remotes": str(len(remotes)), "dirty": dirty}
-    try:
-        load = os.getloadavg()
-    except OSError:
-        load = (0.0, 0.0, 0.0)
-    cpu = os.cpu_count() or 1
-    free = shutil.disk_usage(str(root)).free
-    if free < 1024**3 or load[0] > max(8.0, cpu * 4.0):
-        return False, "OFLOOP_RESOURCE_PRESSURE", {"cpu": str(cpu), "load1": f"{load[0]:.2f}", "disk_free": str(free)}
-    return True, "", {"branch": branch, "expected_branch": expected_branch, "remotes": str(len(remotes)), "dirty": "", "cpu": str(cpu), "load1": f"{load[0]:.2f}", "load5": f"{load[1]:.2f}", "load15": f"{load[2]:.2f}", "disk_free": str(free)}
+    if check_resource_pressure:
+        try:
+            load = os.getloadavg()
+        except OSError:
+            load = (0.0, 0.0, 0.0)
+        cpu = os.cpu_count() or 1
+        free = shutil.disk_usage(str(root)).free
+        if free < 1024**3 or load[0] > max(8.0, cpu * 4.0):
+            return False, "OFLOOP_RESOURCE_PRESSURE", {"cpu": str(cpu), "load1": f"{load[0]:.2f}", "disk_free": str(free)}
+        return True, "", {"branch": branch, "expected_branch": expected_branch, "remotes": str(len(remotes)), "dirty": "", "cpu": str(cpu), "load1": f"{load[0]:.2f}", "load5": f"{load[1]:.2f}", "load15": f"{load[2]:.2f}", "disk_free": str(free)}
+    return True, "", {"branch": branch, "expected_branch": expected_branch, "remotes": str(len(remotes)), "dirty": ""}
 
 
 def _emit(lines: list[str], text: str) -> None:

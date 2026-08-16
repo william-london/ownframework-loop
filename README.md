@@ -1,118 +1,58 @@
 # OwnFramework Loop
 
-OwnFramework Loop is a human-gated engineering workflow for Claude Code
-that turns an approved work packet into bounded build/review cycles with
-exact-SHA verification and manual promotion.
+> Human-gated engineering loops for AI coding agents.
 
-It is built for engineering work where the cost of an unauthorized
-change exceeds the cost of one extra review. Every state transition is
-serialized, every review evaluates the exact candidate SHA, and the
-human — not the loop — merges, deploys, and promotes.
+OwnFramework Loop binds engineering work to a human-approved work packet, lets a coding agent build inside bounded scope, reviews the exact resulting Git commit, limits repair cycles, and leaves merge/deployment authority with the human.
 
----
+Claude Code remains the **stable reference adapter**. v0.4.0 introduces an agent-neutral core/adapter contract and a portable Agent Skills layer so other coding agents can participate without creating a second state machine.
 
 ## Why it exists
 
-Long engineering missions tend to drift in three ways:
+Coding agents are useful at implementation, but long engineering missions still need an explicit answer to a different set of questions:
 
-1. **Scope drift** — an ambitious prompt becomes an unbounded task.
-2. **Trust drift** — a reviewer approves the *idea* of a change rather
-   than the exact bytes that will land.
-3. **Authority drift** — automation starts merging, deploying, or
-   pushing on its own.
+- What exact work did the human approve?
+- What scope and risk budget apply?
+- What immutable candidate did the builder produce?
+- Did the reviewer inspect that exact candidate SHA?
+- How many repair rounds are allowed?
+- Is the result merely reviewed, or actually promoted?
 
-OwnFramework Loop binds each of those down:
+OwnFramework Loop makes those boundaries explicit and machine-readable.
 
-- The mission becomes an explicit, human-approved work packet.
-- The reviewer evaluates the exact candidate commit SHA, not a
-  re-described intent.
-- The loop never pushes, merges, deploys, or talks to a queue server.
-
-If you want autonomous-software-company output, this is not that
-project. If you want a disciplined, human-controlled workflow that
-makes one approved engineering unit land safely per cycle, read on.
-
----
-
-## How it works
-
-```
-        mission
-          |
-          v
-   spec / work packet
-          |
-          v
-   explicit human approval
-          |
-          v
-        builder
-          |
-          v
-   exact-SHA reviewer
-          |
-          +--> APPROVED    --> human merges / deploys
-          |
-          +--> CHANGES_REQUESTED --> repair loop --> builder
-          |
-          +--> BLOCKED / STOPPED  --> human decides
+```text
+mission
+  ↓
+work packet
+  ↓
+human approval + packet hash binding
+  ↓
+bounded builder
+  ↓
+exact candidate Git SHA
+  ↓
+exact-SHA reviewer
+  ↓
+APPROVED / CHANGES_REQUESTED / BLOCKED / STOPPED
+  ↓
+human promotion outside the loop
 ```
 
-Two terminal tabs. Three commands. No daemon. No queue server. The
-human is always the merge and deploy authority.
+The loop never treats an `APPROVED` verdict as permission to push, merge, deploy, publish, or perform another external action.
 
----
+## Agent support
 
-## Quickstart
+| Agent host | Status | What is supported |
+|---|---|---|
+| **Claude Code** | **Stable / reference** | Managed plugin, `/of-loop:spec`, `/of-loop:build`, `/of-loop:review`, custom agents, native hooks, direct `--plugin-dir` evaluation |
+| **Codex** | **Experimental** | Opt-in adapter installer, portable Agent Skills, repository `AGENTS.md`, and the same deterministic core; authenticated live lifecycle proof is still pending |
 
-This repository is self-contained: a fresh `git clone` of
-`william-london/ownframework-loop` is the entire deliverable. There
-is no private sibling repository, no parent marketplace catalog, and
-no William-specific filesystem assumption.
+Agent-agnostic does **not** mean every host has identical enforcement. See [`docs/architecture/CAPABILITY_MATRIX.md`](docs/architecture/CAPABILITY_MATRIX.md) for the distinction between protocol compatibility and hardened host integration.
 
-### A. Direct local trial (`--plugin-dir`, session-local)
+## Claude Code quickstart
 
-Use Anthropic's `--plugin-dir` flag to point Claude Code at the
-cloned ownframework-loop repository. The skills, agents, and hooks
-are loaded for the duration of that Claude session only — nothing is
-written to `~/.claude/`.
+Claude Code is still the simplest and most complete way to use OwnFramework Loop.
 
-**`--plugin-dir` is session-local.** A subsequent plain `claude`
-invocation without `--plugin-dir` will NOT have the loop loaded,
-even from the same shell. Either keep the same Claude session open
-or re-launch with `--plugin-dir` on every invocation.
-
-```bash
-# 1. Clone ownframework-loop somewhere stable
-git clone https://github.com/william-london/ownframework-loop.git /path/to/ownframework-loop
-
-# 2. cd into the TARGET repository you want the loop to operate on
-cd /path/to/your-target-repository
-
-# 3. launch claude with ownframework-loop as the ONLY plugin directory
-claude --plugin-dir /path/to/ownframework-loop
-```
-
-Do not pass the target repository as a `--plugin-dir`. The target
-repository is the working directory, not a plugin.
-
-Inside the Claude Code session:
-
-```
-/of-loop:spec "add a per-IP rate limit to /api/sync"
-/of-loop:spec approve <run-id>
-/loop /of-loop:build <run-id>
-/loop /of-loop:review <run-id>
-```
-
-This is the recommended path for first-time evaluation.
-
-### B. Persistent installation (managed marketplace)
-
-This repository ships a self-contained Claude Code marketplace at
-`.claude-plugin/marketplace.json`. `install.sh` registers the
-marketplace and installs the plugin through the official plugin
-manager.
+### Persistent install
 
 ```bash
 git clone https://github.com/william-london/ownframework-loop.git
@@ -120,223 +60,232 @@ cd ownframework-loop
 bash install.sh
 ```
 
-What `install.sh` does:
-
-1. Verifies the source is a clean git checkout on a tracked branch.
-2. Registers the `ownframework` marketplace pointing at the clone.
-3. Runs `claude plugin install of-loop@ownframework --scope user`.
-4. Captures a payload manifest at the installed cache root so
-   post-install tampering is detectable.
-
-After install:
+Verify:
 
 ```bash
-claude plugin list                  # shows of-loop@ownframework
-claude plugin marketplace list      # shows ownframework -> <clone path>
+claude plugin list
 ```
 
-To uninstall:
+You should see `of-loop@ownframework` version `0.4.0`.
 
-```bash
-bash uninstall.sh                   # removes the plugin only
-REMOVE_MARKETPLACE=1 bash uninstall.sh   # also removes the marketplace
-```
-
-### C. Running on a target repository
-
-The correct way to launch Claude on a target repository depends
-entirely on which install path you used in A or B. The two cases
-behave very differently.
-
-#### Direct trial (Path A) — `--plugin-dir` is session-local
-
-You are already inside the target repository. You launched Claude
-with `claude --plugin-dir /path/to/ownframework-loop`. That Claude
-session has the loop loaded.
-
-**Stay in that Claude session.** If you exit Claude and start a new
-plain `claude` invocation, the loop will NOT be loaded. A new session
-must again be launched with `--plugin-dir`:
-
-```bash
-cd /path/to/your-target-repository
-claude --plugin-dir /path/to/ownframework-loop
-```
-
-The plugin is NOT registered with the manager in Path A; only the
-specific Claude process you started with `--plugin-dir` saw it.
-
-#### Persistent install (Path B) — plugin available normally
-
-You ran `bash install.sh` from a clone of this repository, which
-registered the `ownframework` marketplace and installed
-`of-loop@ownframework` via the official plugin manager. The plugin
-is now part of your Claude environment.
-
-Open Claude in any target repository with a plain launch:
+Then open Claude in the repository you want to work on:
 
 ```bash
 cd /path/to/your-target-repository
 claude
 ```
 
-The loop skills (`/of-loop:spec`, `/of-loop:build`, `/of-loop:review`)
-are available because the plugin is registered globally for your
-user account, not because of any flag on this particular invocation.
+The stable Claude commands remain:
 
-### D. Verifying an install
+```text
+/of-loop:spec <mission>
+/of-loop:spec approve <run-id>
+/of-loop:build <run-id>
+/of-loop:review <run-id>
+```
 
-Both scripts run from the repository root and require no external
-services.
+`/of-loop:spec approve` only surfaces the operator command; the model does not perform approval. The human executes `ofloop spec approve <repo> <run-id>` from an interactive terminal.
+
+### Session-local Claude evaluation
+
+To try the plugin without installing it:
 
 ```bash
-bash validate.sh
-bash release_gate.sh
+git clone https://github.com/william-london/ownframework-loop.git /path/to/ownframework-loop
+cd /path/to/your-target-repository
+claude --plugin-dir /path/to/ownframework-loop
 ```
 
-Stable expected markers (the exact strings the canonical scripts
-emit on success):
+`--plugin-dir` is session-local. If you exit and start a new Claude session, launch again with the flag. A plain later `claude` launch automatically includes OwnFramework Loop only after the persistent install path.
 
-* `OF_LOOP_FAILED=0`
-* `OF_LOOP_RELEASE_GATE_RESULT=PASS`
-* `RELEASE_GATE=PASS`
+## Portable Agent Skills
 
-The total test count is intentionally not pinned here; it changes as
-new tests are added.
+The host-neutral skill descriptions live under:
 
----
-
-## Commands
-
-### Skills
-
-- `/of-loop:spec` — interactive packet creation and human approval gate
-- `/of-loop:build` — one bounded build or repair pass (safe under `/loop`)
-- `/of-loop:review` — one exact-SHA review pass (safe under `/loop`)
-
-### Agents
-
-- `of-builder` — implements or repairs one approved work unit per pass
-- `of-reviewer` — proves one exact candidate SHA per pass, read-only
-
-### CLI
-
-The `ofloop` CLI is the deterministic surface for state transitions:
-
-```
-ofloop spec    new | status | approve | amend | stop | abandon <repo> <run-id>
-ofloop build   claim | transition | write-receipt | marker <repo> <run-id>
-ofloop review  write-verdict | marker <repo> <run-id>
-ofloop doctor  <repo> [--run-id <id>]
-ofloop new-repo <root> <project> [--init-baseline]
+```text
+.agents/skills/of-loop-spec/
+.agents/skills/of-loop-build/
+.agents/skills/of-loop-review/
+.agents/skills/of-loop-status/
 ```
 
-Direct edits to authoritative artifacts (`STATE.json`, `BUILD_RECEIPT.json`,
-`REVIEW_VERDICT.json`, `WORK_PACKET.md`, `APPROVAL.json`, `EVENTS.log`)
-are refused by the hooks — those files must be written through `ofloop`.
+They describe how an agent participates in the same protocol while delegating approval, lifecycle transitions, candidate identity, verdict identity, and repair accounting to `ofloop`.
 
----
+The existing Claude plugin skills under `skills/` remain first-class and may use Claude-specific extensions. Portability is additive; it is not a lowest-common-denominator rewrite of the Claude adapter.
+
+## Experimental Codex quickstart
+
+Codex uses a separate opt-in adapter path so Claude users do not inherit provider-selection or configuration steps.
+
+From a clone of this repository:
+
+```bash
+bash install-adapter.sh codex
+```
+
+By default this installs:
+
+- the exact committed OwnFramework Loop core under user-local data;
+- a managed `ofloop` launcher under `~/.local/bin`;
+- `of-loop-spec`, `of-loop-build`, `of-loop-review`, and `of-loop-status` under `~/.agents/skills`.
+
+The installer refuses unmanaged conflicts instead of overwriting them. Remove the adapter with:
+
+```bash
+bash uninstall-adapter.sh codex
+```
+
+Restart Codex after installation so skill discovery can refresh.
+
+Inspect the installed adapter contract:
+
+```bash
+ofloop adapter show codex
+ofloop adapter doctor codex --allow-unverified
+```
+
+If `~/.local/bin` is not already on your `PATH`, use the path printed by the installer or add it to your shell configuration.
+
+Codex remains **experimental** and `live_verified=false` until a real authenticated Codex environment proves skill discovery and a disposable spec/build/review lifecycle. GitHub Actions currently proves the current Codex CLI installs, the adapter distribution installs/uninstalls cleanly, and the portable files conform to the same deterministic core contract; that is not presented as equivalent to live agent-host proof.
+
+See [`adapters/codex/README.md`](adapters/codex/README.md) for the current boundary.
+
+## Adapter inspection
+
+The deterministic adapter CLI does not launch providers or store credentials:
+
+```bash
+./bin/ofloop adapter list
+./bin/ofloop adapter show claude-code
+./bin/ofloop adapter doctor claude-code
+./bin/ofloop adapter show codex
+```
+
+## Architecture
+
+The core/adapter split is intentionally small:
+
+```text
+                         OwnFramework Loop
+                                │
+                    deterministic protocol/core
+                                │
+          ┌─────────────────────┴─────────────────────┐
+          │                                           │
+  Claude Code adapter                         Codex adapter
+  stable / hardened                           experimental
+```
+
+The core owns:
+
+- work-packet validation;
+- interactive approval and packet-hash binding;
+- deterministic lifecycle transitions;
+- locks and bounded budgets;
+- isolated worktree/candidate handling;
+- exact candidate Git SHA;
+- exact-SHA review/verdict binding;
+- repair accounting and terminal semantics;
+- the boundary before human promotion.
+
+Adapters own host-specific discovery, skills, agents, hooks, and installation UX. They do not get a parallel state machine.
+
+Start with:
+
+- [`docs/architecture/CORE_INVARIANTS.md`](docs/architecture/CORE_INVARIANTS.md)
+- [`docs/architecture/ADAPTER_CONTRACT.md`](docs/architecture/ADAPTER_CONTRACT.md)
+- [`docs/architecture/CAPABILITY_MATRIX.md`](docs/architecture/CAPABILITY_MATRIX.md)
+- [`docs/architecture/AGENT_SKILLS.md`](docs/architecture/AGENT_SKILLS.md)
+- [`docs/ADAPTER_DEVELOPMENT.md`](docs/ADAPTER_DEVELOPMENT.md)
 
 ## Core invariants
 
-1. **Human approval binds the packet.** Approval binds to the SHA-256
-   of the packet bytes. Any drift invalidates approval and transitions
-   the run back to `AWAITING_APPROVAL`.
-2. **The reviewer evaluates the exact candidate SHA.** The reviewer
-   reads `BUILD_RECEIPT.json`, then evaluates the SHA named there —
-   nothing else. A different SHA is a different candidate.
-3. **State transitions are serialized.** All `STATE.json` writes go
-   through `ofloop` under `fcntl.flock`. Concurrent writers cannot
-   corrupt state.
-4. **The loop does not push, merge, or deploy.** Those are human
-   actions. The repository's own hooks refuse push and merge mutations
-   from inside a loop run.
-5. **STOPPED and BLOCKED are deterministic terminal states.** They are
-   not retried by the loop. A human decides what happens next.
-6. **Reviewer source is read-only.** The reviewer may only write
-   `REVIEW_VERDICT.json` and append to `EVENTS.log`. Source under
-   review cannot be modified by the reviewer.
-7. **Escalation is operator-driven.** When an artifact carries an
-   escalation marker, the operator decides what to do manually.
+1. Approval is a human-operated boundary. The portable core requires interactive confirmation; hardened adapters additionally withhold the approval command from the agent tool surface.
+2. Approval binds the exact work-packet bytes/hash.
+3. Builders operate inside approved scope and budgets.
+4. Candidate identity is an exact Git SHA.
+5. Review binds to that exact SHA—not an arbitrary current worktree.
+6. State transitions are serialized and deterministic.
+7. Repair cycles are bounded.
+8. Terminal states fail closed.
+9. The loop does not gain push, merge, deploy, publish, send, payment, or unrelated remote authority.
+10. Human promotion remains outside the loop.
 
-See `docs/STATE_MACHINE.md`, `docs/SECURITY_MODEL.md`, and
-`docs/OPERATOR_RUNBOOK.md` for the full contract.
+## Methodology versus governance
 
----
+OwnFramework Loop is designed to coexist with engineering methodologies and skill collections.
 
-## Repository layout
+A methodology can answer:
 
-```
-ownframework-loop/
-├── .claude-plugin/plugin.json
-├── skills/{spec,build,review}/SKILL.md
-├── agents/{of-builder,of-reviewer}.md
-├── hooks/{hooks.json,*.sh}
-├── bin/ofloop
-├── lib/ownframework_loop/   # Python stdlib core
-├── schemas/                 # JSON Schema for packet, state, receipt, verdict
-├── templates/               # packet + policy + per-repo loop.yaml
-├── examples/                # bug, hardening, tracked contract, new repo
-├── tests/                   # unit, integration, fixtures, smoke
-├── docs/                    # architecture, security model, runbook, history
-├── CONTRIBUTING.md
-├── SECURITY.md
-├── CHANGELOG.md
-├── THIRD_PARTY_NOTICES.md
-├── install.sh
-├── uninstall.sh
-├── rollback.sh
-├── validate.sh
-└── release_gate.sh
+> How should the agent engineer this change?
+
+OwnFramework Loop answers:
+
+> What exact work was approved, what immutable candidate was produced, what exact candidate was reviewed, how are repairs bounded, and is that candidate eligible for human promotion?
+
+The two layers are complementary.
+
+## Validation
+
+Canonical source validation:
+
+```bash
+./validate.sh
+./release_gate.sh
 ```
 
----
+Stable release markers include:
+
+```text
+OF_LOOP_FAILED=0
+OF_LOOP_RELEASE_GATE_RESULT=PASS
+RELEASE_GATE=PASS
+```
+
+Adapter-specific conformance:
+
+```bash
+bash tests/run_adapter_conformance.sh
+bash tests/integration/test_adapter_portability.sh
+bash tests/integration/test_adapter_cli.sh
+bash tests/integration/test_codex_adapter_install.sh
+```
+
+GitHub Actions runs the generic integration matrix on Linux and macOS with supported Python versions, the full release gate on dedicated Ubuntu jobs, a real Claude plugin distribution proof, and a current Codex CLI/static distribution proof. Real authenticated agent-host lifecycle proofs remain separate when they require an existing account session.
 
 ## Requirements
 
-- **Claude Code** — 2.1 or newer
-- **Python** — 3.12 or newer (the runtime uses only the standard library)
-- **POSIX file locking** — `fcntl.flock` is required for serialized state
-- **Bash** — for `install.sh`, `validate.sh`, `release_gate.sh`, and the
-  canonical test suite
+Core/runtime:
 
-OwnFramework Loop introduces no third-party Python package, no npm
-dependency, no system service, and no network dependency.
+- Python 3.12+
+- Git
+- Bash / POSIX-style environment
+- macOS or Linux for the current lock/worktree/runtime implementation
 
----
+Claude reference adapter:
+
+- Claude Code 2.1+ for the currently documented plugin workflow
+
+Codex is required only when evaluating the experimental Codex adapter.
 
 ## Project status
 
-Current release line: **0.3.8**
+Current release line: **0.4.0**
 
-This is the first hardened public release. The state machine, packet binding,
-exact-SHA review, and serialized transitions have been exercised
-against a focused test suite. Performance and behaviour against large
-real-world repositories is an empirical matter — the loop makes no
-claim of guaranteed-correctness, guaranteed-safety, or guaranteed
-coverage. Read `CHANGELOG.md` for the historical release-by-release
-record.
+v0.4.0 broadens the architecture from a Claude-specific product identity to an agent-neutral protocol with Claude Code as the stable reference adapter. Codex remains experimental until live host evidence is completed.
 
-Earlier engineering snapshots (the v0.2.x implementation report and
-the v0.3.0 loop-repair mission report) are preserved under
-`docs/history/` for context only; current authoritative behaviour is
-defined by `README.md`, `CHANGELOG.md`, and the test suite.
+This is still an early public project. Real-repository effectiveness depends on the task, repository, agent host, environment, and validation supplied by the operator.
 
----
+See [`CHANGELOG.md`](CHANGELOG.md) for release history.
 
 ## Contributing
 
-See [`CONTRIBUTING.md`](./CONTRIBUTING.md) for the supported
-contribution flow, including how to run validation, how to scope a
-change, and what license contributions are accepted under.
+Contributions are welcome. See [`CONTRIBUTING.md`](CONTRIBUTING.md). Adapter contributors should also read [`docs/ADAPTER_DEVELOPMENT.md`](docs/ADAPTER_DEVELOPMENT.md).
 
 ## Security
 
-See [`SECURITY.md`](./SECURITY.md) for the responsible-disclosure
-contact and the project's security posture.
+See [`SECURITY.md`](SECURITY.md) for the supported release posture and responsible disclosure path.
 
 ## License
 
-Apache License 2.0. See [`LICENSE`](./LICENSE) for the full text and
-[`THIRD_PARTY_NOTICES.md`](./THIRD_PARTY_NOTICES.md) for attribution
-to upstream MIT works used as architectural inspiration only.
+Apache License 2.0. See [`LICENSE`](LICENSE) and [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).

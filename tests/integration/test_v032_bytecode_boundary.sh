@@ -72,10 +72,11 @@ pass "Test 3: bin/ofloop sets PYTHONDONTWRITEBYTECODE"
 
 # 4. ofloop-launcher runtime: PYTHONDONTWRITEBYTECODE is set BEFORE the user-package import.
 echo "Test 4: ofloop sets PYTHONDONTWRITEBYTECODE before importing user modules"
+export OFLOOP_TEST_LAUNCHER="$ROOT/bin/ofloop"
 out=$(env -u PYTHONDONTWRITEBYTECODE python3 -c '
 import os, sys
 # Read the launcher source first to verify the setdefault.
-src = open("/Users/mr.mrs.london/projects/plugins/ownframework-loop/bin/ofloop").read()
+src = open(os.environ["OFLOOP_TEST_LAUNCHER"]).read()
 assert "PYTHONDONTWRITEBYTECODE" in src, "launcher missing PYTHONDONTWRITEBYTECODE"
 assert "os.environ.setdefault" in src, "launcher not using setdefault"
 # Simulate execution: import the launcher body.
@@ -96,8 +97,8 @@ sys.exit(1)
 ' 2>&1)
 # Verify ordering: setdefault call appears BEFORE the `from ownframework_loop import cli` line
 out2=$(python3 -c '
-import ast
-src = open("/Users/mr.mrs.london/projects/plugins/ownframework-loop/bin/ofloop").read()
+import ast, os
+src = open(os.environ["OFLOOP_TEST_LAUNCHER"]).read()
 tree = ast.parse(src)
 setdefault_line = None
 user_import_line = None

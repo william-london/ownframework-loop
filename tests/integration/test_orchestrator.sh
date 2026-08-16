@@ -71,13 +71,13 @@ from pathlib import Path
 from ownframework_loop import cli as _cli  # noqa
 import os as _os
 env = dict(_os.environ)
-env["PYTHONPATH"] = "/Users/mr.mrs.london/projects/plugins/ownframework-loop/lib"
+env["PYTHONPATH"] = _os.environ["OFLOOP_LIB"]
 repo = sys.argv[1]
 run_id = sys.argv[2]
-r1 = subprocess.run(["/Users/mr.mrs.london/projects/plugins/ownframework-loop/bin/ofloop", "build", "claim", repo, run_id],
+r1 = subprocess.run([_os.environ["OFLOOP_ROOT"] + "/bin/ofloop", "build", "claim", repo, run_id],
                     capture_output=True, text=True, env=env)
 print("FIRST:", r1.stdout.strip())
-r2 = subprocess.run(["/Users/mr.mrs.london/projects/plugins/ownframework-loop/bin/ofloop", "build", "claim", repo, run_id],
+r2 = subprocess.run([_os.environ["OFLOOP_ROOT"] + "/bin/ofloop", "build", "claim", repo, run_id],
                     capture_output=True, text=True, env=env)
 print("SECOND:", r2.stdout.strip())
 assert r1.returncode == 0, r1.stderr

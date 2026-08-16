@@ -7,9 +7,10 @@ user-invocable: true
 # /of-loop:spec — work packet creation and human approval gate
 
 This skill is the human-facing entry point of the OwnFramework Loop. It is
-interactive. It NEVER approves its own packet. Approval requires a real
-human terminal interaction; the model cannot manufacture the typed
-confirmation token.
+interactive. It NEVER approves its own packet. Approval requires an
+interactive operator terminal and is outside the agent's allowed tool surface:
+the Claude adapter's Bash guard refuses agent-issued `ofloop spec approve`
+commands while the human can run the approval command directly.
 
 ## Usage
 
@@ -85,15 +86,18 @@ command and waits.
    ofloop spec approve <repo> <run-id>
    ```
 2. Explain that approval is the single human mission gate: the CLI
-   requires a TTY, prints a short confirmation token derived from the
-   packet SHA, and writes APPROVAL.json only after the operator types
-   the token back.
+   requires an interactive TTY, prints a short confirmation token derived
+   from the packet SHA, and writes APPROVAL.json only after the operator types
+   the token back. In the hardened Claude adapter, the Bash guard separately
+   refuses an agent-issued invocation of this approval command.
 3. Wait for `APPROVAL.json` to exist (poll with `ofloop spec status`).
 4. Show status afterwards.
 
 If the model is asked to approve its own packet, it MUST refuse. The
-typed confirmation token is computed from the packet SHA and cannot be
-synthesized from the model's own reasoning.
+confirmation token is deterministic evidence tied to the packet SHA; it is not
+itself proof of human identity. Human-only authority is preserved by the
+interactive operator step plus the adapter's mechanical refusal of agent-issued
+approval commands.
 
 ### `spec status <run-id>`
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -uo pipefail
-ROOT="/Users/mr.mrs.london/projects/plugins/ownframework-loop"
+ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 LIB="$ROOT/lib"
 export PYTHONPATH="$LIB${PYTHONPATH:+:$PYTHONPATH}"
 TEST_ROOT="/tmp/v032_tests/v032_$$"
@@ -17,7 +17,7 @@ make_repo() {
 }
 
 setup_run() {
-  python3 /tmp/v031_setup_run.py "$@" >/dev/null
+  python3 "$ROOT/tests/helpers/setup_program_run.py" "$@" >/dev/null
 }
 
 run_test() {
@@ -282,24 +282,22 @@ except program.ClaimRefused as e:
 echo "$out" | grep -q 'REFUSED:' || fail "Test 11: $out"
 pass "Test 11: invalid state rejected before mutation"
 
-# 12. Single-mode limits unchanged.
-echo "Test 12: single-mode V1 cap still enforced"
+# 12. Single-mode emergency build cap remains enforced.
+echo "Test 12: single-mode emergency build cap enforced"
 out=$(PYTHONPATH="$LIB" python3 -c '
-import sys
-sys.path.insert(0, "lib")
-from ownframework_loop.limits import enforce
-for n in range(1, 9):
-    enforce("build_pass_count", n - 1, None)
-print("1..8_ALLOWED")
+from ownframework_loop.limits import MAX_BUILD_PASSES, enforce
+for n in range(1, MAX_BUILD_PASSES):
+    enforce("build_pass_count", n, None)
+print(f"1..{MAX_BUILD_PASSES - 1}_ALLOWED")
 try:
-    enforce("build_pass_count", 8, None)
-    print("UNEXPECTED_8_ALLOWED")
+    enforce("build_pass_count", MAX_BUILD_PASSES, None)
+    print("UNEXPECTED_CAP_ALLOWED")
 except Exception as e:
-    print("8_REFUSED:", str(e)[:50])
+    print("CAP_REFUSED:", str(e)[:80])
 ')
-echo "$out" | grep -q '1..8_ALLOWED' || fail "Test 12: $out"
-echo "$out" | grep -q '8_REFUSED' || fail "Test 12 8-refused: $out"
-pass "Test 12: single-mode V1 cap unchanged"
+echo "$out" | grep -q 'ALLOWED' || fail "Test 12 allowed range: $out"
+echo "$out" | grep -q 'CAP_REFUSED' || fail "Test 12 cap refusal: $out"
+pass "Test 12: single-mode emergency cap enforced"
 
 # 13. Graph drift after approval fails closed.
 echo "Test 13: post-approval graph drift refused"

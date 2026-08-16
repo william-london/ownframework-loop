@@ -78,8 +78,19 @@ cat > "$PP" <<'EOFEOF'
 ```
 program mission body
 EOFEOF
-# Replace the placeholder path with the actual REPO path
-sed -i '' 's|"repo": "REPO"|"repo": "'"$REPO"'"|' "$PP"
+# Replace the placeholder path with the actual REPO path portably.
+python3 - "$PP" "$REPO" <<'PYREPO'
+import json, sys
+from pathlib import Path
+packet = Path(sys.argv[1])
+repo = sys.argv[2]
+text = packet.read_text()
+needle = '"repo": "REPO"'
+if text.count(needle) != 1:
+    raise SystemExit(f"expected one repo placeholder, found {text.count(needle)}")
+text = text.replace(needle, '"repo": ' + json.dumps(repo), 1)
+packet.write_text(text)
+PYREPO
 
 # -----------------------------------------------------------------
 # write APPROVAL.json (operator-approved marker)

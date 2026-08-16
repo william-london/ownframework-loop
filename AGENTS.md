@@ -2,8 +2,9 @@
 
 This file is the **agent-operating contract** for the
 `ownframework-loop` repository. It governs how an autonomous or
-human-supervised agent (Claude Code or otherwise) makes changes in this
-repository. It is doctrine, not a lane prompt.
+human-supervised coding agent (Claude Code, Codex, or another supported
+adapter host) makes changes in this repository. It is doctrine, not a lane
+prompt.
 
 The contract here is **self-contained**. It does not depend on any
 private repository, private phase identifier, or private cross-repo
@@ -16,11 +17,14 @@ file and follow it without any access outside this repo.
 
 This contract covers work in **this repository only**:
 
-- Source under `lib/`, `bin/`, `hooks/`, `skills/`, `agents/`,
-  `schemas/`, `templates/`, `tests/`, `examples/`, `docs/`.
+- Deterministic source under `lib/`, `bin/`, `schemas/`, `templates/`,
+  `tests/`, `examples/`, and `docs/`.
+- Agent-host integration under `skills/`, `agents/`, `hooks/`,
+  `.agents/skills/`, `adapters/`, and `.claude-plugin/`.
+- CI and repository automation under `.github/workflows/`.
 - Public-surface files (`README.md`, `AGENTS.md`, `CONTRIBUTING.md`,
   `SECURITY.md`, `CHANGELOG.md`, `LICENSE`, `THIRD_PARTY_NOTICES.md`,
-  `.claude-plugin/plugin.json`).
+  adapter/architecture documentation, and agent-host metadata).
 - Validation and release scripts (`install.sh`, `uninstall.sh`,
   `rollback.sh`, `validate.sh`, `release_gate.sh`).
 
@@ -32,6 +36,28 @@ that the loop never performs on its own.
 
 ---
 
+## Core versus adapter authority
+
+OwnFramework Loop's deterministic protocol is agent-neutral. The core owns:
+
+- work-packet parsing and validation;
+- interactive human approval and packet-hash binding;
+- lifecycle transitions and locks;
+- scope, runtime, and repair budgets;
+- candidate Git SHA identity;
+- exact-SHA verdict binding;
+- terminal-state semantics and the boundary before human promotion.
+
+Agent adapters may provide skills, agents, hooks, discovery, installation,
+and host-specific enforcement. They must not create a parallel approval,
+state, repair, candidate, verdict, or promotion path.
+
+Claude Code is the stable/reference adapter and currently has stronger native
+hook/interception hardening. Experimental adapters must not claim equivalent
+host enforcement without live evidence.
+
+---
+
 ## What an agent may do in this repository
 
 An agent operating on this repository may:
@@ -39,22 +65,26 @@ An agent operating on this repository may:
 - Inspect, edit, refactor, test, commit, and push coherent validated
   work when appropriate to complete an assigned task.
 - Run the loop's local validation lane: `validate.sh`,
-  `release_gate.sh`, the focused test suite, `git diff --check`.
+  `release_gate.sh`, the focused test suite, adapter conformance, and
+  `git diff --check`.
 - Run the loop's hooks and helper scripts in the working copy without
-  touching system-wide install paths.
+  touching system-wide install paths unless an explicit isolated install
+  proof is part of the task.
 
 What an agent may **not** do without explicit operator authorization:
 
 - Force-push, push to `--all`, push `--tags`, push `--mirror`, push
   to non-named branches, or perform destructive history rewrites.
 - Delete or rewrite prior commits for aesthetics.
-- Bypass the textual command guardrails by indirection
+- Bypass textual/mechanical command guardrails by indirection
   (`eval`, hidden Python `subprocess`, variable assembly).
 - Modify `.git/` metadata directly.
 - Edit authoritative run artifacts (`STATE.json`, `BUILD_RECEIPT.json`,
   `REVIEW_VERDICT.json`, `WORK_PACKET.md`, `APPROVAL.json`,
   `EVENTS.log`, `LOCK`, `STOP`) by direct write — those go through
-  the `ofloop` CLI.
+  the `ofloop` CLI/core.
+- Create an adapter-specific approval or lifecycle truth that can diverge
+  from the deterministic core.
 - Inject real customer, prospect, vendor, payroll, bank, tax, legal,
   employee, or production data, real tokens, live payment instruments,
   production secrets, or `.env*` files into the repository.
@@ -100,16 +130,17 @@ applied.
 
 Normal tests must not:
 
-- Publish, deploy, or call outbound network services.
+- Publish, deploy, or call outbound network services except explicit CI
+  package/discovery checks against public package registries.
 - Send mail, post to social media, push notifications, or trigger
   customer-facing flows.
-- Modify the system beyond a temporary scratch directory and the
-  repository worktree.
+- Modify the system beyond a temporary scratch directory, isolated test HOME,
+  and the repository worktree.
 
 ### Public action
 
-- No public deploy, no newsletter, no social, no customer-facing or
-  vendor-facing outbound from this repository's authoring activity.
+- No public deploy, newsletter, social post, customer-facing or vendor-facing
+  outbound from ordinary repository authoring activity.
 - Publishing artifacts from this repo happens through an explicit
   maintainer-authorized release lane, not as part of an ordinary
   authoring commit.
@@ -123,11 +154,16 @@ Normal tests must not:
   hand-editing an installed copy elsewhere on disk — installed copies
   are regenerated from this repo.
 
-### Hooks and templates
+### Hooks, skills, adapters, and templates
 
 - Hooks under `hooks/` and templates under `templates/` are part of
   the loop's local reproduction. They are version-controlled here.
-- Installed copies elsewhere are regenerated from this repo.
+- Claude's stable plugin skill surface remains under `skills/` and
+  `.claude-plugin/` for backward compatibility.
+- Portable host-neutral Agent Skills live under `.agents/skills/`.
+- Adapter metadata/docs live under `adapters/` and `docs/architecture/`.
+- Installed copies elsewhere are regenerated from this repo or through the
+  documented host installer/discovery mechanism.
 
 ---
 
@@ -138,15 +174,22 @@ Before declaring any change complete, an agent must prove:
 1. `./validate.sh` — the canonical proof lane for the loop.
 2. Where the change touches `release_gate.sh` or `rollback.sh`, the
    focused test suite covers the boundary.
-3. `git diff --check` — no whitespace or conflict markers.
+3. Adapter changes run the adapter conformance/portability/doctor checks.
+4. `git diff --check` — no whitespace or conflict markers.
 
-If any of those fail, the change is not done.
+At release/promotion boundaries, `./release_gate.sh` must pass in a suitable
+host environment. GitHub Actions may separate cross-platform source validation
+from host-pressure release gating because live runner load is an environmental
+property, not a source-correctness assertion.
+
+If any required check fails, the change is not done.
 
 When the change touches the public-surface set (`README.md`,
 `AGENTS.md`, `CONTRIBUTING.md`, `SECURITY.md`, `CHANGELOG.md`,
-`LICENSE`, `THIRD_PARTY_NOTICES.md`, `.claude-plugin/plugin.json`),
-also re-run a complete public-surface scan for the new private/internal leakage patterns
-, the README internal-link check, and the standard secret scan.
+`LICENSE`, `THIRD_PARTY_NOTICES.md`, `.claude-plugin/`, `.agents/skills/`,
+`adapters/`, `docs/architecture/`, or `.github/workflows/`), also run the
+checkout-portability/public-surface scan, README/link checks where applicable,
+and the standard secret scan.
 
 ---
 
@@ -180,7 +223,8 @@ the structured fields.
 
 - `README.md`, `CHANGELOG.md`, `THIRD_PARTY_NOTICES.md`,
   `CONTRIBUTING.md`, `SECURITY.md`, `LICENSE`.
-- `docs/ARCHITECTURE.md`, `docs/STATE_MACHINE.md`,
+- `docs/architecture/`, `docs/ADAPTER_DEVELOPMENT.md`,
+  `docs/ARCHITECTURE.md`, `docs/STATE_MACHINE.md`,
   `docs/SECURITY_MODEL.md`, `docs/OPERATOR_RUNBOOK.md`.
 - `docs/history/` — preserved engineering snapshots from earlier
   releases, kept for context only.

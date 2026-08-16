@@ -1,8 +1,5 @@
 # OwnFramework Loop — canonical test gate allow-list.
-# v0.3.5 (A6-F12): tests/run_all.sh consults this file instead of
-# globs. Each line is a path relative to repo root. Lines starting
-# with # are ignored. A test missing from this file is NOT counted
-# toward the gate.
+# Each line is a path relative to repo root. Lines starting with # are ignored.
 
 # Unit tests
 tests/unit/test_trust_approval.sh
@@ -23,3 +20,10 @@ tests/integration/test_hook_multiline_bash.sh
 tests/integration/test_gate_fault_injection.sh
 tests/integration/test_program_mode.sh
 tests/integration/test_plumbing_autonomy.sh
+tests/integration/test_checkout_portability.sh
+
+# v0.4 adapter contract tests
+tests/run_adapter_conformance.sh
+tests/integration/test_adapter_portability.sh
+tests/integration/test_adapter_cli.sh
+tests/integration/test_codex_adapter_install.sh
