@@ -97,6 +97,7 @@ jobs:
         run: |
           ./bin/ofloop adapter list
           ./bin/ofloop adapter doctor claude-code
+          ./bin/ofloop adapter doctor generic-cli
           ./bin/ofloop adapter doctor codex --allow-unverified
 
   claude-adapter:
@@ -126,7 +127,7 @@ jobs:
           bash install.sh
           claude plugin list | tee "$RUNNER_TEMP/claude-plugin-list.txt"
           grep -F 'of-loop@ownframework' "$RUNNER_TEMP/claude-plugin-list.txt"
-          grep -F '0.4.0' "$RUNNER_TEMP/claude-plugin-list.txt"
+          grep -F '0.4.1' "$RUNNER_TEMP/claude-plugin-list.txt"
           REMOVE_MARKETPLACE=1 bash uninstall.sh
 
   codex-adapter-static:

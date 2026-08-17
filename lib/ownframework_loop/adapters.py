@@ -52,6 +52,24 @@ _ADAPTERS = (
         live_verified=True,
     ),
     AdapterCapabilities(
+        adapter_id="generic-cli",
+        display_name="Generic CLI Host",
+        maturity="portable",
+        agent_family="vendor-neutral",
+        skills_supported=False,
+        interactive_spec=True,
+        builder_supported=True,
+        reviewer_supported=True,
+        native_hooks=False,
+        native_subagents=False,
+        session_looping=False,
+        hard_command_interception=False,
+        installation_mode="source-checkout",
+        protocol_compatible=True,
+        hardened=False,
+        live_verified=False,
+    ),
+    AdapterCapabilities(
         adapter_id="codex",
         display_name="Codex",
         maturity="experimental",
@@ -88,6 +106,8 @@ def adapter_skill_paths(repo_root: Path, adapter_id: str) -> tuple[Path, ...]:
         return tuple(repo_root / "skills" / name / "SKILL.md" for name in ("spec", "build", "review"))
     if adapter_id == "codex":
         return tuple(repo_root / ".agents" / "skills" / name / "SKILL.md" for name in ("of-loop-spec", "of-loop-build", "of-loop-review", "of-loop-status"))
+    if adapter_id == "generic-cli":
+        return ()
     raise KeyError(adapter_id)
 
 
@@ -103,6 +123,15 @@ def doctor_adapter(repo_root: Path, adapter_id: str) -> list[str]:
                 failures.append(f"missing Claude adapter file: {rel}")
     if adapter_id == "codex" and not (repo_root / "AGENTS.md").is_file():
         failures.append("missing repository AGENTS.md")
+    if adapter_id == "generic-cli":
+        for rel in (
+            "bin/ofloop",
+            "docs/architecture/ADAPTER_CONTRACT.md",
+            "docs/architecture/PORTABILITY_MODEL.md",
+            "adapters/generic-cli/README.md",
+        ):
+            if not (repo_root / rel).is_file():
+                failures.append(f"missing generic portability surface: {rel}")
     if not adapter.protocol_compatible:
         failures.append("adapter is not protocol compatible")
     return failures

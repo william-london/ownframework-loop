@@ -21,7 +21,7 @@ def _parser() -> argparse.ArgumentParser:
     show.add_argument("adapter_id")
     doctor = sub.add_parser("doctor", help="validate one adapter contract in this checkout")
     doctor.add_argument("adapter_id")
-    doctor.add_argument("--allow-unverified", action="store_true", help="allow static doctor PASS while live host verification is pending")
+    doctor.add_argument("--allow-unverified", action="store_true", help="allow static doctor PASS while a named host's live verification is pending")
     return parser
 
 
@@ -44,7 +44,12 @@ def main(argv: list[str] | None = None, *, repo_root: Path | None = None) -> int
         return 0
 
     failures = doctor_adapter(root, adapter.adapter_id)
-    if not adapter.live_verified and not args.allow_unverified:
+    # The generic CLI entry is a vendor-neutral portability floor, not a claim
+    # about a particular agent host. Its doctor validates the local protocol
+    # surface only, so host-level live verification is intentionally not
+    # required. Named host adapters still fail closed until live-verified or
+    # explicitly inspected with --allow-unverified.
+    if adapter.maturity != "portable" and not adapter.live_verified and not args.allow_unverified:
         failures.append("adapter is not live verified; use --allow-unverified for static contract doctor")
     _emit({"ok": not failures, "adapter": adapter.to_dict(), "doctor": "PASS" if not failures else "FAIL", "failures": failures})
     return 0 if not failures else 1

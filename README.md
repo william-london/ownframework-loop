@@ -1,14 +1,16 @@
 # OwnFramework Loop
 
-> Human-gated engineering loops for AI coding agents.
+> Human-gated engineering protocol for AI coding agents.
 
 OwnFramework Loop binds engineering work to a human-approved work packet, lets a coding agent build inside bounded scope, reviews the exact resulting Git commit, limits repair cycles, and leaves merge/deployment authority with the human.
 
-Claude Code remains the **stable reference adapter**. v0.4.0 introduces an agent-neutral core/adapter contract and a portable Agent Skills layer so other coding agents can participate without creating a second state machine.
+**Born on Claude Code. Not locked to Claude Code.**
+
+The project was developed around a Claude Code loop workflow and remains optimized for Claude's native plugin, skills, agents, hooks, and command-interception model. The deterministic protocol itself is vendor-neutral: any coding-agent host that can operate in a Git checkout and invoke local `ofloop` commands can participate without creating a second state machine.
 
 ## Why it exists
 
-Coding agents are useful at implementation, but long engineering missions still need an explicit answer to a different set of questions:
+Coding agents are good at implementation. Long engineering missions still need an explicit answer to a different set of questions:
 
 - What exact work did the human approve?
 - What scope and risk budget apply?
@@ -39,18 +41,46 @@ human promotion outside the loop
 
 The loop never treats an `APPROVED` verdict as permission to push, merge, deploy, publish, or perform another external action.
 
+## Compatibility model
+
+OwnFramework Loop separates **protocol compatibility** from **host-native UX**.
+
+```mermaid
+flowchart TD
+    A[OwnFramework Loop deterministic core] --> B[Claude Code adapter]
+    A --> C[Generic CLI host]
+    A --> D[Codex adapter]
+    A --> E[Future agent host]
+
+    B --> B1[Plugin + skills + agents + hooks]
+    C --> C1[Git checkout + local ofloop CLI]
+    D --> D1[Portable Agent Skills + adapter distribution]
+    E --> E1[Thin host wrapper over the same core]
+```
+
+There are three compatibility layers:
+
+1. **Deterministic protocol core** — the portability floor. A host only needs to work in Git and invoke local `ofloop` commands.
+2. **Portable Agent Skills** — optional `SKILL.md` wrappers for hosts that understand the Agent Skills format.
+3. **Native adapters** — host-specific plugins, commands, hooks, subagents, installers, or loop integrations when the host genuinely supports them.
+
+Native capabilities can make an adapter easier to use or more hardened. They do not get their own approval/state/SHA/verdict machinery.
+
+See [`docs/architecture/PORTABILITY_MODEL.md`](docs/architecture/PORTABILITY_MODEL.md).
+
 ## Agent support
 
 | Agent host | Status | What is supported |
 |---|---|---|
 | **Claude Code** | **Stable / reference** | Managed plugin, `/of-loop:spec`, `/of-loop:build`, `/of-loop:review`, custom agents, native hooks, direct `--plugin-dir` evaluation |
+| **Generic CLI host** | **Portable baseline** | Any coding-agent host that can operate a Git checkout, invoke local `ofloop`, produce a candidate commit, and review an exact SHA |
 | **Codex** | **Experimental** | Opt-in adapter installer, portable Agent Skills, repository `AGENTS.md`, and the same deterministic core; authenticated live lifecycle proof is still pending |
 
 Agent-agnostic does **not** mean every host has identical enforcement. See [`docs/architecture/CAPABILITY_MATRIX.md`](docs/architecture/CAPABILITY_MATRIX.md) for the distinction between protocol compatibility and hardened host integration.
 
 ## Claude Code quickstart
 
-Claude Code is still the simplest and most complete way to use OwnFramework Loop.
+Claude Code remains the simplest and most complete way to use OwnFramework Loop.
 
 ### Persistent install
 
@@ -66,7 +96,7 @@ Verify:
 claude plugin list
 ```
 
-You should see `of-loop@ownframework` version `0.4.0`.
+You should see `of-loop@ownframework` version `0.4.1`.
 
 Then open Claude in the repository you want to work on:
 
@@ -97,6 +127,44 @@ claude --plugin-dir /path/to/ownframework-loop
 ```
 
 `--plugin-dir` is session-local. If you exit and start a new Claude session, launch again with the flag. A plain later `claude` launch automatically includes OwnFramework Loop only after the persistent install path.
+
+## Bring your own agent
+
+A vendor-specific plugin is **not** required.
+
+Use the generic portability layer when your coding agent can:
+
+- read and modify a Git checkout;
+- invoke local shell/CLI commands;
+- commit a bounded candidate;
+- inspect an exact Git SHA;
+- return structured build/review results through the supported core path.
+
+From an OwnFramework Loop checkout:
+
+```bash
+./bin/ofloop adapter show generic-cli
+./bin/ofloop adapter doctor generic-cli
+```
+
+If your host understands Agent Skills, point it at:
+
+```text
+.agents/skills/of-loop-spec/
+.agents/skills/of-loop-build/
+.agents/skills/of-loop-review/
+.agents/skills/of-loop-status/
+```
+
+If it does **not** support Agent Skills, use [`adapters/generic-cli/README.md`](adapters/generic-cli/README.md) plus those skill files as the semantic reference for a thin wrapper or instruction surface.
+
+The rule is simple:
+
+> Adapt the host to OwnFramework Loop. Do not fork OwnFramework Loop into a host-specific state machine.
+
+That means a future Cursor, Copilot, Gemini, OpenCode, local-model, editor, terminal, or other coding-agent integration can reuse the same packet, approval, state, candidate-SHA, verdict, repair, and promotion contract without requiring the core to know that vendor exists.
+
+This is an architectural compatibility path, not a claim that every named product has already been live-tested.
 
 ## Portable Agent Skills
 
@@ -150,30 +218,35 @@ Codex remains **experimental** and `live_verified=false` until a real authentica
 
 See [`adapters/codex/README.md`](adapters/codex/README.md) for the current boundary.
 
-## Adapter inspection
+## Why not just run an agent in a loop?
 
-The deterministic adapter CLI does not launch providers or store credentials:
+A plain loop can repeatedly ask a model to keep working. OwnFramework Loop focuses on **governance of the engineering transaction**.
 
-```bash
-./bin/ofloop adapter list
-./bin/ofloop adapter show claude-code
-./bin/ofloop adapter doctor claude-code
-./bin/ofloop adapter show codex
-```
+| Plain agent loop | OwnFramework Loop |
+|---|---|
+| Repeats until prompt/model decides to stop | Uses bounded lifecycle and repair limits |
+| Scope often lives mainly in prompt text | Scope is bound to an approved work packet |
+| Reviews whatever state is currently visible | Reviewer is bound to an exact candidate Git SHA |
+| Builder/reviewer authority may blur | Roles hand off through deterministic state |
+| “Looks good” may flow directly into action | `APPROVED` still stops before human promotion |
+| Usually tied to one host's orchestration model | Core protocol remains independent of the host |
+
+OwnFramework Loop can coexist with methodologies, skill collections, and native agent loops. Those systems can decide **how** to engineer; OwnFramework Loop governs **what was authorized, what artifact was produced, what exact artifact was reviewed, how repairs are bounded, and whether it is eligible for human promotion**.
 
 ## Architecture
 
-The core/adapter split is intentionally small:
+The dependency direction is intentional:
 
 ```text
-                         OwnFramework Loop
-                                │
-                    deterministic protocol/core
-                                │
-          ┌─────────────────────┴─────────────────────┐
-          │                                           │
-  Claude Code adapter                         Codex adapter
-  stable / hardened                           experimental
+agent host / native adapter
+          ↓
+portable SPEC / BUILD / REVIEW / STATUS semantics
+          ↓
+       ofloop CLI
+          ↓
+deterministic protocol/core
+          ↓
+packet + approval + state + Git SHA + verdict + repair budget
 ```
 
 The core owns:
@@ -188,12 +261,13 @@ The core owns:
 - repair accounting and terminal semantics;
 - the boundary before human promotion.
 
-Adapters own host-specific discovery, skills, agents, hooks, and installation UX. They do not get a parallel state machine.
+Adapters own host-specific discovery, skills, agents, hooks, installers, and UX. They do not get a parallel state machine.
 
 Start with:
 
 - [`docs/architecture/CORE_INVARIANTS.md`](docs/architecture/CORE_INVARIANTS.md)
 - [`docs/architecture/ADAPTER_CONTRACT.md`](docs/architecture/ADAPTER_CONTRACT.md)
+- [`docs/architecture/PORTABILITY_MODEL.md`](docs/architecture/PORTABILITY_MODEL.md)
 - [`docs/architecture/CAPABILITY_MATRIX.md`](docs/architecture/CAPABILITY_MATRIX.md)
 - [`docs/architecture/AGENT_SKILLS.md`](docs/architecture/AGENT_SKILLS.md)
 - [`docs/ADAPTER_DEVELOPMENT.md`](docs/ADAPTER_DEVELOPMENT.md)
@@ -211,19 +285,18 @@ Start with:
 9. The loop does not gain push, merge, deploy, publish, send, payment, or unrelated remote authority.
 10. Human promotion remains outside the loop.
 
-## Methodology versus governance
+## Adapter inspection
 
-OwnFramework Loop is designed to coexist with engineering methodologies and skill collections.
+The deterministic adapter CLI does not launch providers or store credentials:
 
-A methodology can answer:
-
-> How should the agent engineer this change?
-
-OwnFramework Loop answers:
-
-> What exact work was approved, what immutable candidate was produced, what exact candidate was reviewed, how are repairs bounded, and is that candidate eligible for human promotion?
-
-The two layers are complementary.
+```bash
+./bin/ofloop adapter list
+./bin/ofloop adapter show claude-code
+./bin/ofloop adapter doctor claude-code
+./bin/ofloop adapter show generic-cli
+./bin/ofloop adapter doctor generic-cli
+./bin/ofloop adapter show codex
+```
 
 ## Validation
 
@@ -251,7 +324,7 @@ bash tests/integration/test_adapter_cli.sh
 bash tests/integration/test_codex_adapter_install.sh
 ```
 
-GitHub Actions runs the generic integration matrix on Linux and macOS with supported Python versions, the full release gate on dedicated Ubuntu jobs, a real Claude plugin distribution proof, and a current Codex CLI/static distribution proof. Real authenticated agent-host lifecycle proofs remain separate when they require an existing account session.
+GitHub Actions runs the generic integration matrix on Linux and macOS with supported Python versions, the full release gate on dedicated Ubuntu jobs, a real Claude plugin distribution proof, and a current Codex CLI/static distribution proof. Real authenticated named-host lifecycle proofs remain separate when they require an existing account session.
 
 ## Requirements
 
@@ -270,9 +343,11 @@ Codex is required only when evaluating the experimental Codex adapter.
 
 ## Project status
 
-Current release line: **0.4.0**
+Current release line: **0.4.1**
 
-v0.4.0 broadens the architecture from a Claude-specific product identity to an agent-neutral protocol with Claude Code as the stable reference adapter. Codex remains experimental until live host evidence is completed.
+v0.4.0 introduced the agent-neutral core/adapter contract with Claude Code as the stable reference adapter and Codex as an experimental named adapter.
+
+v0.4.1 adds a vendor-neutral `generic-cli` portability baseline so future coding-agent hosts can integrate through the same deterministic core even without native Agent Skills or a plugin system.
 
 This is still an early public project. Real-repository effectiveness depends on the task, repository, agent host, environment, and validation supplied by the operator.
 
@@ -281,6 +356,8 @@ See [`CHANGELOG.md`](CHANGELOG.md) for release history.
 ## Contributing
 
 Contributions are welcome. See [`CONTRIBUTING.md`](CONTRIBUTING.md). Adapter contributors should also read [`docs/ADAPTER_DEVELOPMENT.md`](docs/ADAPTER_DEVELOPMENT.md).
+
+If you use another coding agent and want first-class integration, an adapter proposal is useful even before code exists. Start from the generic portability floor and document what native capability your host can add.
 
 ## Security
 

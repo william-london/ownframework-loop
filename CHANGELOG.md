@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.4.1 — Generic Host Portability (2026-08-16)
+
+**Scope.** Expands the v0.4 agent-neutral architecture into a vendor-neutral portability floor while preserving Claude Code as the stable, hardened reference adapter.
+
+**Generic host portability**
+
+- Added `generic-cli`, a portable baseline for coding-agent hosts that can operate a Git checkout, invoke local `ofloop` commands, produce a candidate commit, and review an exact Git SHA.
+- Added `docs/architecture/PORTABILITY_MODEL.md` defining the deterministic core, optional Agent Skills layer, and native host adapters as separate compatibility layers.
+- Added `adapters/generic-cli/README.md` so hosts without native Agent Skills, plugins, subagents, hooks, or a built-in loop can integrate without forking protocol state.
+- Added generic adapter inspection and doctor coverage while keeping `hardened=false` and `live_verified=false` for the abstract vendor-neutral baseline.
+
+**Claude Code compatibility**
+
+- Claude Code remains the stable/reference adapter and keeps the existing managed plugin and `/of-loop:spec`, `/of-loop:build`, `/of-loop:review` experience.
+- Portability remains additive; Claude-specific hooks, agents, skills, and command interception are not reduced to a lowest-common-denominator interface.
+
+**Developer adoption**
+
+- Repositioned the README around “Born on Claude Code. Not locked to Claude Code.” with a bring-your-own-agent path and an explicit comparison between a plain prompt loop and OwnFramework Loop's deterministic engineering-governance contract.
+- Expanded the capability matrix and adapter-development guide so new host integrations start from the generic protocol floor and add only evidence-backed native capabilities.
+- Added deterministic conformance and CI coverage for the generic portability surface.
+
+**Claim boundary.** v0.4.1 does not claim that every coding-agent product has been live-tested or exposes identical enforcement. Named hosts remain responsible for their own capability evidence; Codex remains experimental and not live-verified.
+
 ## 0.4.0 — Agent-Agnostic Core (2026-08-10)
 
 **Scope.** OwnFramework Loop is now structured as a deterministic, human-gated engineering protocol with agent-host adapters. Claude Code remains the stable reference adapter and preserves the public v0.3.8 command/install experience.

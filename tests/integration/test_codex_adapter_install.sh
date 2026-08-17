@@ -16,7 +16,7 @@ mkdir -p "$HOME" "$OFLOOP_BIN_DIR" "$OFLOOP_AGENT_SKILLS_DIR"
 bash install-adapter.sh codex | tee "$TMP/install.txt"
 grep -F 'ADAPTER_INSTALL=PASS' "$TMP/install.txt" >/dev/null
 grep -F 'ADAPTER=codex' "$TMP/install.txt" >/dev/null
-grep -F 'VERSION=0.4.0' "$TMP/install.txt" >/dev/null
+grep -F 'VERSION=0.4.1' "$TMP/install.txt" >/dev/null
 
 test -x "$OFLOOP_BIN_DIR/ofloop"
 "$OFLOOP_BIN_DIR/ofloop" adapter show codex | tee "$TMP/adapter.json"
