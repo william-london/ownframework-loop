@@ -204,6 +204,22 @@ def ensure_executable(*, canonical_repo, run_id, actor=None, binding_method="bui
                 prior_state = state_mod.load(canonical_repo, run_id)
                 prior_baseline_sha = (prior_state or {}).get("spec_baseline_sha") or ""
                 prior_baseline_branch = (prior_state or {}).get("spec_baseline_branch") or ""
+                # v0.5.1 explicit legacy-run policy: if a pre-v0.5.0 unstarted
+                # run lacks a spec-time snapshot, refuse unless the
+                # operator passes --legacy-allow-unsafe-snapshot-via-current-head.
+                # Casual reuse is forbidden; silent substitution of
+                # arbitrary current HEAD defeats the drift invariant.
+                if not prior_baseline_sha and not prior_baseline_branch:
+                    import os as _os
+                    if not _os.environ.get("OFLOOP_LEGACY_ALLOW_UNSAFE_SNAPSHOT"):
+                        raise RuntimeError(
+                            "legacy-run policy: run has no spec-time snapshot; "
+                            "refusing to seal against arbitrary current HEAD. "
+                            "Create a fresh run, or set "
+                            "OFLOOP_LEGACY_ALLOW_UNSAFE_SNAPSHOT=1 only if you "
+                            "have independent proof the packet was authored "
+                            "against the current canonical HEAD."
+                        )
                 if prior_baseline_sha and prior_baseline_sha != baseline_sha:
                     raise RuntimeError(
                         f"spec-time source moved between spec and start: spec_baseline_sha={prior_baseline_sha[:12]} current={baseline_sha[:12]}"
