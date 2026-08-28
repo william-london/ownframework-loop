@@ -141,16 +141,95 @@ def cmd_spec_new(args: argparse.Namespace) -> None:
 
 
 
-def cmd_program_init(args: argparse.Namespace) -> None:
-    """Materialize a v2 program-state block for an approved v3 packet.
 
-    Refused unless:
-      - packet schema is v3 and execution_mode == program
-      - APPROVAL.json validates the current packet bytes
+def _ensure_program_initialized(
+    repo: Path,
+    run_id: str,
+    meta: dict[str, Any],
+    approval_doc: dict[str, Any],
+) -> dict[str, Any]:
+    """Materialize PROGRAM state exactly once from the approved packet.
+
+    v0.4.5: PROGRAM materialization is deterministic setup, not a second
+    authority gate. Human approval is the only operator gate. For an already
+    initialized PROGRAM run this function is a strict no-op after verifying the
+    frozen graph, baseline, and candidate branch. It never resets live
+    checkpoint/cumulative progress.
     """
-    from . import packet as packet_mod
-    from . import program as program_mod
+    if not packet_mod.packet_is_program(meta):
+        return {"is_program": False, "initialized": False, "program": None}
 
+    from . import branch_resolver
+
+    baseline_sha = str(approval_doc.get("baseline_sha") or "")
+    candidate_branch = str(approval_doc.get("candidate_branch") or "")
+    if not baseline_sha or not candidate_branch:
+        raise RuntimeError("approved PROGRAM run missing frozen baseline/candidate branch")
+
+    expected = program_mod.materialise_initial_program_state(
+        meta,
+        baseline_sha=baseline_sha,
+        candidate_branch=candidate_branch,
+    )
+    cur = state_mod.load(repo, run_id)
+    if cur is None:
+        raise RuntimeError(f"STATE.json missing for {run_id}")
+
+    existing = cur.get("program")
+    if isinstance(existing, dict):
+        ok, reason = program_mod.verify_frozen_graph(meta, existing)
+        if not ok:
+            raise RuntimeError(f"refusing PROGRAM re-initialization: {reason}")
+        provenance = existing.get("source_sha_provenance") or {}
+        if provenance.get("baseline_sha") not in (None, "", baseline_sha):
+            raise RuntimeError("refusing PROGRAM re-initialization: baseline provenance drift")
+        if provenance.get("candidate_branch") not in (None, "", candidate_branch):
+            raise RuntimeError("refusing PROGRAM re-initialization: candidate branch provenance drift")
+        if cur.get("schema") != state_mod.PROGRAM_STATE_SCHEMA_VERSION:
+            raise RuntimeError("PROGRAM block present under non-PROGRAM state schema")
+        return {
+            "is_program": True,
+            "initialized": False,
+            "program": existing,
+            "candidate_branch": candidate_branch,
+            "baseline_sha": baseline_sha,
+        }
+
+    new_state = dict(cur)
+    new_state["program"] = expected
+    new_state["schema"] = state_mod.PROGRAM_STATE_SCHEMA_VERSION
+    state_mod.save(repo, run_id, new_state)
+    state_mod.append_event(
+        repo,
+        run_id,
+        event_type="program_initialized",
+        old_state=cur.get("state"),
+        new_state=cur.get("state"),
+        actor="ofloop-core",
+        reason="approved v3 PROGRAM graph materialized exactly once",
+        extras={
+            "checkpoint_graph_sha256": expected.get("checkpoint_graph_sha256"),
+            "candidate_branch": candidate_branch,
+            "baseline_sha": baseline_sha,
+        },
+    )
+    return {
+        "is_program": True,
+        "initialized": True,
+        "program": expected,
+        "candidate_branch": candidate_branch,
+        "baseline_sha": baseline_sha,
+    }
+
+
+def cmd_program_init(args: argparse.Namespace) -> None:
+    """Back-compat PROGRAM initializer.
+
+    v0.4.5: successful human approval auto-materializes v3 PROGRAM state.
+    This command remains for diagnosis/recovery of pre-v0.4.5 approved runs.
+    It is idempotent: an already initialized run is verified and returned
+    unchanged; it can never reset checkpoint or cumulative progress.
+    """
     repo = _repo_path(args.repo)
     run_id = args.run_id
     packet_path = state_mod.run_dir(repo, run_id) / "WORK_PACKET.md"
@@ -160,7 +239,6 @@ def cmd_program_init(args: argparse.Namespace) -> None:
     if not packet_mod.packet_is_program(meta):
         _emit_error("packet is not a v3 program-mode packet", exit_code=2)
 
-    # Validate approval binding.
     approval_doc = approval.load_approval(repo, run_id)
     ok, msg = approval.validate_approval_binding(
         canonical_repo=repo,
@@ -170,64 +248,34 @@ def cmd_program_init(args: argparse.Namespace) -> None:
         packet_path=packet_path,
     )
     if not ok:
-        _emit_error(f"approval binding invalid: {msg}", exit_code=3,
-                    classification="APPROVAL_INVALID")
-    import subprocess as _sp
-    baseline = _sp.run(
-        ["git", "-C", str(repo), "rev-parse", "HEAD"],
-        capture_output=True, text=True, check=False,
-    ).stdout.strip()
-    if not baseline:
-        _emit_error("repo has no HEAD", exit_code=2)
-    # v0.4.3: candidate_branch comes from the branch_resolver so that
-    # packet-declared prefixes and the default shape are both honored
-    # consistently. Approval-frozen branch wins if APPROVAL.json has it.
-    from . import branch_resolver
-    candidate_branch = branch_resolver.resolve_candidate_branch(
-        repo, run_id, packet=meta,
-    )
-    program_state = program_mod.materialise_initial_program_state(
-        meta,
-        baseline_sha=baseline,
-        candidate_branch=candidate_branch,
-    )
-    s = state_mod.load(repo, run_id)
-    if s is None:
-        _emit_error(f"STATE.json missing for {run_id}", exit_code=2)
-
-    # Audit v0.3.0-F2: refuse to re-init if the existing program state has
-    # a different checkpoint_graph_sha256. This prevents post-approval
-    # widening via the init path (operator edits packet, refreshes
-    # APPROVAL.json, re-init rolls the frozen SHA forward).
-    existing_program = (s.get("program") or {})
-    existing_graph_sha = existing_program.get("checkpoint_graph_sha256")
-    new_graph_sha = program_state.get("checkpoint_graph_sha256")
-    if existing_graph_sha and existing_graph_sha != new_graph_sha:
         _emit_error(
-            f"refusing to refreeze checkpoint graph: "
-            f"existing={existing_graph_sha[:12]} new={new_graph_sha[:12]}",
+            f"approval binding invalid: {msg}",
             exit_code=3,
-            classification="PROGRAM_GRAPH_SHA_DRIFT",
-            field="program.checkpoint_graph_sha256",
-            remediation="Submit a new run with a new run-id; do not re-initialize "
-                        "an existing program with a different graph.",
+            classification="APPROVAL_INVALID",
         )
-
-    new = dict(s)
-    new["program"] = program_state
-    new["schema"] = state_mod.PROGRAM_STATE_SCHEMA_VERSION
-    state_mod.save(repo, run_id, new)
+    try:
+        info = _ensure_program_initialized(repo, run_id, meta, approval_doc or {})
+    except RuntimeError as e:
+        _emit_error(
+            str(e),
+            exit_code=3,
+            classification="PROGRAM_INIT_REFUSED",
+        )
+    prog = info["program"] or {}
     _emit({
         "ok": True,
         "run_id": run_id,
-        "schema": new["schema"],
+        "schema": state_mod.PROGRAM_STATE_SCHEMA_VERSION,
         "execution_mode": "program",
-        "candidate_branch": candidate_branch,
-        "baseline_sha": baseline,
-        "current_checkpoints": program_state["current_checkpoints"],
-        "cumulative_ceilings": program_state["cumulative_ceilings"],
+        "initialized": bool(info["initialized"]),
+        "already_initialized": not bool(info["initialized"]),
+        "candidate_branch": info["candidate_branch"],
+        "baseline_sha": info["baseline_sha"],
+        "current_checkpoints": prog.get("current_checkpoints") or [],
+        "finalized_count": len(prog.get("finalized_checkpoints") or []),
+        "cumulative_counters": prog.get("cumulative_counters") or {},
+        "cumulative_ceilings": prog.get("cumulative_ceilings") or {},
     })
-
 
 def cmd_program_status(args: argparse.Namespace) -> None:
     """Return program-state summary (or absent if not program-mode)."""
@@ -331,6 +379,30 @@ def cmd_spec_approve(args: argparse.Namespace) -> None:
     errors = packet_mod.validate_packet_for_approval(meta)
     if errors:
         _emit_error("packet invalid", exit_code=2, errors=errors)
+
+    # v0.4.5: prove that an approved PROGRAM can be materialized BEFORE
+    # asking the human to authorize it. This prevents an approval artifact
+    # from being created for a graph/envelope that cannot initialize.
+    if packet_mod.packet_is_program(meta):
+        from . import branch_resolver
+        baseline_preflight = git_checks.current_head(repo)
+        candidate_preflight = (
+            (meta.get("target") or {}).get("candidate_branch_prefix")
+            or branch_resolver.default_candidate_branch(args.run_id)
+        )
+        try:
+            program_mod.materialise_initial_program_state(
+                meta,
+                baseline_sha=baseline_preflight or "",
+                candidate_branch=candidate_preflight,
+            )
+        except program_mod.ProgramGraphError as e:
+            _emit_error(
+                f"PROGRAM pre-approval materialization refused: {e}",
+                exit_code=2,
+                classification="PROGRAM_GRAPH_INVALID",
+            )
+
     # v0.3.5 (AUD2-P0-1): actor is recorded as attribution only; it is
     # NOT authority. The CLI no longer accepts OFLOOP_ACTOR env as a
     # fallback — operators must pass --actor explicitly.
@@ -373,6 +445,23 @@ def cmd_spec_approve(args: argparse.Namespace) -> None:
             "confirmation_token": approval_doc["confirmation_token"],
         },
     )
+
+    # v0.4.5: human approval is the one and only PROGRAM operator gate.
+    # Materialize the frozen graph now; no separate `program init` command is
+    # required in normal operation.
+    program_info = {"is_program": False, "initialized": False, "program": None}
+    if packet_mod.packet_is_program(meta):
+        try:
+            program_info = _ensure_program_initialized(
+                repo, args.run_id, meta, approval_doc,
+            )
+        except RuntimeError as e:
+            _emit_error(
+                f"approved PROGRAM materialization refused: {e}",
+                exit_code=4,
+                classification="PROGRAM_INIT_REFUSED_AFTER_APPROVAL",
+            )
+
     # Transition AWAITING_APPROVAL -> READY_TO_BUILD only.
     cur = state_mod.load(repo, args.run_id)
     if cur.get("state") == "AWAITING_APPROVAL":
@@ -392,6 +481,11 @@ def cmd_spec_approve(args: argparse.Namespace) -> None:
         "baseline_branch": approval_doc["baseline_branch"],
         "approval_method": approval_doc["approval_method"],
         "state": "READY_TO_BUILD",
+        "execution_mode": "program" if program_info.get("is_program") else "single",
+        "program_initialized": bool(program_info.get("initialized")),
+        "current_checkpoints": (
+            (program_info.get("program") or {}).get("current_checkpoints") or []
+        ),
     })
 
 

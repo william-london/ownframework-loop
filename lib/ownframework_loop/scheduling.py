@@ -92,9 +92,13 @@ def _builder_decision(state: str) -> tuple[str, int]:
 def _reviewer_decision(state: str) -> tuple[str, int]:
     if state == "READY_FOR_REVIEW":
         return "RESCHEDULE", 0
-    if state == "BUILDING" or state == "REVIEWING":
+    if state in ("READY_TO_BUILD", "CHANGES_REQUESTED"):
+        # The builder owns these phases. A long-lived reviewer lane must
+        # remain scheduled so it can review the next candidate/checkpoint.
+        return "RESCHEDULE", 10
+    if state in ("BUILDING", "REVIEWING"):
         return "RESCHEDULE", 15
-    if state in ("APPROVED", "BLOCKED", "STOPPED", "AWAITING_APPROVAL", "READY_TO_BUILD", "CHANGES_REQUESTED"):
+    if state in ("APPROVED", "BLOCKED", "STOPPED", "AWAITING_APPROVAL"):
         return "STOP", 0
     return "STOP", 0
 

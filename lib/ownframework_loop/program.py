@@ -17,7 +17,7 @@ Implements (per governing manual):
   - packet-bound checkpoint order and budgets
   - checkpoint-local build/review/repair counters
   - per-checkpoint maximum 8 build, 8 review, 3 repair
-  - cumulative caps == sum of approved-checkpoint exact caps
+  - cumulative caps == min(human-approved global envelope, checkpoint-cap sum)
   - global source ceilings: 500 unique changed files, 30000 diff lines
   - no post-approval widening (graph SHA frozen at program start)
   - one candidate branch per run, shared across all checkpoints
@@ -434,6 +434,16 @@ def finalize_checkpoint(
         raise ProgramStateError(f"invalid terminal_state: {terminal_state}")
 
     cp = _find_cp(program_state, cp_id)
+    if cp.get("terminal") is not None:
+        raise ProgramStateError(
+            f"checkpoint {cp_id} already terminal={cp.get('terminal')}; "
+            "duplicate finalization refused"
+        )
+    if any(fc.get("id") == cp_id for fc in (program_state.get("finalized_checkpoints") or [])):
+        raise ProgramStateError(
+            f"checkpoint {cp_id} already present in finalized_checkpoints; "
+            "duplicate finalization refused"
+        )
     if terminal_state == "APPROVED":
         if cp["build_pass_count"] < 1 or cp["review_pass_count"] < 1:
             raise ProgramStateError(
@@ -513,7 +523,21 @@ def advance_after_review_approval(
         raise ProgramStateError(
             "advance_after_review_approval called on a non-program run"
         )
+    if state.get("state") != "REVIEWING":
+        raise ProgramStateError(
+            f"program advancement requires top-level REVIEWING, got {state.get('state')!r}"
+        )
     cur = state.get("program") or {}
+    frozen_ok, frozen_reason = verify_frozen_graph(packet, cur)
+    if not frozen_ok:
+        raise ProgramStateError(
+            f"program advancement refused: frozen graph invalid ({frozen_reason})"
+        )
+    bound_candidate = state.get("last_candidate_sha") or ""
+    if not bound_candidate or bound_candidate != candidate_sha:
+        raise ProgramStateError(
+            "program advancement candidate SHA does not match state.last_candidate_sha"
+        )
     cur_cps = list(cur.get("current_checkpoints") or [])
     if not cur_cps:
         raise ProgramStateError(
