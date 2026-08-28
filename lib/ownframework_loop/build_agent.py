@@ -73,7 +73,6 @@ FILLABLE_KEYS: frozenset[str] = frozenset(
         "acceptance_addressed",
         "notes",
         "timestamp",
-        "candidate_sha",
     }
 )
 
@@ -89,13 +88,23 @@ def template_path(source_root: Path) -> Path:
 
 
 def agent_result_path(canonical_repo: Path, run_id: str) -> Path:
-    """Return the absolute path of the per-run agent-result artifact.
+    """Return the current claimed build pass's semantic-result path.
 
-    Canonical location (v0.4.4): .ownframework-loop/<run-id>/scratch/builder/
-    This is the bounded builder semantic scratch the install hook permits
-    for the exact active builder, in addition to the exact builder worktree.
+    v0.4.5: semantic artifacts are pass-scoped. A replayed claim retains the
+    same pass number/path for crash recovery; a fresh claim gets a fresh path,
+    so CP-N can never inherit CP-(N-1)'s filled result.
     """
-    return state_mod.run_dir(canonical_repo, run_id) / "scratch" / "builder" / "BUILD_AGENT_RESULT.json"
+    state = state_mod.load(canonical_repo, run_id)
+    pass_number = int((state or {}).get("build_pass_count") or 0)
+    if pass_number < 1:
+        raise RuntimeError(
+            "build_pass_count=0; claim the build pass before materializing the agent result"
+        )
+    return (
+        state_mod.run_dir(canonical_repo, run_id)
+        / "scratch" / "builder" / f"pass-{pass_number:04d}"
+        / "BUILD_AGENT_RESULT.json"
+    )
 
 
 def _find_source_root(start: Path) -> Path | None:

@@ -11,6 +11,7 @@
 
   "packet_sha256_recomputed": "<fill: recompute sha256 of WORK_PACKET.md bytes; must equal approval.packet_sha256>",
   "approval_sha256":          "<fill: approval_artifact_sha256(approval_doc) — see approval.py>",
+  "build_receipt_sha256":      "<fill: sha256 of exact BUILD_RECEIPT.json bytes at skeleton creation>",
 
   "scope_findings":      [],
   "protected_findings":  [],
@@ -44,6 +45,9 @@
   ],
 
   "findings": [],
+
+  "escalation_recommended": false,
+  "escalation_reason": null,
 
   "recommended_verdict": "APPROVED",
   "_recommended_verdict_enum": "Must be exactly one of: APPROVED | CHANGES_REQUESTED | BLOCKED | HUMAN_REVIEW_REQUIRED | STALE_CANDIDATE — UPPERCASE, no quotes mismatch.",

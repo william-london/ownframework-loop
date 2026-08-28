@@ -190,13 +190,42 @@ case "$(basename "$abs_path")" in
     ;;
 esac
 
-# Builder worktree writable, reviewer worktree restricted.
+# v0.4.5: semantic scratch is authorized by exact target run + live phase.
+# These files are non-authoritative; finalizers independently validate all
+# identity/security claims before writing authoritative receipts or verdicts.
+if [[ -n "$target_run_id" ]]; then
+  target_state_file="$run_root/$target_run_id/STATE.json"
+  target_state=""
+  if [[ -f "$target_state_file" ]]; then
+    target_state="$(python3 -B -c 'import sys, json
+try:
+    print(json.load(open(sys.argv[1])).get("state",""))
+except Exception:
+    pass' "$target_state_file" 2>/dev/null || true)"
+  fi
+
+  builder_rel="${abs_path#"$run_root/$target_run_id/scratch/builder/"}"
+  if [[ "$target_state" == "BUILDING" && "$abs_path" == "$run_root/$target_run_id/scratch/builder/"* ]]; then
+    if [[ "$builder_rel" =~ ^pass-[0-9]{4,}/BUILD_AGENT_RESULT\.json$ ]]; then
+      exit 0
+    fi
+  fi
+
+  reviewer_rel="${abs_path#"$run_root/$target_run_id/scratch/reviewer/"}"
+  if [[ "$target_state" == "REVIEWING" && "$abs_path" == "$run_root/$target_run_id/scratch/reviewer/"* ]]; then
+    if [[ "$reviewer_rel" =~ ^pass-[0-9]{4,}/REVIEW_AGENT_ASSESSMENT\.json$ ]]; then
+      exit 0
+    fi
+  fi
+fi
+
+# Builder worktree writable, reviewer worktree source-read-only.
 is_builder_wt=0
 is_reviewer_wt=0
-if [[ "$abs_path" == "$wt_root"/*/builder"* || "$abs_path" == "$wt_root"/*/builder/"* ]]; then
+if [[ "$abs_path" == "$wt_root"/*/builder || "$abs_path" == "$wt_root"/*/builder/* ]]; then
   is_builder_wt=1
 fi
-if [[ "$abs_path" == "$wt_root"/*/reviewer"* || "$abs_path" == "$wt_root"/*/reviewer/"* ]]; then
+if [[ "$abs_path" == "$wt_root"/*/reviewer || "$abs_path" == "$wt_root"/*/reviewer/* ]]; then
   is_reviewer_wt=1
 fi
 
@@ -220,31 +249,13 @@ except Exception:
   done
 fi
 
-# Reviewer worktree: only approved scratch allowed.
 if [[ "$is_reviewer_wt" -eq 1 ]]; then
-  for rid in "${RUN_IDS[@]}"; do
-    if [[ "$abs_path" == "$run_root/$rid/scratch/reviewer"* || "$abs_path" == "$run_root/$rid/scratch/reviewer/"* ]]; then
-      exit 0
-    fi
-  done
   emit_block "REVIEWER_SOURCE_WRITE" \
-    "Reviewer may not write to candidate source. Only .ownframework-loop/<run-id>/scratch/reviewer/ is writable."
+    "Reviewer may not write candidate source. Only the current pass-scoped REVIEW_AGENT_ASSESSMENT.json scratch artifact is writable."
   exit 0
 fi
 
-# Builder worktree: allow any path inside it.
 if [[ "$is_builder_wt" -eq 1 ]]; then
-  # Defect 4 (v0.4.4): the builder may ALSO write the exact canonical
-  # semantic-result artifact at .ownframework-loop/<run-id>/scratch/builder/
-  # BUILD_AGENT_RESULT.json for the run whose builder worktree it is.
-  # Nothing else under .ownframework-loop/ is writable from the builder.
-  for rid in "${RUN_IDS[@]}"; do
-    if [[ "$abs_cwd" == "$wt_root/$rid/builder"* ]]; then
-      if [[ "$abs_path" == "$run_root/$rid/scratch/builder/BUILD_AGENT_RESULT.json" ]]; then
-        exit 0
-      fi
-    fi
-  done
   exit 0
 fi
 

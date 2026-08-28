@@ -46,9 +46,8 @@ FILLABLE_KEYS: frozenset[str] = frozenset(
         "non_goal_results",
         "findings",
         "recommended_verdict",
-        "reviewer_head_before",
-        "reviewer_head_after",
-        "evidence",
+        "escalation_recommended",
+        "escalation_reason",
         "timestamp",
     }
 )
@@ -71,8 +70,22 @@ def template_path(source_root: Path) -> Path:
 
 
 def assessment_path(canonical_repo: Path, run_id: str) -> Path:
-    """Return the absolute path of the per-run assessment artifact."""
-    return state_mod.run_dir(canonical_repo, run_id) / "REVIEW_AGENT_ASSESSMENT.json"
+    """Return the current claimed review pass's semantic-assessment path.
+
+    v0.4.5: pass-scoped scratch prevents a later checkpoint from reusing a
+    prior review's filled assessment while preserving same-pass crash resume.
+    """
+    state = state_mod.load(canonical_repo, run_id)
+    pass_number = int((state or {}).get("review_pass_count") or 0)
+    if pass_number < 1:
+        raise RuntimeError(
+            "review_pass_count=0; claim the review pass before materializing the assessment"
+        )
+    return (
+        state_mod.run_dir(canonical_repo, run_id)
+        / "scratch" / "reviewer" / f"pass-{pass_number:04d}"
+        / "REVIEW_AGENT_ASSESSMENT.json"
+    )
 
 
 def _find_source_root(start: Path) -> Path | None:
@@ -113,6 +126,15 @@ def _resolve_candidate_sha(canonical_repo: Path, run_id: str) -> str:
             f"BUILD_RECEIPT.json missing candidate_sha for run {run_id}"
         )
     return sha
+
+
+def _resolve_build_receipt_sha256(canonical_repo: Path, run_id: str) -> str:
+    receipt = state_mod.run_dir(canonical_repo, run_id) / "BUILD_RECEIPT.json"
+    if not receipt.exists():
+        raise RuntimeError(
+            f"BUILD_RECEIPT.json missing for run {run_id}; cannot bind assessment"
+        )
+    return util.sha256_file(receipt)
 
 
 def _resolve_approval_sha256(canonical_repo: Path, run_id: str) -> str:
@@ -175,6 +197,7 @@ def build_skeleton(
     candidate_sha = _resolve_candidate_sha(canonical_repo, run_id)
     packet_sha = _resolve_packet_sha256(canonical_repo, run_id)
     approval_sha = _resolve_approval_sha256(canonical_repo, run_id)
+    build_receipt_sha = _resolve_build_receipt_sha256(canonical_repo, run_id)
     reviewer_wt = (
         canonical_repo / ".worktrees" / "ownframework-loop" / run_id / "reviewer"
     )
@@ -202,7 +225,10 @@ def build_skeleton(
     clean["reviewer_head_after"] = candidate_sha
     clean["packet_sha256_recomputed"] = packet_sha
     clean["approval_sha256"] = approval_sha
+    clean["build_receipt_sha256"] = build_receipt_sha
     clean["reviewer_identity"] = "of-reviewer"
+    clean["escalation_recommended"] = False
+    clean["escalation_reason"] = None
     clean["timestamp"] = util.utc_now_iso()
 
     # Ensure list fields are lists (never None).

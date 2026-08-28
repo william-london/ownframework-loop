@@ -37,6 +37,7 @@ from . import (
     state as state_mod,
     util,
     worktrees as worktrees_mod,
+    build_agent as build_agent_mod,
 )
 
 
@@ -220,9 +221,8 @@ def prepare(
         "builder_head": wt.get("head"),
         "builder_actual_branch": wt.get("actual_branch", candidate_branch),
         "candidate_branch": candidate_branch,
-        "agent_result_path": str(
-            state_mod.run_dir(canonical_repo, run_id) / "scratch" / "builder" / "BUILD_AGENT_RESULT.json"
-        ),
+        "agent_result_path": str(build_agent_mod.agent_result_path(canonical_repo, run_id)),
+        "agent_result_exists": build_agent_mod.agent_result_path(canonical_repo, run_id).exists(),
         "prepared_at": util.utc_now_iso(),
         "preparation_owner": "ofloop build prepare",
     }
