@@ -10,7 +10,7 @@ from .util import (
     atomic_write_json, builder_worktree, reviewer_worktree,
     run_subprocess, short_sha, utc_now_iso, worktrees_dir,
 )
-from .git_checks import branch_exists, current_head, rev_parse, worktree_list
+from .git_checks import branch_exists, current_branch, current_head, rev_parse, worktree_list
 
 
 class WorktreeError(RuntimeError):
@@ -66,7 +66,18 @@ def add_builder_worktree(
     with flock_exclusive(lock):
         if wt.exists():
             head = current_head(wt)
-            return {"path": str(wt), "branch": branch, "head": head, "existed": True}
+            # Defect 5A (v0.4.4): refuse if the existing worktree is on
+            # a different branch than the frozen candidate branch. We do
+            # NOT silently heal branch drift during an active approved run.
+            actual_branch = current_branch(wt)
+            if actual_branch and actual_branch != branch:
+                raise WorktreeError(
+                    f"existing builder worktree is on branch {actual_branch!r} "
+                    f"but frozen candidate branch is {branch!r}; refusing to "
+                    f"reuse without explicit remediation"
+                )
+            return {"path": str(wt), "branch": branch, "head": head,
+                    "actual_branch": actual_branch or branch, "existed": True}
 
         # Base sha: the receiver picks; default to current HEAD of canonical.
         if base_sha is None:
@@ -86,10 +97,14 @@ def add_builder_worktree(
             # the failure if it is a benign race.
             if wt.exists():
                 head = current_head(wt)
-                return {"path": str(wt), "branch": branch, "head": head, "existed": True}
+                actual_branch = current_branch(wt)
+                return {"path": str(wt), "branch": branch, "head": head,
+                        "actual_branch": actual_branch or branch, "existed": True}
             raise WorktreeError(f"git worktree add failed: {r.stderr.strip()}")
         head = current_head(wt)
-        return {"path": str(wt), "branch": branch, "head": head, "existed": False}
+        actual_branch = current_branch(wt)
+        return {"path": str(wt), "branch": branch, "head": head,
+                "actual_branch": actual_branch or branch, "existed": False}
 
 
 def add_reviewer_worktree(
@@ -125,7 +140,7 @@ def add_reviewer_worktree(
         if wt.exists():
             existing_sha = current_head(wt)
 
-        if existing_sha and existing_sha.startswith(candidate_sha[:7]):
+        if existing_sha and existing_sha == candidate_sha:
             return {
                 "path": str(wt),
                 "head": existing_sha,
@@ -315,11 +330,7 @@ def diff_tracked_mutation(
     # the previous candidate" by saying: if after_sha matches expected AND
     # expected differs from after_sha, it is a re-pin (control). Otherwise it
     # is external drift.
-    if expected_candidate_sha and after_sha and (
-        after_sha.startswith(expected_candidate_sha[:7])
-        or expected_candidate_sha.startswith(after_sha[:7])
-        or after_sha == expected_candidate_sha
-    ):
+    if expected_candidate_sha and after_sha and after_sha == expected_candidate_sha:
         # Either we are now pinned to expected (re-pin complete), or expected
         # is a prefix of after — both indicate a controlled movement.
         return {

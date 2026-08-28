@@ -1376,20 +1376,43 @@ def cmd_build_agent_skeleton(args: argparse.Namespace) -> None:
     runtime-dependent values: summary, evidence, blocker_reason,
     escalation_*, unit_ids_completed, acceptance_addressed, notes,
     timestamp. Idempotent unless --overwrite is supplied.
+
+    v0.4.4 (defect 7): independently re-verifies approval binding BEFORE
+    writing the skeleton. Each deterministic boundary must fail closed
+    itself; never rely on the parent model having called another
+    validator first.
     """
     from . import build_agent as build_agent_mod
     repo = _repo_path(args.repo)
+    run_id = args.run_id
+    if not run_id:
+        rd = state_mod.run_dir(repo, "")
+        runs = sorted(p.name for p in rd.iterdir() if p.is_dir() and p.name.startswith("run-"))
+        if not runs:
+            _emit_error("no run-* directories", exit_code=2)
+        if len(runs) > 1:
+            _emit_error(
+                f"multiple active runs; pass --run-id explicitly: {', '.join(runs)}",
+                exit_code=2,
+            )
+        run_id = runs[0]
+    # Defect 7: re-verify approval binding (packet + APPROVAL.json match).
+    try:
+        _require_valid_approval(repo, run_id)
+    except RuntimeError as e:
+        _emit_error(f"approval-binding refused: {e}", exit_code=4,
+                    classification="OF_LOOP_APPROVAL_BINDING_DRIFT")
     try:
         path = build_agent_mod.write_skeleton(
             repo,
-            args.run_id,
+            run_id,
             overwrite=bool(args.overwrite),
         )
     except RuntimeError as e:
         _emit_error(str(e), exit_code=4)
     print(json.dumps({
         "ok": True,
-        "run_id": args.run_id or path.parent.parent.name,
+        "run_id": run_id,
         "agent_result_path": str(path),
         "shape": build_agent_mod.SCHEMA_AGENT_RESULT,
         "overwritten": bool(args.overwrite),

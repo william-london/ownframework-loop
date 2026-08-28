@@ -234,6 +234,17 @@ fi
 
 # Builder worktree: allow any path inside it.
 if [[ "$is_builder_wt" -eq 1 ]]; then
+  # Defect 4 (v0.4.4): the builder may ALSO write the exact canonical
+  # semantic-result artifact at .ownframework-loop/<run-id>/scratch/builder/
+  # BUILD_AGENT_RESULT.json for the run whose builder worktree it is.
+  # Nothing else under .ownframework-loop/ is writable from the builder.
+  for rid in "${RUN_IDS[@]}"; do
+    if [[ "$abs_cwd" == "$wt_root/$rid/builder"* ]]; then
+      if [[ "$abs_path" == "$run_root/$rid/scratch/builder/BUILD_AGENT_RESULT.json" ]]; then
+        exit 0
+      fi
+    fi
+  done
   exit 0
 fi
 

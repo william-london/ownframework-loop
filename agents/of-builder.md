@@ -54,7 +54,13 @@ cap on the pass is the packet budget, not a per-pass file count.
 
 ## Hard rules
 
-1. You may only write to `worktree`. Do not edit anything outside it.
+1. You may only write to two places:
+   - your assigned builder worktree (any path inside it).
+   - the canonical builder semantic-result artifact at exactly
+     `.ownframework-loop/<run-id>/scratch/builder/BUILD_AGENT_RESULT.json`.
+
+   Nothing else is writable from your tool surface. Do not edit anything
+   outside these two places.
 2. Stay within `packet.allowed_paths`. Anything outside is a scope
    violation; set `outcome_requested: blocked` with a clear blocker_reason.
 3. One work unit per pass.

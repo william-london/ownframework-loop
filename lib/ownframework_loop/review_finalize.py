@@ -256,6 +256,15 @@ def finalize_review(
     if not _candidate_branch_contains(canonical_repo, receipt_branch, receipt_candidate_sha):
         raise RuntimeError(f"candidate branch {receipt_branch!r} does not contain candidate SHA")
 
+    # Defect 5D (v0.4.4): BUILD_RECEIPT.candidate_branch must equal the
+    # approval-frozen candidate_branch. Reject mismatched receipts.
+    approval_frozen_branch = (approval_doc or {}).get("candidate_branch") or ""
+    if approval_frozen_branch and receipt_branch != approval_frozen_branch:
+        raise RuntimeError(
+            f"BUILD_RECEIPT.candidate_branch {receipt_branch!r} != "
+            f"approval-frozen candidate_branch {approval_frozen_branch!r}"
+        )
+
     # 7. Create or verify reviewer detached worktree.
     reviewer_wt = util.reviewer_worktree(canonical_repo, run_id)
     try:
@@ -534,13 +543,45 @@ def finalize_review(
     # 22. Transition if appropriate.
     cur = state_mod.load(canonical_repo, run_id)
     if cur.get("state") != next_state and transitions.is_valid(cur.get("state"), next_state):
-        state_mod.transition(
-            canonical_repo, run_id,
-            to_state=next_state,
-            actor=actor,
-            reason=f"finalizer verdict={verdict}",
-            commit_sha=receipt_candidate_sha,
-        )
+        # Defect 3 (v0.4.4): in PROGRAM mode, an APPROVED review must
+        # route through the single deterministic helper that finalizes
+        # the current checkpoint AND advances to the next one (or marks
+        # terminal APPROVED). The helper is the sole owner of PROGRAM
+        # advancement; the orchestrator also routes through it.
+        if (
+            verdict == "APPROVED"
+            and state_mod.is_program_state(cur)
+            and next_state == "APPROVED"
+        ):
+            verdict_sha256 = util.sha256_text(json.dumps(new_verdict, sort_keys=True, default=str))
+            try:
+                adv = program_mod.advance_after_review_approval(
+                    canonical_repo=canonical_repo,
+                    run_id=run_id,
+                    packet=meta,
+                    state=cur,
+                    candidate_sha=receipt_candidate_sha,
+                    verdict_sha256=verdict_sha256,
+                    review_pass_number=int(new_review_pass_count),
+                    actor=actor,
+                )
+                next_state = adv["next_top_state"]
+                # new_verdict reflects the resolved next state and
+                # surfaces the finalized cp + advanced_to_cp for audit.
+                new_verdict["recommended_next_state"] = next_state
+                new_verdict["program_advanced_to_cp"] = adv["advanced_to_cp"]
+                new_verdict["program_finalized_cp"] = adv["finalized_cp"]
+                new_verdict["program_evidence_sha256"] = adv["evidence_manifest_sha256"]
+            except program_mod.ProgramStateError as e:
+                raise RuntimeError(f"program advancement refused: {e}")
+        else:
+            state_mod.transition(
+                canonical_repo, run_id,
+                to_state=next_state,
+                actor=actor,
+                reason=f"finalizer verdict={verdict}",
+                commit_sha=receipt_candidate_sha,
+            )
         if next_state == "CHANGES_REQUESTED":
             # v0.3.2: in program mode, route the repair-round increment
             # through the unified claim owner so per-cp and cumulative

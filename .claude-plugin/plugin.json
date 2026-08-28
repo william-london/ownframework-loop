@@ -2,7 +2,7 @@
   "name": "of-loop",
   "displayName": "OwnFramework Loop",
   "description": "Stable Claude Code reference adapter for OwnFramework Loop \u2014 human-gated engineering loops with approved work packets, exact-SHA review, bounded repairs, and manual promotion.",
-  "version": "0.4.3",
+  "version": "0.4.4",
   "author": {
     "name": "OwnFramework"
   },

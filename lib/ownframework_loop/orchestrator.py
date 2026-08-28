@@ -482,17 +482,44 @@ def run_program_mode(
             except program_mod.ProgramStateError as e:
                 history.append({"phase": "aggregate_cap", "reason": str(e)})
                 cp_terminal = "BLOCKED"
-            new_prog = program_mod.finalize_checkpoint(
-                program_state=new_prog,
-                cp_id=cp_id,
-                terminal_state=cp_terminal,
-                evidence_manifest={"_packet": meta, "round": round_idx,
-                                    "candidate_sha": cur.get("last_candidate_sha")},
-            )
-            new_state = dict(cur)
-            new_state["program"] = new_prog
-            new_state["schema"] = state_mod.PROGRAM_STATE_SCHEMA_VERSION
-            state_mod.save(canonical_repo, run_id, new_state)
+            # Defect 3 (v0.4.4): when the orchestrator's per-round
+            # outcome is APPROVED, route through the SAME deterministic
+            # helper the Claude-native review_finalize uses. This is the
+            # single owner of PROGRAM advancement — no second state
+            # machine, no duplicated advancement logic.
+            evidence_manifest = {"_packet": meta, "round": round_idx,
+                                  "candidate_sha": cur.get("last_candidate_sha")}
+            if cp_terminal == "APPROVED":
+                ev_sha = program_mod.sha256_text(
+                    program_mod.canonical_json_dumps(evidence_manifest)
+                )
+                # The orchestrator may not have a review verdict SHA, so
+                # use the evidence manifest SHA as the link.
+                adv = program_mod.advance_after_review_approval(
+                    canonical_repo=canonical_repo,
+                    run_id=run_id,
+                    packet=meta,
+                    state=cur,
+                    candidate_sha=cur.get("last_candidate_sha") or "",
+                    verdict_sha256=ev_sha,
+                    review_pass_number=int(cur.get("review_pass_count", 0) or 0),
+                    actor="orchestrator",
+                )
+                # Reload so we pick up the helper's saved state.
+                cur = state_mod.load(canonical_repo, run_id)
+                new_state = cur
+                new_prog = cur.get("program") or new_prog
+            else:
+                new_prog = program_mod.finalize_checkpoint(
+                    program_state=new_prog,
+                    cp_id=cp_id,
+                    terminal_state=cp_terminal,
+                    evidence_manifest=evidence_manifest,
+                )
+                new_state = dict(cur)
+                new_state["program"] = new_prog
+                new_state["schema"] = state_mod.PROGRAM_STATE_SCHEMA_VERSION
+                state_mod.save(canonical_repo, run_id, new_state)
             history.append({"round": round_idx, "phase": "finalize",
                             "cp_id": cp_id, "terminal_state": cp_terminal})
 

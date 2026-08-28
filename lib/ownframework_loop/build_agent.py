@@ -56,6 +56,11 @@ AGENT_RESULT_TEMPLATE_NAME = "BUILD_AGENT_RESULT.template.json"
 
 # Top-level keys the builder agent is expected to fill in (everything
 # else is pre-populated by the skeleton helper).
+# FILLABLE_KEYS — every key the builder agent is allowed to mutate
+# at fill-time. outcome_requested is included because the agent must
+# be able to switch it from the skeleton default `candidate_ready` to
+# `blocked` or `stopped` on failure paths; the deterministic finalizer
+# still validates the enum.
 FILLABLE_KEYS: frozenset[str] = frozenset(
     {
         "summary",
@@ -63,10 +68,12 @@ FILLABLE_KEYS: frozenset[str] = frozenset(
         "blocker_reason",
         "escalation_recommended",
         "escalation_reason",
+        "outcome_requested",
         "unit_ids_completed",
         "acceptance_addressed",
         "notes",
         "timestamp",
+        "candidate_sha",
     }
 )
 
@@ -82,8 +89,13 @@ def template_path(source_root: Path) -> Path:
 
 
 def agent_result_path(canonical_repo: Path, run_id: str) -> Path:
-    """Return the absolute path of the per-run agent-result artifact."""
-    return state_mod.run_dir(canonical_repo, run_id) / "builder" / "BUILD_AGENT_RESULT.json"
+    """Return the absolute path of the per-run agent-result artifact.
+
+    Canonical location (v0.4.4): .ownframework-loop/<run-id>/scratch/builder/
+    This is the bounded builder semantic scratch the install hook permits
+    for the exact active builder, in addition to the exact builder worktree.
+    """
+    return state_mod.run_dir(canonical_repo, run_id) / "scratch" / "builder" / "BUILD_AGENT_RESULT.json"
 
 
 def _find_source_root(start: Path) -> Path | None:

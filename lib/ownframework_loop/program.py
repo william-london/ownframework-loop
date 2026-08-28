@@ -471,6 +471,116 @@ def advance_to_next(program_state: dict[str, Any], packet: dict[str, Any]) -> di
     return new
 
 
+
+
+def advance_after_review_approval(
+    *,
+    canonical_repo: Path,
+    run_id: str,
+    packet: dict[str, Any],
+    state: dict[str, Any],
+    candidate_sha: str,
+    verdict_sha256: str,
+    review_pass_number: int,
+    actor: str,
+) -> dict[str, Any]:
+    """Single deterministic helper that finalizes the current PROGRAM
+    checkpoint after a review APPROVED and advances to the next one.
+
+    v0.4.4 (defect 3): BOTH the Claude-native review_finalize path and
+    orchestrator.run_program_mode route through this helper. No second
+    PROGRAM state machine; no duplicated advancement logic.
+
+    Required semantics after an APPROVED review in PROGRAM mode:
+
+      1. identify the exact current checkpoint;
+      2. record/finalize its approved checkpoint evidence;
+      3. update checkpoint/cumulative accounting exactly once;
+      4. mark current checkpoint terminal APPROVED;
+      5. resolve the next claimable checkpoint from the frozen graph;
+      6. if another checkpoint exists: top-level state becomes
+         READY_TO_BUILD; else top-level state becomes APPROVED;
+      7. preserve exact candidate SHA / evidence lineage;
+      8. fail closed on accounting, graph, SHA, state, or budget
+         inconsistency.
+
+    Returns: dict with keys { advanced_to_cp, finalized_cp, next_top_state,
+    evidence_manifest_sha256, terminal_state }.
+    """
+    # 0. Preconditions.
+    if not is_program_state(state):
+        raise ProgramStateError(
+            "advance_after_review_approval called on a non-program run"
+        )
+    cur = state.get("program") or {}
+    cur_cps = list(cur.get("current_checkpoints") or [])
+    if not cur_cps:
+        raise ProgramStateError(
+            "no current checkpoint in program state; cannot advance"
+        )
+    cp_id = cur_cps[0]
+
+    # 1-2. Build the evidence manifest (deterministic canonical JSON).
+    evidence_manifest = {
+        "_packet": packet,
+        "candidate_sha": candidate_sha,
+        "verdict_sha256": verdict_sha256,
+        "review_pass_number": int(review_pass_number),
+        "approved_at": utc_now_iso(),
+        "approved_actor": actor,
+        "cp_id": cp_id,
+    }
+
+    # 3-4. Finalize the current checkpoint as APPROVED.
+    new_program = finalize_checkpoint(
+        program_state=cur,
+        cp_id=cp_id,
+        terminal_state="APPROVED",
+        evidence_manifest=evidence_manifest,
+    )
+
+    # 5. Advance to the next claimable CP from the frozen graph.
+    new_program = advance_to_next(new_program, packet)
+
+    # 6. Decide next top-level state from the new current_checkpoints.
+    new_cps = list(new_program.get("current_checkpoints") or [])
+    next_top_state = "READY_TO_BUILD" if new_cps else "APPROVED"
+
+    # 7. Build the new top-level state.
+    new_top = dict(state)
+    new_top["program"] = new_program
+    new_top["state"] = next_top_state
+    new_top["last_candidate_sha"] = candidate_sha
+
+    # Save and append event so a crash between transitions and counter
+    # writes cannot desync. state_mod.save uses flock under the hood.
+    state_mod.save(canonical_repo, run_id, new_top)
+
+    state_mod.append_event(
+        canonical_repo, run_id,
+        event_type="program_advanced",
+        old_state=state.get("state"),
+        new_state=next_top_state,
+        actor=actor,
+        commit_sha=candidate_sha,
+        reason=f"CP {cp_id} APPROVED via review pass {review_pass_number}; "
+               f"next top state={next_top_state}, current_checkpoints={new_cps}",
+        extras={
+            "cp_id_finalized": cp_id,
+            "cp_terminal": "APPROVED",
+            "verdict_sha256": verdict_sha256,
+            "next_checkpoints": new_cps,
+        },
+    )
+
+    return {
+        "advanced_to_cp": new_cps[0] if new_cps else "",
+        "finalized_cp": cp_id,
+        "next_top_state": next_top_state,
+        "evidence_manifest_sha256": sha256_text(canonical_json_dumps(evidence_manifest)),
+        "terminal_state": "APPROVED",
+    }
+
 # --------------------------------------------------------------------------- #
 # Cumulative counters & gates
 # --------------------------------------------------------------------------- #

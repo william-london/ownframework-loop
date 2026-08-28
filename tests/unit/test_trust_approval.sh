@@ -297,7 +297,10 @@ assert_contains "$out" "OF_LOOP_BUILD_FINALIZE_REFUSED" "wrong repo in approval 
 out="$("$OFLOOP_BIN" spec approve "$T" "$RID" < /dev/null 2>&1 || true)"
 assert_contains "$out" "TTY" "noninteractive model approval is refused"
 
-# 11. Real-PTY approval path: drive `ofloop spec approve` via a child PTY,
+# 11. AUTOMATED_PTY_APPROVAL_TEST path (v0.4.4 honest label):
+# This proves PTY mechanics — NOT a real human approval.
+# For real human approval see docs/OPERATOR_RUNBOOK.md.
+# Real-PTY approval path: drive `ofloop spec approve` via a child PTY,
 # write the derived confirmation token into the master fd, and assert
 # exit 0 plus approval_method == "tty_confirmation" in APPROVAL.json.
 #
@@ -371,8 +374,8 @@ print("SHA", ap.get("packet_sha256", "")[:12])
 print("OK" if (proc.returncode == 0 and ap.get("approval_method") == "tty_confirmation") else "FAIL")
 PYEND
 )"
-assert_contains "$PTY_OUT" "OK" "real-PTY approval succeeds with tty_confirmation method"
-assert_contains "$PTY_OUT" "METHOD tty_confirmation" "approval_method is exactly tty_confirmation"
+assert_contains "$PTY_OUT" "OK" "AUTOMATED_PTY_APPROVAL_TEST succeeds (PTY mechanics; not a real human approval)"
+assert_contains "$PTY_OUT" "METHOD tty_confirmation" "AUTOMATED_PTY_APPROVAL_TEST approval_method is exactly tty_confirmation"
 
 # Gate-visible failure: exit non-zero if PTY output is missing required markers.
 # (assert_contains itself does not exit on failure.)

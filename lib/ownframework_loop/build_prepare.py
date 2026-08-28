@@ -131,14 +131,34 @@ def prepare(
     if not baseline_sha:
         raise PrepareRefused("APPROVAL.json missing baseline_sha")
 
+    # Defect 7 (v0.4.4): independently re-verify approval binding BEFORE
+    # any protocol mutation. Each deterministic boundary must fail
+    # closed itself — never rely on the parent model having called
+    # another validator first.
+    current_packet_sha = util.sha256_text(packet_p.read_text(encoding="utf-8"))
+    if current_packet_sha != packet_sha:
+        raise PrepareRefused(
+            f"approval-binding drift: APPROVAL.json packet_sha256={packet_sha[:12]} "
+            f"no longer matches current WORK_PACKET bytes sha={current_packet_sha[:12]}"
+        )
+    bind_ok, bind_msg = approval_mod.validate_approval_binding(
+        canonical_repo=canonical_repo,
+        run_id=run_id,
+        approval=approval_doc,
+        packet=meta,
+        packet_path=packet_p,
+    )
+    if not bind_ok:
+        raise PrepareRefused(f"approval-binding invalid: {bind_msg}")
+
     # Canonical HEAD drift guard.
     cur_head = git_checks.current_head(canonical_repo)
     if not cur_head:
         raise PrepareRefused("canonical repo has no HEAD")
-    if not cur_head.startswith(baseline_sha[:7]):
+    if cur_head != baseline_sha:
         raise PrepareRefused(
-            f"canonical HEAD {cur_head[:12]} drifted from approved "
-            f"baseline {baseline_sha[:12]}"
+            f"canonical HEAD {cur_head} drifted from approved "
+            f"baseline {baseline_sha}"
         )
 
     # Resolve candidate branch from packet > approval > state > default.
@@ -170,6 +190,16 @@ def prepare(
             f"worktree path mismatch: expected {expected_wt_path}, got {wt_path}"
         )
 
+    # Defect 5B (v0.4.4): the returned actual_branch must equal the
+    # frozen candidate branch. We surface actual_branch so the parent
+    # skill and reviewer path can independently verify.
+    actual_branch = wt.get("actual_branch") or ""
+    if actual_branch != candidate_branch:
+        raise PrepareRefused(
+            f"worktree actual branch {actual_branch!r} != frozen candidate "
+            f"branch {candidate_branch!r}"
+        )
+
     ctx: dict[str, Any] = {
         "canonical_repo": str(canonical_repo),
         "run_id": run_id,
@@ -188,8 +218,10 @@ def prepare(
         "builder_worktree": str(wt_path),
         "builder_worktree_existed": bool(wt.get("existed")),
         "builder_head": wt.get("head"),
+        "builder_actual_branch": wt.get("actual_branch", candidate_branch),
+        "candidate_branch": candidate_branch,
         "agent_result_path": str(
-            state_mod.run_dir(canonical_repo, run_id) / "builder" / "BUILD_AGENT_RESULT.json"
+            state_mod.run_dir(canonical_repo, run_id) / "scratch" / "builder" / "BUILD_AGENT_RESULT.json"
         ),
         "prepared_at": util.utc_now_iso(),
         "preparation_owner": "ofloop build prepare",

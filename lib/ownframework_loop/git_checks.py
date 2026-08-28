@@ -193,8 +193,8 @@ def check_baseline_identity(
     if expected_baseline_sha:
         if head is None:
             return False, "repository has no HEAD"
-        if not head.startswith(expected_baseline_sha[:7]):
-            return False, f"HEAD {head[:12]} does not match expected baseline {expected_baseline_sha[:12]}"
+        if head != expected_baseline_sha:
+            return False, f"HEAD {head} does not match expected baseline {expected_baseline_sha}"
     return True, "ok"
 
 

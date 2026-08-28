@@ -1,3 +1,66 @@
+## 0.4.4 - Native Program Commissioning Closure (2026-08-28)
+
+**Scope.** Surgical closures for the remaining defects independently
+adjudicated against GitHub commit b30eacf (v0.4.3). No architecture
+changes; no second PROGRAM state machine; no model redesign.
+
+**Defect 1 - portable test paths.** All user-machine-specific absolute
+paths in active tests replaced with portable ROOT / LIB / OFLOOP_BIN
+derived from the test file location. tests/unit/test_v044_hardening.sh.
+
+**Defect 2 - release version truth.** README and CI derive expected
+version dynamically from lib/ownframework_loop/__init__.py (__version__).
+No hardcoded release numbers in CI.
+
+**Defect 3 - single-core PROGRAM advancement.** New deterministic helper
+program.advance_after_review_approval finalizes the current CP,
+resolves the next claimable CP from the frozen graph, advances to
+READY_TO_BUILD or terminal APPROVED, and preserves SHA lineage. Both
+the Claude-native review finalize path AND orchestrator.run_program_mode
+route through this single helper. No second state machine; no duplicated
+advancement logic.
+
+**Defect 4 - builder semantic scratch.** BUILD_AGENT_RESULT.json moved
+to canonical .ownframework-loop/<run-id>/scratch/builder/. Install hook
+permits the exact active builder to write only that exact file in
+addition to the builder worktree. Authoritative-artifact protection
+preserved.
+
+**Defect 5 - branch single source end-to-end.** Frozen candidate branch
+enforced at every boundary: builder-worktree reuse refuses on branch
+mismatch; build prepare verifies actual == frozen; build finalize
+requires actual_builder_branch == approval_frozen_branch; review finalize
+requires BUILD_RECEIPT.candidate_branch == approval_frozen_branch;
+doctor surfaces both frozen and actual.
+
+**Defect 6 - full SHA equality.** All head.startswith(baseline_sha[:7])
+prefix checks replaced with exact equality. Same-prefix-but-different-
+full-SHA values no longer pass identity checks. Tests cover the
+collision case.
+
+**Defect 7 - approval re-binding.** ofloop build prepare and
+ofloop build agent-skeleton independently re-verify packet SHA and
+approval binding BEFORE any protocol mutation. Each deterministic
+boundary fails closed itself.
+
+**Defect 8 - honest PTY test labels.** tests/unit/test_trust_approval.sh
+renamed to use AUTOMATED_PTY_APPROVAL_TEST label; that test proves
+PTY mechanics only. Real human approval is the operator terminal
+invocation of the canonical approval CLI.
+
+**Defect 9 - portable adapter contract.** adapters/generic-cli/README.md
+documents the build semantic-result surface so non-Claude hosts use
+ofloop build agent-skeleton instead of constructing the schema from
+prose. Core remains one protocol across all adapters.
+
+**Defect 10 - operator doc truth.** docs/OPERATOR_RUNBOOK.md updated to
+one canonical operator UX. The operator types no cadence, no cron
+expression, no worktree/branch command, no build-claim / finalize /
+skeleton / loop-run command. Those are internal protocol surfaces
+invoked by the skills.
+
+**Tests.** New tests/unit/test_v044_hardening.sh covers all 10 defects.
+Added to tests/canonical.txt. Replaces the v0.4.3 test file.
 
 ## 0.4.3 — Real-Program Incident Hardening (2026-08-28)
 

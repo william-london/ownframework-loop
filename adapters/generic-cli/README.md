@@ -69,3 +69,30 @@ See also:
 - [`../../docs/architecture/PORTABILITY_MODEL.md`](../../docs/architecture/PORTABILITY_MODEL.md)
 - [`../../docs/architecture/ADAPTER_CONTRACT.md`](../../docs/architecture/ADAPTER_CONTRACT.md)
 - [`../../docs/ADAPTER_DEVELOPMENT.md`](../../docs/ADAPTER_DEVELOPMENT.md)
+
+
+## Build semantic-result surface (v0.4.4)
+
+Generic hosts must use the supported deterministic surface for the build
+semantic result, not reconstruct the schema from prose:
+
+```
+ofloop build agent-skeleton <repo> <run-id>
+```
+
+This materializes `BUILD_AGENT_RESULT.json` at:
+
+```
+<canonical_repo>/.ownframework-loop/<run-id>/scratch/builder/BUILD_AGENT_RESULT.json
+```
+
+The agent (in any host) fills only the runtime-dependent fields in
+place: `summary`, `evidence.*`, `blocker_reason`,
+`escalation_recommended`, `escalation_reason`, `outcome_requested`,
+`unit_ids_completed`, `acceptance_addressed`, `notes`, `timestamp`.
+
+Then `ofloop build finalize <repo> <run-id>` independently verifies
+Git, scope, budget, tests, and writes the authoritative
+`BUILD_RECEIPT.json`. The agent never writes BUILD_RECEIPT.
+
+Do not fork the schema per-host. Core remains one protocol.

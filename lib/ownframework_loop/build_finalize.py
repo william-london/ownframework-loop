@@ -167,8 +167,8 @@ def _verify_canonical_branch_unchanged(canonical_repo: Path, baseline_sha: str, 
     head = git_checks.current_head(canonical_repo)
     if head is None:
         return False, "canonical repo has no HEAD"
-    if not head.startswith(baseline_sha[:7]):
-        return False, f"canonical HEAD {head[:12]} drifted from approved baseline {baseline_sha[:12]}"
+    if head != baseline_sha:
+        return False, f"canonical HEAD {head} drifted from approved baseline {baseline_sha}"
     return True, "ok"
 
 
@@ -270,6 +270,17 @@ def finalize_build(
     if candidate_sha is None:
         raise RuntimeError("builder worktree has no HEAD")
     candidate_branch = git_checks.current_branch(builder_wt) or f"factory/candidate/{run_id}"
+
+    # Defect 5C (v0.4.4): the actual branch of the builder worktree must
+    # equal the approval-frozen candidate_branch. Do NOT accept whichever
+    # branch the worktree happens to be on. Use the approval_doc value as
+    # the authoritative frozen branch.
+    approval_frozen_branch = approval_doc.get("candidate_branch") or candidate_branch
+    if candidate_branch != approval_frozen_branch:
+        raise RuntimeError(
+            f"builder worktree actual branch {candidate_branch!r} != "
+            f"approval-frozen candidate_branch {approval_frozen_branch!r}"
+        )
 
     # 6. Verify candidate SHA exists in canonical repo.
     if not git_checks.commit_exists(canonical_repo, candidate_sha):

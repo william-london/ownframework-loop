@@ -96,7 +96,9 @@ Verify:
 claude plugin list
 ```
 
-You should see `of-loop@ownframework` version `0.4.1`.
+You should see `of-loop@ownframework` with the current release version.
+The version is derived from the source tree at install — there is no
+hardcoded version in the install proof.
 
 Then open Claude in the repository you want to work on:
 
@@ -343,7 +345,7 @@ Codex is required only when evaluating the experimental Codex adapter.
 
 ## Project status
 
-Current release line: **0.4.2**
+Current release line: see `.claude-plugin/plugin.json` (`version`) and `lib/ownframework_loop/__init__.py` (`__version__`); these are the canonical machine sources of truth.
 
 v0.4.0 introduced the agent-neutral core/adapter contract with Claude Code as the stable reference adapter and Codex as an experimental named adapter.
 
