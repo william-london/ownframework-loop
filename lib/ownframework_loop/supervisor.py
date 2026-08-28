@@ -438,13 +438,31 @@ class ClaudeCodeRunner:
             )
 
         cost = 0.0
+        parsed: dict[str, Any] | None = None
         try:
             data = json.loads(stdout_data or "")
-            cost = float(data.get("total_cost_usd") or 0.0)
+            if isinstance(data, dict):
+                parsed = data
+                cost = float(data.get("total_cost_usd") or 0.0)
         except Exception:
             pass
+
+        # Treat Claude as success when its structured JSON output says
+        # is_error is false AND there is a substantive result. Claude CLI
+        # may exit non-zero for warnings (e.g. unrecognized model warnings)
+        # while still producing a valid result envelope. The semantic
+        # completion check + deterministic finalizer are the real authority.
+        claude_ok = False
+        if parsed is not None:
+            if parsed.get("is_error") is False:
+                claude_ok = True
+            elif "is_error" not in parsed and (
+                parsed.get("result") or parsed.get("subtype") == "success"
+            ):
+                claude_ok = True
+
         return RunnerResult(
-            ok=proc.returncode == 0,
+            ok=bool(claude_ok and (parsed is not None)) or proc.returncode == 0,
             returncode=int(proc.returncode or 0),
             cost_usd=cost,
             stdout=(stdout_data or "")[-65536:],
