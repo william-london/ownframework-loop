@@ -54,6 +54,10 @@ effects.
 3. Inspect existing worktree state first. A replayed parent claim may mean a
    prior agent already produced part or all of this same pass.
 4. Make the smallest coherent implementation within allowed paths and budgets.
+   (F-5-01 v0.3.7: when the must-fix surface spans multiple files or
+   requires a coordinated cross-cut, a substantial pass is permitted —
+   expand the change set coherently rather than fragmenting across many
+   tiny passes that each race the budget ceiling.)
 5. Run required validation.
 6. Inspect the baseline-to-candidate diff and ensure no protected/out-of-scope
    path is present.

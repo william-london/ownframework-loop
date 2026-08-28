@@ -1,4 +1,4 @@
-## 0.4.4 - Native Program Commissioning Closure (2026-08-28)
+## 0.4.5 - Native Program Commissioning Closure (2026-08-28)
 
 **Scope.** Surgical closures for the remaining defects independently
 adjudicated against GitHub commit b30eacf (v0.4.3). No architecture

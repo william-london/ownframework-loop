@@ -21,6 +21,15 @@ branch/worktree/state identity.
 
 ## Pass responsibilities
 
+## Substantial passes (F-5-01 v0.3.7)
+
+A bounded build pass is not required to be minimal. When the
+must-fix surface, scope, or refactor cut spans multiple files,
+the builder may produce a coherent substantial pass. The operator
+MUST NOT collapse or thin the change set to keep the pass small;
+that would force re-entry through the same must-fix surface and
+race the per-checkpoint build cap.
+
 1. Re-prove current packet bytes and approval binding.
 2. Claim via `ofloop build claim <repo> <run-id> --actor builder`.
    A replayed `BUILDING` claim is the same pass and MUST NOT increment budget.

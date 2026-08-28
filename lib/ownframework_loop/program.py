@@ -616,12 +616,16 @@ def _unified_claim_pass(
         if cp_live.get("terminal"):
             raise ClaimRefused(f"checkpoint {cp_id} is terminal: {cp_live['terminal']}")
 
-        new_program = _bump_counter_one(
-            program_state,
-            cp_id=cp_id,
-            counter=counter,
-            packet_cp=packet_cp,
-        )
+        try:
+            new_program = _bump_counter_one(
+                program_state,
+                cp_id=cp_id,
+                counter=counter,
+                packet_cp=packet_cp,
+            )
+        except ProgramStateError as exc:
+            # Cap-related refusals are the canonical "claim refused" case.
+            raise ClaimRefused(str(exc)) from exc
         new_program_evidence = _deepcopy_program(new_program)
         cp_new = _find_cp(new_program_evidence, cp_id)
         ev_map = dict(cp_new.get("last_evidence_sha_by_counter") or {})

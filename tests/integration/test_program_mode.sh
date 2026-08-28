@@ -109,6 +109,7 @@ baseline = subprocess.run(
     ["git", "-C", str(canonical_repo), "rev-parse", "master"],
     capture_output=True, text=True, check=True,
 ).stdout.strip()
+candidate_branch = f"factory/candidate/{run_id}"
 doc = {
     "schema": "ownframework-loop-approval/v1",
     "run_id": run_id,
@@ -118,6 +119,7 @@ doc = {
     "canonical_repo": str(canonical_repo.resolve(strict=False)),
     "baseline_branch": "master",
     "baseline_sha": baseline,
+    "candidate_branch": candidate_branch,
     "packet_schema": "ownframework-work-packet/v3",
     "approval_method": "tty_confirmation",
     "confirmation_token": approval.derive_confirmation_token(sha),

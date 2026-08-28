@@ -15,9 +15,7 @@ echo "$SKEL_JSON" | grep -q '"shape": "ownframework-loop-build-agent-result/v1"'
   && pass "skeleton advertises canonical build-agent schema" \
   || fail "skeleton shape mismatch: $SKEL_JSON"
 
-BUILD_PASS="$(echo "$PREP_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin)["build_pass_number"])')"
-printf -v PASS_DIR 'pass-%04d' "$BUILD_PASS"
-SKEL_PATH="$REPO/.ownframework-loop/$RID/scratch/builder/$PASS_DIR/BUILD_AGENT_RESULT.json"
+SKEL_PATH="$(echo "$PREP_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin)["agent_result_path"])')"
 [[ -f "$SKEL_PATH" ]] && pass "skeleton is pass-scoped" || fail "skeleton missing: $SKEL_PATH"
 
 python3 - "$SKEL_PATH" <<'PY'

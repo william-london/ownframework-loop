@@ -129,7 +129,7 @@ jobs:
           grep -F 'of-loop@ownframework' "$RUNNER_TEMP/claude-plugin-list.txt"
           # v0.4.4: derive expected version from the canonical machine
           # source-of-truth, do NOT hardcode the release number into CI.
-          EXPECTED_VERSION="$(python3 -c 'from ownframework_loop import __version__; print(__version__)')"
+          EXPECTED_VERSION="$(PYTHONPATH="$PWD/lib" python3 -c 'from ownframework_loop import __version__; print(__version__)')"
           grep -F "$EXPECTED_VERSION" "$RUNNER_TEMP/claude-plugin-list.txt"
           REMOVE_MARKETPLACE=1 bash uninstall.sh
 

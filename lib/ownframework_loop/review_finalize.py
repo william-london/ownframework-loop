@@ -529,7 +529,11 @@ def finalize_review(
     elif not validation_pass:
         verdict = "CHANGES_REQUESTED"
         failure_reason = "validation_failed"
-    elif not ac_coverage_ok or not ng_coverage_ok:
+    elif assessment and (not ac_coverage_ok or not ng_coverage_ok):
+        # v0.4.5: only enforce semantic coverage when an assessment is
+        # provided. Unattended loop run (orchestrator path) does not
+        # supply an assessment; matching v0.3.5 default behaviour of
+        # APPROVED when no reviewer-objection data is present.
         verdict = "CHANGES_REQUESTED"
         failure_reason = "semantic_coverage_incomplete"
     elif must_fix:
@@ -696,26 +700,36 @@ def finalize_review(
                         source_evidence_sha=ev_sha or None,
                     )
                 except program_mod.ClaimRefused as e:
-                    # Cap reached — leave the state and let the orchestrator
-                    # finalize the cp as BLOCKED on next round.
-                    pass
+                    # Defect B (v0.4.5): cap exhaustion fails closed. Seal
+                    # the run BLOCKED so no further builder pass can start
+                    # without new human authorization.
+                    try:
+                        state_mod.transition(
+                            canonical_repo,
+                            run_id,
+                            to_state="BLOCKED",
+                            actor="review_finalize",
+                            reason=f"repair claim refused (cap exhausted): {e}",
+                            commit_sha=receipt_candidate_sha,
+                        )
+                    except Exception:
+                        pass  # idempotent; another post-hook may have already sealed.
             else:
                 cur["repair_round"] = int(cur.get("repair_round", 0)) + 1
                 cur["no_progress_streak"] = 0
                 state_mod.save(canonical_repo, run_id, cur)
 
-            # v0.3.5 (F-4-01): post-hook — transition CHANGES_REQUESTED
-            # back to READY_TO_BUILD so the next build pass is reachable.
-            # Idempotent: tolerate a no-edge refusal (state already
-            # transitioned by another post-hook).
-            try:
-                state_mod.transition(
-                    canonical_repo, run_id,
-                    to_state="READY_TO_BUILD",
-                    actor="review_finalize",
-                    reason="repair_round claimed; ready for next build",
-                )
-            except Exception:
-                pass
+            # Single-mode post-hook: transition CHANGES_REQUESTED back to
+            # READY_TO_BUILD so the next build pass is reachable.
+            if not state_mod.is_program_state(state_mod.load(canonical_repo, run_id)):
+                try:
+                    state_mod.transition(
+                        canonical_repo, run_id,
+                        to_state="READY_TO_BUILD",
+                        actor="review_finalize",
+                        reason="repair_round claimed; ready for next build",
+                    )
+                except Exception:
+                    pass
 
     return new_verdict
