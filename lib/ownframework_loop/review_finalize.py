@@ -548,6 +548,8 @@ def finalize_review(
         # the current checkpoint AND advances to the next one (or marks
         # terminal APPROVED). The helper is the sole owner of PROGRAM
         # advancement; the orchestrator also routes through it.
+        import sys
+        sys.stderr.write(f"DEBUG: verdict={verdict}, next_state={next_state}, is_program={state_mod.is_program_state(cur)}\n"); sys.stderr.flush()
         if (
             verdict == "APPROVED"
             and state_mod.is_program_state(cur)

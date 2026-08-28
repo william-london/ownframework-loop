@@ -554,10 +554,10 @@ def advance_after_review_approval(
     new_top["last_candidate_sha"] = candidate_sha
 
     # Save and append event so a crash between transitions and counter
-    # writes cannot desync. state_mod.save uses flock under the hood.
-    state_mod.save(canonical_repo, run_id, new_top)
+    # writes cannot desync. state_save uses flock under the hood.
+    state_save(canonical_repo, run_id, new_top)
 
-    state_mod.append_event(
+    append_event(
         canonical_repo, run_id,
         event_type="program_advanced",
         old_state=state.get("state"),
