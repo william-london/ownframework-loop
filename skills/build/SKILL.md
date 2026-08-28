@@ -1,6 +1,6 @@
 ---
 name: build
-description: OwnFramework Loop — build pass. One invocation performs at most one bounded build or repair pass. Validates APPROVAL.json, claims the build, invokes a fresh `of-builder` agent (broad engineering tools), collects a semantic agent result, then calls the deterministic build finalizer. Safe to invoke under `/loop`.
+description: OwnFramework Loop — build pass. One invocation performs at most one bounded build or repair pass. Validates APPROVAL.json, claims the build, runs deterministic build preparation (branch, baseline, worktree), materializes the BUILD_AGENT_RESULT skeleton, invokes a fresh `of-builder` agent, then calls the deterministic build finalizer. Safe to invoke under `/loop`.
 user-invocable: true
 ---
 
@@ -16,33 +16,42 @@ in this parent session.
 
 1. Validate the target repository (canonical repo resolved via `git
    rev-parse --show-toplevel`).
-2. Validate the work packet is present and validates against the V2
-   schema.
+2. Validate the work packet is present and validates against the V3
+   schema (PROGRAM) or V2 (SINGLE).
 3. Validate that APPROVAL.json exists and binds to the current packet
    bytes (canonical repo, baseline branch, baseline SHA, packet SHA,
-   confirmation token).
+   confirmation token, candidate_branch).
 4. Validate the current state allows a build claim
    (`READY_TO_BUILD` or `CHANGES_REQUESTED`).
 5. Claim the build atomically (`READY_TO_BUILD/CHANGES_REQUESTED ->
-   BUILDING`) and increment `build_pass_count`.
-6. Create or reuse the builder worktree at
-   `.worktrees/ownframework-loop/<run-id>/builder` on branch
-   `factory/candidate/<run-id>`. The branch prefix is a default;
-   packets may pre-declare a different `candidate_branch_prefix`.
+   BUILDING`) and increment `build_pass_count`. Use `ofloop build
+   claim <repo> <run-id>`.
+6. Run `ofloop build prepare <repo> <run-id>` to deterministically
+   resolve and create/reuse the builder worktree at
+   `.worktrees/ownframework-loop/<run-id>/builder` on the candidate
+   branch (resolved via `branch_resolver`, honoring
+   `packet.target.candidate_branch_prefix` or the
+   `factory/candidate/<run-id>` default). The prepare step is the
+   single source of truth for worktree path, candidate branch, baseline
+   SHA, current checkpoint, work_unit_id, packet SHA, and approval SHA.
 7. Verify the canonical branch is clean and untouched by anyone other
    than this run.
-8. Invoke a fresh `of-builder` agent through the Agent tool, providing
-   the packet metadata, current state, the worktree path, and the
-   approval summary.
-9. Collect the agent's semantic `BUILD_AGENT_RESULT.json`. The agent
-   does NOT write the authoritative build receipt.
-10. Call `ofloop build finalize <repo> <run-id> <agent-result.json>`.
+8. Materialize the `BUILD_AGENT_RESULT.json` skeleton at the run
+   scratch path via `ofloop build agent-skeleton <repo> <run-id>`. Pass
+   the schema-conformant path and the prepared context to the agent.
+9. Invoke a fresh `of-builder` agent through the Agent tool, providing
+   the prepared context (worktree, branch, baseline_sha, cp_id,
+   work_unit_id, agent_result_path). The agent fills the runtime-
+   dependent keys in place and never renames top-level keys.
+10. Collect the agent's semantic `BUILD_AGENT_RESULT.json`. The agent
+    does NOT write the authoritative build receipt.
+11. Call `ofloop build finalize <repo> <run-id> <agent-result.json>`.
     The finalizer independently verifies the candidate SHA, ancestry,
     branch, diff counts, allowed/protected/elevated paths, secret
     patterns, runs validations, and writes the authoritative
     `BUILD_RECEIPT.json`. The model cannot influence the finalizer's
     verdict on any of these checks.
-11. Emit the operator marker.
+12. Emit the operator marker.
 
 ## No-work fast paths
 
@@ -63,6 +72,9 @@ in this parent session.
 - Approve its own work.
 - Write the authoritative build receipt.
 - Run a second build pass inside one invocation.
+- Issue raw `git worktree add`, `git worktree remove`, or `git branch`
+  for ordinary pass setup. The `ofloop build prepare` step is the
+  sole owner of worktree creation and branch resolution. v0.4.3.
 
 ## Operator marker
 
@@ -87,10 +99,14 @@ Scheduling policy:
 | `REVIEWING` | RESCHEDULE | 15 |
 | `APPROVED`, `BLOCKED`, `STOPPED`, `AWAITING_APPROVAL` | STOP | 0 |
 
-## CLI surface used by the build skill
+## CLI surface used by the build skill (v0.4.3)
 
 - `ofloop spec status <repo> <run-id>` — initial check
 - `ofloop build claim <repo> <run-id>` — atomic claim
+- `ofloop build prepare <repo> <run-id>` — deterministic
+  branch/baseline/worktree preparation; sole owner of worktree add
+- `ofloop build agent-skeleton <repo> <run-id>` — materializes the
+  schema-conformant BUILD_AGENT_RESULT.json skeleton
 - `ofloop build finalize <repo> <run-id> <agent-result.json>` — finalizer
 - `ofloop build marker <repo> <run-id>` — emit marker
 
@@ -110,6 +126,22 @@ edits `STATE.json` directly.
   pass may produce MULTIPLE files / MULTIPLE commits / a coherent subsystem so
   long as `risk_budget` is honoured — the cap is the packet budget, not a
   per-pass file count.)
+- Letting the parent model issue raw `git worktree add`, `git worktree
+  remove`, or invent the candidate branch. v0.4.3.
+
+## Canonical scheduling UX (v0.4.3)
+
+The supported scheduling invocation is the bare slash command — no
+cadence grammar, no `15m`, no cron syntax:
+
+```
+/loop /of-loop:build <run-id>
+```
+
+The operator does not type an interval. Native Claude `/loop` defaults
+to `10m` cadence, which is acceptable for both lanes. If a different
+cadence is required, the operator types it explicitly
+(e.g. `/loop 15m /of-loop:build <run-id>`).
 
 
 ## PROGRAM mode (v3 packets)
@@ -123,3 +155,8 @@ this skill) drives the checkpoint graph via:
 This skill remains the single pass-per-invocation entry for one
 checkpoint. It does NOT replace the orchestrator and MUST NOT be
 parallelized into a multi-checkpoint loop within one invocation.
+
+The per-checkpoint cumulative ceilings are derived at program init
+from the smaller of (a) the packet-level global risk_budget and (b)
+the sum of per-checkpoint risk_budgets. The effective cumulative cap
+NEVER exceeds the human-approved packet-level envelope. v0.4.3.

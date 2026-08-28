@@ -1,0 +1,35 @@
+{
+  "_comment": "Deterministic skeleton for BUILD_AGENT_RESULT.json. The builder agent MUST copy this file verbatim into the per-run scratch path, then fill in the values. Every required field name, casing, and enum value is part of the contract — do not rename, lowercase, or omit. The deterministic build finalizer refuses any agent result that does not validate against this shape.",
+
+  "schema": "ownframework-loop-build-agent-result/v1",
+  "run_id": "<fill: run-...Z-...>",
+
+  "work_unit_id": "<fill: e.g. UNIT-1 — must match a work unit in the approved packet>",
+
+  "outcome_requested": "candidate_ready",
+  "_outcome_requested_enum": "Must be exactly one of: candidate_ready | blocked | stopped — lowercase, underscore, no quotes mismatch.",
+
+  "summary": "<fill: one-paragraph plain text summary of what was done and what the validators said>",
+
+  "evidence": {
+    "validate_sh_exit": 0,
+    "validate_sh_marker_found": true,
+    "pytest_offline_exit": 0,
+    "pytest_offline_summary": "<fill: last lines of pytest output, plain text>",
+    "files_changed": ["<fill: relpath>", "..."],
+    "diff_lines_total": 0,
+    "diff_lines_protected_path_violations": [],
+    "protected_paths_touched": []
+  },
+
+  "blocker_reason": null,
+  "escalation_recommended": false,
+  "escalation_reason": null,
+
+  "unit_ids_completed": ["<fill: e.g. UNIT-1>"],
+  "acceptance_addressed": ["<fill: e.g. AC-1, AC-2>"],
+  "notes": "<fill: anything the reviewer/finalizer should know that is not visible from the diff>",
+
+  "builder_identity": "of-builder",
+  "timestamp": "<fill: UTC ISO 8601, e.g. 2026-08-28T12:10:00Z>"
+}

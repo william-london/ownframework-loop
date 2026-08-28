@@ -1,3 +1,78 @@
+
+## 0.4.3 — Real-Program Incident Hardening (2026-08-28)
+
+**Scope.** Incident-driven repair after the first real PROGRAM benchmark
+(v0.4.2) failed at the deterministic build finalizer with
+`OF_LOOP_BUILD_FINALIZE_REFUSED`. No architecture changes; all safety
+boundaries preserved. Model-owned deterministic plumbing is moved behind
+`ofloop`; operator ceremony is reduced.
+
+**Defect 1 — build agent result contract drift**
+
+- Added `templates/BUILD_AGENT_RESULT.template.json` — the deterministic
+  skeleton the builder agent starts from.
+- Added `lib/ownframework_loop/build_agent.py` with `build_skeleton` and
+  `write_skeleton`. Pre-populates every required top-level key with the
+  exact casing, the run id, packet SHA, approval SHA, baseline SHA,
+  candidate branch, and current work_unit_id.
+- Added CLI subcommand `ofloop build agent-skeleton <repo> <run-id>`
+  that materializes the skeleton at the run scratch path.
+- Rewrote `agents/of-builder.md` Output section to be a three-step
+  deterministic workflow: materialize, fill runtime values, submit. The
+  agent is no longer re-deriving the JSON shape from prose.
+- Rewrote `skills/build/SKILL.md` to reference the new CLI surfaces.
+  The agent never writes BUILD_RECEIPT.json; only the deterministic
+  finalizer does.
+
+**Defect 2 — model-owned branch / worktree plumbing**
+
+- Added `lib/ownframework_loop/build_prepare.py` with `prepare`. Returns
+  a machine-readable context: current checkpoint, baseline SHA, candidate
+  branch, exact builder worktree path, packet SHA, approval SHA, and
+  current work_unit_id.
+- Added CLI subcommand `ofloop build prepare <repo> <run-id>`. The
+  parent build skill MUST NOT issue raw `git worktree add`,
+  `git worktree remove`, or `git branch <invented-name>` for ordinary
+  pass setup.
+
+**Defect 3 — candidate branch source-of-truth drift**
+
+- Added `lib/ownframework_loop/branch_resolver.py`. Single source of
+  truth: packet-declared prefix wins; else the value frozen in
+  APPROVAL.json at approval time; else STATE.json source-of-truth;
+  else the deterministic default `factory/candidate/<run-id>`.
+- `spec approve` now freezes the resolved candidate_branch into
+  APPROVAL.json at approval time, eliminating the post-approval drift
+  the v0.4.2 incident exposed.
+- `program init` and `build prepare` both consume the resolver.
+
+**Defect 4 — global program budget envelope**
+
+- `materialise_initial_program_state` now computes
+  `effective_cumulative_cap = min(packet_global_cap, sum_checkpoint_caps)`.
+  The cumulative ceiling NEVER exceeds the human-approved packet-level
+  global risk_budget.
+- Pre-approval consistency check refuses packets whose global build or
+  review cap is smaller than the checkpoint count.
+- Records `envelope_source`, `packet_global_cap`, and
+  `checkpoint_sum_cap` in `source_sha_provenance` so the clamp is
+  auditable, not implicit.
+
+**UX defect — native /loop invocation**
+
+- Documented one canonical form: `/loop /of-loop:build <run-id>` and
+  `/loop /of-loop:review <run-id>`. The operator does not type cadence
+  grammar. If a cadence is required, it is typed explicitly
+  (`/loop 15m ...`).
+
+**Tests**
+
+- `tests/unit/test_v043_hardening.sh` covers the skeleton match,
+  fresh-builder-without-repair, finalizer still rejects malformed
+  shapes, builder docs do not author BUILD_RECEIPT, deterministic prep
+  owns plumbing, packet-declared branch propagation, default branch
+  determinism, global envelope clamp, incident shape
+  (global=24/24/8 vs sum=33/33/22).
 # Changelog
 
 ## 0.4.2 — Autonomy Micro-Repair (2026-08-28)

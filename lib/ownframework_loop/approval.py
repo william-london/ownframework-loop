@@ -29,7 +29,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from . import git_checks, packet as packet_mod, util
+from . import branch_resolver, git_checks, packet as packet_mod, util
 
 
 SCHEMA_VERSION = "ownframework-loop-approval/v1"
@@ -337,6 +337,17 @@ def request_human_approval(
     if not baseline_sha:
         raise RuntimeError("canonical repo has no HEAD")
     canonical_repo_str = str(canonical_repo.resolve(strict=False))
+    # v0.4.3: freeze the candidate branch in APPROVAL.json so every
+    # later consumer (program init, build prepare, build finalize,
+    # review finalize, receipts) reads the SAME value from a single
+    # authoritative source. Priority: packet-declared prefix, else the
+    # deterministic default factory/candidate/<run-id>.
+    candidate_branch = (
+        (meta.get("target") or {}).get("candidate_branch_prefix")
+        or branch_resolver.default_candidate_branch(run_id)
+    )
+    if not isinstance(candidate_branch, str) or not candidate_branch.strip():
+        raise RuntimeError("could not resolve candidate_branch for run {run_id}")
 
     token = derive_confirmation_token(packet_sha)
     prompt_lines = [
@@ -355,6 +366,7 @@ def request_human_approval(
         f"  diff_lines_budget   : {((meta.get('risk_budget') or {}) .get('max_diff_lines'))}",
         f"  sensitive_paths     : {meta.get('sensitive_paths') or []}",
         f"  elevated_paths      : {meta.get('elevated_allowed_paths') or []}",
+        f"  candidate_branch    : {candidate_branch}",
         "",
         f"  Type this token to approve: {token}",
         "",
@@ -385,6 +397,7 @@ def request_human_approval(
         "packet_title": meta.get("title"),
         "sensitive_paths_in_scope": list(meta.get("sensitive_paths") or []),
         "elevated_paths_in_scope": list(meta.get("elevated_allowed_paths") or []),
+        "candidate_branch": candidate_branch,
     }
     util.atomic_write_json(approval_path(canonical_repo, run_id), approval, mode=0o600)
     return approval

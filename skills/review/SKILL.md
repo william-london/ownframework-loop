@@ -111,6 +111,21 @@ run-specific reviewer worktree may be cleaned up by an explicit
 operator command.
 
 
+
+## Canonical scheduling UX (v0.4.3)
+
+The supported scheduling invocation is the bare slash command — no
+cadence grammar, no `15m`, no cron syntax:
+
+```
+/loop /of-loop:review <run-id>
+```
+
+The operator does not type an interval. Native Claude `/loop` defaults
+to `10m` cadence, which is acceptable for both lanes. If a different
+cadence is required, the operator types it explicitly
+(e.g. `/loop 15m /of-loop:review <run-id>`).
+
 ## PROGRAM mode (v3 packets)
 
 The review pass is identical for single-mode and program-mode packets

@@ -179,7 +179,13 @@ def cmd_program_init(args: argparse.Namespace) -> None:
     ).stdout.strip()
     if not baseline:
         _emit_error("repo has no HEAD", exit_code=2)
-    candidate_branch = f"factory/candidate/{run_id}"
+    # v0.4.3: candidate_branch comes from the branch_resolver so that
+    # packet-declared prefixes and the default shape are both honored
+    # consistently. Approval-frozen branch wins if APPROVAL.json has it.
+    from . import branch_resolver
+    candidate_branch = branch_resolver.resolve_candidate_branch(
+        repo, run_id, packet=meta,
+    )
     program_state = program_mod.materialise_initial_program_state(
         meta,
         baseline_sha=baseline,
@@ -1259,6 +1265,29 @@ def _build_parser() -> argparse.ArgumentParser:
     b_mk.add_argument("run_id")
     b_mk.set_defaults(func=cmd_build_marker)
 
+    # v0.4.3: deterministic builder agent result skeleton.
+    b_skel = bld_sub.add_parser(
+        "agent-skeleton",
+        help="write a deterministic BUILD_AGENT_RESULT.json skeleton at the run scratch path",
+    )
+    b_skel.add_argument("repo")
+    b_skel.add_argument("run_id", nargs="?", default=None)
+    b_skel.add_argument("--overwrite", action="store_true",
+                        help="overwrite an existing BUILD_AGENT_RESULT.json")
+    b_skel.set_defaults(func=cmd_build_agent_skeleton)
+
+    # v0.4.3: deterministic build preparation that owns worktree +
+    # branch resolution so the model does not have to.
+    b_prep = bld_sub.add_parser(
+        "prepare",
+        help="deterministic build preparation (branch, baseline, worktree, scratch); "
+             "the parent build skill MUST use this instead of raw git worktree add",
+    )
+    b_prep.add_argument("repo")
+    b_prep.add_argument("run_id", nargs="?", default=None)
+    b_prep.add_argument("--repair-round", type=int, default=0)
+    b_prep.set_defaults(func=cmd_build_prepare)
+
     # review
     rev = sub.add_parser("review", help="review subcommands")
     rev_sub = rev.add_subparsers(dest="review_cmd", required=True)
@@ -1334,6 +1363,74 @@ def _build_parser() -> argparse.ArgumentParser:
     nr.set_defaults(func=cmd_new_repo)
 
     return p
+
+
+def cmd_build_agent_skeleton(args: argparse.Namespace) -> None:
+    """Write a schema-conformant BUILD_AGENT_RESULT.json skeleton.
+
+    v0.4.3: the deterministic build finalizer refuses any agent result
+    whose top-level shape does not match the contract (the v0.4.2
+    incident demonstrated the cost of letting the agent reconstruct
+    the schema from prose). This subcommand materializes a pre-shaped
+    skeleton at the run scratch path so the agent only fills in
+    runtime-dependent values: summary, evidence, blocker_reason,
+    escalation_*, unit_ids_completed, acceptance_addressed, notes,
+    timestamp. Idempotent unless --overwrite is supplied.
+    """
+    from . import build_agent as build_agent_mod
+    repo = _repo_path(args.repo)
+    try:
+        path = build_agent_mod.write_skeleton(
+            repo,
+            args.run_id,
+            overwrite=bool(args.overwrite),
+        )
+    except RuntimeError as e:
+        _emit_error(str(e), exit_code=4)
+    print(json.dumps({
+        "ok": True,
+        "run_id": args.run_id or path.parent.parent.name,
+        "agent_result_path": str(path),
+        "shape": build_agent_mod.SCHEMA_AGENT_RESULT,
+        "overwritten": bool(args.overwrite),
+    }, indent=2))
+
+
+def cmd_build_prepare(args: argparse.Namespace) -> None:
+    """Deterministic build preparation.
+
+    v0.4.3 hardening: replaces the model-owned `git worktree add`
+    pattern that the v0.4.2 incident showed was unreliable. Returns a
+    machine-readable execution context that the parent build skill and
+    the fresh `of-builder` agent consume:
+
+      - current checkpoint id
+      - baseline SHA
+      - candidate branch (single source of truth via branch_resolver)
+      - exact builder worktree path (created or reused, deterministic)
+      - approved packet SHA
+      - approval SHA
+      - current work_unit_id
+      - repair round / pass identity
+
+    The parent build skill MUST NOT issue raw `git worktree add`,
+    `git worktree remove`, or `git branch <invented-name>` for ordinary
+    pass setup. Run `ofloop build prepare` instead.
+    """
+    from . import build_prepare as build_prepare_mod
+    repo = _repo_path(args.repo)
+    try:
+        ctx = build_prepare_mod.prepare(
+            canonical_repo=repo,
+            run_id=args.run_id,
+            repair_round=int(getattr(args, "repair_round", 0) or 0),
+        )
+    except build_prepare_mod.PrepareRefused as e:
+        _emit_error(f"build prepare refused: {e}", exit_code=4)
+    except RuntimeError as e:
+        _emit_error(str(e), exit_code=2)
+    print(json.dumps(ctx, indent=2, sort_keys=True))
+
 
 
 def main(argv: list[str] | None = None) -> int:

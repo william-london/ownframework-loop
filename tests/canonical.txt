@@ -5,6 +5,7 @@
 tests/unit/test_trust_approval.sh
 tests/unit/test_trust_build_review.sh
 tests/unit/test_approval_pty_e2e.sh
+tests/unit/test_v043_hardening.sh
 tests/unit/test_lifecycle.sh
 
 # Integration tests

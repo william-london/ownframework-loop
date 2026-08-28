@@ -274,17 +274,57 @@ def materialise_initial_program_state(
             "terminal": "",
         })
 
-    # Cumulative caps == sum of the exact approved checkpoint caps.
-    cumulative = {
-        "max_build_passes": 0,
-        "max_review_passes": 0,
-        "max_repair_rounds": 0,
-    }
+    # Cumulative caps = min(operator-approved global cap, sum of per-CP caps).
+    #
+    # v0.4.3 hardening: the per-checkpoint risk_budgets may sum to MORE
+    # than the packet-level global risk_budget (each CP carries its own
+    # independent budget). Without this clamp, the cumulative ceiling
+    # would silently grant MORE total passes than the operator approved.
+    #
+    # The effective ceiling MUST NEVER exceed the operator-approved
+    # global envelope. The smaller of the two wins.
+    global_rb = (packet.get("risk_budget") or {})
+    global_build_cap = int(global_rb.get("max_build_passes", 0))
+    global_review_cap = int(global_rb.get("max_review_passes", 0))
+    global_repair_cap = int(global_rb.get("max_repair_rounds", 0))
+
+    # Sum of per-checkpoint budgets (the existing deterministic total).
+    sum_build = 0
+    sum_review = 0
+    sum_repair = 0
     for cp in packet["checkpoint_graph"]["checkpoints"]:
         rb = cp["risk_budget"]
-        cumulative["max_build_passes"] += int(rb["max_build_passes"])
-        cumulative["max_review_passes"] += int(rb["max_review_passes"])
-        cumulative["max_repair_rounds"] += int(rb["max_repair_rounds"])
+        sum_build += int(rb["max_build_passes"])
+        sum_review += int(rb["max_review_passes"])
+        sum_repair += int(rb["max_repair_rounds"])
+
+    # Pre-approval consistency: the global cap must permit at least one
+    # build and one review pass per required checkpoint. Repair budget
+    # may legitimately be smaller than the checkpoint count because
+    # successful checkpoints need no repair.
+    n_cps = len(packet["checkpoint_graph"]["checkpoints"])
+    if global_build_cap and global_build_cap < n_cps:
+        raise ProgramGraphError(
+            f"packet-level max_build_passes={global_build_cap} cannot "
+            f"accommodate {n_cps} checkpoints (need >=1 build per CP)"
+        )
+    if global_review_cap and global_review_cap < n_cps:
+        raise ProgramGraphError(
+            f"packet-level max_review_passes={global_review_cap} cannot "
+            f"accommodate {n_cps} checkpoints (need >=1 review per CP)"
+        )
+
+    # Effective = min(global, sum). When global is missing/zero we fall
+    # back to the sum so legacy packets that pre-date the global envelope
+    # still get a usable ceiling.
+    cumulative = {
+        "max_build_passes": min(global_build_cap, sum_build) if global_build_cap else sum_build,
+        "max_review_passes": min(global_review_cap, sum_review) if global_review_cap else sum_review,
+        "max_repair_rounds": min(global_repair_cap, sum_repair) if global_repair_cap else sum_repair,
+    }
+    # Record the inputs in source_sha_provenance so an auditor can
+    # prove the clamp happened, not just see the post-clamp value.
+    # (inserted below into source_sha_provenance block)
 
     sc = (packet["checkpoint_graph"].get("global_source_ceilings") or {})
     cumulative["max_unique_changed_files"] = int(
@@ -332,6 +372,17 @@ def materialise_initial_program_state(
             "baseline_sha": baseline_sha,
             "candidate_branch": candidate_branch,
             "captured_at": utc_now_iso(),
+            "envelope_source": "min(global_packet_cap, sum_checkpoint_caps)",
+            "packet_global_cap": {
+                "max_build_passes": global_build_cap,
+                "max_review_passes": global_review_cap,
+                "max_repair_rounds": global_repair_cap,
+            },
+            "checkpoint_sum_cap": {
+                "max_build_passes": sum_build,
+                "max_review_passes": sum_review,
+                "max_repair_rounds": sum_repair,
+            },
         },
     }
 
