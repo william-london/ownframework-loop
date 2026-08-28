@@ -164,7 +164,12 @@ def ensure_executable(*, canonical_repo, run_id, actor=None, binding_method="bui
     try:
         with flock_exclusive(start_lock, blocking=True, timeout_seconds=30):
             with flock_exclusive(binding_lock, blocking=True, timeout_seconds=30):
+                existing_seal_path = approval_mod.approval_path(canonical_repo, run_id)
                 existing = approval_mod.load_approval(canonical_repo, run_id)
+                if existing_seal_path.exists() and existing is None:
+                    raise RuntimeError(
+                        "existing seal malformed: bytes are not valid JSON; refusing to overwrite"
+                    )
                 if existing is not None:
                     seal_errors = _validate_seal_shape(existing)
                     if seal_errors:
