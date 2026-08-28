@@ -349,10 +349,12 @@ class ClaudeCodeRunner:
             "OFLOOP_CLAUDE_ALLOWED_TOOLS",
             "Read,Edit,Write,Bash,Glob,Grep,WebSearch,WebFetch",
         )
+        # Pipe the prompt via stdin. Passing it as an argv string lets Claude
+        # CLI mis-parse leading `---` (YAML frontmatter in the role file) as
+        # an unknown option. stdin is the supported, robust path.
         cmd = [
             claude_bin,
             "-p",
-            prompt,
             "--output-format",
             "json",
             "--plugin-dir",
@@ -373,11 +375,17 @@ class ClaudeCodeRunner:
         proc = subprocess.Popen(
             cmd,
             cwd=str(worktree),
+            stdin=subprocess.PIPE,
             stdout=stdout_fh,
             stderr=stderr_fh,
             text=True,
             start_new_session=True,
         )
+        try:
+            proc.stdin.write(prompt)  # type: ignore[union-attr]
+            proc.stdin.close()  # type: ignore[union-attr]
+        except Exception:
+            pass
         if on_start is not None:
             on_start(int(proc.pid), role)
 
