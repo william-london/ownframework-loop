@@ -753,7 +753,19 @@ def run_one(*, db_path: Path | None = None, timeout_seconds: int = 3600) -> dict
             added_cost = _record_cost_attempt(
                 conn, job["id"], attempt_digest, result.cost_usd
             )
-            new_cost = float(job["total_cost_usd"]) + added_cost
+            # Derive cumulative cost from cost_attempts (exact-once) rather
+            # than from in-memory total_cost_usd so the value is always the
+            # sum of recorded attempts.
+            try:
+                new_cost = float(
+                    conn.execute(
+                        "SELECT COALESCE(SUM(cost_usd),0) FROM cost_attempts WHERE job_id=?",
+                        (job["id"],),
+                    ).fetchone()[0]
+                    or 0.0
+                )
+            except Exception:
+                new_cost = float(job["total_cost_usd"] or 0.0) + added_cost
             if not result.ok:
                 failures = int(job["infra_failures"]) + 1
                 max_failures = int(job["max_infra_failures"])
@@ -803,11 +815,25 @@ def run_one(*, db_path: Path | None = None, timeout_seconds: int = 3600) -> dict
             max_failures = int(job["max_infra_failures"])
             quarantined = failures >= max_failures
             backoff = min(300.0, float(5 * (2 ** max(0, failures - 1))))
+            # Persist any cost the runner already accumulated before the
+            # exception. cost_attempts deduplicates; jobs.total_cost_usd is
+            # the operator-visible cumulative number.
+            try:
+                total_attempted_cost = float(
+                    conn.execute(
+                        "SELECT COALESCE(SUM(cost_usd),0) FROM cost_attempts WHERE job_id=?",
+                        (job["id"],),
+                    ).fetchone()[0]
+                    or 0.0
+                )
+            except Exception:
+                total_attempted_cost = float(job["total_cost_usd"] or 0.0)
             _update_job(
                 conn,
                 job["id"],
                 status_value="QUARANTINED" if quarantined else "BACKOFF",
                 infra_failures=failures,
+                total_cost_usd=total_attempted_cost,
                 last_error=f"{type(exc).__name__}: {exc}"[-4000:],
                 next_attempt_at=0 if quarantined else time.time() + backoff,
             )
