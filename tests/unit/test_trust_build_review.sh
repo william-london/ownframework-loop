@@ -46,6 +46,29 @@ Path(canonical_repo, ".ownframework-loop", run_id, "APPROVAL.json").write_text(
 PY
 }
 
+
+# Current finalizers require an explicit semantic builder pass. Legacy trust
+# cases below care about deterministic candidate/scope behavior, so use a
+# schema-correct synthetic semantic result instead of the retired implicit
+# candidate_ready shortcut.
+semantic_build_finalize() {
+  local repo="$1" rid="$2"
+  local semantic
+  semantic="$("$OFLOOP_BIN" build agent-skeleton "$repo" "$rid" | jq -r '.agent_result_path')"
+  python3 - "$semantic" <<'PY'
+import json, sys
+from pathlib import Path
+p = Path(sys.argv[1])
+d = json.loads(p.read_text())
+d["summary"] = "trust-suite synthetic semantic builder result"
+d["outcome_requested"] = "candidate_ready"
+d["unit_ids_completed"] = ["UNIT-1"]
+d["acceptance_addressed"] = ["AC-1"]
+p.write_text(json.dumps(d, indent=2, sort_keys=True) + "\n")
+PY
+  "$OFLOOP_BIN" build finalize "$repo" "$rid" "$semantic"
+}
+
 # ---------- BUILD PROOF TESTS 12-25 ----------
 
 # 12. candidate SHA is the worktree HEAD (model cannot fabricate it)
@@ -77,7 +100,7 @@ RID1="$(make_approved_run "$T1" BUG low "cross-repo")"
 WT1="$T1/.worktrees/ownframework-loop/$RID1/builder"
 git -C "$T1" worktree add -b "factory/candidate/$RID1" "$WT1" master >/dev/null 2>&1
 echo "y" > "$WT1/y.py" && git -C "$WT1" add y.py && git -C "$WT1" commit -m y >/dev/null 2>&1
-"$OFLOOP_BIN" build finalize "$T1" "$RID1" >/dev/null 2>&1
+semantic_build_finalize "$T1" "$RID1" >/dev/null 2>&1
 SHA1="$(python3 -c "import json; print(json.load(open('$T1/.ownframework-loop/$RID1/BUILD_RECEIPT.json'))['candidate_sha'])")"
 git -C "$T1" cat-file -e "$SHA1" && pass "candidate SHA exists in canonical repo" || fail "candidate SHA not in canonical repo"
 
@@ -158,7 +181,7 @@ WT3="$T3/.worktrees/ownframework-loop/$RID3/builder"
 git -C "$T3" worktree add -b "factory/candidate/$RID3" "$WT3" master >/dev/null 2>&1
 mkdir -p "$WT3/elsewhere" && echo "x" > "$WT3/elsewhere/x.py"
 git -C "$WT3" add elsewhere/x.py && git -C "$WT3" commit -m x >/dev/null 2>&1
-"$OFLOOP_BIN" build finalize "$T3" "$RID3" >/dev/null 2>&1 || true
+semantic_build_finalize "$T3" "$RID3" >/dev/null 2>&1 || true
 NEXT3="$(python3 -c "import json; r=json.load(open('$T3/.ownframework-loop/$RID3/BUILD_RECEIPT.json')); print(r['next_state'])")"
 assert_eq "$NEXT3" "BLOCKED" "out-of-scope path is rejected"
 
@@ -169,7 +192,7 @@ RID4="$(make_approved_run "$T4" BUG low "sensitive-blocked")"
 WT4="$T4/.worktrees/ownframework-loop/$RID4/builder"
 git -C "$T4" worktree add -b "factory/candidate/$RID4" "$WT4" master >/dev/null 2>&1
 echo "x" > "$WT4/AGENTS.md" && git -C "$WT4" add AGENTS.md && git -C "$WT4" commit -m x >/dev/null 2>&1
-"$OFLOOP_BIN" build finalize "$T4" "$RID4" >/dev/null 2>&1 || true
+semantic_build_finalize "$T4" "$RID4" >/dev/null 2>&1 || true
 NEXT4="$(python3 -c "import json; r=json.load(open('$T4/.ownframework-loop/$RID4/BUILD_RECEIPT.json')); print(r['next_state'])")"
 assert_eq "$NEXT4" "BLOCKED" "unapproved sensitive path is rejected"
 
@@ -194,7 +217,7 @@ reapprove "$T5" "$RID5"
 WT5="$T5/.worktrees/ownframework-loop/$RID5/builder"
 git -C "$T5" worktree add -b "factory/candidate/$RID5" "$WT5" master >/dev/null 2>&1
 echo "y" > "$WT5/AGENTS.md" && git -C "$WT5" add AGENTS.md && git -C "$WT5" commit -m y >/dev/null 2>&1
-"$OFLOOP_BIN" build finalize "$T5" "$RID5" >/dev/null 2>&1 || true
+semantic_build_finalize "$T5" "$RID5" >/dev/null 2>&1 || true
 RECEIPT5="$T5/.ownframework-loop/$RID5/BUILD_RECEIPT.json"
 [[ -f "$RECEIPT5" ]] && pass "approved elevated path succeeds" || fail "approved elevated path was blocked"
 
@@ -217,7 +240,7 @@ reapprove "$T6" "$RID6"
 WT6="$T6/.worktrees/ownframework-loop/$RID6/builder"
 git -C "$T6" worktree add -b "factory/candidate/$RID6" "$WT6" master >/dev/null 2>&1
 echo "v" > "$WT6/v.py" && git -C "$WT6" add v.py && git -C "$WT6" commit -m v >/dev/null 2>&1
-"$OFLOOP_BIN" build finalize "$T6" "$RID6" >/dev/null 2>&1 || true
+semantic_build_finalize "$T6" "$RID6" >/dev/null 2>&1 || true
 EC="$(python3 -c "import json; r=json.load(open('$T6/.ownframework-loop/$RID6/BUILD_RECEIPT.json')); print(r['validation'][0]['exit_code'] if r.get('validation') else 'NONE')")"
 assert_eq "$EC" "0" "required validation is actually executed"
 
@@ -244,7 +267,7 @@ WT7="$T7/.worktrees/ownframework-loop/$RID7/builder"
 git -C "$T7" worktree add -b "factory/candidate/$RID7" "$WT7" master >/dev/null 2>&1
 mkdir -p "$WT7/src"
 echo "v" > "$WT7/src/v.py" && git -C "$WT7" add src/v.py && git -C "$WT7" commit -m v >/dev/null 2>&1
-"$OFLOOP_BIN" build finalize "$T7" "$RID7" >/dev/null 2>&1 || true
+semantic_build_finalize "$T7" "$RID7" >/dev/null 2>&1 || true
 NEXT="$(python3 -c "import json; r=json.load(open('$T7/.ownframework-loop/$RID7/BUILD_RECEIPT.json')); print(r['next_state'])")"
 assert_eq "$NEXT" "CHANGES_REQUESTED" "failed required validation blocks review readiness"
 
@@ -277,7 +300,7 @@ RID8="$(make_approved_run "$T8" BUG low "fab-reviewed")"
 WT8="$T8/.worktrees/ownframework-loop/$RID8/builder"
 git -C "$T8" worktree add -b "factory/candidate/$RID8" "$WT8" master >/dev/null 2>&1
 echo "r" > "$WT8/r.py" && git -C "$WT8" add r.py && git -C "$WT8" commit -m r >/dev/null 2>&1
-"$OFLOOP_BIN" build finalize "$T8" "$RID8" >/dev/null 2>&1 || true
+semantic_build_finalize "$T8" "$RID8" >/dev/null 2>&1 || true
 ASSESS26="$(mktemp)"
 cat > "$ASSESS26" <<JSON
 {
@@ -448,7 +471,7 @@ RID9="$(make_approved_run "$T9" BUG low "master-baseline")"
 WT9="$T9/.worktrees/ownframework-loop/$RID9/builder"
 git -C "$T9" worktree add -b "factory/candidate/$RID9" "$WT9" master >/dev/null 2>&1
 echo "m" > "$WT9/m.py" && git -C "$WT9" add m.py && git -C "$WT9" commit -m m >/dev/null 2>&1
-"$OFLOOP_BIN" build finalize "$T9" "$RID9" >/dev/null 2>&1 || true
+semantic_build_finalize "$T9" "$RID9" >/dev/null 2>&1 || true
 [[ -f "$T9/.ownframework-loop/$RID9/BUILD_RECEIPT.json" ]] && pass "master baseline works" || fail "master baseline failed"
 
 # 59. main baseline works
@@ -459,7 +482,7 @@ RID10="$(make_approved_run "$T10" BUG low "main-baseline" main)"
 WT10="$T10/.worktrees/ownframework-loop/$RID10/builder"
 git -C "$T10" worktree add -b "factory/candidate/$RID10" "$WT10" main >/dev/null 2>&1
 echo "m" > "$WT10/m.py" && git -C "$WT10" add m.py && git -C "$WT10" commit -m m >/dev/null 2>&1
-"$OFLOOP_BIN" build finalize "$T10" "$RID10" >/dev/null 2>&1 || true
+semantic_build_finalize "$T10" "$RID10" >/dev/null 2>&1 || true
 [[ -f "$T10/.ownframework-loop/$RID10/BUILD_RECEIPT.json" ]] && pass "main baseline works" || fail "main baseline failed"
 
 # 60. alternate branch works
@@ -470,7 +493,7 @@ RID11="$(make_approved_run "$T11" BUG low "develop-baseline" develop)"
 WT11="$T11/.worktrees/ownframework-loop/$RID11/builder"
 git -C "$T11" worktree add -b "factory/candidate/$RID11" "$WT11" develop >/dev/null 2>&1
 echo "d" > "$WT11/d.py" && git -C "$WT11" add d.py && git -C "$WT11" commit -m d >/dev/null 2>&1
-"$OFLOOP_BIN" build finalize "$T11" "$RID11" >/dev/null 2>&1 || true
+semantic_build_finalize "$T11" "$RID11" >/dev/null 2>&1 || true
 [[ -f "$T11/.ownframework-loop/$RID11/BUILD_RECEIPT.json" ]] && pass "alternate branch works" || fail "alternate branch failed"
 
 # 61. existing remote works without mutation
@@ -485,7 +508,7 @@ RID12="$(make_approved_run "$T12" BUG low "remote-exists")"
 WT12="$T12/.worktrees/ownframework-loop/$RID12/builder"
 git -C "$T12" worktree add -b "factory/candidate/$RID12" "$WT12" master >/dev/null 2>&1
 echo "r" > "$WT12/r.py" && git -C "$WT12" add r.py && git -C "$WT12" commit -m r >/dev/null 2>&1
-"$OFLOOP_BIN" build finalize "$T12" "$RID12" >/dev/null 2>&1 || true
+semantic_build_finalize "$T12" "$RID12" >/dev/null 2>&1 || true
 REMOTE_COUNT_AFTER="$(git -C "$T12" remote | wc -l | tr -d ' ')"
 assert_eq "$REMOTE_COUNT_AFTER" "$REMOTE_COUNT_BEFORE" "existing remote works without mutation"
 [[ -f "$T12/.ownframework-loop/$RID12/BUILD_RECEIPT.json" ]] && pass "existing remote (finalize succeeded)"
@@ -534,7 +557,7 @@ WT13="$T13/.worktrees/ownframework-loop/$RID13/builder"
 git -C "$T13" worktree add -b "factory/candidate/$RID13" "$WT13" master >/dev/null 2>&1
 mkdir -p "$WT13/.claude" && echo "x" > "$WT13/.claude/x.md"
 git -C "$WT13" add .claude/x.md && git -C "$WT13" commit -m x >/dev/null 2>&1
-"$OFLOOP_BIN" build finalize "$T13" "$RID13" >/dev/null 2>&1 || true
+semantic_build_finalize "$T13" "$RID13" >/dev/null 2>&1 || true
 NEXT66="$(python3 -c "import json; r=json.load(open('$T13/.ownframework-loop/$RID13/BUILD_RECEIPT.json')); print(r['next_state'])")"
 assert_eq "$NEXT66" "BLOCKED" ".claude/ edit blocked when not elevated"
 
@@ -596,7 +619,7 @@ RID14="$(make_approved_run "$T14" BUG low "tamper-test")"
 WT14="$T14/.worktrees/ownframework-loop/$RID14/builder"
 git -C "$T14" worktree add -b "factory/candidate/$RID14" "$WT14" master >/dev/null 2>&1
 echo "z" > "$WT14/z.py" && git -C "$WT14" add z.py && git -C "$WT14" commit -m z >/dev/null 2>&1
-"$OFLOOP_BIN" build finalize "$T14" "$RID14" >/dev/null 2>&1 || true
+semantic_build_finalize "$T14" "$RID14" >/dev/null 2>&1 || true
 echo '{"tampered": true}' > "$T14/.ownframework-loop/$RID14/STATE.json"
 out72="$("$OFLOOP_BIN" build transition "$T14" "$RID14" --to READY_FOR_REVIEW 2>&1 || true)"
 assert_contains "$out72" "transition refused" "direct artifact tampering is detected"

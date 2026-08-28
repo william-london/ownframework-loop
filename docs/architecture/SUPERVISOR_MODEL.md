@@ -94,3 +94,47 @@ budget, then quarantines the job without inventing a protocol verdict.
 The old `ofloop loop run` implementation is retired because it drove
 finalizers without a real semantic builder/reviewer process. It is not an
 unattended execution path.
+
+
+## Operational ceilings
+
+The supervisor carries bounded operational policy separately from protocol
+truth. Enqueue defaults currently provide:
+
+- one global active worker per supervisor database;
+- up to 3 infrastructure failures before quarantine;
+- an 8-hour wall-clock ceiling from first execution;
+- a $25 observed/estimated model-cost ceiling.
+
+The cost and wall ceilings are configurable at enqueue time. A ceiling
+violation sets supervisor state to QUARANTINED; it does not manufacture
+`BLOCKED` or alter the deterministic engineering verdict. Zero-cost semantic
+replay/finalization is still allowed when a worker already completed its
+artifact before a supervisor restart.
+
+## Restart ownership
+
+A RUNNING job records the live worker PID. Worker processes are launched in
+their own process group. A second supervisor process sharing the same SQLite
+database will not start another job while a live RUNNING owner exists.
+
+After supervisor restart:
+
+1. a still-live worker remains owned and is not duplicated;
+2. a dead worker makes the same job QUEUED;
+3. dispatch replays the same core claim;
+4. a complete semantic artifact is finalized with zero additional model call;
+5. an incomplete artifact launches a fresh worker for the same claimed pass.
+
+Timeout first sends SIGTERM to the process group, waits briefly, then uses
+SIGKILL only when needed.
+
+## macOS service
+
+The repository ships `install-supervisor-macos.sh`, which installs a per-user
+`launchd` agent named `com.ownframework.loop-supervisor`. The generated
+service uses the exact `ofloop` executable path selected at installation and
+runs `ofloop supervisor serve` independently of any terminal working
+directory.
+
+Use `uninstall-supervisor-macos.sh` to remove the launch agent.

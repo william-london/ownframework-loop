@@ -60,7 +60,29 @@ with supervisor._connect(db) as conn:
 assert recovered == 1, recovered
 assert dead == "QUEUED", dead
 assert live == "RUNNING", live
-print("PASS supervisor recovery requeues dead owner and preserves live owner")
+assert supervisor._take_next_job(conn) is None, "global worker fence allowed a second job"
+print("PASS supervisor recovery preserves live owner and global one-worker fence")
+PY
+
+# Operational budgets are durable supervisor policy, not protocol state.
+DB_CAP="$(mktemp -t ofloop-supervisor-cap.XXXXXX.sqlite3)"
+PYTHONPATH="$LIB_DIR" python3 - "$DB_CAP" <<'PY'
+import sys, tempfile
+from pathlib import Path
+from ownframework_loop import supervisor
+db = Path(sys.argv[1])
+repo = Path(tempfile.mkdtemp(prefix="ofloop-supervisor-caps-"))
+supervisor.enqueue(
+    canonical_repo=repo,
+    run_id="run-cap",
+    db_path=db,
+    max_total_cost_usd=7.5,
+    max_wall_seconds=1234,
+)
+s = supervisor.status(canonical_repo=repo, run_id="run-cap", db_path=db)
+assert s["max_total_cost_usd"] == 7.5, s
+assert s["max_wall_seconds"] == 1234, s
+print("PASS supervisor operational ceilings persist")
 PY
 
 # 4. Fresh human-originated run dispatches BUILD with deterministic preparation.
@@ -115,7 +137,14 @@ grep -Fq 'dispatch_mod.claim_next' "$ROOT/lib/ownframework_loop/supervisor.py" \
   || fail "supervisor does not consume dispatch owner"
 pass "supervisor is execution clock, not second engineering state machine"
 
-# 8. Deterministic finalizers themselves require semantic evidence.
+# 8. macOS service packaging is syntax-valid and launchd-owned.
+bash -n "$ROOT/install-supervisor-macos.sh"
+bash -n "$ROOT/uninstall-supervisor-macos.sh"
+grep -Fq 'launchctl bootstrap' "$ROOT/install-supervisor-macos.sh" \
+  || fail "macOS supervisor installer does not bootstrap launchd"
+pass "macOS supervisor service packaging is present"
+
+# 9. Deterministic finalizers themselves require semantic evidence.
 grep -Fq 'semantic BUILD_AGENT_RESULT.json is required' "$ROOT/lib/ownframework_loop/build_finalize.py" \
   || fail "build finalizer still permits missing semantic builder result"
 grep -Fq 'semantic REVIEW_AGENT_ASSESSMENT.json is required' "$ROOT/lib/ownframework_loop/review_finalize.py" \

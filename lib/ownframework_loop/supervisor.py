@@ -58,6 +58,9 @@ def _connect(path: Path) -> sqlite3.Connection:
           worker_pid INTEGER,
           worker_started_at REAL,
           worker_role TEXT,
+          max_total_cost_usd REAL NOT NULL DEFAULT 25,
+          max_wall_seconds INTEGER NOT NULL DEFAULT 28800,
+          execution_started_at REAL,
           UNIQUE(repo, run_id)
         );
         """
@@ -70,6 +73,9 @@ def _connect(path: Path) -> sqlite3.Connection:
         "worker_pid": "ALTER TABLE jobs ADD COLUMN worker_pid INTEGER",
         "worker_started_at": "ALTER TABLE jobs ADD COLUMN worker_started_at REAL",
         "worker_role": "ALTER TABLE jobs ADD COLUMN worker_role TEXT",
+        "max_total_cost_usd": "ALTER TABLE jobs ADD COLUMN max_total_cost_usd REAL NOT NULL DEFAULT 25",
+        "max_wall_seconds": "ALTER TABLE jobs ADD COLUMN max_wall_seconds INTEGER NOT NULL DEFAULT 28800",
+        "execution_started_at": "ALTER TABLE jobs ADD COLUMN execution_started_at REAL",
     }
     for name, statement in migrations.items():
         if name not in columns:
@@ -133,6 +139,8 @@ def enqueue(
     runner: str = "claude-code",
     db_path: Path | None = None,
     max_infra_failures: int = 3,
+    max_total_cost_usd: float = 25.0,
+    max_wall_seconds: int = 28800,
 ) -> dict[str, Any]:
     repo = str(Path(canonical_repo).resolve(strict=False))
     db = db_path or default_db_path()
@@ -143,18 +151,29 @@ def enqueue(
             INSERT INTO jobs
               (repo, run_id, runner, status, infra_failures,
                max_infra_failures, total_cost_usd, next_attempt_at,
-               created_at, updated_at)
-            VALUES (?, ?, ?, 'QUEUED', 0, ?, 0, 0, ?, ?)
+               max_total_cost_usd, max_wall_seconds, created_at, updated_at)
+            VALUES (?, ?, ?, 'QUEUED', 0, ?, 0, 0, ?, ?, ?, ?)
             ON CONFLICT(repo, run_id) DO UPDATE SET
               runner=excluded.runner,
               max_infra_failures=excluded.max_infra_failures,
+              max_total_cost_usd=excluded.max_total_cost_usd,
+              max_wall_seconds=excluded.max_wall_seconds,
               status=CASE
                 WHEN jobs.status IN ('DONE','QUARANTINED') THEN jobs.status
                 ELSE 'QUEUED'
               END,
               updated_at=excluded.updated_at
             """,
-            (repo, run_id, runner, int(max_infra_failures), now, now),
+            (
+                repo,
+                run_id,
+                runner,
+                int(max_infra_failures),
+                float(max_total_cost_usd),
+                int(max_wall_seconds),
+                now,
+                now,
+            ),
         )
         row = conn.execute(
             "SELECT * FROM jobs WHERE repo=? AND run_id=?", (repo, run_id)
@@ -186,9 +205,40 @@ def status(
     return _job_dict(row, db)
 
 
+def _core_snapshot(repo: Path, run_id: str) -> dict[str, Any]:
+    run_dir = repo / ".ownframework-loop" / run_id
+    loaded: dict[str, dict[str, Any]] = {}
+    for name in ("STATE.json", "BUILD_RECEIPT.json", "REVIEW_VERDICT.json"):
+        path = run_dir / name
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            value = {}
+        loaded[name] = value if isinstance(value, dict) else {}
+    state = loaded["STATE.json"]
+    receipt = loaded["BUILD_RECEIPT.json"]
+    verdict = loaded["REVIEW_VERDICT.json"]
+    program = state.get("program") or {}
+    return {
+        "core_state": state.get("state"),
+        "last_candidate_sha": state.get("last_candidate_sha"),
+        "build_pass_count": state.get("build_pass_count"),
+        "review_pass_count": state.get("review_pass_count"),
+        "repair_round": state.get("repair_round"),
+        "current_checkpoints": program.get("current_checkpoints") or [],
+        "last_build_candidate_sha": receipt.get("candidate_sha"),
+        "last_review_verdict": verdict.get("verdict"),
+        "last_reviewed_candidate_sha": verdict.get("candidate_sha_reviewed"),
+    }
+
+
 def _job_dict(row: sqlite3.Row, db: Path) -> dict[str, Any]:
     d = dict(row)
     d.update({"schema": SCHEMA, "ok": True, "db_path": str(db)})
+    try:
+        d.update(_core_snapshot(Path(str(row["repo"])), str(row["run_id"])))
+    except Exception:
+        pass
     return d
 
 
@@ -251,7 +301,7 @@ class ClaudeCodeRunner:
         extra = shlex.split(os.environ.get("OFLOOP_CLAUDE_EXTRA_ARGS", ""))
         allowed_tools = os.environ.get(
             "OFLOOP_CLAUDE_ALLOWED_TOOLS",
-            "Read,Edit,Write,Bash,Glob,Grep",
+            "Read,Edit,Write,Bash,Glob,Grep,WebSearch,WebFetch",
         )
         cmd = [
             claude_bin,
@@ -330,6 +380,12 @@ def _take_next_job(conn: sqlite3.Connection) -> sqlite3.Row | None:
     _recover_stale_running(conn)
     now = time.time()
     conn.execute("BEGIN IMMEDIATE")
+    already_running = conn.execute(
+        "SELECT id FROM jobs WHERE status='RUNNING' LIMIT 1"
+    ).fetchone()
+    if already_running is not None:
+        conn.commit()
+        return None
     row = conn.execute(
         """
         SELECT * FROM jobs
@@ -349,10 +405,11 @@ def _take_next_job(conn: sqlite3.Connection) -> sqlite3.Row | None:
           worker_pid=?,
           worker_started_at=?,
           worker_role='dispatching',
+          execution_started_at=COALESCE(execution_started_at, ?),
           updated_at=?
         WHERE id=?
         """,
-        (os.getpid(), now, now, row["id"]),
+        (os.getpid(), now, now, now, row["id"]),
     )
     conn.commit()
     return conn.execute("SELECT * FROM jobs WHERE id=?", (row["id"],)).fetchone()
@@ -468,6 +525,46 @@ def run_one(*, db_path: Path | None = None, timeout_seconds: int = 3600) -> dict
                     "cost_usd": 0.0,
                     "semantic_replay": True,
                     "finalized": finalized,
+                }
+
+            started_at = float(job["execution_started_at"] or time.time())
+            elapsed = max(0.0, time.time() - started_at)
+            max_wall = int(job["max_wall_seconds"] or 0)
+            max_cost = float(job["max_total_cost_usd"] or 0.0)
+            spent = float(job["total_cost_usd"] or 0.0)
+            if max_wall > 0 and elapsed >= max_wall:
+                _update_job(
+                    conn,
+                    job["id"],
+                    status_value="QUARANTINED",
+                    last_error=f"operational wall-clock ceiling reached: {elapsed:.1f}s >= {max_wall}s",
+                    next_attempt_at=0,
+                )
+                return {
+                    "schema": SCHEMA,
+                    "ok": False,
+                    "action": "QUARANTINED",
+                    "job_id": job["id"],
+                    "reason": "wall_clock_ceiling",
+                    "elapsed_seconds": elapsed,
+                    "max_wall_seconds": max_wall,
+                }
+            if max_cost > 0 and spent >= max_cost:
+                _update_job(
+                    conn,
+                    job["id"],
+                    status_value="QUARANTINED",
+                    last_error=f"operational model-cost ceiling reached: ${spent:.4f} >= ${max_cost:.4f}",
+                    next_attempt_at=0,
+                )
+                return {
+                    "schema": SCHEMA,
+                    "ok": False,
+                    "action": "QUARANTINED",
+                    "job_id": job["id"],
+                    "reason": "cost_ceiling",
+                    "total_cost_usd": spent,
+                    "max_total_cost_usd": max_cost,
                 }
 
             result = _runner(str(job["runner"])).run(

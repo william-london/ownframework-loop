@@ -1585,6 +1585,8 @@ def _build_parser() -> argparse.ArgumentParser:
             runner=args.runner,
             db_path=Path(args.db).expanduser() if args.db else None,
             max_infra_failures=args.max_infra_failures,
+            max_total_cost_usd=args.max_cost_usd,
+            max_wall_seconds=args.max_wall_seconds,
         )
         _emit(out)
 
@@ -1615,6 +1617,14 @@ def _build_parser() -> argparse.ArgumentParser:
     s_enq.add_argument("--runner", default="claude-code")
     s_enq.add_argument("--db", default=None)
     s_enq.add_argument("--max-infra-failures", type=int, default=3)
+    s_enq.add_argument(
+        "--max-cost-usd", type=float, default=25.0,
+        help="operational model-cost ceiling per enqueued run; <=0 disables",
+    )
+    s_enq.add_argument(
+        "--max-wall-seconds", type=int, default=28800,
+        help="operational wall-clock ceiling from first supervisor execution; <=0 disables",
+    )
     s_enq.set_defaults(func=cmd_supervisor_enqueue)
     s_ss = sup_sub.add_parser("status", help="show supervisor operational state")
     s_ss.add_argument("repo")

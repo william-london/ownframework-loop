@@ -21,7 +21,9 @@ packet exists.
 Enqueue the existing run:
 
 ```bash
-ofloop supervisor enqueue /absolute/path/to/repo <run-id>
+ofloop supervisor enqueue /absolute/path/to/repo <run-id> \
+  --max-cost-usd 25 \
+  --max-wall-seconds 28800
 ```
 
 Start the execution clock:
@@ -38,11 +40,24 @@ deterministic dispatch boundary for exactly one BUILD or REVIEW work order,
 launches one fresh runner process, finalizes deterministically, and immediately
 asks core what is next.
 
-Operational status:
+Operational status / morning evidence:
 
 ```bash
 ofloop supervisor status /absolute/path/to/repo <run-id>
 ```
+
+Status combines supervisor queue/retry/cost evidence with a read-only snapshot
+of core state, candidate SHA, pass counters, PROGRAM checkpoint, and latest
+review verdict.
+
+On macOS, after commissioning the exact checkout:
+
+```bash
+bash install-supervisor-macos.sh
+```
+
+This installs a per-user `launchd` service so the supervisor is independent of
+an open terminal or Claude session.
 
 ## 3. Interactive foreground mode
 
