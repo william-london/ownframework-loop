@@ -59,7 +59,7 @@ from pathlib import Path
 from typing import Any
 
 from . import (
-    approval, git_checks, integrity, limits as limits_mod,
+    approval, git_checks, guards, integrity, limits as limits_mod,
     packet as packet_mod, program as program_mod, receipts, secrets_v2,
     state as state_mod, transitions, util, verdicts, worktrees,
     assessment as assessment_mod,
@@ -357,6 +357,12 @@ def finalize_review(
         name = v["name"]
         kind = v.get("kind") or "fast"
         timeout = int(meta.get("required_runtime_proof", {}).get("max_runtime_seconds") or 600)
+        command_policy = guards.classify_bash_command(cmd)
+        if command_policy.get("severity") == "forbidden":
+            raise RuntimeError(
+                "required_validation command refused by deterministic guard: "
+                + "; ".join(command_policy.get("forbidden") or ["forbidden command"])
+            )
         result = _run_validation_command(reviewer_wt, cmd, timeout_seconds=timeout)
         expected_exit = int(v.get("expected_exit_code") or 0)
         ok_v = (result["exit_code"] == expected_exit)

@@ -427,6 +427,12 @@ def finalize_build(
         name = (v or {}).get("name") or "validation"
         kind = (v or {}).get("kind") or "fast"
         timeout = int(meta.get("required_runtime_proof", {}).get("max_runtime_seconds") or 600)
+        command_policy = guards.classify_bash_command(cmd)
+        if command_policy.get("severity") == "forbidden":
+            raise RuntimeError(
+                "required_validation command refused by deterministic guard: "
+                + "; ".join(command_policy.get("forbidden") or ["forbidden command"])
+            )
         result = _run_validation_command(builder_wt, cmd, timeout_seconds=timeout)
         validations.append({
             "name": name,

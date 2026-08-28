@@ -23,8 +23,8 @@ The deterministic core owns:
 - crash reconciliation;
 - terminal semantics and the promotion boundary.
 
-Adapters call supported `ofloop` surfaces. They must not directly author or
-patch `STATE.json`, the compatibility-named execution binding
+Adapters and unattended runners call supported `ofloop` surfaces. They must
+not directly author or patch `STATE.json`, the compatibility-named execution binding
 (`APPROVAL.json`), `BUILD_RECEIPT.json`, `REVIEW_VERDICT.json`, locks, or event
 logs in real runs.
 
@@ -77,6 +77,17 @@ hardening, and live verification.
 - **stable** — documented native UX, deterministic conformance, maintained
   compatibility, and live host proof.
 - **planned** — design intent only.
+
+## Durable runner contract
+
+Unattended execution uses the same core through `dispatch.py`. A runner
+receives one already-claimed/prepared work order, launches one fresh semantic
+agent process, writes only the exact semantic artifact, and exits. The durable
+supervisor owns queue/process/retry concerns only; it never chooses the next
+engineering state.
+
+Claude Code is the first live runner. Other hosts may implement the same runner
+contract without changing packet, state, SHA, or verdict authority.
 
 ## Non-negotiable adapter rule
 
