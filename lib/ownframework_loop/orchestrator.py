@@ -489,27 +489,25 @@ def run_program_mode(
             # machine, no duplicated advancement logic.
             evidence_manifest = {"_packet": meta, "round": round_idx,
                                   "candidate_sha": cur.get("last_candidate_sha")}
-            if cp_terminal == "APPROVED":
-                ev_sha = program_mod.sha256_text(
-                    program_mod.canonical_json_dumps(evidence_manifest)
-                )
-                # The orchestrator may not have a review verdict SHA, so
-                # use the evidence manifest SHA as the link.
-                adv = program_mod.advance_after_review_approval(
-                    canonical_repo=canonical_repo,
-                    run_id=run_id,
-                    packet=meta,
-                    state=cur,
-                    candidate_sha=cur.get("last_candidate_sha") or "",
-                    verdict_sha256=ev_sha,
-                    review_pass_number=int(cur.get("review_pass_count", 0) or 0),
-                    actor="orchestrator",
-                )
-                # Reload so we pick up the helper's saved state.
-                cur = state_mod.load(canonical_repo, run_id)
-                new_state = cur
-                new_prog = cur.get("program") or new_prog
-            else:
+            # The Claude-native review finalize (called via
+            # _drive_review_cycle) ALREADY routes through the single
+            # advancement helper in PROGRAM mode. The orchestrator MUST
+            # NOT call advance_after_review_approval again — that would
+            # observe an empty current_checkpoints and raise.
+            # The orchestrator's job here is just to record the outcome
+            # of this round and advance its own loop counter; the
+            # final PROGRAM state is whatever the helper left behind.
+            cur = state_mod.load(canonical_repo, run_id)
+            new_state = cur
+            new_prog = cur.get("program") or new_prog
+            adv = {
+                "advanced_to_cp": (new_prog.get("current_checkpoints") or [""])[0],
+                "finalized_cp": cp_id,
+                "next_top_state": cur.get("state", ""),
+                "evidence_manifest_sha256": "",
+                "terminal_state": cp_terminal,
+            }
+            if cp_terminal != "APPROVED":
                 new_prog = program_mod.finalize_checkpoint(
                     program_state=new_prog,
                     cp_id=cp_id,
