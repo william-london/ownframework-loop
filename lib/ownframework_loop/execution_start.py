@@ -199,6 +199,19 @@ def ensure_executable(*, canonical_repo, run_id, actor=None, binding_method="bui
                     raise RuntimeError("canonical repo has no HEAD")
                 if _is_tracked_or_staged_dirty(canonical_repo):
                     raise RuntimeError("canonical source has tracked or staged changes; refusing to seal an execution start against dirty source")
+                # v0.5.1: consume STATE.spec_baseline_sha/spec_baseline_branch
+                # to refuse source drift between spec-time and start-time.
+                prior_state = state_mod.load(canonical_repo, run_id)
+                prior_baseline_sha = (prior_state or {}).get("spec_baseline_sha") or ""
+                prior_baseline_branch = (prior_state or {}).get("spec_baseline_branch") or ""
+                if prior_baseline_sha and prior_baseline_sha != baseline_sha:
+                    raise RuntimeError(
+                        f"spec-time source moved between spec and start: spec_baseline_sha={prior_baseline_sha[:12]} current={baseline_sha[:12]}"
+                    )
+                if prior_baseline_branch and prior_baseline_branch != target_branch:
+                    raise RuntimeError(
+                        f"spec-time source branch moved between spec and start: spec_baseline_branch={prior_baseline_branch!r} current={target_branch!r}"
+                    )
                 seal = _build_seal(
                     canonical_repo=canonical_repo, run_id=run_id, packet=packet,
                     packet_path=packet_path, baseline_sha=baseline_sha,

@@ -44,6 +44,7 @@ from typing import Any
 
 from . import (
     approval as approval_mod,
+    execution_start,
     packet as packet_mod,
     program as program_mod,
     state as state_mod,
@@ -91,27 +92,6 @@ def _run_cli(args: list[str], *, cwd: Path | None = None) -> dict[str, Any]:
     except json.JSONDecodeError as e:
         raise RuntimeError(f"ofloop {' '.join(args)} non-JSON output: {proc.stdout!r}") from e
 
-
-def _require_approval_marker(canonical_repo: Path, run_id: str) -> dict[str, Any]:
-    """Refuse to run without a pre-existing approval marker.
-
-    The marker is APPROVAL.json written by spec approve. The
-    orchestrator never writes it itself.
-    """
-    # Check whether the run even exists before blaming the approval marker.
-    run_dir = canonical_repo / ".ownframework-loop" / run_id
-    if not run_dir.is_dir():
-        raise RuntimeError(
-            f"refuse to start: run directory not found for {run_id!r} under {canonical_repo}. "
-            "Operator must run: ofloop spec new <repo> <mission>"
-        )
-    approval_doc = approval_mod.load_approval(canonical_repo, run_id)
-    if approval_doc is None:
-        raise RuntimeError(
-            f"refuse to start: no APPROVAL.json for run {run_id!r}. "
-            "Operator must run: ofloop spec approve <repo> <run-id>"
-        )
-    return approval_doc
 
 
 def _drive_build_cycle(canonical_repo: Path, run_id: str) -> dict[str, Any]:
@@ -196,7 +176,23 @@ def run_single_mode(
         run_id = _discover_run_id(canonical_repo)
 
     # Refuse to start without an operator approval marker.
-    _require_approval_marker(canonical_repo, run_id)
+    # v0.5.1: route through shared execution-start owner so headless
+    # orchestrator uses the SAME auto-seal path as native build claim.
+    try:
+        execution_start.ensure_executable(
+            canonical_repo=canonical_repo,
+            run_id=run_id,
+            binding_method="build_start",
+        )
+    except Exception as e:
+        return {
+            "ok": False,
+            "run_id": run_id,
+            "terminal_state": (_safe_load_state(canonical_repo, run_id) or {}).get("state"),
+            "reason": "execution_start_refused",
+            "error": str(e),
+            "history": [],
+        }
 
     # Phase 3: deterministic automatic crash reconciliation. Adopt any
     # half-committed durable artifact (BUILD_RECEIPT, REVIEW_VERDICT)
@@ -312,7 +308,23 @@ def run_program_mode(
         run_id = _discover_run_id(canonical_repo)
 
     # Refuse without operator approval.
-    _require_approval_marker(canonical_repo, run_id)
+    # v0.5.1: route through shared execution-start owner so headless
+    # orchestrator uses the SAME auto-seal path as native build claim.
+    try:
+        execution_start.ensure_executable(
+            canonical_repo=canonical_repo,
+            run_id=run_id,
+            binding_method="build_start",
+        )
+    except Exception as e:
+        return {
+            "ok": False,
+            "run_id": run_id,
+            "terminal_state": (_safe_load_state(canonical_repo, run_id) or {}).get("state"),
+            "reason": "execution_start_refused",
+            "error": str(e),
+            "history": [],
+        }
 
     # Phase 3: deterministic automatic crash reconciliation.
     try:

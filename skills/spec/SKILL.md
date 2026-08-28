@@ -178,3 +178,18 @@ transitioning to `READY_TO_BUILD`. The operator does not run a second
 The Claude-native builder/reviewer lanes consume and advance that deterministic
 PROGRAM state. The spec skill never advances checkpoints and never performs
 approval itself.
+
+
+## Spec new flow (v0.5.0)
+
+Normal flow:
+  spec mission -> inspect target -> spec new -> draft bounded packet -> validate -> return run id + builder/reviewer commands -> DONE.
+
+No approval command. No confirmation token. No program init.
+
+The optional historical legacy pre-seal command remains as backward-compatible / optional strict pre-seal. Not required by normal workflow.
+
+Internal state AWAITING_APPROVAL is preserved for compatibility; operator-facing meaning is READY_TO_START.
+
+Before first execution seal: packet amendments are supported.
+After execution seal: packet is immutable. New mission/scope requires NEW RUN.

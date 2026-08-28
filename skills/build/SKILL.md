@@ -58,6 +58,19 @@ No raw worktree/branch creation or removal; no direct state/receipt/event
 writes; no self-approval; no scope/budget widening; no push, merge, deploy,
 publish, remote creation, or external effect.
 
+## First-start auto-seal (v0.5.0)
+
+For an unstarted run with internal state `AWAITING_APPROVAL` / `READY_TO_START`:
+
+  * The first invocation of `ofloop build claim` creates the immutable
+    execution seal: binding_method=build_start, binding_kind=execution_seal.
+  * No prior human approval or confirmation token is required.
+  * The operator first build claim IS the authorization to execute
+    the exact bounded packet locally.
+
+The internal state name `AWAITING_APPROVAL` is preserved for
+backward compatibility. The operator-facing meaning is `READY_TO_START`.
+
 ## Canonical scheduling UX
 
 ```

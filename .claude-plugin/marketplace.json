@@ -7,7 +7,7 @@
   "plugins": [
     {
       "name": "of-loop",
-      "version": "0.5.0",
+      "version": "0.5.1",
       "source": "./",
       "description": "Claude Code reference adapter for OwnFramework Loop: approved work packets, bounded build/review cycles, exact-SHA verification, and human promotion."
     }

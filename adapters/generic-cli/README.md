@@ -96,3 +96,20 @@ Git, scope, budget, tests, and writes the authoritative
 `BUILD_RECEIPT.json`. The agent never writes BUILD_RECEIPT.
 
 Do not fork the schema per-host. Core remains one protocol.
+
+
+## v0.5.0 exact pass-scoped result path (REQUIRED)
+
+Generic hosts MUST NOT assume a fixed unscoped path like
+`scratch/builder/BUILD_AGENT_RESULT.json`.
+
+The canonical flow:
+
+  ofloop build claim <repo> <run-id>
+  ofloop build prepare <repo> <run-id>    # returns exact agent_result_path
+  ofloop build agent-skeleton <repo> <run-id>
+  agent fills exact returned semantic artifact
+  ofloop build finalize <repo> <run-id> <agent_result_path>
+
+Do not reconstruct the path from prose. Do not hardcode
+scratch/builder/BUILD_AGENT_RESULT.json anywhere.

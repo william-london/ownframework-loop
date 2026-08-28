@@ -18,6 +18,17 @@ own candidate/worktree/state identity.
    the reviewer marker and wait; do not invoke a reviewer.
 4. Only `READY_FOR_REVIEW` or replayed `REVIEWING` may proceed.
 
+## Reviewer wait semantics (v0.5.0)
+
+For an unstarted run with internal state `AWAITING_APPROVAL` / `READY_TO_START`:
+
+  * Reviewer WAITS. The builder owns first execution start.
+  * Reviewer does NOT create the execution seal independently.
+  * After the build is finalized with a receipt, the reviewer proceeds
+    with normal exact-SHA review.
+
+No human approval ceremony is required. The first build claim auto-seals.
+
 ## Pass responsibilities
 
 1. Re-prove current packet bytes, approval binding, and authoritative build
