@@ -1,4 +1,4 @@
-## 0.5.1 - Auto Execution Seal / Approval Ceremony Removed (2026-08-28)
+## 0.5.2 - Auto Execution Seal / Approval Ceremony Removed (2026-08-28)
 
 **Scope.** Final deterministic-core hardening discovered during the post-0.4.5
 production sweep. No new coordinator, state machine, operator command, provider

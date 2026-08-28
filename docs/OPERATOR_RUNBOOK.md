@@ -1,105 +1,66 @@
-# Operator Runbook
+# OPERATOR_RUNBOOK
 
-This runbook is for operator. It assumes the plugin has been installed
-via `install.sh`. If you have not installed it, see the README quickstart.
+Canonical operator workflow for OwnFramework Loop.
 
-## 1. Create a mission
+## Operator flow
 
-```bash
-cd /path/to/target-repo
-claude --plugin-dir $HOME/.claude/skills/of-loop
-```
+1. Create spec: /of-loop:spec <mission>.
+2. Launch builder lane: /loop /of-loop:build <run-id>.
+3. Launch reviewer lane: /loop /of-loop:review <run-id>.
+4. Observe state read-only.
+5. After terminal APPROVED, decide promotion outside Loop.
 
-Inside the Claude session:
+## Internal vs operator-facing state
 
-```text
-/of-loop:spec "add a per-IP rate limit to /api/sync"
-```
+Internal state AWAITING_APPROVAL is preserved for backward compatibility.
+The operator-facing meaning is READY_TO_START - the run is startable; no
+human approval ceremony is required.
 
-The skill investigates the repo, asks only the minimum required questions,
-and writes a packet at:
+## First-start execution seal
 
-```text
-<target-repo>/.ownframework-loop/<run-id>/WORK_PACKET.md
-```
+The first build claim invocation creates the immutable execution seal:
 
-The packet is `human_approved: false`. The loop cannot run until you
-approve it.
+  * binding_method = build_start
+  * binding_kind = execution_seal
+  * binds: run_id, packet SHA, canonical repo, baseline branch, baseline SHA,
+    candidate branch, packet schema, packet metadata.
 
-## 2. Approve the packet (HUMAN ONLY)
+There is no separate approval step. The operator first build claim IS the
+authorization to execute the exact bounded packet locally.
 
-The approval is **human-only** and **must be performed by you** in your
-normal interactive Terminal. Do NOT delegate this to any agent, script,
-pty helper, pexpect, tmux injection, AppleScript, or subprocess
-wrapper. The hardened adapter refuses all such indirections.
+## What the operator does NOT do
 
-Open the packet, read the metadata and the Markdown body. When satisfied,
-in your Terminal run the canonical approval command (replace SPEC with
-the spec subcommand):
+- No human approval ceremony.
+- No confirmation token.
+- No program init.
+- No manual loop run.
+- No manual build claim or finalize or review claim or finalize invocation.
+- No manual STATE.json edits.
+- No manual receipt or verdict or scratch edits.
+- No manual checkpoint advancement.
+- No remote mutation.
 
-```
-ofloop SPEC approve /path/to/target-repo <run-id>
-```
+## Promotion outside Loop
 
-The CLI prompts you for a confirmation token derived from the packet
-SHA-256. Type the token; the CLI writes APPROVAL.json and the run
-transitions to READY_TO_BUILD.
+APPROVED means the work is eligible for operator promotion. It does NOT
+authorize automatic promotion. Operator promotion is the only authority to:
 
-## 2.5. PROGRAM mode (multi-checkpoint)
+- merge the candidate branch,
+- publish to remote,
+- deploy to production,
+- create or mutate remotes.
 
-For v3 PROGRAM packets, the program init subcommand (replace PROGRAM
-with the program subcommand) materializes the per-checkpoint graph. The
-same two /loop lanes drive the run; the Claude-native review finalize
-automatically advances to the next checkpoint after an APPROVED review.
-No loop-run subcommand invocation is required from the operator.
+## External authority
 
-After the final checkpoint is APPROVED, the top-level state transitions
-to terminal APPROVED and both lanes exit.
+Guards refuse ref-mutating subcommands.
 
-## 3. Start the two loops
+Guards refuse publish-to-remote, merge-branch, branch-delete subcommands.
 
-Open two terminal tabs in the target repo (with the plugin loaded):
+Guards refuse destructive systemctl operations.
 
-**Builder tab:**
+Guards refuse human approval command invocation by Claude.
 
-```text
-/loop /of-loop:build <run-id>
-```
+Guards are tool-surface guardrails, not OS sandbox.
+Claude policy forbids routing around refusals.
 
-**Reviewer tab:**
-
-```text
-/loop /of-loop:review <run-id>
-```
-
-Both sessions run via Claude Code's `/loop` command. The operator
-types no cadence, no cron expression, no worktree command, no branch
-command, no build-claim / finalize / skeleton / loop-run command.
-Those are internal protocol surfaces invoked by the skills; they are
-not part of the operator-facing UX.
-
-Each pass spawns a fresh agent through the Agent tool, so the parent
-`/loop` context never carries build state.
-
-## 4. Watch the markers
-
-Every pass emits a compact operator marker:
-
-```text
-OF_LOOP_OPERATOR_MARKER
-OF_LOOP_RUN_ID=<run-id>
-OF_LOOP_ROLE=builder|reviewer
-OF_LOOP_STATE=<state>
-OF_LOOP_ACTION=RESCHEDULE|STOP
-OF_LOOP_NEXT_DELAY_MINUTES=<int>
-OF_LOOP_REASON=<short>
-```
-
-At a terminal state (`APPROVED`, `BLOCKED`, `STOPPED`), the loop emits
-`OF_LOOP_ACTION=STOP` and exits.
-
-## 5. Inspect state at any time
-
-```bash
-ofloop doctor /path/to/target-repo --run-id <run-id>
-```
+REMOTE_COUNT=0 guarantees no remote destination.

@@ -1,75 +1,65 @@
 ---
 name: build
-description: OwnFramework Loop — one bounded build/repair pass. Claims atomically, consumes deterministic preparation, materializes a pass-scoped semantic skeleton, invokes a fresh of-builder, and deterministically finalizes.
+description: OwnFramework Loop - one bounded build or repair pass. Claims atomically, consumes deterministic preparation, materializes a pass-scoped semantic skeleton, invokes a fresh of-builder, and deterministically finalizes.
 user-invocable: true
 ---
 
-# /of-loop:build — one bounded build or repair pass
+# /of-loop:build - one bounded build or repair pass
 
 The parent is a thin coordinator. It does not engineer source and does not own
 branch/worktree/state identity.
 
-## Fast paths
+## Fast paths (single source of truth)
 
-1. Resolve canonical repo and read `ofloop spec status <repo> <run-id>`.
-2. If state is `APPROVED`, `BLOCKED`, `STOPPED`, or
-   `AWAITING_APPROVAL`: emit the builder marker and stop.
-3. If state is `READY_FOR_REVIEW` or `REVIEWING`: emit the builder marker and
-   do not invoke a builder.
-4. Only `READY_TO_BUILD`, `CHANGES_REQUESTED`, or replayed `BUILDING` may
-   proceed.
+| State | Action |
+|-------|--------|
+| APPROVED / BLOCKED / STOPPED | STOP |
+| READY_FOR_REVIEW / REVIEWING | WAIT |
+| AWAITING_APPROVAL / READY_TO_START | STARTABLE; invoke ofloop build claim; first claim may auto-seal |
+| READY_TO_BUILD / CHANGES_REQUESTED / replayed BUILDING | proceed normally |
 
-## Pass responsibilities
+Internal state AWAITING_APPROVAL is preserved for compatibility. The
+operator-facing meaning is READY_TO_START (the run is startable; no approval
+ceremony is required).
 
 ## Substantial passes (F-5-01 v0.3.7)
 
-A bounded build pass is not required to be minimal. When the
-must-fix surface, scope, or refactor cut spans multiple files,
-the builder may produce a coherent substantial pass. The operator
-MUST NOT collapse or thin the change set to keep the pass small;
-that would force re-entry through the same must-fix surface and
-race the per-checkpoint build cap.
+A bounded build pass is not required to be minimal. When the must-fix surface,
+scope, or refactor cut spans multiple files, the builder may produce a coherent
+substantial pass. The operator MUST NOT collapse or thin the change set to keep
+the pass small.
 
-1. Re-prove current packet bytes and approval binding.
-2. Claim via `ofloop build claim <repo> <run-id> --actor builder`.
-   A replayed `BUILDING` claim is the same pass and MUST NOT increment budget.
-3. Run `ofloop build prepare <repo> <run-id>`. This is the sole owner of
+## First-start execution seal (v0.5.x)
+
+The first ofloop build claim invocation on an unstarted run creates the
+immutable execution seal: binding_method=build_start,
+binding_kind=execution_seal. The operator first build claim IS the
+authorization to execute the exact bounded packet locally.
+
+No prior human approval. No confirmation token. No program init. No legacy
+sealing command. No ofloop loop run.
+
+## Pass responsibilities
+
+1. Re-prove current packet bytes and execution binding.
+2. Claim via ofloop build claim <repo> <run-id> --actor builder.
+   A replayed BUILDING claim is the same pass and MUST NOT increment budget.
+3. Run ofloop build prepare <repo> <run-id>. This is the sole owner of
    baseline, candidate branch, checkpoint/work-unit identity, builder worktree,
    and pass-scoped result path.
-4. Run `ofloop build agent-skeleton <repo> <run-id>` without `--overwrite`.
+4. Run ofloop build agent-skeleton <repo> <run-id> without --overwrite.
    Fresh claims get a new pass path; replayed claims retain the same path.
-5. Invoke one fresh `of-builder` with exactly the prepared context.
+5. Invoke one fresh of-builder with exactly the prepared context.
 6. The agent engineers only in the prepared worktree and fills only the exact
    pass-scoped semantic result.
-7. Call `ofloop build finalize <repo> <run-id> <agent_result_path>`.
-8. Emit `ofloop build marker <repo> <run-id>`.
-
-## PROGRAM mode
-
-Human approval materializes the frozen PROGRAM graph exactly once. There is no
-normal operator `program init` or `ofloop loop run` step in Claude-native
-operation. Each invocation performs one claimed pass for the current
-checkpoint. After an approved review the deterministic core selects/advances
-the next checkpoint.
+7. Call ofloop build finalize <repo> <run-id> <agent_result_path>.
+8. Emit ofloop build marker <repo> <run-id>.
 
 ## Prohibitions
 
 No raw worktree/branch creation or removal; no direct state/receipt/event
 writes; no self-approval; no scope/budget widening; no push, merge, deploy,
 publish, remote creation, or external effect.
-
-## First-start auto-seal (v0.5.0)
-
-For an unstarted run with internal state `AWAITING_APPROVAL` / `READY_TO_START`:
-
-  * The first invocation of `ofloop build claim` creates the immutable
-    execution seal: binding_method=build_start, binding_kind=execution_seal.
-  * No prior human approval or confirmation token is required.
-  * The operator first build claim IS the authorization to execute
-    the exact bounded packet locally.
-
-The internal state name `AWAITING_APPROVAL` is preserved for
-backward compatibility. The operator-facing meaning is `READY_TO_START`.
 
 ## Canonical scheduling UX
 

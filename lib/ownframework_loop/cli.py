@@ -37,7 +37,8 @@ from pathlib import Path
 from typing import Any
 
 from . import (
-    git_checks, guards, packet as packet_mod, program as program_mod, receipts,
+    git_checks, guards,
+    locking, packet as packet_mod, program as program_mod, receipts,
     scheduling, state as state_mod, transitions, util, verdicts, worktrees,
     integrity, limits as limits_mod, approval, build_finalize, review_finalize,
     branch_resolver, execution_start,
@@ -648,32 +649,53 @@ def cmd_build_claim(args: argparse.Namespace) -> None:
         })
         return
 
-    # SINGLE mode: legacy V1 path.
-    if cur_state not in ("READY_TO_BUILD", "CHANGES_REQUESTED", "BUILDING"):
-        _emit_error(f"cannot claim in state {cur_state!r}", exit_code=2)
-    # Idempotent re-claim: do not increment twice.
-    if cur_state == "BUILDING":
-        _emit({
-            "ok": True,
-            "run_id": args.run_id,
-            "state": "BUILDING",
-            "build_pass_count": int(cur.get("build_pass_count") or 0),
-            "replayed": True,
-        })
-        return
+    # SINGLE mode: v0.5.2 atomic per-run claim lock. Two concurrent
+    # single-mode build claims must converge on one pass.
+    claim_lock = state_mod.run_dir(repo, args.run_id) / "BUILD_CLAIM_LOCK"
     try:
-        state_mod.transition(
-            repo, args.run_id, to_state="BUILDING",
-            actor=args.actor or "of-builder",
-            reason="claim build pass",
-        )
-        new_pass_count = state_mod.increment_counter(
-            repo, args.run_id, counter="build_pass_count",
-            actor="of-builder", packet=meta,
-            hard_cap=True,
-        )
-    except limits_mod.RepairLimitExceeded as e:
-        _emit_error(f"repair limit exceeded: {e}", exit_code=4)
+        with locking.flock_exclusive(claim_lock, blocking=True, timeout_seconds=30):
+            cur = state_mod.load(repo, args.run_id)
+            cur_state = cur.get("state")
+            if cur_state not in ("READY_TO_BUILD", "CHANGES_REQUESTED", "BUILDING"):
+                _emit_error(f"cannot claim in state {cur_state!r}", exit_code=2)
+            if cur_state == "BUILDING":
+                _emit({
+                    "ok": True,
+                    "run_id": args.run_id,
+                    "state": "BUILDING",
+                    "build_pass_count": int(cur.get("build_pass_count") or 0),
+                    "replayed": True,
+                })
+                return
+            try:
+                state_mod.transition(
+                    repo, args.run_id, to_state="BUILDING",
+                    actor=args.actor or "of-builder",
+                    reason="claim build pass",
+                )
+                new_pass_count = state_mod.increment_counter(
+                    repo, args.run_id, counter="build_pass_count",
+                    actor="of-builder", packet=meta,
+                    hard_cap=True,
+                )
+            except limits_mod.RepairLimitExceeded as e:
+                _emit_error(f"repair limit exceeded: {e}", exit_code=4)
+            state_mod.append_event(
+                repo, args.run_id,
+                event_type="build_claimed",
+                old_state=cur_state, new_state="BUILDING",
+                actor=args.actor or "of-builder",
+            )
+            _emit({
+                "ok": True,
+                "run_id": args.run_id,
+                "state": "BUILDING",
+                "build_pass_count": new_pass_count,
+                "replayed": False,
+            })
+            return
+    except locking.LockBusyError as e:
+        _emit_error(f"build claim lock contention: {e}", exit_code=4)
     state_mod.append_event(
         repo, args.run_id,
         event_type="build_claimed",
@@ -723,44 +745,53 @@ def cmd_review_claim(args: argparse.Namespace) -> None:
         })
         return
 
-    # SINGLE mode: legacy V1 path.
-    if cur_state not in ("READY_FOR_REVIEW", "CHANGES_REQUESTED", "REVIEWING"):
-        _emit_error(f"cannot claim in state {cur_state!r}", exit_code=2)
-    if cur_state == "REVIEWING":
-        _emit({
-            "ok": True,
-            "run_id": args.run_id,
-            "state": "REVIEWING",
-            "review_pass_count": int(cur.get("review_pass_count") or 0),
-            "replayed": True,
-        })
-        return
+    # SINGLE mode: v0.5.2 atomic per-run claim lock. Two concurrent
+    # single-mode review claims must converge on one pass.
+    claim_lock = state_mod.run_dir(repo, args.run_id) / "REVIEW_CLAIM_LOCK"
     try:
-        state_mod.transition(
-            repo, args.run_id, to_state="REVIEWING",
-            actor=args.actor or "of-reviewer",
-            reason="claim review pass",
-        )
-        new_pass_count = state_mod.increment_counter(
-            repo, args.run_id, counter="review_pass_count",
-            actor="of-reviewer", packet=meta,
-            hard_cap=True,
-        )
-    except limits_mod.RepairLimitExceeded as e:
-        _emit_error(f"repair limit exceeded: {e}", exit_code=4)
-    state_mod.append_event(
-        repo, args.run_id,
-        event_type="review_claimed",
-        old_state=cur_state, new_state="REVIEWING",
-        actor=args.actor or "of-reviewer",
-    )
-    _emit({
-        "ok": True,
-        "run_id": args.run_id,
-        "state": "REVIEWING",
-        "review_pass_count": new_pass_count,
-        "replayed": False,
-    })
+        with locking.flock_exclusive(claim_lock, blocking=True, timeout_seconds=30):
+            cur = state_mod.load(repo, args.run_id)
+            cur_state = cur.get("state")
+            if cur_state not in ("READY_FOR_REVIEW", "CHANGES_REQUESTED", "REVIEWING"):
+                _emit_error(f"cannot claim in state {cur_state!r}", exit_code=2)
+            if cur_state == "REVIEWING":
+                _emit({
+                    "ok": True,
+                    "run_id": args.run_id,
+                    "state": "REVIEWING",
+                    "review_pass_count": int(cur.get("review_pass_count") or 0),
+                    "replayed": True,
+                })
+                return
+            try:
+                state_mod.transition(
+                    repo, args.run_id, to_state="REVIEWING",
+                    actor=args.actor or "of-reviewer",
+                    reason="claim review pass",
+                )
+                new_pass_count = state_mod.increment_counter(
+                    repo, args.run_id, counter="review_pass_count",
+                    actor="of-reviewer", packet=meta,
+                    hard_cap=True,
+                )
+            except limits_mod.RepairLimitExceeded as e:
+                _emit_error(f"repair limit exceeded: {e}", exit_code=4)
+            state_mod.append_event(
+                repo, args.run_id,
+                event_type="review_claimed",
+                old_state=cur_state, new_state="REVIEWING",
+                actor=args.actor or "of-reviewer",
+            )
+            _emit({
+                "ok": True,
+                "run_id": args.run_id,
+                "state": "REVIEWING",
+                "review_pass_count": new_pass_count,
+                "replayed": False,
+            })
+            return
+    except locking.LockBusyError as e:
+        _emit_error(f"review claim lock contention: {e}", exit_code=4)
 
 
 def cmd_build_transition(args: argparse.Namespace) -> None:

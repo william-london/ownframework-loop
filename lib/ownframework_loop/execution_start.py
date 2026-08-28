@@ -140,6 +140,37 @@ def _ensure_program_for_sealed(canonical_repo, run_id, packet, seal):
     info = cli_mod._ensure_program_initialized(canonical_repo, run_id, packet, seal)
     return info.get("program")
 
+
+
+def _activate_sealed_run(
+    canonical_repo,
+    run_id,
+    actor,
+    reason,
+):
+    """Deterministically activate a sealed run.
+
+    Performs AWAITING_APPROVAL/READY_TO_START -> READY_TO_BUILD once.
+    Reloads state afterwards and refuses if the resulting state is
+    not legally executable (per the normal READY_TO_BUILD-or-later
+    FSM contract). Failures propagate explicitly; the caller surfaces
+    them as a refused execution start.
+    """
+    state_mod.transition(
+        canonical_repo, run_id,
+        to_state="READY_TO_BUILD",
+        actor=actor,
+        reason=reason,
+    )
+    cur = state_mod.load(canonical_repo, run_id)
+    final_state = (cur or {}).get("state") or ""
+    if final_state not in ("READY_TO_BUILD", "READY_FOR_REVIEW", "REVIEWING",
+                          "CHANGES_REQUESTED", "APPROVED", "BUILDING"):
+        raise RuntimeError(
+            f"execution-start activation produced unexpected state={final_state!r}"
+        )
+
+
 def ensure_executable(*, canonical_repo, run_id, actor=None, binding_method="build_start"):
     """Ensure the run is sealed, valid, and in READY_TO_BUILD (or replayable)."""
     if binding_method not in EXECUTION_BINDING_METHODS:

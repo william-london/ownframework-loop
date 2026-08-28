@@ -1,180 +1,56 @@
 ---
 name: spec
-description: Spec interview, packet writing, and approval flow for OwnFramework Loop. Drives /of-loop:spec (mission interview → packet), /of-loop:spec approve (TTY-bound human approval that binds the packet SHA), and /of-loop:spec abandon. Approval produces APPROVAL.json with approval_method=tty_confirmation only — there is no automation override. Subsequent lifecycle stages (build via /of-loop:build, review via /of-loop:review) consume the approved packet.
+description: OwnFramework Loop - create, inspect, amend, or stop an OwnFramework Loop run. Returns the run id plus the canonical builder/reviewer commands.
 user-invocable: true
 ---
 
-# /of-loop:spec — work packet creation and human approval gate
+# OwnFramework Loop - spec
 
-This skill is the human-facing entry point of the OwnFramework Loop. It is
-interactive. It NEVER approves its own packet. Approval requires an
-interactive operator terminal and is outside the agent's allowed tool surface:
-the Claude adapter's Bash guard refuses agent-issued `ofloop spec approve`
-commands while the human can run the approval command directly.
+This skill is a host adapter over the deterministic ofloop core.
 
-## Usage
+## Rules
 
-- `/of-loop:spec <mission>` — create a new work packet for the mission.
-- `/of-loop:spec approve <run-id>` — operator-only command. The CLI prompts
-  on a TTY with the run's packet SHA and a short confirmation token. The
-  operator types the token back to authorize approval. The CLI writes
-  `APPROVAL.json` (the packet bytes are NOT modified) and transitions to
-  `READY_TO_BUILD`. THIS SKILL DOES NOT IMPLEMENT APPROVAL; it only prints
-  the operator command and waits.
-- `/of-loop:spec status <run-id>` — print current state, packet, approval,
-  receipt, verdict, stop flag.
-- `/of-loop:spec inspect-legacy <run-id>` — diagnose legacy V1 runs.
-- `/of-loop:spec amend <run-id> <requested change>` — record amendment.
-- `/of-loop:spec stop <run-id>` — request stop.
-- `/of-loop:spec abandon <run-id>` — record STOP and archive.
+- Never approve your own packet.
+- Never write STATE.json, APPROVAL.json, REVIEW_VERDICT.json, event logs, or lock files directly.
+- Never manufacture the TTY confirmation token.
+- Never add push, merge, deploy, publish, send, payment, or unrelated remote authority.
 
-The skill uses the bundled CLI (`bin/ofloop`) for all state transitions and
-packet parsing. The CLI is a Python source file invoked via `./bin/ofloop`
-(executable bit + python shebang) or `python3 bin/ofloop`. Never invoke it
-as `bash bin/ofloop`.
+## New specification (normal flow)
 
-## Behavior
+1. Confirm the working directory is the target Git repository.
+2. Inspect only enough repository context to draft an accurate bounded packet.
+3. Use ofloop spec new <repo> "<mission>" to create the run.
+4. Draft WORK_PACKET.md using the repository schema and packet conventions.
+5. Validate the packet shape with the supported validator.
+6. Return to the operator:
 
-### `spec <mission>`
+   * repo
+   * run_id
+   * packet_sha256
+   * spec_baseline_branch / spec_baseline_sha
+   * execution_mode / checkpoint_count
+   * builder command: /loop /of-loop:build <run-id>
+   * reviewer command: /loop /of-loop:review <run-id>
 
-1. Resolve the target repo. The current working directory must be a git
-   repository (the canonical branch may be `master`, `main`, `develop`, or
-   any other named branch — V2 has no master-only restriction).
-2. Use `ofloop spec new <repo> "<mission>"` to create the run directory
-   and write the initial `STATE.json` in `AWAITING_APPROVAL`.
-3. Read the target repository to understand layout, conventions, and
-   existing patterns. Investigate only what materially affects the packet.
-4. Ask only questions that materially affect implementation. Use
-   `AskUserQuestion` if you must ask more than one question at a time.
-   Suggested product questions (only the ones the code cannot answer):
-   - Work class (BUG / FEATURE / REFACTOR / HARDENING / etc.)
-   - Behavior forks that change acceptance criteria
-   - Scope boundaries (what is explicitly out of scope)
-   - Edge cases that flip the criteria (empty states, error handling)
-   - Risk class / authority class (low / medium / high)
-   - Sensitive paths needing packet approval (AGENTS.md, CLAUDE.md, .claude/)
-   - Required runtime proof, if any
-5. Derive a work-class-aware budget. The default ranges are:
-   - small (BUG / TESTING / DOCUMENTATION / CI_REPAIR): 12–25 files, 400–1,000 lines, 3–4 repair rounds
-   - medium (FEATURE / DEBUG / HARDENING): 25–60 files, 1,000–3,000 lines, 4–5 repair rounds
-   - large bounded (REFACTOR / TRACKED_CONTRACT / NEW_REPOSITORY): 60–150 files, 3,000–8,000 lines, 4–6 repair rounds
-   The packet's `risk_budget` is human-approved; the spec skill proposes
-   reasonable defaults that match the work class.
-6. Draft `WORK_PACKET.md` at
-   `<repo>/.ownframework-loop/<run-id>/WORK_PACKET.md`. The metadata
-   block must be valid JSON inside a fenced code block
-   (```json ... ```). Follow `schemas/work-packet.schema.json` (V2).
-   Do NOT depend on a YAML parser.
+7. STOP. The operator launches the two lanes; the first build claim creates
+   the immutable execution seal automatically.
 
-   **Path-coverage contract (v0.4.2, mandatory).** Before writing the
-   packet, scan the mission text and your draft work units for any
-   literal root-level file references (e.g. `pyproject.toml`,
-   `setup.py`, `README.md`, `Makefile`, `Dockerfile`, `LICENSE`,
-   `.gitignore`). Every such reference MUST appear in `allowed_paths`.
-   If a work unit says "add a minimal `pyproject.toml`", then
-   `allowed_paths` MUST contain `"pyproject.toml"`. The CLI runs the
-   deterministic `validate_packet_self_consistency` check before
-   approval and will refuse approval if any root-level file referenced
-   in `work_units.title`/`work_units.scope`/packet `title` is missing
-   from `allowed_paths` and missing from `protected_paths`. The
-   `KNOWN_ROOT_FILES` whitelist in `lib/ownframework_loop/packet.py`
-   lists every recognized root file. Do NOT widen `allowed_paths` to
-   `"."` or any equivalent global pattern — that defeats the safety
-   net. If the work class is `NEW_REPOSITORY` and the implementation
-   language is Python, `pyproject.toml` is almost always required for
-   pytest discovery; include it in `allowed_paths` from the start.
-7. Never include `human_approved`, `approved_packet_sha256`, `approved_at`,
-   or `approved_actor` inside the packet metadata. Approval is a separate
-   artifact.
-8. Append a readable Markdown body after the metadata block. The body
-   must include `## Mission`, `## Acceptance criteria`, `## Non-goals`,
-   `## Work units`, `## Sensitive paths (if any)`, and `## Risks`.
-9. Print the packet path and instruct the operator to run:
-   `ofloop spec approve <repo> <run-id>`
-   (or, in the v2 interactive session, `/of-loop:spec approve <run-id>`)
-   to bind approval. The model does not run the approve command itself.
+## Internal vs operator-facing state
 
-### `spec approve <run-id>`
+Internal storage name AWAITING_APPROVAL is preserved for backward
+compatibility. The operator-facing meaning is READY_TO_START (the run is
+startable; no approval ceremony is required).
 
-**This skill does not implement approval.** It only prints the operator
-command and waits.
+## Compatibility-only: legacy TTY pre-seal
 
-1. Print the exact operator command:
-   ```
-   ofloop spec approve <repo> <run-id>
-   ```
-2. Explain that approval is the single human mission gate: the CLI
-   requires an interactive TTY, prints a short confirmation token derived
-   from the packet SHA, and writes APPROVAL.json only after the operator types
-   the token back. In the hardened Claude adapter, the Bash guard separately
-   refuses an agent-issued invocation of this approval command.
-3. Wait for `APPROVAL.json` to exist (poll with `ofloop spec status`).
-4. Show status afterwards.
+The optional historical TTY pre-seal command remains as backward-compatible /
+optional strict pre-seal. It is NOT required by the normal workflow and must
+NOT appear in operator instructions.
 
-If the model is asked to approve its own packet, it MUST refuse. The
-confirmation token is deterministic evidence tied to the packet SHA; it is not
-itself proof of human identity. Human-only authority is preserved by the
-interactive operator step plus the adapter's mechanical refusal of agent-issued
-approval commands.
+## Packet immutability
 
-### `spec status <run-id>`
+Before first execution seal: packet amendments are supported through the
+supported amendment surface.
 
-Use `ofloop spec status <repo> <run-id>`. Print state, transitions
-count, build/review pass counts, repair round, last actor, last
-candidate SHA, stop flag, packet summary (title/work_class/risk/sha),
-approval summary (binding ok/confirmation token), receipt and verdict
-presence, last verdict.
-
-### `spec inspect-legacy <run-id>`
-
-Use `ofloop spec inspect-legacy <repo> <run-id>`. Prints whether the
-run still carries legacy V1 approval fields and whether the approval
-binding is intact. If V1 fields are present, recommend re-approval.
-
-### `spec amend <run-id> <change>`
-
-Record an amendment event. Do NOT modify the packet automatically.
-After amendment, the operator must edit the packet manually and rerun
-the operator approval command.
-
-### `spec stop <run-id>`
-
-Create `STOP` file with the operator-provided reason. Transition to
-`STOPPED`. Builder and reviewer loops will exit on their next tick.
-
-### `spec abandon <run-id>`
-
-Same as `spec stop` but always records `abandoned` as the reason. The
-builder worktree is left intact for manual inspection.
-
-## Invariants
-
-- The skill never approves its own packet.
-- The skill never transitions a terminal state.
-- The skill never opens a remote, never pushes, never merges, never
-  deploys, never sends email, never charges money.
-- The skill refuses if the target is on the wrong branch for the
-  packet, has uncommitted changes that don't belong to the run, or
-  has a remote mismatch with the packet's `classification`.
-
-## Anti-patterns to refuse
-
-- Approving a packet without an explicit operator command.
-- Editing `STATE.json` directly.
-- Storing approval fields in the packet metadata (V1 mistake).
-- Creating a remote to "make the loop easier".
-- Silently lowering risk class to dodge review rigor.
-- Adding work units the operator did not request.
-- Setting an unbounded budget without explicit operator approval.
-
-
-## PROGRAM mode (v3 packets)
-
-A validated PROGRAM packet uses the same single human TTY approval. On successful
-approval, the CLI materializes the frozen checkpoint graph exactly once before
-transitioning to `READY_TO_BUILD`. The operator does not run a second
-`program init` command in normal operation.
-
-The Claude-native builder/reviewer lanes consume and advance that deterministic
-PROGRAM state. The spec skill never advances checkpoints and never performs
-approval itself.
+After execution seal: packet is immutable. Changed mission/scope requires a
+NEW RUN.
