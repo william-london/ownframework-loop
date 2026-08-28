@@ -38,7 +38,9 @@ SCHEMA_VERSION = "ownframework-loop-approval/v1"
 # path. The TTY check establishes an interactive operator surface; hardened host
 # adapters are responsible for preventing an agent tool call from invoking that
 # human-only command. There is no non-interactive core override.
-ALLOWED_APPROVAL_METHODS = {"tty_confirmation"}
+# v0.5.0: build_start is the normal auto-seal method;
+# tty_confirmation remains for legacy / optional strict pre-seal.
+ALLOWED_APPROVAL_METHODS = {"tty_confirmation", "build_start"}
 
 CONFIRMATION_PREFIX = "CONFIRM-OF-LOOP"
 

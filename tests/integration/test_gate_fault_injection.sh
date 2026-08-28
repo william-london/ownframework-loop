@@ -93,7 +93,11 @@ import sys
 sys.path.insert(0, '$LIB')
 from ownframework_loop import approval
 m = approval.ALLOWED_APPROVAL_METHODS
-assert m == {'tty_confirmation'}, f'approval methods not restricted: {m}'
+# v0.5.0: ALLOWED_APPROVAL_METHODS now contains both tty_confirmation (legacy)
+# and build_start (auto-seal at first build start). Whichever wins the
+# first-write race is immutable.
+expected = {'tty_confirmation', 'build_start'}
+assert m == expected, f'approval methods not aligned with v0.5.0: got={m} expected={expected}'
 print('OK')
 " >/dev/null 2>&1 && pass "fault 9: ALLOWED_APPROVAL_METHODS is restricted to tty_confirmation" || fail "fault 9: approval methods not restricted"
 

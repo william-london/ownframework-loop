@@ -40,7 +40,7 @@ from . import (
     git_checks, guards, packet as packet_mod, program as program_mod, receipts,
     scheduling, state as state_mod, transitions, util, verdicts, worktrees,
     integrity, limits as limits_mod, approval, build_finalize, review_finalize,
-    branch_resolver,
+    branch_resolver, execution_start,
 )
 
 
@@ -125,6 +125,11 @@ def cmd_spec_new(args: argparse.Namespace) -> None:
         )
     state_mod.run_dir(repo, run_id).mkdir(parents=True, exist_ok=True)
     initial = state_mod.initial_state(run_id)
+    # v0.5.0: snapshot the source identity so first build start can refuse
+    # if the canonical source moved or got dirty between spec and start.
+    initial["spec_baseline_branch"] = git_checks.current_branch(repo)
+    initial["spec_baseline_sha"] = git_checks.current_head(repo) or ""
+    initial["spec_snapshot_at"] = util.utc_now_iso()
     state_mod.save(repo, run_id, initial)
     state_mod.append_event(
         repo, run_id,
@@ -604,6 +609,16 @@ def cmd_build_claim(args: argparse.Namespace) -> None:
     cp_id, replayed, cumulative, cap}.
     """
     repo = _repo_path(args.repo)
+    # v0.5.0: first build claim auto-seals the run via execution_start.
+    # Sealed runs bypass the legacy approval-ceremony refusal.
+    try:
+        seal = execution_start.ensure_executable(
+            canonical_repo=repo, run_id=args.run_id,
+            actor=args.actor or "operator",
+            binding_method="build_start",
+        )
+    except RuntimeError as e:
+        _emit_error(str(e), exit_code=4)
     try:
         meta, _approval_doc, _packet_path = _require_valid_approval(repo, args.run_id)
     except RuntimeError as e:

@@ -345,7 +345,7 @@ Codex is required only when evaluating the experimental Codex adapter.
 
 ## Project status
 
-Current release line: **0.4.6** (canonical sources: `.claude-plugin/plugin.json` `version` and `lib/ownframework_loop/__init__.py` `__version__`).
+Current release line: **0.5.0** (canonical sources: `.claude-plugin/plugin.json` `version` and `lib/ownframework_loop/__init__.py` `__version__`).
 
 v0.4.0 introduced the agent-neutral core/adapter contract with Claude Code as the stable reference adapter and Codex as an experimental named adapter.
 
