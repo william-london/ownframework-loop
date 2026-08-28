@@ -12,18 +12,41 @@ promotion or external effects.
 
 ## The operator experience
 
-Normal operation is intentionally small:
+SPEC remains human-originated. After a valid packet exists, normal execution
+has no approval ceremony.
+
+### Unattended / background
 
 ```text
 /of-loop:spec <mission>
         ↓
-/loop /of-loop:build <run-id>
-/loop /of-loop:review <run-id>
+ofloop supervisor enqueue <repo> <run-id>
+ofloop supervisor serve
+        ↓
+fresh builder only when BUILD is actionable
+fresh reviewer only when REVIEW is actionable
         ↓
 APPROVED | BLOCKED | STOPPED
         ↓
 operator decides promotion outside Loop
 ```
+
+The supervisor is a durable execution clock, not a second engineering state
+machine. While idle it makes zero model calls. It asks the deterministic
+dispatch boundary for one typed BUILD / REVIEW / WAIT / TERMINAL decision and
+launches a fresh agent process only for semantic work.
+
+### Interactive / foreground
+
+Claude Code users may still run:
+
+```text
+/loop /of-loop:build <run-id>
+/loop /of-loop:review <run-id>
+```
+
+Those commands remain useful foreground/debug UX over the same core; `/loop`
+is not the canonical overnight scheduler.
 
 There is **no mandatory approval command, confirmation token, `program init`,
 manual claim/finalize ceremony, or manual checkpoint advancement**.
@@ -210,6 +233,7 @@ See:
 - [`docs/architecture/PORTABILITY_MODEL.md`](docs/architecture/PORTABILITY_MODEL.md)
 - [`docs/architecture/CAPABILITY_MATRIX.md`](docs/architecture/CAPABILITY_MATRIX.md)
 - [`docs/architecture/AGENT_SKILLS.md`](docs/architecture/AGENT_SKILLS.md)
+- [`docs/architecture/SUPERVISOR_MODEL.md`](docs/architecture/SUPERVISOR_MODEL.md)
 - [`docs/ADAPTER_DEVELOPMENT.md`](docs/ADAPTER_DEVELOPMENT.md)
 
 ## Generic CLI contract
@@ -288,7 +312,7 @@ Claude reference adapter:
 
 ## Project status
 
-Current release line: **0.5.4**.
+Current release line: **0.6.0**.
 
 This remains an early public project. Correctness depends on the target
 repository, mission, validation supplied by the packet, agent host, and local

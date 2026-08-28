@@ -4,6 +4,28 @@ All notable current-release changes to OwnFramework Loop are documented here.
 The complete historical changelog through 0.5.2 is preserved at
 [`docs/history/CHANGELOG-through-0.5.2.md`](docs/history/CHANGELOG-through-0.5.2.md).
 
+## 0.6.0 - Durable Supervisor Architecture (2026-08-28)
+
+- Replaced the legacy `ofloop loop run` unattended orchestrator with a
+  typed dispatch boundary (`lib/ownframework_loop/dispatch.py`) and a
+  durable supervisor (`lib/ownframework_loop/supervisor.py`).
+- One fresh Claude Code process per semantic BUILD or REVIEW pass.
+- Vendor-neutral semantic-runner registry; `claude-code` is the first live
+  implementation.
+- SQLite is operational truth only: queue, retries, backoff, worker PID,
+  cost attempts, operational ceilings.
+- Required-validation shell authority is mechanically classified before
+  execution.
+- Exact-once model-cost accounting via stable attempt digests.
+- Crash/restart reconciliation preserves live workers and requeues dead
+  ones without duplicating a pass.
+- macOS launchd installer pins exact runtime executables (Python, ofloop,
+  Claude) and persists a runtime provenance record.
+- Promotion policy enforced as `human_gate`; `external_action_authority`
+  must be `none`; `merge_on_approved` is retired from current execution.
+- CLI: `ofloop dispatch claim|finalize`, `ofloop supervisor
+  enqueue|status|serve|resume`.
+
 ## 0.5.4 - Public Architecture Consolidation (2026-08-28)
 
 This release consolidates the no-ceremony execution-seal architecture into one

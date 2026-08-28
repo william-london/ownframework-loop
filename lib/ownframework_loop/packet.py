@@ -354,3 +354,39 @@ def packet_promotion_policy(meta: dict[str, Any]) -> str:
     if p not in ("human_gate", "merge_on_approved"):
         raise ValueError(f"invalid promotion_policy: {p!r}")
     return p
+
+
+# v0.6.0 — current executable packet authority model.
+# Distinct from validate_packet_metadata (which only checks parseable shape).
+# A packet MAY be parseable yet not executable under current 0.6 rules.
+EXECUTABLE_AUTHORITY_REQUIREMENTS: tuple[tuple[str, str], ...] = (
+    ("merge_authority", "human_only"),
+    ("push_authority", "human_only"),
+    ("deploy_authority", "human_only"),
+    ("external_action_authority", "none"),
+)
+EXECUTABLE_PROMOTION_POLICY: str = "human_gate"
+
+
+def packet_is_executable_under_current_authority(meta: dict[str, Any]) -> tuple[bool, list[str]]:
+    """True iff the packet would be accepted for execution under current v0.6 rules.
+
+    A packet that parses cleanly but carries `external_action_authority=delegated`
+    or `promotion_policy=merge_on_approved` is NOT executable under current rules.
+    Such packets remain readable for audit/compatibility, but dispatch will refuse
+    to claim a BUILD/REVIEW work order for them.
+    """
+    reasons: list[str] = []
+    for field, required in EXECUTABLE_AUTHORITY_REQUIREMENTS:
+        actual = meta.get(field)
+        if actual != required:
+            reasons.append(
+                f"{field} must be {required!r} for current execution, got {actual!r}"
+            )
+    pp = meta.get("promotion_policy")
+    if pp not in (None, EXECUTABLE_PROMOTION_POLICY):
+        reasons.append(
+            f"promotion_policy must be {EXECUTABLE_PROMOTION_POLICY!r} or omitted "
+            f"for current execution, got {pp!r}"
+        )
+    return (not reasons, reasons)

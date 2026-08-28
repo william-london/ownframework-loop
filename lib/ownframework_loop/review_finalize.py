@@ -59,7 +59,7 @@ from pathlib import Path
 from typing import Any
 
 from . import (
-    approval, git_checks, integrity, limits as limits_mod,
+    approval, git_checks, guards, integrity, limits as limits_mod,
     packet as packet_mod, program as program_mod, receipts, secrets_v2,
     state as state_mod, transitions, util, verdicts, worktrees,
     assessment as assessment_mod,
@@ -290,21 +290,26 @@ def finalize_review(
     pre_review_head = git_checks.current_head(reviewer_wt)
 
     # 9. Validate assessment schema.
-    assessment: dict[str, Any] = {}
-    if assessment_path is not None:
-        assessment_path = Path(assessment_path).resolve(strict=False)
-        if state_mod.is_program_state(active_state):
-            expected_assessment_path = assessment_mod.assessment_path(
-                canonical_repo, run_id
-            ).resolve(strict=False)
-            if assessment_path != expected_assessment_path:
-                raise RuntimeError(
-                    f"PROGRAM review assessment path {assessment_path} != "
-                    f"current claimed pass path {expected_assessment_path}"
-                )
-        assessment = _read_json(assessment_path, default={}) or {}
+    if assessment_path is None:
+        raise RuntimeError(
+            "semantic REVIEW_AGENT_ASSESSMENT.json is required; deterministic "
+            "review finalization cannot approve without a semantic reviewer pass"
+        )
+    assessment_path = Path(assessment_path).resolve(strict=False)
+    if state_mod.is_program_state(active_state):
+        expected_assessment_path = assessment_mod.assessment_path(
+            canonical_repo, run_id
+        ).resolve(strict=False)
+        if assessment_path != expected_assessment_path:
+            raise RuntimeError(
+                f"PROGRAM review assessment path {assessment_path} != "
+                f"current claimed pass path {expected_assessment_path}"
+            )
+    assessment = _read_json(assessment_path, default={}) or {}
+    if not assessment:
+        raise RuntimeError("semantic reviewer assessment missing or empty")
     schema_ok, schema_errs = _assessment_schema_ok(assessment)
-    if not schema_ok and assessment:
+    if not schema_ok:
         raise RuntimeError("assessment schema invalid: " + "; ".join(schema_errs))
 
     # 10. Reject assessment candidate mismatch.
@@ -357,6 +362,12 @@ def finalize_review(
         name = v["name"]
         kind = v.get("kind") or "fast"
         timeout = int(meta.get("required_runtime_proof", {}).get("max_runtime_seconds") or 600)
+        command_policy = guards.classify_bash_command(cmd)
+        if command_policy.get("severity") == "forbidden":
+            raise RuntimeError(
+                "required_validation command refused by deterministic guard: "
+                + "; ".join(command_policy.get("forbidden") or ["forbidden command"])
+            )
         result = _run_validation_command(reviewer_wt, cmd, timeout_seconds=timeout)
         expected_exit = int(v.get("expected_exit_code") or 0)
         ok_v = (result["exit_code"] == expected_exit)
@@ -529,11 +540,7 @@ def finalize_review(
     elif not validation_pass:
         verdict = "CHANGES_REQUESTED"
         failure_reason = "validation_failed"
-    elif assessment and (not ac_coverage_ok or not ng_coverage_ok):
-        # v0.4.5: only enforce semantic coverage when an assessment is
-        # provided. Unattended loop run (orchestrator path) does not
-        # supply an assessment; matching v0.3.5 default behaviour of
-        # APPROVED when no reviewer-objection data is present.
+    elif not ac_coverage_ok or not ng_coverage_ok:
         verdict = "CHANGES_REQUESTED"
         failure_reason = "semantic_coverage_incomplete"
     elif must_fix:

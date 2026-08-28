@@ -142,6 +142,7 @@ baseline_sha = subprocess.run(
     capture_output=True, text=True, check=True,
 ).stdout.strip()
 token = approval.derive_confirmation_token(packet_sha)
+candidate_branch = f"factory/candidate/{run_id}"
 approval_doc = {
     "schema": "ownframework-loop-approval/v1",
     "run_id": run_id,
@@ -151,6 +152,7 @@ approval_doc = {
     "canonical_repo": str(canonical_repo.resolve(strict=False)),
     "baseline_branch": branch,
     "baseline_sha": baseline_sha,
+    "candidate_branch": candidate_branch,
     "packet_schema": "ownframework-work-packet/v2",
     # v0.3.5 (AUD2-P0-1): helper records "tty_confirmation" because
     # ALLOWED_APPROVAL_METHODS shrunk to {"tty_confirmation"} only.

@@ -210,7 +210,7 @@ STATE.json
 ├── program (v2 only, present iff packet is v3)
 │   ├── execution_mode: "program"
 │   ├── checkpoint_graph_sha256   # frozen at init; widening post-init refused
-│   ├── promotion_policy: "human_gate" | "merge_on_approved"
+│   ├── promotion_policy: "human_gate"   # v0.6: only human_gate is executable
 │   ├── current_checkpoints: [CP-N, ...]   # ready-to-build now
 │   ├── finalized_checkpoints: [CP-N, ...]
 │   ├── cumulative_counters: {build_pass_count, review_pass_count, repair_round_count, ...}
@@ -228,20 +228,32 @@ Global source ceilings apply to the union of all checkpoints:
 
 Each checkpoint's per-pass caps are bounded by packet's `risk_budget`; the
 cumulative caps are the sum of approved-checkpoint exact caps. Promotion
-(`merge_on_approved`) only fires once the program is terminal AND all
-approved-checkpoint exact caps are met AND no cap is exceeded.
+is always `human_gate` under current execution: even when a program is
+terminal and all caps are met, no merge, push, or deploy is fired from
+inside Loop.
 
 Frozen graph SHA at init prevents post-approval widening: re-running
 `ofloop program init` for an existing program refuses if the packet's
 `checkpoint_graph_sha256` differs from the recorded one.
 
-CLI additions:
+CLI surface (v0.6 supervisor architecture):
 
-- `ofloop program init <repo> <run-id>` — materialise program state
-- `ofloop program status <repo> <run-id>` — read-only program state dump
-- `ofloop loop run <repo> [mission]` — drives one checkpoint per pass
+- `ofloop dispatch claim <repo> <run-id>` — return one BUILD, REVIEW,
+  WAIT, or TERMINAL work order.
+- `ofloop dispatch finalize <repo> <run-id> <decision> <semantic-path>` —
+  finalize one completed semantic pass.
+- `ofloop supervisor enqueue <repo> <run-id>` — register a run with the
+  durable supervisor (operational state only).
+- `ofloop supervisor serve` — run the durable execution clock.
+- `ofloop supervisor status <repo> <run-id>` — read-only operational
+  snapshot.
+- `ofloop supervisor resume <repo> <run-id>` — clear operational
+  quarantine and reset operational counters; never alters engineering
+  state, candidate SHA, or review verdict.
 
-The orchestrator dispatches single-mode vs program-mode transparently based
-on the packet's `execution_mode` and decrements/increments per-checkpoint
-counters before each finalize. PROGRAM mode is product-agnostic — no
-domain-specific knowledge of any target system is encoded in the engine.
+The legacy `ofloop loop run` orchestrator is intentionally retired and
+returns `legacy_unattended_orchestrator_retired_use_supervisor`. Use the
+dispatch boundary for unattended execution. `/loop /of-loop:build` and
+`/loop /of-loop:review` remain valid interactive adapter UX. PROGRAM
+mode is product-agnostic — no domain-specific knowledge of any target
+system is encoded in the engine.

@@ -1,30 +1,26 @@
 #!/usr/bin/env bash
-# Repair loop — drives the orchestrator through a CHANGES_REQUESTED
-# verdict and verifies it loops back to BUILDING and reaches APPROVED.
+# v0.6 — repair cycle through the typed dispatch boundary.
+#
+# Drives one CHANGES_REQUESTED cycle followed by an APPROVED cycle through
+# the dispatch + deterministic finalizer path. The supervisor (or a
+# replacement supervisor) replays the same claimed pass; the pass count is
+# never double-consumed for restart replays.
+#
+# No model is called; synthetic semantic results are schema-correct.
 
-# This test creates a custom reviewer worktree that ALWAYS produces a
-# CHANGES_REQUESTED verdict when first called, then an APPROVED verdict
-# on the second call. The orchestrator must loop.
-
-set -uo pipefail
+set -euo pipefail
 TESTS_DIR="$(cd "$(dirname "$0")" && pwd)"
 . "$TESTS_DIR/../_helpers.sh"
 
-REP="$(make_tmp_repo)"
-RUN_ID="$(make_approved_run "$REP" FEATURE low "repair-loop")"
-# Transition to READY_TO_BUILD.
-python3 - "$REP" "$RUN_ID" <<'PY'
-import sys
-from pathlib import Path
-import os as _os_for_path
-sys.path.insert(0, _os_for_path.environ.get("OFLOOP_LIB", "/path/to/ownframework-loop/lib"))
-from ownframework_loop import state as state_mod
-repo = Path(sys.argv[1])
-rid = sys.argv[2]
-state_mod.transition(repo, rid, to_state="READY_TO_BUILD", actor="setup", reason="x")
-PY
+OFLOOP="$OFLOOP_BIN"
+LIB_DIR="$ROOT_DIR/lib"
 
-# Build candidate (round 0 will be CHANGES_REQUESTED, round 1 will be APPROVED).
+REP="$(make_tmp_repo)"
+RUN_ID="$(make_approved_run "$REP" FEATURE low "repair-dispatch-loop")"
+
+# Auto-seal already leaves the run ready for a BUILD work order.
+
+# Round 0: build candidate + produce a CHANGES_REQUESTED verdict.
 WT1="$REP/.worktrees/ownframework-loop/$RUN_ID/builder"
 git -C "$REP" worktree add -b "factory/candidate/$RUN_ID" "$WT1" master >/dev/null 2>&1
 mkdir -p "$WT1/src"
@@ -33,40 +29,52 @@ def v1():
     return "first"
 PY
 git -C "$WT1" add src/v1.py && git -C "$WT1" commit -m "v1" >/dev/null 2>&1
-SHA1=$(git -C "$WT1" rev-parse HEAD)
+SHA1="$(git -C "$WT1" rev-parse HEAD)"
 
-# Drive one cycle — should land at CHANGES_REQUESTED (no PROGRESS).
-# Wait — the deterministic finalizer produces APPROVED unless the
-# validation fails. We need a different way to force CHANGES_REQUESTED.
-# Approach: directly call review_finalize with a CHANGES_REQUESTED verdict,
-# then run the orchestrator and see it loop.
+BUILD1="$("$OFLOOP" dispatch claim "$REP" "$RUN_ID")"
+assert_eq "$(printf '%s' "$BUILD1" | jq -r '.decision')" "BUILD" "round 1 dispatch BUILD"
+BSEM1="$(printf '%s' "$BUILD1" | jq -r '.semantic_path')"
+python3 - "$BSEM1" "$RUN_ID" <<'PY'
+import json, sys
+from pathlib import Path
+p = Path(sys.argv[1])
+d = json.loads(p.read_text())
+d["summary"] = "round 1 synthetic builder result"
+d["outcome_requested"] = "candidate_ready"
+d["unit_ids_completed"] = ["UNIT-1"]
+d["acceptance_addressed"] = ["AC-1"]
+p.write_text(json.dumps(d, indent=2, sort_keys=True) + "\n")
+PY
+"$OFLOOP" dispatch finalize "$REP" "$RUN_ID" BUILD "$BSEM1" >/dev/null
 
-# Claim build + finalize to land at READY_FOR_REVIEW.
-"$OFLOOP_BIN" build claim "$REP" "$RUN_ID" >/dev/null
-"$OFLOOP_BIN" build finalize "$REP" "$RUN_ID" >/dev/null
+REVIEW1="$("$OFLOOP" dispatch claim "$REP" "$RUN_ID")"
+assert_eq "$(printf '%s' "$REVIEW1" | jq -r '.decision')" "REVIEW" "round 1 dispatch REVIEW"
+RSEM1="$(printf '%s' "$REVIEW1" | jq -r '.semantic_path')"
+python3 - "$RSEM1" "$RUN_ID" "$SHA1" <<'PY'
+import json, sys
+from pathlib import Path
+p = Path(sys.argv[1])
+d = json.loads(p.read_text())
+d["validation_results"] = []
+d["acceptance_results"] = [{"id": "AC-1", "result": "fail", "evidence": "needs repair"}]
+d["non_goal_results"] = []
+d["findings"] = [{"id": "F-1", "severity": "must_fix", "summary": "needs repair"}]
+d["recommended_verdict"] = "CHANGES_REQUESTED"
+p.write_text(json.dumps(d, indent=2, sort_keys=True) + "\n")
+PY
+"$OFLOOP" dispatch finalize "$REP" "$RUN_ID" REVIEW "$RSEM1" >/dev/null
 
-# Claim review and finalize with a CHANGES_REQUESTED verdict.
-ASSESS=$(mktemp)
-cat > "$ASSESS" <<JSON
-{
-  "schema": "ownframework-loop-review-agent-assessment/v1",
-  "run_id": "$RUN_ID",
-  "candidate_sha_claimed": "$SHA1",
-  "acceptance_results": [{"id": "AC-1", "result": "fail"}],
-  "non_goal_results": [],
-  "findings": [{"id": "F-1", "severity": "must_fix", "summary": "needs repair"}],
-  "recommended_verdict": "CHANGES_REQUESTED"
-}
-JSON
-"$OFLOOP_BIN" review claim "$REP" "$RUN_ID" >/dev/null 2>&1
-"$OFLOOP_BIN" review finalize "$REP" "$RUN_ID" "$ASSESS" >/dev/null 2>&1
-# Verify state landed at CHANGES_REQUESTED.
-STATE_AFTER_1=$(python3 -c "import json; print(json.load(open('$REP/.ownframework-loop/$RUN_ID/STATE.json'))['state'])")
-assert_eq "$STATE_AFTER_1" "CHANGES_REQUESTED" "first cycle lands at CHANGES_REQUESTED"
-REPAIR_R1=$(python3 -c "import json; print(json.load(open('$REP/.ownframework-loop/$RUN_ID/STATE.json'))['repair_round'])")
+# After CHANGES_REQUESTED the deterministic state is READY_TO_BUILD for the
+# next build pass; the verdict artifact carries the CHANGES_REQUESTED signal.
+VERDICT_AFTER_1="$(jq -r '.verdict' "$REP/.ownframework-loop/$RUN_ID/REVIEW_VERDICT.json")"
+assert_eq "$VERDICT_AFTER_1" "CHANGES_REQUESTED" "review verdict is CHANGES_REQUESTED"
+STATE_AFTER_1="$(jq -r '.state' "$REP/.ownframework-loop/$RUN_ID/STATE.json")"
+assert_eq "$STATE_AFTER_1" "READY_TO_BUILD" "state advances back to READY_TO_BUILD for the next build"
+REPAIR_R1="$(jq -r '.repair_round' "$REP/.ownframework-loop/$RUN_ID/STATE.json")"
 assert_eq "$REPAIR_R1" "1" "repair_round incremented after CHANGES_REQUESTED"
 
-# Now build round 2 with a real fix.
+# Round 2: operator updates source; run continues through the same
+# dispatch boundary to APPROVED. NO separate "loop run" command is needed.
 WT2="$REP/.worktrees/ownframework-loop/$RUN_ID/builder"
 git -C "$REP" worktree add -b "factory/candidate/$RUN_ID-r2" "$WT2" master >/dev/null 2>&1 || true
 mkdir -p "$WT2/src"
@@ -75,30 +83,54 @@ def v2():
     return "second"
 PY
 git -C "$WT2" add src/v2.py && git -C "$WT2" commit -m "v2" >/dev/null 2>&1
-# Reset state to READY_TO_BUILD (operator-driven).
-python3 - "$REP" "$RUN_ID" <<'PY'
-import sys
+SHA2="$(git -C "$WT2" rev-parse HEAD)"
+
+# The state must be advanced back to READY_TO_BUILD after CHANGES_REQUESTED;
+# the dispatch boundary takes care of that automatically. Replay the dispatch
+# claim — it must return BUILD for the same claimed pass without double-counting
+# engineering passes.
+BUILD2="$("$OFLOOP" dispatch claim "$REP" "$RUN_ID")"
+assert_eq "$(printf '%s' "$BUILD2" | jq -r '.decision')" "BUILD" "round 2 dispatch BUILD"
+assert_eq "$(printf '%s' "$BUILD2" | jq -r '.replayed')" "false" "round 2 is a fresh pass, not a replay"
+BSEM2="$(printf '%s' "$BUILD2" | jq -r '.semantic_path')"
+python3 - "$BSEM2" "$RUN_ID" <<'PY'
+import json, sys
 from pathlib import Path
-import os as _os_for_path
-sys.path.insert(0, _os_for_path.environ.get("OFLOOP_LIB", "/path/to/ownframework-loop/lib"))
-from ownframework_loop import state as state_mod
-repo = Path(sys.argv[1])
-rid = sys.argv[2]
-state_mod.transition(repo, rid, to_state="READY_TO_BUILD", actor="repair-agent", reason="round 2")
+p = Path(sys.argv[1])
+d = json.loads(p.read_text())
+d["summary"] = "round 2 synthetic builder result"
+d["outcome_requested"] = "candidate_ready"
+d["unit_ids_completed"] = ["UNIT-1"]
+d["acceptance_addressed"] = ["AC-1"]
+p.write_text(json.dumps(d, indent=2, sort_keys=True) + "\n")
 PY
+"$OFLOOP" dispatch finalize "$REP" "$RUN_ID" BUILD "$BSEM2" >/dev/null
 
-# Now run the orchestrator — it should drive the cycle and reach APPROVED.
-ORCH_OUT="$("$OFLOOP_BIN" loop run "$REP" --run-id "$RUN_ID" 2>&1)"
-echo "ORCH_OUT=$ORCH_OUT"
-assert_contains "$ORCH_OUT" '"ok": true' "orchestrator reports ok=true"
-assert_contains "$ORCH_OUT" '"terminal_state": "APPROVED"' "terminal_state is APPROVED"
+REVIEW2="$("$OFLOOP" dispatch claim "$REP" "$RUN_ID")"
+RSEM2="$(printf '%s' "$REVIEW2" | jq -r '.semantic_path')"
+python3 - "$RSEM2" "$RUN_ID" "$SHA2" <<'PY'
+import json, sys
+from pathlib import Path
+p = Path(sys.argv[1])
+d = json.loads(p.read_text())
+d["validation_results"] = []
+d["acceptance_results"] = [{"id": "AC-1", "result": "pass", "evidence": "round 2 exact-SHA review"}]
+d["non_goal_results"] = []
+d["findings"] = []
+d["recommended_verdict"] = "APPROVED"
+p.write_text(json.dumps(d, indent=2, sort_keys=True) + "\n")
+PY
+"$OFLOOP" dispatch finalize "$REP" "$RUN_ID" REVIEW "$RSEM2" >/dev/null
 
-FINAL_STATE=$(python3 -c "import json; print(json.load(open('$REP/.ownframework-loop/$RUN_ID/STATE.json'))['state'])")
+FINAL_STATE="$(jq -r '.state' "$REP/.ownframework-loop/$RUN_ID/STATE.json")"
 assert_eq "$FINAL_STATE" "APPROVED" "final state is APPROVED"
+BUILD_PASSES="$(jq -r '.build_pass_count' "$REP/.ownframework-loop/$RUN_ID/STATE.json")"
+assert_eq "$BUILD_PASSES" "2" "two build passes recorded"
+REVIEW_PASSES="$(jq -r '.review_pass_count' "$REP/.ownframework-loop/$RUN_ID/STATE.json")"
+assert_eq "$REVIEW_PASSES" "2" "two review passes recorded"
 
 # Cleanup.
 git -C "$REP" worktree remove --force "$WT1" >/dev/null 2>&1 || true
 git -C "$REP" worktree remove --force "$WT2" >/dev/null 2>&1 || true
-rm -f "$ASSESS"
 
-echo "REPAIR_LOOP=PASS"
+echo "REPAIR_LOOP_DISPATCH=PASS"

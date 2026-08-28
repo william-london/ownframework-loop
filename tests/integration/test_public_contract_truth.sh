@@ -11,6 +11,7 @@ ACTIVE_FILES=(
   SECURITY.md
   docs/SECURITY_MODEL.md
   docs/OPERATOR_RUNBOOK.md
+  docs/WORK_PACKET_FORMAT.md
   docs/ADAPTER_DEVELOPMENT.md
   docs/architecture/README.md
   docs/architecture/CORE_INVARIANTS.md
@@ -18,6 +19,7 @@ ACTIVE_FILES=(
   docs/architecture/PORTABILITY_MODEL.md
   docs/architecture/CAPABILITY_MATRIX.md
   docs/architecture/AGENT_SKILLS.md
+  docs/architecture/SUPERVISOR_MODEL.md
   adapters/README.md
   adapters/generic-cli/README.md
   skills/spec/SKILL.md

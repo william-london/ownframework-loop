@@ -32,6 +32,13 @@ The core preserves:
     protocol approval.
 12. **Adapter thinness** — adapters may improve UX/hardening but may not create a
     second execution-binding/state/repair/candidate/verdict truth.
+13. **Supervisor thinness** — durable supervision may own queue/process/retry
+    lifecycle, but it must obtain BUILD/REVIEW/WAIT/TERMINAL work from the core
+    dispatch boundary rather than reimplementing engineering state transitions.
+14. **Semantic-pass requirement for unattended work** — an unattended BUILD or
+    REVIEW action launches a real semantic agent process before deterministic
+    finalization. The retired legacy `ofloop loop run` path is not an approval
+    mechanism.
 
 The historical `APPROVAL.json` filename and `tty_confirmation` method remain
 compatibility surfaces. New runs normally use `approval_method=build_start` and

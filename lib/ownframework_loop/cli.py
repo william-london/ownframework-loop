@@ -42,6 +42,7 @@ from . import (
     scheduling, state as state_mod, transitions, util, verdicts, worktrees,
     integrity, limits as limits_mod, approval, build_finalize, review_finalize,
     branch_resolver, execution_start,
+    dispatch as dispatch_mod, supervisor as supervisor_mod,
 )
 
 
@@ -143,7 +144,11 @@ def cmd_spec_new(args: argparse.Namespace) -> None:
         "ok": True,
         "run_id": run_id,
         "state": "AWAITING_APPROVAL",
-        "next_step": f"draft packet at {state_mod.run_dir(repo, run_id) / 'WORK_PACKET.md'}, then run: ofloop spec approve {repo} {run_id}",
+        "next_step": (
+            f"draft and validate packet at {state_mod.run_dir(repo, run_id) / 'WORK_PACKET.md'}, "
+            f"then start with: ofloop dispatch claim {repo} {run_id} "
+            f"or interactive /loop /of-loop:build {run_id}"
+        ),
     })
 
 
@@ -1351,7 +1356,10 @@ def _build_parser() -> argparse.ArgumentParser:
     s_status.add_argument("repo")
     s_status.add_argument("run_id")
     s_status.set_defaults(func=cmd_spec_status)
-    s_app = spec_sub.add_parser("approve", help="approve the work packet (TTY required)")
+    s_app = spec_sub.add_parser(
+        "approve",
+        help="legacy compatibility pre-seal (TTY only; normal 0.6 flow does not require it)",
+    )
     s_app.add_argument("repo")
     s_app.add_argument("run_id")
     # v0.3.5 (AUD2-P0-1): OFLOOP_ACTOR env is no longer accepted as a
@@ -1386,7 +1394,10 @@ def _build_parser() -> argparse.ArgumentParser:
     s_aban.set_defaults(func=cmd_spec_abandon)
     program = sub.add_parser("program", help="program subcommands")
     program_sub = program.add_subparsers(dest="program_sub", required=True)
-    p_init = program_sub.add_parser("init", help="materialise program state for v3 packet")
+    p_init = program_sub.add_parser(
+        "init",
+        help="legacy compatibility PROGRAM materialization; normal flow auto-materializes at first start",
+    )
     p_init.add_argument("repo")
     p_init.add_argument("run_id")
     p_init.set_defaults(func=cmd_program_init)
@@ -1527,6 +1538,139 @@ def _build_parser() -> argparse.ArgumentParser:
     l_run.add_argument('--max-repair-rounds', type=int, default=None,
                        help='override packet.risk_budget.max_repair_rounds')
     l_run.set_defaults(func=cmd_loop_run)
+
+    # dispatch — one deterministic work-order owner for interactive or durable hosts.
+    def cmd_dispatch_claim(args: argparse.Namespace) -> None:
+        repo = _repo_path(args.repo)
+        try:
+            out = dispatch_mod.claim_next(canonical_repo=repo, run_id=args.run_id)
+        except dispatch_mod.DispatchError as e:
+            _emit_error(str(e), exit_code=4, classification="OF_LOOP_DISPATCH_REFUSED")
+        _emit(out)
+
+    def cmd_dispatch_finalize(args: argparse.Namespace) -> None:
+        repo = _repo_path(args.repo)
+        order = {
+            "schema": dispatch_mod.SCHEMA,
+            "decision": args.decision,
+            "canonical_repo": str(repo),
+            "run_id": args.run_id,
+            "semantic_path": args.semantic_path,
+        }
+        try:
+            out = dispatch_mod.finalize_work_order(order)
+        except dispatch_mod.DispatchError as e:
+            _emit_error(str(e), exit_code=4, classification="OF_LOOP_DISPATCH_FINALIZE_REFUSED")
+        _emit(out)
+
+    dsp = sub.add_parser("dispatch", help="atomic BUILD/REVIEW/WAIT/TERMINAL work-order boundary")
+    dsp_sub = dsp.add_subparsers(dest="dispatch_cmd", required=True)
+    d_claim = dsp_sub.add_parser("claim", help="claim and prepare exactly one semantic work order")
+    d_claim.add_argument("repo")
+    d_claim.add_argument("run_id")
+    d_claim.set_defaults(func=cmd_dispatch_claim)
+    d_fin = dsp_sub.add_parser("finalize", help="finalize one completed semantic work order")
+    d_fin.add_argument("repo")
+    d_fin.add_argument("run_id")
+    d_fin.add_argument("decision", choices=["BUILD", "REVIEW"])
+    d_fin.add_argument("semantic_path")
+    d_fin.set_defaults(func=cmd_dispatch_finalize)
+
+    # supervisor — durable machine execution clock. Protocol truth remains in core artifacts.
+    def cmd_supervisor_enqueue(args: argparse.Namespace) -> None:
+        repo = _repo_path(args.repo)
+        out = supervisor_mod.enqueue(
+            canonical_repo=repo,
+            run_id=args.run_id,
+            runner=args.runner,
+            db_path=Path(args.db).expanduser() if args.db else None,
+            max_infra_failures=args.max_infra_failures,
+            max_total_cost_usd=args.max_cost_usd,
+            max_wall_seconds=args.max_wall_seconds,
+        )
+        _emit(out)
+
+    def cmd_supervisor_status(args: argparse.Namespace) -> None:
+        repo = _repo_path(args.repo)
+        out = supervisor_mod.status(
+            canonical_repo=repo,
+            run_id=args.run_id,
+            db_path=Path(args.db).expanduser() if args.db else None,
+        )
+        _emit(out, exit_code=0 if out.get("ok") else 2)
+
+    def cmd_supervisor_serve(args: argparse.Namespace) -> None:
+        out = supervisor_mod.serve(
+            db_path=Path(args.db).expanduser() if args.db else None,
+            poll_seconds=args.poll_seconds,
+            timeout_seconds=args.timeout_seconds,
+            once=bool(args.once),
+        )
+        if out is not None:
+            _emit(out, exit_code=0 if out.get("ok") else 1)
+
+    def cmd_supervisor_resume(args: argparse.Namespace) -> None:
+        repo = _repo_path(args.repo)
+        kwargs = {}
+        if getattr(args, "max_infra_failures", None) is not None:
+            kwargs["max_infra_failures"] = int(args.max_infra_failures)
+        if getattr(args, "max_cost_usd", None) is not None:
+            kwargs["max_total_cost_usd"] = float(args.max_cost_usd)
+        if getattr(args, "max_wall_seconds", None) is not None:
+            kwargs["max_wall_seconds"] = int(args.max_wall_seconds)
+        kwargs["reset_execution_started_at"] = not bool(args.keep_execution_clock)
+        out = supervisor_mod.resume(
+            canonical_repo=repo,
+            run_id=args.run_id,
+            db_path=Path(args.db).expanduser() if args.db else None,
+            **kwargs,
+        )
+        _emit(out, exit_code=0 if out.get("ok") else 2)
+
+    sup = sub.add_parser("supervisor", help="durable zero-LLM-idle execution supervisor")
+    sup_sub = sup.add_subparsers(dest="supervisor_cmd", required=True)
+    s_enq = sup_sub.add_parser("enqueue", help="enqueue one existing human-originated run")
+    s_enq.add_argument("repo")
+    s_enq.add_argument("run_id")
+    s_enq.add_argument("--runner", default="claude-code")
+    s_enq.add_argument("--db", default=None)
+    s_enq.add_argument("--max-infra-failures", type=int, default=3)
+    s_enq.add_argument(
+        "--max-cost-usd", type=float, default=25.0,
+        help="operational model-cost ceiling per enqueued run; <=0 disables",
+    )
+    s_enq.add_argument(
+        "--max-wall-seconds", type=int, default=28800,
+        help="operational wall-clock ceiling from first supervisor execution; <=0 disables",
+    )
+    s_enq.set_defaults(func=cmd_supervisor_enqueue)
+    s_ss = sup_sub.add_parser("status", help="show supervisor operational state")
+    s_ss.add_argument("repo")
+    s_ss.add_argument("run_id")
+    s_ss.add_argument("--db", default=None)
+    s_ss.set_defaults(func=cmd_supervisor_status)
+    s_srv = sup_sub.add_parser("serve", help="run the durable supervisor execution clock")
+    s_srv.add_argument("--db", default=None)
+    s_srv.add_argument("--poll-seconds", type=float, default=2.0)
+    s_srv.add_argument("--timeout-seconds", type=int, default=3600)
+    s_srv.add_argument("--once", action="store_true")
+    s_srv.set_defaults(func=cmd_supervisor_serve)
+    s_res = sup_sub.add_parser(
+        "resume",
+        help="clear operational quarantine and reset operational counters; "
+             "does NOT alter engineering state, candidate SHA, or review verdict",
+    )
+    s_res.add_argument("repo")
+    s_res.add_argument("run_id")
+    s_res.add_argument("--db", default=None)
+    s_res.add_argument("--max-infra-failures", type=int, default=None)
+    s_res.add_argument("--max-cost-usd", type=float, default=None)
+    s_res.add_argument("--max-wall-seconds", type=int, default=None)
+    s_res.add_argument(
+        "--keep-execution-clock", action="store_true",
+        help="preserve the existing execution_started_at wall-clock origin",
+    )
+    s_res.set_defaults(func=cmd_supervisor_resume)
 
     # doctor
     doc = sub.add_parser("doctor", help="inspect repo + run")

@@ -2,65 +2,96 @@
 
 Canonical operator workflow for OwnFramework Loop.
 
-## Operator flow
+## 1. Human-originated specification
 
-1. Create spec: /of-loop:spec <mission>.
-2. Launch builder lane: /loop /of-loop:build <run-id>.
-3. Launch reviewer lane: /loop /of-loop:review <run-id>.
-4. Observe state read-only.
-5. After terminal APPROVED, decide promotion outside Loop.
+Create and inspect the mission:
 
-## Internal vs operator-facing state
+```text
+/of-loop:spec <mission>
+```
 
-Internal state AWAITING_APPROVAL is preserved for backward compatibility.
-The operator-facing meaning is READY_TO_START - the run is startable; no
-human approval ceremony is required.
+SPEC is the human boundary. The packet must describe the intended local
+engineering work, scope, validation, budgets, and non-goals.
+
+There is no mandatory approval command or confirmation token after a valid
+packet exists.
+
+## 2. Unattended mode (canonical for background work)
+
+Enqueue the existing run:
+
+```bash
+ofloop supervisor enqueue /absolute/path/to/repo <run-id> \
+  --max-cost-usd 25 \
+  --max-wall-seconds 28800
+```
+
+Start the execution clock:
+
+```bash
+ofloop supervisor serve
+```
+
+The supervisor is independent of the shell working directory because every job
+stores an absolute repository path.
+
+While idle it makes zero model calls. For actionable work it asks the
+deterministic dispatch boundary for exactly one BUILD or REVIEW work order,
+launches one fresh runner process, finalizes deterministically, and immediately
+asks core what is next.
+
+Operational status / morning evidence:
+
+```bash
+ofloop supervisor status /absolute/path/to/repo <run-id>
+```
+
+Status combines supervisor queue/retry/cost evidence with a read-only snapshot
+of core state, candidate SHA, pass counters, PROGRAM checkpoint, and latest
+review verdict.
+
+On macOS, after commissioning the exact checkout:
+
+```bash
+bash install-supervisor-macos.sh
+```
+
+This installs a per-user `launchd` service so the supervisor is independent of
+an open terminal or Claude session.
+
+## 3. Interactive foreground mode
+
+For debugging or hands-on sessions, the existing Claude UX remains:
+
+```text
+/loop /of-loop:build <run-id>
+/loop /of-loop:review <run-id>
+```
+
+These are adapters over the same deterministic core, not the durable execution
+clock.
 
 ## First-start execution seal
 
-The first build claim invocation creates the immutable execution seal:
+The first legitimate build start creates the immutable execution seal:
 
-  * binding_method = build_start
-  * binding_kind = execution_seal
-  * binds: run_id, packet SHA, canonical repo, baseline branch, baseline SHA,
-    candidate branch, packet schema, packet metadata.
+- `binding_method=build_start`
+- `binding_kind=execution_seal`
+- binds exact packet bytes/SHA, canonical repo, spec-time baseline branch/SHA,
+  candidate branch, packet metadata, and PROGRAM provenance.
 
-There is no separate approval step. The operator first build claim IS the
-authorization to execute the exact bounded packet locally.
+Internal state name `AWAITING_APPROVAL` and historical file
+`APPROVAL.json` remain compatibility names for existing runs. Operator-facing
+meaning is `READY_TO_START`.
 
-## What the operator does NOT do
+## Promotion boundary
 
-- No human approval ceremony.
-- No confirmation token.
-- No program init.
-- No manual loop run.
-- No manual build claim or finalize or review claim or finalize invocation.
-- No manual STATE.json edits.
-- No manual receipt or verdict or scratch edits.
-- No manual checkpoint advancement.
-- No remote mutation.
+`APPROVED` means eligible for human/operator promotion. Loop and its
+supervisor do not push, merge, deploy, publish, pay, send messages, or mutate
+unrelated remote systems.
 
-## Promotion outside Loop
+## Retired path
 
-APPROVED means the work is eligible for operator promotion. It does NOT
-authorize automatic promotion. Operator promotion is the only authority to:
-
-- merge the candidate branch,
-- publish to remote,
-- deploy to production,
-- create or mutate remotes.
-
-## External authority
-
-Guards refuse ref-mutating subcommands.
-
-Guards refuse publish-to-remote, merge-branch, branch-delete subcommands.
-
-Guards refuse destructive systemctl operations.
-
-Guards refuse human approval command invocation by Claude.
-
-Guards are tool-surface guardrails, not OS sandbox.
-Claude policy forbids routing around refusals.
-
-REMOTE_COUNT=0 guarantees no remote destination.
+`ofloop loop run` is intentionally retired. It previously drove finalizers
+without a real semantic builder/reviewer process and is not a supported
+unattended architecture.

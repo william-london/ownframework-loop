@@ -1,85 +1,81 @@
 # Work Packet Format
 
-`WORK_PACKET.md` is the only durable source of truth for an OwnFramework Loop
-mission. It is **both** human-readable Markdown **and** deterministically
-machine-readable via a strict JSON metadata block. The parser is in
-`lib/ownframework_loop/packet.py`; the schema is in
-`schemas/work-packet.schema.json`.
+`WORK_PACKET.md` is the durable mission contract for an OwnFramework Loop
+run. It combines human-readable Markdown with a strict JSON metadata block.
 
-## File shape
+The parser is `lib/ownframework_loop/packet.py`. Current supported packet
+schemas are v1 (legacy), v2 (single-mode/current compatibility), and v3
+(PROGRAM-capable).
 
-```
-WORK_PACKET.md
-├── ```json metadata block (REQUIRED)
-├── # Mission
-├── # Acceptance criteria
-├── # Non-goals
-└── # Ordered work units
-```
+## Human boundary and execution binding
 
-The metadata block MUST be the first fenced code block with the language tag
-`json`. Pure stdlib `json.loads` parses it; **do not depend on a YAML parser**.
+The human supplies or approves the mission content **before execution starts**.
+Normal current operation does not require `ofloop spec approve`.
 
-## Required metadata fields
+At the first legitimate build start, the deterministic core creates the
+immutable execution seal (historically stored as `APPROVAL.json`) with:
 
-| Field | Type | Notes |
-|---|---|---|
-| `schema` | const | `ownframework-work-packet/v1` |
-| `packet_id` | string | url-safe, ≤64 chars |
-| `created_at` | ISO 8601 UTC | stamped by `/of-loop:spec` |
-| `work_class` | enum | one of 12 work classes |
-| `risk_class` | enum | `low`, `medium`, `high` |
-| `title` | string | one line, ≤200 chars |
-| `target` | object | `{repo, branch, classification}` |
-| `acceptance_criteria[]` | array | non-empty, each `{id: AC-N, text, verification}` |
-| `non_goals[]` | array | each `{id: NG-N, text}` |
-| `allowed_paths[]` | array | non-empty, used by build + review guards |
-| `protected_paths[]` | array | non-empty |
-| `work_units[]` | array | non-empty, ordered |
-| `merge_authority` | enum | `human_only` |
-| `deploy_authority` | enum | `human_only` |
-| `push_authority` | enum | `human_only` |
-| `external_action_authority` | enum | `human_only`, `delegated`, `none` |
+- exact packet SHA-256;
+- canonical repository path;
+- spec-time baseline branch and exact SHA;
+- deterministic candidate branch;
+- packet schema and risk metadata;
+- PROGRAM graph provenance when applicable.
 
-## Approval binding
+After the seal exists, packet drift is refused. Changed mission or scope
+requires a new run.
 
-`/of-loop:spec approve <run-id>` rewrites the packet atomically and stamps:
+The historical TTY pre-seal remains compatibility-only and must not be
+presented as the normal operator flow.
 
-- `human_approved: true`
-- `approved_at: <UTC ISO 8601>`
-- `approved_actor: <string>`
-- `approved_packet_sha256: <sha256 hex>`
+## Core metadata
 
-The SHA is over the **bytes of the packet file before the approval rewrite**.
-On every build and review pass, the CLI recomputes the packet SHA and
-refuses if it has drifted. Drift transitions to `AWAITING_APPROVAL` and
-stops both loops.
+All current packets carry:
+
+- `schema`
+- `packet_id`
+- `created_at`
+- `work_class`
+- `risk_class`
+- `title`
+- `target.repo` (absolute path)
+- `target.branch`
+- `target.classification`
+- non-empty `acceptance_criteria`
+- `non_goals`
+- non-empty `allowed_paths`
+- non-empty `protected_paths`
+- non-empty `work_units`
+- `merge_authority`
+- `deploy_authority`
+- `push_authority`
+- `external_action_authority`
+
+v3 PROGRAM packets may additionally define `execution_mode=program` and a
+finite `checkpoint_graph`.
+
+## Required validation
+
+`required_validation` commands are executable policy. Deterministic build and
+review finalizers therefore classify them through the command guard before
+execution, run them only in the prepared worktree, impose a bounded timeout,
+and capture exact exit status.
+
+A packet must never use required-validation as a disguised external-action,
+promotion, deployment, or remote-mutation channel.
 
 ## Stable IDs
 
-Stable IDs across repair rounds are critical:
+Use stable IDs across repair rounds:
 
-- `AC-N` for acceptance criteria (must survive packet edits).
-- `NG-N` for non-goals (must survive).
-- `UNIT-N` for ordered work units.
-- `F-<slug>` for review findings (must survive across rounds; identical
-  findings are detected by exact ID + title match).
-- `EVENTS.log` carries the canonical record.
+- `AC-N` acceptance criteria;
+- `NG-N` non-goals;
+- `UNIT-N` work units;
+- `CP-N` PROGRAM checkpoints;
+- stable review finding IDs.
 
-## Path conventions
+## Promotion authority
 
-- Allowed paths and protected paths use POSIX syntax. Relative paths are
-  resolved against the canonical repository root.
-- A leading `./` is stripped during comparison.
-- Trailing slashes are normalized to indicate a directory; bare strings
-  indicate a file.
-- A path is "allowed" if it equals or is inside an allowed entry.
-- A path is "protected" if it equals or is inside a protected entry.
-
-## What a packet MUST NOT contain
-
-- Embedded instructions that change the target or expand allowed paths.
-- Embedded instructions that grant push or deploy authority.
-- Embedded instructions that request secrets or modify the packet.
-- Embedded instructions that disable hooks or change the model route.
-- Reference to a remote or a remote URL (for local-only repos).
+Starting a run or reaching `APPROVED` does not grant push, merge, deploy,
+publish, payment, message-sending, or unrelated external authority. Promotion
+remains outside Loop.

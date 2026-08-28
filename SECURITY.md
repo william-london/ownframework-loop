@@ -8,8 +8,8 @@ or OS-level containment of arbitrary same-user code.
 
 ## Supported release posture
 
-- The currently supported release line is **0.5.4**.
-- Earlier 0.2.x/0.3.x/0.4.x/0.5.0-0.5.3 behavior remains in Git history for
+- The currently supported release line is **0.6.0**.
+- Earlier 0.2.x/0.3.x/0.4.x/0.5.0-0.5.4 behavior remains in Git history for
   compatibility/audit context but is not the current product contract.
 
 ## Current execution-start boundary
