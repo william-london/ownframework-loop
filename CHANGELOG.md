@@ -1,3 +1,31 @@
+## 0.4.6 - Production Lifecycle Integrity Closure (2026-08-28)
+
+**Scope.** Final deterministic-core hardening discovered during the post-0.4.5
+production sweep. No new coordinator, state machine, operator command, provider
+integration, or authority.
+
+- **Atomic lane-phase claims.** PROGRAM build/review/repair claims enforce legal
+  top-level phases under the same run lock that owns counters. Racing builder
+  and reviewer lanes cannot stomp each other's state or consume the wrong pass.
+  Counter-mirror drift and impossible in-flight replay states fail closed.
+- **Exact-pass crash reconciliation.** BUILD_RECEIPT and REVIEW_VERDICT recovery
+  is limited to the exact in-flight BUILDING/REVIEWING pass. Prior-checkpoint
+  and prior-pass artifacts cannot advance a later checkpoint.
+- **PROGRAM-equivalent review recovery.** The reconciler consumes the canonical
+  recommended_next_state verdict field. Approved PROGRAM verdict recovery uses
+  the same checkpoint-advancement primitive as normal review; changes-requested
+  recovery claims the same bounded repair budget.
+- **FSM-owned PROGRAM advancement.** Approved checkpoint advancement no longer
+  writes top-level state directly. REVIEWING -> READY_TO_BUILD is an explicit
+  PROGRAM transition validated against the prospective post-finalization graph
+  and committed atomically through program_transition with candidate binding.
+- **Approval-bound teardown.** Candidate branch teardown revalidates the exact
+  approved packet and resolves the frozen candidate branch instead of assuming
+  factory/candidate/<run-id>.
+- **Regression coverage.** test_v046_hardening.sh proves lane races, counter
+  mirrors, stale/current crash artifacts, PROGRAM crash advancement/repair,
+  and teardown source-of-truth behavior.
+
 ## 0.4.5 - Native Program Commissioning Closure (2026-08-28)
 
 **Scope.** Surgical closures for the remaining defects independently

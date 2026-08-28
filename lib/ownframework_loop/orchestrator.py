@@ -301,8 +301,9 @@ def run_program_mode(
       4. finalize the checkpoint (APPROVED/BLOCKED/STOPPED)
       5. advance to the next claimable cp or terminate
 
-    Refuses to start without an approval marker. Caller must have
-    already written APPROVAL.json and run `program init`.
+    Refuses to start without an approval marker. v0.4.5+ human approval
+    materializes PROGRAM state automatically; `program init` remains only a
+    back-compat diagnostic/recovery surface.
     """
     canonical_repo = Path(canonical_repo).resolve(strict=False)
     if not canonical_repo.is_dir():

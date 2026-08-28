@@ -482,15 +482,18 @@ def program_transition(
                 f"STATE.json missing for run {run_id}"
             )
         from_state = current["state"]
-        # Determine whether the run has more claimable checkpoints.
-        # We compare the program state's finalized_checkpoints list
-        # against the execution_order in the packet. If every CP in
-        # execution_order is finalized (or the run has no program
-        # sub-object), there are no more checkpoints and the run is
-        # terminal. Otherwise, the program-mode escape hatches
-        # (APPROVED/BLOCKED -> READY_TO_BUILD) remain available.
+        # Determine whether the destination PROGRAM graph still has work.
+        # When a transition atomically carries a replacement program block
+        # (for example review approval finalizing CP-1 and selecting CP-2),
+        # validate against that prospective block rather than the stale
+        # pre-transition one.
         has_more_cps = False
-        prog = current.get("program")
+        prospective_program = (
+            extras.get("program")
+            if isinstance(extras, dict) and isinstance(extras.get("program"), dict)
+            else current.get("program")
+        )
+        prog = prospective_program
         if isinstance(prog, dict):
             # v0.3.7 (F-1-01): finalize_checkpoint() stores entries as
             # dicts ({"id": cp_id, ...}). The previous code called

@@ -102,6 +102,10 @@ def is_terminal(state: str) -> bool:
 # blocker and resumes). APPROVED in program mode is reachable only
 # when the candidate SHA matches the bound candidate.
 PROGRAM_ALLOWED: Mapping[str, FrozenSet[str]] = {
+    # A reviewed/approved checkpoint may atomically finalize its PROGRAM
+    # evidence and advance directly to the next checkpoint. The prospective
+    # PROGRAM block determines whether another checkpoint truly remains.
+    "REVIEWING": frozenset({"READY_TO_BUILD"}),
     "APPROVED":  frozenset({"READY_TO_BUILD"}),
     "BLOCKED":   frozenset({"READY_TO_BUILD"}),  # not APPROVED
     "STOPPED":   frozenset(),                     # absorbing
@@ -122,7 +126,7 @@ def assert_valid_program(
     non-program transitions (e.g. AWAITING_APPROVAL -> READY_TO_BUILD)
     follow the same rules as single-mode.
 
-    Program-mode escape hatches (APPROVED/BLOCKED -> READY_TO_BUILD)
+    Program-mode extensions (review advancement and APPROVED/BLOCKED -> READY_TO_BUILD)
     are permitted ONLY when `has_more_checkpoints` is True. Once the
     program is fully terminated (no more checkpoints), the run is
     terminal and the transition is refused.

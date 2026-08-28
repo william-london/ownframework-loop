@@ -40,6 +40,7 @@ from . import (
     git_checks, guards, packet as packet_mod, program as program_mod, receipts,
     scheduling, state as state_mod, transitions, util, verdicts, worktrees,
     integrity, limits as limits_mod, approval, build_finalize, review_finalize,
+    branch_resolver,
 )
 
 
@@ -866,14 +867,17 @@ def cmd_teardown_branch(args: argparse.Namespace) -> None:
     s = state_mod.load(repo, args.run_id)
     if s is None:
         _emit_error(f"run not found: {args.run_id}", exit_code=2)
-    packet_path = state_mod.run_dir(repo, args.run_id) / "WORK_PACKET.md"
-    teardown_allowed = False
-    if packet_path.exists():
-        meta, _ = packet_mod.parse_packet_file(packet_path)
-        teardown_allowed = bool(meta.get("teardown_allowed"))
-    if not teardown_allowed:
+    try:
+        meta, approval_doc, _packet_path = _require_valid_approval(repo, args.run_id)
+    except RuntimeError as e:
         _emit_error(
-            "teardown refused: packet does not declare teardown_allowed=true",
+            f"teardown refused: {e}",
+            exit_code=4,
+            classification="OF_LOOP_TEARDOWN_APPROVAL_INVALID",
+        )
+    if not bool(meta.get("teardown_allowed")):
+        _emit_error(
+            "teardown refused: approved packet does not declare teardown_allowed=true",
             exit_code=4, classification="OF_LOOP_TEARDOWN_NOT_AUTHORIZED",
         )
     cur_state = s.get("state")
@@ -882,7 +886,22 @@ def cmd_teardown_branch(args: argparse.Namespace) -> None:
             f"teardown refused: run is in {cur_state!r}; only APPROVED/BLOCKED/STOPPED/CHANGES_REQUESTED are teardown-eligible",
             exit_code=4, classification="OF_LOOP_TEARDOWN_STATE_INELIGIBLE",
         )
-    branch = f"factory/candidate/{args.run_id}"
+    frozen_branch = str(approval_doc.get("candidate_branch") or "")
+    branch = branch_resolver.resolve_candidate_branch(
+        repo, args.run_id, packet=meta,
+    )
+    if not frozen_branch or branch != frozen_branch:
+        _emit_error(
+            "teardown refused: candidate branch does not match frozen approval",
+            exit_code=4,
+            classification="OF_LOOP_TEARDOWN_BRANCH_DRIFT",
+        )
+    if branch == str(approval_doc.get("baseline_branch") or ""):
+        _emit_error(
+            "teardown refused: candidate branch equals approved baseline branch",
+            exit_code=4,
+            classification="OF_LOOP_TEARDOWN_BASELINE_BRANCH",
+        )
     if not git_checks.branch_exists(repo, branch):
         _emit({"ok": True, "run_id": args.run_id, "branch": branch, "removed": False, "message": "branch already absent"})
         return

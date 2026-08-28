@@ -414,25 +414,32 @@ def advance_after_review_approval(
     new_cps = list(new_program.get("current_checkpoints") or [])
     next_top_state = "READY_TO_BUILD" if new_cps else "APPROVED"
 
-    now = utc_now_iso()
-    new_top = dict(state)
-    new_top["program"] = new_program
-    new_top["state"] = next_top_state
-    new_top["last_candidate_sha"] = candidate_sha
-    new_top["updated_at"] = now
-    new_top["last_actor"] = actor
-    new_top["transitions_count"] = int(state.get("transitions_count", 0)) + 1
-    history = list(state.get("state_history") or [])
-    history.append({
-        "from": state.get("state"),
-        "to": next_top_state,
-        "at": now,
-        "actor": actor,
-        "reason": f"checkpoint {cp_id} approved; program advancement",
-    })
-    new_top["state_history"] = history
-    new_top["terminal_reason"] = "all_checkpoints_approved" if next_top_state == "APPROVED" else ""
-    state_save(canonical_repo, run_id, new_top)
+    # v0.4.6: PROGRAM advancement uses the atomic FSM-owned transition path.
+    # The prospective PROGRAM block is supplied so program_transition validates
+    # REVIEWING -> READY_TO_BUILD against the post-finalization graph.
+    from . import state as state_mod
+    transition_reason = (
+        "all_checkpoints_approved"
+        if next_top_state == "APPROVED"
+        else f"checkpoint {cp_id} approved; advancing to {new_cps[0]}"
+    )
+    new_top = state_mod.program_transition(
+        canonical_repo,
+        run_id,
+        to_state=next_top_state,
+        actor=actor,
+        reason=transition_reason,
+        commit_sha=candidate_sha,
+        extras={
+            "program": new_program,
+            "schema": state_mod.PROGRAM_STATE_SCHEMA_VERSION,
+            "terminal_reason": (
+                "all_checkpoints_approved"
+                if next_top_state == "APPROVED"
+                else ""
+            ),
+        },
+    )
     append_event(
         canonical_repo, run_id,
         event_type="program_advanced",
@@ -582,6 +589,12 @@ def _unified_claim_pass(
         last_evidence = (existing_cp or {}).get("last_evidence_sha_by_counter") or {}
         last_evidence_for_counter = last_evidence.get(counter)
 
+        existing_top = int(cur.get(top_counter_name, 0) or 0)
+        if existing_top != existing_cum:
+            raise ClaimRefused(
+                f"{pass_kind} counter mirror drift: top={existing_top}, cumulative={existing_cum}"
+            )
+
         is_replay = False
         if counter == "repair_round_count":
             if (
@@ -590,11 +603,18 @@ def _unified_claim_pass(
                 and source_evidence_sha == last_evidence_for_counter
             ):
                 is_replay = True
-        elif cur_state == replay_states[counter] and existing_cum > 0:
+        elif cur_state == replay_states[counter]:
+            if existing_cp is None or existing_cp_pass < 1:
+                raise ClaimRefused(
+                    f"{pass_kind} replay refused: in-flight state has no claimed current-checkpoint pass"
+                )
+            if existing_cum < 1:
+                raise ClaimRefused(
+                    f"{pass_kind} replay refused: cumulative counter is zero"
+                )
             is_replay = True
 
         if is_replay:
-            existing_top = int(cur.get(top_counter_name, 0) or 0)
             return {
                 "ok": True,
                 "run_id": run_id,
@@ -607,6 +627,21 @@ def _unified_claim_pass(
                 "cap": int(program_state["cumulative_ceilings"].get(cap_key, 0)),
                 "replayed": True,
             }
+
+        # v0.4.6: phase legality is enforced atomically by the claim owner,
+        # not merely by host-skill fast paths. This closes the race where the
+        # builder and reviewer lanes both read an eligible-looking state and
+        # then claim in the wrong phase.
+        allowed_new_states = {
+            "build_pass_count": {"READY_TO_BUILD", "CHANGES_REQUESTED"},
+            "review_pass_count": {"READY_FOR_REVIEW"},
+            "repair_round_count": {"CHANGES_REQUESTED"},
+        }
+        if cur_state not in allowed_new_states[counter]:
+            raise ClaimRefused(
+                f"{pass_kind} claim refused in top-level state {cur_state!r}; "
+                f"allowed={sorted(allowed_new_states[counter])}"
+            )
 
         cp_id = select_next_checkpoint(packet, program_state)
         if cp_id is None:

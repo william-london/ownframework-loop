@@ -5,11 +5,12 @@ mode) before any new work proceeds. Also invoked by `ofloop doctor`.
 
 Crash boundaries explicitly handled (recovery via state-machine transition):
   1. build receipt written before state transition
-       -> adopt receipt, transition BUILDING/READY_TO_BUILD/CHANGES_REQUESTED
-          -> receipt.next_state (state-machine validity-checked; stale is skipped)
+       -> adopt only while the exact claimed build pass is still BUILDING
+          and receipt.builder_pass_number matches STATE.build_pass_count
   3. review verdict written before state transition
-       -> adopt verdict, transition READY_FOR_REVIEW/REVIEWING
-          -> verdict.next_state (state-machine validity-checked; stale is skipped)
+       -> adopt only while the exact claimed review pass is still REVIEWING
+          and verdict.review_pass_number matches STATE.review_pass_count;
+          PROGRAM approval/repair recovery uses the same core paths as normal review
   5/6. program-mode frozen-graph integrity
        -> verify_frozen_graph(packet, state.program) refuses on post-approval drift
 
@@ -187,52 +188,121 @@ def reconcile_run(
         }
 
     # --- Crash boundary 1: build receipt written before state transition.
-    # Detect: receipt present, receipt.next_state is a valid transition from
-    # cur_state (per state machine), and cur_state in
-    # {READY_TO_BUILD, BUILDING, CHANGES_REQUESTED}. Adopt by transitioning
-    # the state machine to receipt.next_state. Stale receipts (where the
-    # transition is no longer valid) are skipped silently: the receipt is
-    # the durable finalizer artifact and the orchestrator will overwrite
-    # it on the next cycle.
-    if receipt and rec_binds and cur_state in ("READY_TO_BUILD", "BUILDING", "CHANGES_REQUESTED"):
-        next_state = receipt.get("next_state")
-        if next_state in transitions.STATES and next_state != cur_state:
-            if not transitions.is_valid(cur_state, next_state):
-                # Stale receipt: the transition it implies is no longer
-                # legal from the current state (e.g. state was manually
-                # reset). Skip; do not refuse (the orchestrator can rebuild).
-                actions.append(f"skip_stale_build_receipt:{cur_state}!->{next_state}")
-            else:
-                try:
-                    state_mod.transition(
-                        canonical_repo, run_id,
-                        to_state=next_state,
-                        actor="reconciler",
-                        reason=f"crash_reconcile:adopt_build_receipt_to_{next_state}",
-                        commit_sha=receipt.get("candidate_sha"),
+    # Only the exact currently claimed BUILDING pass is adoptable. Prior-pass
+    # receipts remain immutable evidence and must never advance a later CP.
+    if receipt and rec_binds and cur_state == "BUILDING":
+        state_pass = int(state_obj.get("build_pass_count") or 0)
+        artifact_pass = int(receipt.get("builder_pass_number") or 0)
+        if artifact_pass != state_pass or state_pass < 1:
+            actions.append(
+                f"skip_stale_build_receipt_pass:{artifact_pass}!={state_pass}"
+            )
+        else:
+            next_state = receipt.get("next_state")
+            if next_state in transitions.STATES and next_state != cur_state:
+                if not transitions.is_valid(cur_state, next_state):
+                    actions.append(
+                        f"skip_stale_build_receipt:{cur_state}!->{next_state}"
                     )
-                    actions.append(f"adopt_build_receipt:{cur_state}->{next_state}")
-                    cur_state = next_state
-                except Exception as e:
-                    refused.append(f"build_receipt_transition_failed:{e}")
+                else:
+                    try:
+                        state_mod.transition(
+                            canonical_repo, run_id,
+                            to_state=next_state,
+                            actor="reconciler",
+                            reason=f"crash_reconcile:adopt_build_receipt_to_{next_state}",
+                            commit_sha=receipt.get("candidate_sha"),
+                        )
+                        actions.append(
+                            f"adopt_build_receipt:{cur_state}->{next_state}"
+                        )
+                        cur_state = next_state
+                    except Exception as e:
+                        refused.append(f"build_receipt_transition_failed:{e}")
 
     # --- Crash boundary 3: review verdict written before state transition.
-    if verdict and ver_binds and cur_state in ("READY_FOR_REVIEW", "REVIEWING"):
-        next_state = verdict.get("next_state")
-        if next_state in transitions.STATES and next_state != cur_state:
-            if not transitions.is_valid(cur_state, next_state):
-                actions.append(f"skip_stale_review_verdict:{cur_state}!->{next_state}")
-            else:
+    # Review verdicts use the canonical recommended_next_state field.
+    # Only the exact currently claimed REVIEWING pass is adoptable.
+    if verdict and ver_binds and cur_state == "REVIEWING":
+        state_pass = int(state_obj.get("review_pass_count") or 0)
+        artifact_pass = int(verdict.get("review_pass_number") or 0)
+        if artifact_pass != state_pass or state_pass < 1:
+            actions.append(
+                f"skip_stale_review_verdict_pass:{artifact_pass}!={state_pass}"
+            )
+        else:
+            next_state = (
+                verdict.get("recommended_next_state")
+                or verdict.get("next_state")
+            )
+            candidate_sha = verdict.get("candidate_sha_reviewed")
+            if next_state in transitions.STATES and next_state != cur_state:
                 try:
-                    state_mod.transition(
-                        canonical_repo, run_id,
-                        to_state=next_state,
-                        actor="reconciler",
-                        reason=f"crash_reconcile:adopt_review_verdict_to_{next_state}",
-                        commit_sha=verdict.get("candidate_sha_reviewed"),
-                    )
-                    actions.append(f"adopt_review_verdict:{cur_state}->{next_state}")
-                    cur_state = next_state
+                    latest = state_mod.load(canonical_repo, run_id) or {}
+                    if state_mod.is_program_state(latest):
+                        from . import packet as packet_mod, program as prog_mod
+                        meta, _ = packet_mod.parse_packet_file(packet_path)
+                        if next_state == "APPROVED" and verdict.get("verdict") == "APPROVED":
+                            adv = prog_mod.advance_after_review_approval(
+                                canonical_repo=canonical_repo,
+                                run_id=run_id,
+                                packet=meta,
+                                state=latest,
+                                candidate_sha=str(candidate_sha or ""),
+                                verdict_sha256=util.sha256_file(run_d / "REVIEW_VERDICT.json"),
+                                review_pass_number=artifact_pass,
+                                actor="reconciler",
+                            )
+                            cur_state = adv["next_top_state"]
+                            actions.append(
+                                f"adopt_program_review_approval:REVIEWING->{cur_state}"
+                            )
+                        else:
+                            state_mod.program_transition(
+                                canonical_repo, run_id,
+                                to_state=next_state,
+                                actor="reconciler",
+                                reason=f"crash_reconcile:adopt_review_verdict_to_{next_state}",
+                                commit_sha=candidate_sha,
+                            )
+                            cur_state = next_state
+                            if next_state == "CHANGES_REQUESTED":
+                                try:
+                                    prog_mod.claim_repair_round(
+                                        canonical_repo=canonical_repo,
+                                        run_id=run_id,
+                                        packet=meta,
+                                        source_evidence_sha=str(candidate_sha or "") or None,
+                                    )
+                                    actions.append(
+                                        "adopt_program_review_changes_requested:repair_claimed"
+                                    )
+                                except prog_mod.ClaimRefused as e:
+                                    cur_state = (state_mod.load(canonical_repo, run_id) or {}).get("state")
+                                    actions.append(
+                                        f"adopt_program_review_changes_requested:repair_refused:{e}"
+                                    )
+                            else:
+                                actions.append(
+                                    f"adopt_program_review_verdict:REVIEWING->{next_state}"
+                                )
+                    else:
+                        if not transitions.is_valid(cur_state, next_state):
+                            actions.append(
+                                f"skip_stale_review_verdict:{cur_state}!->{next_state}"
+                            )
+                        else:
+                            state_mod.transition(
+                                canonical_repo, run_id,
+                                to_state=next_state,
+                                actor="reconciler",
+                                reason=f"crash_reconcile:adopt_review_verdict_to_{next_state}",
+                                commit_sha=candidate_sha,
+                            )
+                            actions.append(
+                                f"adopt_review_verdict:{cur_state}->{next_state}"
+                            )
+                            cur_state = next_state
                 except Exception as e:
                     refused.append(f"review_verdict_transition_failed:{e}")
 
