@@ -1017,6 +1017,27 @@ def cmd_review_finalize(args: argparse.Namespace) -> None:
     })
 
 
+def cmd_review_prepare(args: argparse.Namespace) -> None:
+    """Deterministically pin the current review candidate/worktree/context."""
+    from . import review_prepare as review_prepare_mod
+
+    repo = _repo_path(args.repo)
+    try:
+        ctx = review_prepare_mod.prepare(
+            canonical_repo=repo,
+            run_id=args.run_id,
+        )
+    except review_prepare_mod.ReviewPrepareRefused as e:
+        _emit_error(
+            f"review prepare refused: {e}",
+            exit_code=4,
+            classification="OF_LOOP_REVIEW_PREPARE_REFUSED",
+        )
+    except RuntimeError as e:
+        _emit_error(str(e), exit_code=4)
+    print(json.dumps(ctx, indent=2, sort_keys=True))
+
+
 def cmd_review_assessment_skeleton(args: argparse.Namespace) -> None:
     """Write a schema-conformant REVIEW_AGENT_ASSESSMENT.json skeleton.
 
@@ -1030,6 +1051,13 @@ def cmd_review_assessment_skeleton(args: argparse.Namespace) -> None:
     from . import assessment as assessment_mod
     repo = _repo_path(args.repo)
     try:
+        _require_valid_approval(repo, args.run_id)
+        cur = state_mod.load(repo, args.run_id)
+        if not cur or cur.get("state") != "REVIEWING":
+            raise RuntimeError(
+                f"assessment skeleton requires REVIEWING state, got "
+                f"{(cur or {}).get('state')!r}"
+            )
         path = assessment_mod.write_skeleton(
             repo,
             args.run_id,
@@ -1395,6 +1423,13 @@ def _build_parser() -> argparse.ArgumentParser:
     r_claim.add_argument("run_id")
     r_claim.add_argument("--actor", default="of-reviewer")
     r_claim.set_defaults(func=cmd_review_claim)
+    r_prep = rev_sub.add_parser(
+        "prepare",
+        help="deterministic reviewer preparation (candidate, exact-SHA worktree, scratch)",
+    )
+    r_prep.add_argument("repo")
+    r_prep.add_argument("run_id")
+    r_prep.set_defaults(func=cmd_review_prepare)
     r_fin = rev_sub.add_parser("finalize", help="deterministic review finalizer (V2)")
     r_fin.add_argument("repo")
     r_fin.add_argument("run_id")

@@ -62,6 +62,7 @@ from . import (
     approval, git_checks, integrity, limits as limits_mod,
     packet as packet_mod, program as program_mod, receipts, secrets_v2,
     state as state_mod, transitions, util, verdicts, worktrees,
+    assessment as assessment_mod,
 )
 
 
@@ -229,12 +230,20 @@ def finalize_review(
         raise RuntimeError(f"approval invalid: {msg}")
     baseline_sha = approval_doc["baseline_sha"]
 
+    active_state = state_mod.load(canonical_repo, run_id)
+    if not active_state or active_state.get("state") != "REVIEWING":
+        raise RuntimeError(
+            f"review finalize requires REVIEWING state, got "
+            f"{(active_state or {}).get('state')!r}"
+        )
+
     # 2. Validate build receipt.
     receipt = receipts.load_receipt(canonical_repo, run_id)
     if receipt is None:
         raise RuntimeError("BUILD_RECEIPT.json missing — cannot review without a build receipt")
     if not (receipt.get("schema") or "").startswith("ownframework-loop-build-receipt/"):
         raise RuntimeError("BUILD_RECEIPT.json schema invalid")
+    receipt_sha_before = util.sha256_file(receipts.receipt_path(canonical_repo, run_id))
     receipt_candidate_sha = receipt.get("candidate_sha")
     if not receipt_candidate_sha:
         raise RuntimeError("BUILD_RECEIPT.json missing candidate_sha")
@@ -283,6 +292,16 @@ def finalize_review(
     # 9. Validate assessment schema.
     assessment: dict[str, Any] = {}
     if assessment_path is not None:
+        assessment_path = Path(assessment_path).resolve(strict=False)
+        if state_mod.is_program_state(active_state):
+            expected_assessment_path = assessment_mod.assessment_path(
+                canonical_repo, run_id
+            ).resolve(strict=False)
+            if assessment_path != expected_assessment_path:
+                raise RuntimeError(
+                    f"PROGRAM review assessment path {assessment_path} != "
+                    f"current claimed pass path {expected_assessment_path}"
+                )
         assessment = _read_json(assessment_path, default={}) or {}
     schema_ok, schema_errs = _assessment_schema_ok(assessment)
     if not schema_ok and assessment:
@@ -294,6 +313,38 @@ def finalize_review(
             raise RuntimeError(
                 f"assessment candidate_sha_claimed={assessment['candidate_sha_claimed'][:12]} "
                 f"!= receipt candidate_sha={receipt_candidate_sha[:12]}"
+            )
+
+    semantic_identity_errors: list[str] = []
+    if assessment:
+        expected_approval_sha = approval.approval_artifact_sha256(approval_doc)
+        fixed_identity = {
+            "packet_sha256_recomputed": approval_doc["packet_sha256"],
+            "approval_sha256": expected_approval_sha,
+            "reviewer_worktree": str(util.reviewer_worktree(canonical_repo, run_id)),
+            "reviewer_identity": "of-reviewer",
+        }
+        for key, expected in fixed_identity.items():
+            if key in assessment and assessment.get(key) != expected:
+                semantic_identity_errors.append(
+                    f"{key} mismatch: {assessment.get(key)!r} != {expected!r}"
+                )
+        if assessment.get("build_receipt_sha256") not in (None, receipt_sha_before):
+            semantic_identity_errors.append("BUILD_RECEIPT bytes changed since assessment skeleton")
+        if state_mod.is_program_state(active_state):
+            required_fixed = (
+                "packet_sha256_recomputed", "approval_sha256",
+                "build_receipt_sha256", "reviewer_worktree", "reviewer_identity",
+            )
+            for key in required_fixed:
+                if key not in assessment:
+                    semantic_identity_errors.append(
+                        f"missing PROGRAM semantic identity field: {key}"
+                    )
+        if semantic_identity_errors:
+            raise RuntimeError(
+                "review assessment fixed identity invalid: "
+                + "; ".join(semantic_identity_errors)
             )
 
     # 11. Run required validations from the packet (re-run for verifier freshness).
@@ -376,7 +427,7 @@ def finalize_review(
         "packet_sha_match": final_packet_sha == approval_doc["packet_sha256"],
         "approval_present": approval_doc is not None,
         "approval_sha_stable": True,  # approval is unchanged this pass
-        "receipt_sha_stable": (final_receipt_sha == final_receipt_sha),  # receipt was unchanged this pass
+        "receipt_sha_stable": (final_receipt_sha == receipt_sha_before),
         "candidate_sha_present": git_checks.commit_exists(canonical_repo, receipt_candidate_sha),
     }
 
@@ -397,12 +448,46 @@ def finalize_review(
     ac_results = assessment.get("acceptance_results") or []
     if not isinstance(ac_results, list):
         ac_results = []
-    ac_fail = [a for a in ac_results if (a.get("result") or "").lower() != "pass"]
     ng_results = assessment.get("non_goal_results") or []
     if not isinstance(ng_results, list):
         ng_results = []
-    ng_violated = [g for g in ng_results if (g.get("result") or "").lower() != "preserved"]
-    must_fix = [f for f in (assessment.get("findings") or []) if f.get("classification") == "must_fix"]
+
+    def _expected_ids(items: list[Any], prefix: str) -> list[str]:
+        out: list[str] = []
+        for idx, item in enumerate(items, start=1):
+            if isinstance(item, dict) and isinstance(item.get("id"), str):
+                out.append(item["id"])
+            else:
+                out.append(f"{prefix}-{idx}")
+        return out
+
+    expected_ac_ids = _expected_ids(meta.get("acceptance_criteria") or [], "AC")
+    expected_ng_ids = _expected_ids(meta.get("non_goals") or [], "NG")
+    provided_ac_ids = [str(a.get("id") or "") for a in ac_results if isinstance(a, dict)]
+    provided_ng_ids = [str(g.get("id") or "") for g in ng_results if isinstance(g, dict)]
+    ac_coverage_ok = (
+        len(provided_ac_ids) == len(expected_ac_ids)
+        and len(set(provided_ac_ids)) == len(provided_ac_ids)
+        and set(provided_ac_ids) == set(expected_ac_ids)
+    )
+    ng_coverage_ok = (
+        len(provided_ng_ids) == len(expected_ng_ids)
+        and len(set(provided_ng_ids)) == len(provided_ng_ids)
+        and set(provided_ng_ids) == set(expected_ng_ids)
+    )
+
+    ac_fail = [
+        a for a in ac_results
+        if not isinstance(a, dict) or (a.get("result") or "").lower() != "pass"
+    ]
+    ng_violated = [
+        g for g in ng_results
+        if not isinstance(g, dict) or (g.get("result") or "").lower() != "preserved"
+    ]
+    must_fix = [
+        f for f in (assessment.get("findings") or [])
+        if isinstance(f, dict) and f.get("classification") == "must_fix"
+    ]
 
     # 16. Stale-SHA record. Each field is computed from current repo state.
     stale_sha_check = {
@@ -444,6 +529,9 @@ def finalize_review(
     elif not validation_pass:
         verdict = "CHANGES_REQUESTED"
         failure_reason = "validation_failed"
+    elif not ac_coverage_ok or not ng_coverage_ok:
+        verdict = "CHANGES_REQUESTED"
+        failure_reason = "semantic_coverage_incomplete"
     elif must_fix:
         verdict = "CHANGES_REQUESTED"
         failure_reason = "must_fix_finding"
@@ -492,7 +580,12 @@ def finalize_review(
         "validation_results": validations,
         "tracked_mutation_check": tracked_mutation_check,
         "stale_sha_check": stale_sha_check,
-        "integrity_check": integrity_check,
+        "integrity_check": {
+            **integrity_check,
+            "acceptance_coverage_complete": ac_coverage_ok,
+            "non_goal_coverage_complete": ng_coverage_ok,
+            "semantic_identity_errors": semantic_identity_errors,
+        },
         "protected_path_check": {
             "result": "fail" if protected_findings else "pass",
             "offending_paths": [p["path"] for p in protected_findings],
@@ -548,14 +641,12 @@ def finalize_review(
         # the current checkpoint AND advances to the next one (or marks
         # terminal APPROVED). The helper is the sole owner of PROGRAM
         # advancement; the orchestrator also routes through it.
-        import sys
-        sys.stderr.write(f"DEBUG: verdict={verdict}, next_state={next_state}, is_program={state_mod.is_program_state(cur)}\n"); sys.stderr.flush()
         if (
             verdict == "APPROVED"
             and state_mod.is_program_state(cur)
             and next_state == "APPROVED"
         ):
-            verdict_sha256 = util.sha256_text(json.dumps(new_verdict, sort_keys=True, default=str))
+            verdict_sha256 = util.sha256_file(verdicts.verdict_path(canonical_repo, run_id))
             try:
                 adv = program_mod.advance_after_review_approval(
                     canonical_repo=canonical_repo,
@@ -568,12 +659,9 @@ def finalize_review(
                     actor=actor,
                 )
                 next_state = adv["next_top_state"]
-                # new_verdict reflects the resolved next state and
-                # surfaces the finalized cp + advanced_to_cp for audit.
-                new_verdict["recommended_next_state"] = next_state
-                new_verdict["program_advanced_to_cp"] = adv["advanced_to_cp"]
-                new_verdict["program_finalized_cp"] = adv["finalized_cp"]
-                new_verdict["program_evidence_sha256"] = adv["evidence_manifest_sha256"]
+                # The persisted REVIEW_VERDICT is the immutable review result.
+                # PROGRAM advancement is recorded in STATE/EVENTS; do not mutate
+                # the in-memory verdict after hashing/writing it.
             except program_mod.ProgramStateError as e:
                 raise RuntimeError(f"program advancement refused: {e}")
         else:

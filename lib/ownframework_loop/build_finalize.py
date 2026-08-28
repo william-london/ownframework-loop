@@ -45,7 +45,7 @@ from typing import Any
 from . import (
     approval, git_checks, guards, integrity, limits as limits_mod,
     packet as packet_mod, receipts, secrets_v2, state as state_mod,
-    transitions, util, worktrees,
+    transitions, util, worktrees, build_agent as build_agent_mod,
 )
 
 
@@ -246,8 +246,10 @@ def finalize_build(
 
     # 2. Validate state.
     state = state_mod.load(canonical_repo, run_id)
-    if state.get("state") not in ("BUILDING", "READY_TO_BUILD", "CHANGES_REQUESTED"):
-        raise RuntimeError(f"cannot finalize in state {state.get('state')!r}")
+    if state.get("state") != "BUILDING":
+        raise RuntimeError(
+            f"build finalize requires BUILDING state, got {state.get('state')!r}"
+        )
 
     # 3. Validate builder worktree.
     builder_wt = util.builder_worktree(canonical_repo, run_id)
@@ -257,6 +259,16 @@ def finalize_build(
     # 4. Read and validate semantic agent result.
     agent_result: dict[str, Any] = {}
     if agent_result_path is not None:
+        agent_result_path = Path(agent_result_path).resolve(strict=False)
+        if state_mod.is_program_state(state):
+            expected_agent_path = build_agent_mod.agent_result_path(
+                canonical_repo, run_id
+            ).resolve(strict=False)
+            if agent_result_path != expected_agent_path:
+                raise RuntimeError(
+                    f"PROGRAM build semantic result path {agent_result_path} != "
+                    f"current claimed pass path {expected_agent_path}"
+                )
         agent_result = _read_json(agent_result_path, default={}) or {}
     schema_ok, schema_errs = _build_agent_result_schema_ok(agent_result)
     if not schema_ok and agent_result:
@@ -264,6 +276,49 @@ def finalize_build(
     outcome_requested = agent_result.get("outcome_requested") if agent_result else "candidate_ready"
     if agent_result and agent_result.get("run_id") and agent_result["run_id"] != run_id:
         raise RuntimeError("agent result run_id mismatch")
+
+    if agent_result:
+        expected_identity = {
+            "packet_sha256": approval_doc["packet_sha256"],
+            "approval_sha256": approval.approval_artifact_sha256(approval_doc),
+            "baseline_sha": baseline_sha,
+            "candidate_branch": approval_doc.get("candidate_branch"),
+            "builder_identity": "of-builder",
+        }
+        for key, expected in expected_identity.items():
+            if key in agent_result and expected is not None and agent_result.get(key) != expected:
+                raise RuntimeError(
+                    f"agent result fixed identity {key}={agent_result.get(key)!r} "
+                    f"!= expected {expected!r}"
+                )
+        if "candidate_sha" in agent_result:
+            raise RuntimeError(
+                "agent result must not supply candidate_sha; Git HEAD is authoritative"
+            )
+
+        if state_mod.is_program_state(state):
+            current_cps = ((state.get("program") or {}).get("current_checkpoints") or [])
+            if not current_cps:
+                raise RuntimeError("PROGRAM build has no current checkpoint")
+            cp_id = current_cps[0]
+            cp_meta = next(
+                (cp for cp in (meta.get("checkpoint_graph") or {}).get("checkpoints", [])
+                 if cp.get("id") == cp_id),
+                None,
+            )
+            if cp_meta is None:
+                raise RuntimeError(f"current checkpoint {cp_id} missing from packet")
+            allowed_units: set[str] = set()
+            for unit in cp_meta.get("work_units") or []:
+                if isinstance(unit, str):
+                    allowed_units.add(unit)
+                elif isinstance(unit, dict) and isinstance(unit.get("id"), str):
+                    allowed_units.add(unit["id"])
+            if allowed_units and agent_result.get("work_unit_id") not in allowed_units:
+                raise RuntimeError(
+                    f"agent result work_unit_id {agent_result.get('work_unit_id')!r} "
+                    f"is not in current checkpoint {cp_id} units {sorted(allowed_units)}"
+                )
 
     # 5. Resolve candidate SHA and branch.
     candidate_sha = git_checks.current_head(builder_wt)
