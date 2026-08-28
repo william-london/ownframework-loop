@@ -257,23 +257,28 @@ def finalize_build(
         raise RuntimeError("builder worktree missing")
 
     # 4. Read and validate semantic agent result.
-    agent_result: dict[str, Any] = {}
-    if agent_result_path is not None:
-        agent_result_path = Path(agent_result_path).resolve(strict=False)
-        if state_mod.is_program_state(state):
-            expected_agent_path = build_agent_mod.agent_result_path(
-                canonical_repo, run_id
-            ).resolve(strict=False)
-            if agent_result_path != expected_agent_path:
-                raise RuntimeError(
-                    f"PROGRAM build semantic result path {agent_result_path} != "
-                    f"current claimed pass path {expected_agent_path}"
-                )
-        agent_result = _read_json(agent_result_path, default={}) or {}
+    if agent_result_path is None:
+        raise RuntimeError(
+            "semantic BUILD_AGENT_RESULT.json is required; deterministic "
+            "finalization cannot substitute for a semantic builder pass"
+        )
+    agent_result_path = Path(agent_result_path).resolve(strict=False)
+    if state_mod.is_program_state(state):
+        expected_agent_path = build_agent_mod.agent_result_path(
+            canonical_repo, run_id
+        ).resolve(strict=False)
+        if agent_result_path != expected_agent_path:
+            raise RuntimeError(
+                f"PROGRAM build semantic result path {agent_result_path} != "
+                f"current claimed pass path {expected_agent_path}"
+            )
+    agent_result = _read_json(agent_result_path, default={}) or {}
+    if not agent_result:
+        raise RuntimeError("semantic builder result missing or empty")
     schema_ok, schema_errs = _build_agent_result_schema_ok(agent_result)
-    if not schema_ok and agent_result:
+    if not schema_ok:
         raise RuntimeError("agent result schema invalid: " + "; ".join(schema_errs))
-    outcome_requested = agent_result.get("outcome_requested") if agent_result else "candidate_ready"
+    outcome_requested = agent_result.get("outcome_requested")
     if agent_result and agent_result.get("run_id") and agent_result["run_id"] != run_id:
         raise RuntimeError("agent result run_id mismatch")
 

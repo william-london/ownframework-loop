@@ -16,7 +16,7 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-from . import reconcile as reconcile_mod, state as state_mod
+from . import packet as packet_mod, reconcile as reconcile_mod, state as state_mod
 from .locking import LockBusyError, flock_exclusive
 
 SCHEMA = "ownframework-loop-dispatch/v1"
@@ -32,6 +32,107 @@ REVIEW_STATES = {"READY_FOR_REVIEW", "REVIEWING"}
 
 class DispatchError(RuntimeError):
     """Deterministic dispatch refusal."""
+
+BUILD_AGENT_SCHEMA = "ownframework-loop-build-agent-result/v1"
+REVIEW_AGENT_SCHEMA = "ownframework-loop-review-agent-assessment/v1"
+BUILD_OUTCOMES = {"candidate_ready", "blocked", "stopped"}
+REVIEW_VERDICTS = {
+    "APPROVED",
+    "CHANGES_REQUESTED",
+    "BLOCKED",
+    "HUMAN_REVIEW_REQUIRED",
+    "STALE_CANDIDATE",
+}
+
+
+def _load_json_file(path: Path) -> dict[str, Any] | None:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def semantic_result_ready(work_order: dict[str, Any]) -> tuple[bool, str]:
+    """Prove that a semantic worker actually completed the claimed pass.
+
+    Skeleton existence is never completion: skeletons intentionally contain
+    placeholder defaults. This check is used both before deterministic
+    finalization and after supervisor restart so a completed semantic artifact
+    can be finalized without paying for a duplicate model call.
+    """
+    if work_order.get("schema") != SCHEMA:
+        return False, "invalid_work_order_schema"
+    decision = str(work_order.get("decision") or "")
+    if decision not in {"BUILD", "REVIEW"}:
+        return False, "not_semantic_work"
+
+    semantic = Path(str(work_order.get("semantic_path") or "")).resolve(strict=False)
+    data = _load_json_file(semantic)
+    if data is None:
+        return False, "semantic_artifact_missing_or_invalid"
+
+    run_id = str(work_order.get("run_id") or "")
+    if data.get("run_id") != run_id:
+        return False, "semantic_run_id_mismatch"
+
+    if decision == "BUILD":
+        if data.get("schema") != BUILD_AGENT_SCHEMA:
+            return False, "builder_schema_mismatch"
+        outcome = data.get("outcome_requested")
+        if outcome not in BUILD_OUTCOMES:
+            return False, "builder_outcome_invalid"
+        summary = str(data.get("summary") or "").strip()
+        if outcome == "candidate_ready":
+            addressed = data.get("acceptance_addressed") or []
+            completed = data.get("unit_ids_completed") or []
+            if not summary:
+                return False, "builder_summary_empty"
+            if not addressed and not completed:
+                return False, "builder_completion_evidence_empty"
+        elif not summary and not str(data.get("blocker_reason") or "").strip():
+            return False, "builder_terminal_reason_empty"
+        return True, "ready"
+
+    if data.get("schema") != REVIEW_AGENT_SCHEMA:
+        return False, "review_schema_mismatch"
+    candidate = str(work_order.get("candidate_sha") or "")
+    if candidate and data.get("candidate_sha_claimed") != candidate:
+        return False, "review_candidate_mismatch"
+    if data.get("recommended_verdict") not in REVIEW_VERDICTS:
+        return False, "review_recommendation_invalid"
+    if not isinstance(data.get("findings"), list):
+        return False, "review_findings_invalid"
+
+    repo = Path(str(work_order.get("canonical_repo") or "")).resolve(strict=False)
+    packet_path = state_mod.run_dir(repo, run_id) / "WORK_PACKET.md"
+    try:
+        meta, _ = packet_mod.parse_packet_file(packet_path)
+    except Exception:
+        return False, "packet_unreadable"
+
+    def expected_ids(items: list[Any], prefix: str) -> set[str]:
+        out: set[str] = set()
+        for idx, item in enumerate(items, start=1):
+            if isinstance(item, dict) and isinstance(item.get("id"), str):
+                out.add(item["id"])
+            else:
+                out.add(f"{prefix}-{idx}")
+        return out
+
+    expected_ac = expected_ids(meta.get("acceptance_criteria") or [], "AC")
+    expected_ng = expected_ids(meta.get("non_goals") or [], "NG")
+    ac = data.get("acceptance_results")
+    ng = data.get("non_goal_results")
+    if not isinstance(ac, list) or not isinstance(ng, list):
+        return False, "review_coverage_not_lists"
+    ac_ids = {str(x.get("id") or "") for x in ac if isinstance(x, dict)}
+    ng_ids = {str(x.get("id") or "") for x in ng if isinstance(x, dict)}
+    if ac_ids != expected_ac:
+        return False, "review_acceptance_coverage_incomplete"
+    if ng_ids != expected_ng:
+        return False, "review_non_goal_coverage_incomplete"
+    return True, "ready"
 
 
 def _ofloop_bin() -> str:
@@ -180,8 +281,11 @@ def finalize_work_order(work_order: dict[str, Any]) -> dict[str, Any]:
     semantic = Path(str(work_order.get("semantic_path") or "")).resolve(strict=False)
     if not repo or not run_id or not semantic.is_file():
         raise DispatchError("semantic result is missing; refusing finalization")
-    if semantic.stat().st_size <= 2:
-        raise DispatchError("semantic result is empty; refusing finalization")
+    ready, reason = semantic_result_ready(work_order)
+    if not ready:
+        raise DispatchError(
+            f"semantic result is incomplete ({reason}); refusing finalization"
+        )
 
     if decision == "BUILD":
         result = _run_cli(["build", "finalize", repo, run_id, str(semantic)])
@@ -201,4 +305,5 @@ __all__ = [
     "SCHEMA",
     "claim_next",
     "finalize_work_order",
+    "semantic_result_ready",
 ]

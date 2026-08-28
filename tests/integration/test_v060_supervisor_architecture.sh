@@ -34,7 +34,36 @@ assert s["status"] == "QUEUED", s
 print("PASS supervisor queue idempotent")
 PY
 
-# 3. Fresh human-originated run dispatches BUILD with deterministic preparation.
+# 3. Stale RUNNING recovery is PID-aware and never duplicates a live owner.
+PYTHONPATH="$LIB_DIR" python3 - "$DB" <<'PY'
+import os, sqlite3, sys, tempfile
+from pathlib import Path
+from ownframework_loop import supervisor
+
+db = Path(sys.argv[1])
+repo = Path(tempfile.mkdtemp(prefix="ofloop-supervisor-recovery-"))
+supervisor.enqueue(canonical_repo=repo, run_id="run-dead", db_path=db)
+supervisor.enqueue(canonical_repo=repo, run_id="run-live", db_path=db)
+with supervisor._connect(db) as conn:
+    conn.execute(
+        "UPDATE jobs SET status='RUNNING', worker_pid=? WHERE run_id='run-dead'",
+        (99999999,),
+    )
+    conn.execute(
+        "UPDATE jobs SET status='RUNNING', worker_pid=? WHERE run_id='run-live'",
+        (os.getpid(),),
+    )
+    conn.commit()
+    recovered = supervisor._recover_stale_running(conn)
+    dead = conn.execute("SELECT status FROM jobs WHERE run_id='run-dead'").fetchone()[0]
+    live = conn.execute("SELECT status FROM jobs WHERE run_id='run-live'").fetchone()[0]
+assert recovered == 1, recovered
+assert dead == "QUEUED", dead
+assert live == "RUNNING", live
+print("PASS supervisor recovery requeues dead owner and preserves live owner")
+PY
+
+# 4. Fresh human-originated run dispatches BUILD with deterministic preparation.
 T="$(make_tmp_repo)"
 RID="$(make_approved_run_unapproved "$T" FEATURE low "v060-dispatch")"
 OUT="$($OFLOOP dispatch claim "$T" "$RID")"
@@ -46,25 +75,51 @@ assert_file_exists "$SEM" "dispatch materialized pass-scoped builder semantic sk
 assert_dir_exists "$WT" "dispatch materialized deterministic builder worktree"
 assert_eq "$(jq -r '.approval_method' "$T/.ownframework-loop/$RID/APPROVAL.json")" "build_start" "dispatch uses no-ceremony execution seal"
 
-# 4. Re-dispatch of same claimed pass is replay, not another budget unit.
+# Skeleton presence is not semantic completion.
+PYTHONPATH="$LIB_DIR" python3 - "$T" "$RID" "$OUT" <<'PY'
+import json, sys
+from pathlib import Path
+from ownframework_loop import dispatch
+order = json.loads(sys.argv[3])
+ready, reason = dispatch.semantic_result_ready(order)
+assert not ready and reason == "builder_summary_empty", (ready, reason)
+p = Path(order["semantic_path"])
+d = json.loads(p.read_text())
+d["summary"] = "semantic work completed"
+d["unit_ids_completed"] = ["UNIT-1"]
+d["acceptance_addressed"] = ["AC-1"]
+p.write_text(json.dumps(d, indent=2, sort_keys=True) + "\n")
+ready, reason = dispatch.semantic_result_ready(order)
+assert ready and reason == "ready", (ready, reason)
+print("PASS semantic completion distinguishes skeleton from completed pass")
+PY
+
+# 5. Re-dispatch of same claimed pass is replay, not another budget unit.
 OUT2="$($OFLOOP dispatch claim "$T" "$RID")"
 assert_eq "$(printf '%s' "$OUT2" | jq -r '.decision')" "BUILD" "re-dispatch remains BUILD"
 assert_eq "$(printf '%s' "$OUT2" | jq -r '.replayed')" "true" "re-dispatch is replay"
 assert_eq "$(jq -r '.build_pass_count' "$T/.ownframework-loop/$RID/STATE.json")" "1" "re-dispatch consumes one pass"
 
-# 5. Packet-supplied validation commands are mechanically classified before execution.
+# 6. Packet-supplied validation commands are mechanically classified before execution.
 grep -Fq 'required_validation command refused by deterministic guard' "$ROOT/lib/ownframework_loop/build_finalize.py" \
   || fail "build finalizer missing required-validation guard"
 grep -Fq 'required_validation command refused by deterministic guard' "$ROOT/lib/ownframework_loop/review_finalize.py" \
   || fail "review finalizer missing required-validation guard"
 pass "required-validation shell authority is mechanically guarded"
 
-# 6. Supervisor contains no engineering-state transition table.
+# 7. Supervisor contains no engineering-state transition table.
 if grep -Eq 'READY_TO_BUILD|READY_FOR_REVIEW|CHANGES_REQUESTED|REVIEWING|BUILDING' "$ROOT/lib/ownframework_loop/supervisor.py"; then
   fail "supervisor reimplemented engineering state machine"
 fi
 grep -Fq 'dispatch_mod.claim_next' "$ROOT/lib/ownframework_loop/supervisor.py" \
   || fail "supervisor does not consume dispatch owner"
 pass "supervisor is execution clock, not second engineering state machine"
+
+# 8. Deterministic finalizers themselves require semantic evidence.
+grep -Fq 'semantic BUILD_AGENT_RESULT.json is required' "$ROOT/lib/ownframework_loop/build_finalize.py" \
+  || fail "build finalizer still permits missing semantic builder result"
+grep -Fq 'semantic REVIEW_AGENT_ASSESSMENT.json is required' "$ROOT/lib/ownframework_loop/review_finalize.py" \
+  || fail "review finalizer still permits missing semantic reviewer result"
+pass "finalizer authority cannot approve without semantic passes"
 
 echo "V060_SUPERVISOR_ARCHITECTURE=PASS"

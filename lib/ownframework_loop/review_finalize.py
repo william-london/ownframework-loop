@@ -290,21 +290,26 @@ def finalize_review(
     pre_review_head = git_checks.current_head(reviewer_wt)
 
     # 9. Validate assessment schema.
-    assessment: dict[str, Any] = {}
-    if assessment_path is not None:
-        assessment_path = Path(assessment_path).resolve(strict=False)
-        if state_mod.is_program_state(active_state):
-            expected_assessment_path = assessment_mod.assessment_path(
-                canonical_repo, run_id
-            ).resolve(strict=False)
-            if assessment_path != expected_assessment_path:
-                raise RuntimeError(
-                    f"PROGRAM review assessment path {assessment_path} != "
-                    f"current claimed pass path {expected_assessment_path}"
-                )
-        assessment = _read_json(assessment_path, default={}) or {}
+    if assessment_path is None:
+        raise RuntimeError(
+            "semantic REVIEW_AGENT_ASSESSMENT.json is required; deterministic "
+            "review finalization cannot approve without a semantic reviewer pass"
+        )
+    assessment_path = Path(assessment_path).resolve(strict=False)
+    if state_mod.is_program_state(active_state):
+        expected_assessment_path = assessment_mod.assessment_path(
+            canonical_repo, run_id
+        ).resolve(strict=False)
+        if assessment_path != expected_assessment_path:
+            raise RuntimeError(
+                f"PROGRAM review assessment path {assessment_path} != "
+                f"current claimed pass path {expected_assessment_path}"
+            )
+    assessment = _read_json(assessment_path, default={}) or {}
+    if not assessment:
+        raise RuntimeError("semantic reviewer assessment missing or empty")
     schema_ok, schema_errs = _assessment_schema_ok(assessment)
-    if not schema_ok and assessment:
+    if not schema_ok:
         raise RuntimeError("assessment schema invalid: " + "; ".join(schema_errs))
 
     # 10. Reject assessment candidate mismatch.
@@ -535,11 +540,7 @@ def finalize_review(
     elif not validation_pass:
         verdict = "CHANGES_REQUESTED"
         failure_reason = "validation_failed"
-    elif assessment and (not ac_coverage_ok or not ng_coverage_ok):
-        # v0.4.5: only enforce semantic coverage when an assessment is
-        # provided. Unattended loop run (orchestrator path) does not
-        # supply an assessment; matching v0.3.5 default behaviour of
-        # APPROVED when no reviewer-objection data is present.
+    elif not ac_coverage_ok or not ng_coverage_ok:
         verdict = "CHANGES_REQUESTED"
         failure_reason = "semantic_coverage_incomplete"
     elif must_fix:

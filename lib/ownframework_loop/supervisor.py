@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import os
 import shlex
+import signal
 import sqlite3
 import subprocess
 import time
@@ -54,11 +55,75 @@ def _connect(path: Path) -> sqlite3.Connection:
           next_attempt_at REAL NOT NULL DEFAULT 0,
           created_at REAL NOT NULL,
           updated_at REAL NOT NULL,
+          worker_pid INTEGER,
+          worker_started_at REAL,
+          worker_role TEXT,
           UNIQUE(repo, run_id)
         );
         """
     )
+    columns = {
+        str(row["name"])
+        for row in conn.execute("PRAGMA table_info(jobs)").fetchall()
+    }
+    migrations = {
+        "worker_pid": "ALTER TABLE jobs ADD COLUMN worker_pid INTEGER",
+        "worker_started_at": "ALTER TABLE jobs ADD COLUMN worker_started_at REAL",
+        "worker_role": "ALTER TABLE jobs ADD COLUMN worker_role TEXT",
+    }
+    for name, statement in migrations.items():
+        if name not in columns:
+            conn.execute(statement)
+    conn.commit()
     return conn
+
+
+def _pid_alive(pid: int | None) -> bool:
+    if not pid or int(pid) <= 0:
+        return False
+    try:
+        os.kill(int(pid), 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _recover_stale_running(conn: sqlite3.Connection) -> int:
+    """Requeue only RUNNING jobs whose recorded worker process is gone.
+
+    A live orphan is left RUNNING so another supervisor cannot duplicate it.
+    When that process later exits, the next recovery pass requeues the same
+    core claim. Dispatch replay + semantic_result_ready then either finalizes
+    the completed artifact with zero model calls or resumes the same pass.
+    """
+    recovered = 0
+    rows = conn.execute(
+        "SELECT * FROM jobs WHERE status='RUNNING' ORDER BY id"
+    ).fetchall()
+    for row in rows:
+        pid = row["worker_pid"]
+        if _pid_alive(pid):
+            continue
+        conn.execute(
+            """
+            UPDATE jobs SET
+              status='QUEUED',
+              worker_pid=NULL,
+              worker_started_at=NULL,
+              worker_role=NULL,
+              last_error=?,
+              next_attempt_at=0,
+              updated_at=?
+            WHERE id=?
+            """,
+            ("recovered stale RUNNING job after supervisor/worker exit", time.time(), row["id"]),
+        )
+        recovered += 1
+    if recovered:
+        conn.commit()
+    return recovered
 
 
 def enqueue(
@@ -146,6 +211,7 @@ class RunnerResult:
     cost_usd: float
     stdout: str
     stderr: str
+    pid: int | None = None
 
 
 class ClaudeCodeRunner:
@@ -153,7 +219,13 @@ class ClaudeCodeRunner:
 
     runner_id = "claude-code"
 
-    def run(self, work_order: dict[str, Any], *, timeout_seconds: int = 3600) -> RunnerResult:
+    def run(
+        self,
+        work_order: dict[str, Any],
+        *,
+        timeout_seconds: int = 3600,
+        on_start=None,
+    ) -> RunnerResult:
         role = str(work_order.get("role") or "")
         if role not in {"builder", "reviewer"}:
             raise RuntimeError(f"unsupported work-order role: {role!r}")
@@ -177,44 +249,74 @@ class ClaudeCodeRunner:
 
         claude_bin = os.environ.get("OFLOOP_CLAUDE_BIN", "claude")
         extra = shlex.split(os.environ.get("OFLOOP_CLAUDE_EXTRA_ARGS", ""))
+        allowed_tools = os.environ.get(
+            "OFLOOP_CLAUDE_ALLOWED_TOOLS",
+            "Read,Edit,Write,Bash,Glob,Grep",
+        )
         cmd = [
             claude_bin,
             "-p",
             prompt,
             "--output-format",
             "json",
+            "--plugin-dir",
+            str(_source_root()),
+            "--allowedTools",
+            allowed_tools,
             *extra,
         ]
+        proc = subprocess.Popen(
+            cmd,
+            cwd=str(worktree),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            start_new_session=True,
+        )
+        if on_start is not None:
+            on_start(int(proc.pid), role)
+
+        timed_out = False
         try:
-            proc = subprocess.run(
-                cmd,
-                cwd=str(worktree),
-                capture_output=True,
-                text=True,
-                timeout=int(timeout_seconds),
-                check=False,
-            )
-        except subprocess.TimeoutExpired as exc:
+            stdout, stderr = proc.communicate(timeout=int(timeout_seconds))
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            try:
+                os.killpg(proc.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            try:
+                stdout, stderr = proc.communicate(timeout=10)
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                stdout, stderr = proc.communicate()
+
+        if timed_out:
             return RunnerResult(
                 ok=False,
                 returncode=124,
                 cost_usd=0.0,
-                stdout=(exc.stdout or "") if isinstance(exc.stdout, str) else "",
-                stderr="claude runner timed out",
+                stdout=(stdout or "")[-65536:],
+                stderr=((stderr or "") + "\nclaude runner timed out")[-65536:],
+                pid=int(proc.pid),
             )
 
         cost = 0.0
         try:
-            data = json.loads(proc.stdout)
+            data = json.loads(stdout or "")
             cost = float(data.get("total_cost_usd") or 0.0)
         except Exception:
             pass
         return RunnerResult(
             ok=proc.returncode == 0,
-            returncode=int(proc.returncode),
+            returncode=int(proc.returncode or 0),
             cost_usd=cost,
-            stdout=proc.stdout[-65536:],
-            stderr=proc.stderr[-65536:],
+            stdout=(stdout or "")[-65536:],
+            stderr=(stderr or "")[-65536:],
+            pid=int(proc.pid),
         )
 
 
@@ -225,6 +327,7 @@ def _runner(name: str) -> ClaudeCodeRunner:
 
 
 def _take_next_job(conn: sqlite3.Connection) -> sqlite3.Row | None:
+    _recover_stale_running(conn)
     now = time.time()
     conn.execute("BEGIN IMMEDIATE")
     row = conn.execute(
@@ -240,11 +343,35 @@ def _take_next_job(conn: sqlite3.Connection) -> sqlite3.Row | None:
         conn.commit()
         return None
     conn.execute(
-        "UPDATE jobs SET status='RUNNING', updated_at=? WHERE id=?",
-        (now, row["id"]),
+        """
+        UPDATE jobs SET
+          status='RUNNING',
+          worker_pid=?,
+          worker_started_at=?,
+          worker_role='dispatching',
+          updated_at=?
+        WHERE id=?
+        """,
+        (os.getpid(), now, now, row["id"]),
     )
     conn.commit()
     return conn.execute("SELECT * FROM jobs WHERE id=?", (row["id"],)).fetchone()
+
+
+def _set_worker_pid(
+    conn: sqlite3.Connection,
+    job_id: int,
+    pid: int,
+    role: str,
+) -> None:
+    conn.execute(
+        """
+        UPDATE jobs SET worker_pid=?, worker_started_at=?, worker_role=?, updated_at=?
+        WHERE id=? AND status='RUNNING'
+        """,
+        (int(pid), time.time(), role, time.time(), job_id),
+    )
+    conn.commit()
 
 
 def _update_job(
@@ -268,6 +395,9 @@ def _update_job(
           total_cost_usd=?,
           last_error=?,
           next_attempt_at=?,
+          worker_pid=NULL,
+          worker_started_at=NULL,
+          worker_role=NULL,
           updated_at=?
         WHERE id=?
         """,
@@ -317,8 +447,35 @@ def run_one(*, db_path: Path | None = None, timeout_seconds: int = 3600) -> dict
                     "work_order": work_order,
                 }
 
+            semantic_ready, semantic_reason = dispatch_mod.semantic_result_ready(
+                work_order
+            )
+            if semantic_ready:
+                finalized = dispatch_mod.finalize_work_order(work_order)
+                _update_job(
+                    conn,
+                    job["id"],
+                    status_value="QUEUED",
+                    infra_failures=0,
+                    last_error=None,
+                    next_attempt_at=0,
+                )
+                return {
+                    "schema": SCHEMA,
+                    "ok": True,
+                    "action": f"{decision}_REPLAY_FINALIZED",
+                    "job_id": job["id"],
+                    "cost_usd": 0.0,
+                    "semantic_replay": True,
+                    "finalized": finalized,
+                }
+
             result = _runner(str(job["runner"])).run(
-                work_order, timeout_seconds=timeout_seconds
+                work_order,
+                timeout_seconds=timeout_seconds,
+                on_start=lambda pid, role: _set_worker_pid(
+                    conn, int(job["id"]), pid, role
+                ),
             )
             new_cost = float(job["total_cost_usd"]) + result.cost_usd
             if not result.ok:
