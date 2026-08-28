@@ -276,7 +276,7 @@ Start with:
 
 ## Core invariants
 
-1. Approval is a human-operated boundary. The portable core requires interactive confirmation; hardened adapters additionally withhold the approval command from the agent tool surface.
+1. v0.5.0: approval ceremony removed. The first legitimate build start auto-seals the run (binding_method=build_start, binding_kind=execution_seal). Legacy tty_confirmation remains for backward-compatible / optional strict pre-seal.
 2. Approval binds the exact work-packet bytes/hash.
 3. Builders operate inside approved scope and budgets.
 4. Candidate identity is an exact Git SHA.
