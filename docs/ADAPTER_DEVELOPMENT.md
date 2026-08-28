@@ -1,75 +1,110 @@
 # Developing an OwnFramework Loop adapter
 
-OwnFramework Loop separates deterministic protocol authority from agent-host UX. An adapter should be thin: it teaches a host how to participate while reusing the same packet, approval, state, Git-SHA, repair, and verdict machinery.
+OwnFramework Loop separates deterministic protocol authority from agent-host UX.
+An adapter should be thin: teach a host how to participate while reusing the
+same packet, execution-binding, state, Git-SHA, repair, receipt, and verdict
+machinery.
 
-Read [`architecture/ADAPTER_CONTRACT.md`](architecture/ADAPTER_CONTRACT.md) and [`architecture/PORTABILITY_MODEL.md`](architecture/PORTABILITY_MODEL.md) first.
+Read:
+
+- [`architecture/ADAPTER_CONTRACT.md`](architecture/ADAPTER_CONTRACT.md)
+- [`architecture/PORTABILITY_MODEL.md`](architecture/PORTABILITY_MODEL.md)
+- [`architecture/CORE_INVARIANTS.md`](architecture/CORE_INVARIANTS.md)
 
 ## Start from the generic portability floor
 
-Before copying Claude- or Codex-specific integration code, verify that the host can satisfy the `generic-cli` contract:
+Before copying Claude- or Codex-specific integration code, prove the host can:
 
 1. operate in a Git checkout;
 2. invoke local `ofloop` commands;
-3. work in the core-selected builder/reviewer surfaces;
-4. produce or inspect exact Git commit SHAs;
-5. return semantic build/review results through supported core paths.
+3. use core-selected builder/reviewer surfaces;
+4. produce/inspect exact Git SHAs;
+5. fill semantic result artifacts at exact paths returned by preparation.
 
-If those conditions hold, the host can be protocol-compatible even when it has no native Agent Skills, hooks, subagents, marketplace, or loop command.
-
-Then add only the host-native conveniences that are real and evidence-backed.
+If those conditions hold, the host can be protocol-compatible without native
+Agent Skills, hooks, subagents, marketplace support, or a built-in loop command.
 
 ## What the core owns
 
-Packet parsing, TTY-bound approval binding, lifecycle transitions, locks, budgets, worktree/candidate identity, exact-SHA verdict binding, repair counters, events/receipts, and terminal states.
+- packet parsing/validation;
+- spec-time baseline snapshot;
+- first-start execution sealing;
+- lifecycle transitions and locks;
+- scope/runtime/repair/checkpoint budgets;
+- candidate branch/worktree identity;
+- exact-SHA receipts/verdicts;
+- crash reconciliation;
+- terminal semantics and promotion boundary.
 
 ## What adapters may provide
 
 - discoverable Agent Skills or host-native commands;
 - host-specific agents/subagents;
-- host-specific hooks or command interception;
+- host-specific hooks/command interception;
 - installer/discovery helpers;
 - adapter-specific doctor checks;
-- presentation of spec/build/review/status operations;
-- host-native loop/retry UX when the host provides it.
+- native loop/retry/session UX.
 
 ## What adapters must never reimplement
 
-Do not implement a second approval mechanism, state machine, packet hash, repair counter, candidate identity store, verdict identity store, or promotion mechanism. Do not directly mutate protected run artifacts.
+Do not implement a second execution-seal mechanism, lifecycle state machine,
+packet hash store, repair counter, candidate identity store, verdict identity
+store, crash-recovery truth, or promotion mechanism.
 
-A native host loop may repeatedly invoke the shared core, but it must not become a second source of lifecycle truth.
+A native host loop may repeatedly invoke the shared core, but it must not become
+a second lifecycle authority.
+
+## Normal start contract
+
+Normal adapters do not ask for a separate approval/token step.
+
+```text
+SPEC → first BUILD claim auto-seals → BUILD/REVIEW lifecycle
+```
+
+The historical TTY pre-seal may remain compatibility-only. An adapter must not
+make it mandatory or give it a parallel PROGRAM initialization/state path.
+
+## Exact preparation contract
+
+Do not derive worktree/branch/checkpoint/result paths from examples. Consume
+`ofloop build prepare` / review preparation outputs exactly. Pass-scoped semantic
+result paths are authoritative outputs, not naming conventions for adapters to
+reconstruct.
 
 ## Capability declaration
 
-Add a named adapter to `lib/ownframework_loop/adapters.py` only when the repository has a concrete host integration to describe. Capability values represent verified host behavior, not aspiration.
+Add a named adapter only when there is concrete integration evidence.
 
-- `protocol_compatible` means the adapter participates in the shared core protocol.
-- `hardened` means the host exposes deterministic enforcement primitives for the adapter's declared hard rails.
-- `live_verified` means the named adapter has been exercised in a real supported host.
+- `protocol_compatible`: participates in the shared core protocol.
+- `hardened`: named host exposes extra deterministic enforcement for declared
+  rails; this is not an OS-sandbox claim.
+- `live_verified`: named adapter has been exercised in a real supported host.
 
-The abstract `generic-cli` entry is different: it represents the vendor-neutral portability floor and intentionally makes no named-host live claim.
-
-## Agent Skills are optional
-
-If a host supports Agent Skills / `SKILL.md`, prefer the portable semantic source under `.agents/skills/` and add only a thin host wrapper when necessary.
-
-If it does not support Agent Skills, use those files as the behavioral reference. Do not fork their state semantics into a host-specific orchestration engine.
+The abstract `generic-cli` entry represents a portability floor and therefore
+has no named-host live claim.
 
 ## Conformance
 
-A new adapter must prove that it cannot approve its own packet, does not directly own protected run state, hands candidate/review identity through exact Git SHAs, leaves repair/terminal semantics to the core, and gains no push/merge/deploy authority from the loop.
+A new adapter must prove that it:
 
-Run `tests/run_adapter_conformance.sh` plus the full repository gates. Named adapters start experimental and become stable only after live host verification, conformance coverage, installation/discovery proof, and documented enforcement differences.
+- uses the shared execution-start path;
+- never directly authors protected run state/evidence;
+- uses exact candidate/review SHAs;
+- leaves repair/terminal semantics to the core;
+- gains no push/merge/deploy/external-effect authority from Loop state;
+- does not reconstruct deterministic paths/identity from prose.
 
-## Good adapter contribution
+Run `tests/run_adapter_conformance.sh` plus the full repository gates.
 
-A useful adapter PR should answer:
+## Contribution questions
 
-- What host and exact version were tested?
+A useful adapter change should answer:
+
+- Which host/version was tested?
 - Does it work at the generic CLI layer first?
 - Which native features are added beyond the portability floor?
-- Which hard rails are deterministic versus instruction-only?
-- Can the host discover the portable skills directly?
-- What live proof justifies `live_verified=true`?
-- What capability remains weaker than the Claude reference adapter?
-
-This makes it possible to add support for new coding-agent hosts without turning OwnFramework Loop into a collection of vendor-specific state machines.
+- Which rails are mechanical versus instruction-only?
+- Can the host discover portable skills directly?
+- What evidence justifies `live_verified=true`?
+- Which capability remains weaker than the Claude reference adapter?

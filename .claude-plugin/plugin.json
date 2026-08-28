@@ -1,8 +1,8 @@
 {
   "name": "of-loop",
   "displayName": "OwnFramework Loop",
-  "description": "Stable Claude Code reference adapter for OwnFramework Loop \u2014 human-gated engineering loops with approved work packets, exact-SHA review, bounded repairs, and manual promotion.",
-  "version": "0.5.3",
+  "description": "Stable Claude Code reference adapter for deterministic execution-sealed engineering loops with exact-SHA review, bounded repairs, and operator-owned promotion.",
+  "version": "0.5.4",
   "author": {
     "name": "OwnFramework"
   },

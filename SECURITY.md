@@ -1,38 +1,77 @@
 # Security
 
-OwnFramework Loop is an early public project. The state machine,
-packet binding, exact-SHA review, serialized transitions, and adapter
-conformance boundaries are implemented and tested, but the project makes
-no claim of guaranteed correctness, guaranteed safety, or guaranteed
-coverage against arbitrary real-world inputs.
+OwnFramework Loop is an early public project. It implements deterministic
+workflow/integrity controls around packet binding, source identity, candidate
+SHA, serialized lifecycle transitions, bounded repairs, exact-SHA review, and
+adapter conformance. It does not claim universal correctness, universal safety,
+or OS-level containment of arbitrary same-user code.
 
 ## Supported release posture
 
-- The currently supported release line is **0.5.3**.
-- Earlier release lines (0.2.x, 0.3.x) are preserved in the
-  git history but are no longer receiving fixes.
+- The currently supported release line is **0.5.4**.
+- Earlier 0.2.x/0.3.x/0.4.x/0.5.0-0.5.3 behavior remains in Git history for
+  compatibility/audit context but is not the current product contract.
 
-## Human-gate security boundary
+## Current execution-start boundary
 
-OwnFramework Loop's human approval gate is a workflow/authority boundary,
-not a privilege sandbox against arbitrary code already running with the same
-OS user and unrestricted filesystem/shell access.
+Normal operation has no mandatory approval ceremony.
 
-The portable core requires an interactive TTY confirmation and binds the
-resulting approval artifact to the exact packet bytes/hash. Hardened adapters
-add host-native enforcement on top of that. The Claude Code reference adapter,
-for example, uses a PreToolUse Bash guard to refuse direct agent-issued
-`ofloop spec approve` commands during the loop.
+The first legitimate execution start creates an immutable execution seal that
+binds:
 
-Those controls are meaningful, deterministic guardrails, but they do not turn
-a same-user coding agent into an untrusted operating-system principal. A host
-that does not expose equivalent enforcement is reported as less hardened in
-the adapter capability matrix rather than being described as equally safe.
+- exact work-packet bytes / SHA-256;
+- canonical repository identity;
+- spec-time baseline branch and exact baseline SHA;
+- deterministic candidate branch;
+- relevant packet metadata and PROGRAM provenance.
 
-Similarly, `hardened=yes` in adapter metadata means the adapter has additional
-mechanical host controls for its declared workflow rails. It does **not** mean
-the adapter is an adversarial sandbox or can contain arbitrary malicious code
-with the operator's own privileges.
+The historical `APPROVAL.json` filename and `tty_confirmation` method are kept
+for backward compatibility. New runs normally use:
+
+```text
+approval_method=build_start
+binding_kind=execution_seal
+```
+
+Compatibility field names such as `approved_at` are not evidence that a person
+typed a confirmation token.
+
+A run start authorizes bounded local engineering only. It does not grant push,
+merge, deploy, publish, payment, message sending, remote mutation, or unrelated
+external-action authority.
+
+## Tool-surface hardening versus OS containment
+
+The Claude Code reference adapter uses mechanical hooks to block direct and
+several normalized dangerous-command forms during active runs. Those hooks are
+meaningful guardrails, but they do **not** turn a same-user coding agent into an
+untrusted OS principal.
+
+The project does not claim arbitrary semantic containment of Turing-complete
+local programs without a real OS/runtime isolation boundary.
+
+A coding agent must never intentionally route around a guard refusal using
+indirection such as hidden subprocess construction, aliases, encoded commands,
+or dynamic shell assembly. A guard refusal is a policy boundary, not a puzzle.
+
+`hardened=true` means a named adapter has additional deterministic host rails for
+its declared workflow. It does not mean sandboxed arbitrary-code containment.
+
+## Core security-relevant invariants
+
+Security-sensitive defects include violations of:
+
+- exact packet/source execution binding;
+- spec-time source-drift refusal;
+- execution-seal immutability;
+- serialized first-start/build/review claims;
+- protected-path and scope enforcement;
+- exact candidate SHA and clean-worktree receipts;
+- exact-SHA review/verdict identity;
+- exact-current-pass crash reconciliation;
+- repair/checkpoint/global budget enforcement;
+- fail-closed terminal semantics;
+- no autonomous push/merge/deploy/publish/payment/customer-effect authority.
 
 ## Reporting a vulnerability
 
@@ -40,39 +79,32 @@ Please report suspected vulnerabilities privately to:
 
 **williamlondon@ownframework.com**
 
-Please do **not** open a public GitHub issue for an undisclosed
-vulnerability. Public disclosure should wait until a fix or
-mitigation is in place.
+Do not open a public GitHub issue for an undisclosed vulnerability. Public
+disclosure should wait until a fix or mitigation is available.
 
-When reporting, please include:
+Please include:
 
-- A short description of the issue.
-- The release line and commit SHA you observed it on.
-- A minimal reproduction or steps to observe.
-- Any relevant environment details (operating system, Python
-  version, agent host and version, such as Claude Code or Codex).
+- short description;
+- affected release/commit SHA;
+- minimal reproduction;
+- environment details (OS, Python, agent host/version);
+- whether the issue affects deterministic core authority, an adapter rail, or a
+  documentation/claim mismatch.
 
 ## Response posture
 
-The project is maintained on a best-effort basis. We will
-acknowledge new reports as time permits, but no formal response
-SLA is committed. Critical defects that affect core invariants
-(human approval binding, exact-SHA review, state serialization,
-repair/terminal limits, or the no autonomous push / merge / deploy
-boundary) will be prioritized.
+The project is maintained on a best-effort basis with no formal response SLA.
+Defects affecting core authority/integrity boundaries are prioritized.
 
 ## Scope notes
 
-The following are intentionally **out of scope** for security
-reports:
+The following are intentionally out of scope as standalone reports:
 
-- Hypothetical AI safety or autonomy claims about the workflow's
-  *philosophy*. The project makes narrow, verifiable claims about
-  its code behaviour, not broad claims about autonomous AI.
-- Behaviour of third-party agent plugins, hooks, skills, or host
-  configuration outside this repository.
-- Behaviour of customer code that the loop is asked to work on.
-- Claims that a same-user process with unrestricted shell/filesystem
-  authority is not equivalent to an OS sandbox; the project explicitly
-  documents that boundary above. Concrete bypasses of declared deterministic
-  adapter/core checks are still in scope.
+- broad philosophical claims about autonomous AI;
+- behavior of unrelated third-party plugins/hosts outside this repository;
+- behavior of arbitrary customer code the loop is asked to edit;
+- the observation that same-user arbitrary code is not equivalent to an OS
+  sandbox (the project documents that explicitly).
+
+Concrete bypasses of declared deterministic checks or materially false public
+security claims remain in scope.

@@ -25,8 +25,10 @@ tests/integration/test_gate_fault_injection.sh
 tests/integration/test_program_mode.sh
 tests/integration/test_plumbing_autonomy.sh
 tests/integration/test_checkout_portability.sh
+tests/integration/test_v054_execution_start.sh
+tests/integration/test_public_contract_truth.sh
 
-# v0.4 adapter contract tests
+# v0.4+ adapter contract tests
 tests/run_adapter_conformance.sh
 tests/integration/test_adapter_portability.sh
 tests/integration/test_adapter_cli.sh

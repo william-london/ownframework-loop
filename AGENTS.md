@@ -1,230 +1,199 @@
 # AGENTS.md
 
-This file is the **agent-operating contract** for the
-`ownframework-loop` repository. It governs how an autonomous or
-human-supervised coding agent (Claude Code, Codex, or another supported
-adapter host) makes changes in this repository. It is doctrine, not a lane
-prompt.
+This is the repository-local operating contract for coding agents working on
+`ownframework-loop`. It is public, self-contained doctrine for this repository;
+it does not depend on private infrastructure or private policy files.
 
-The contract here is **self-contained**. It does not depend on any
-private repository, private phase identifier, or private cross-repo
-doctrine to be interpretable. An external contributor can read this
-file and follow it without any access outside this repo.
+## Product intent
 
----
+OwnFramework Loop is a deterministic engineering protocol for AI coding agents.
+The normal operator experience is deliberately low-friction:
+
+```text
+spec → builder lane + reviewer lane → terminal result → operator promotion
+```
+
+There is no mandatory approval ceremony, confirmation token, manual PROGRAM
+initialization, manual claim/finalize sequence, or checkpoint babysitting.
+
+The first legitimate execution start creates an immutable execution seal that
+binds the exact packet and spec-time source baseline. Promotion and external
+effects remain outside Loop authority.
 
 ## Scope
 
-This contract covers work in **this repository only**:
+This contract covers this repository only, including:
 
-- Deterministic source under `lib/`, `bin/`, `schemas/`, `templates/`,
-  `tests/`, `examples/`, and `docs/`.
-- Agent-host integration under `skills/`, `agents/`, `hooks/`,
-  `.agents/skills/`, `adapters/`, and `.claude-plugin/`.
-- CI and repository automation under `.github/workflows/`.
-- Public-surface files (`README.md`, `AGENTS.md`, `CONTRIBUTING.md`,
-  `SECURITY.md`, `CHANGELOG.md`, `LICENSE`, `THIRD_PARTY_NOTICES.md`,
-  adapter/architecture documentation, and agent-host metadata).
-- Validation and release scripts (`install.sh`, `uninstall.sh`,
-  `rollback.sh`, `validate.sh`, `release_gate.sh`).
-
-The canonical remote for this repository is configured under the
-project maintainer's GitHub namespace and is recorded in
-`.git/config`. The local clone is the source of truth for what is
-currently checked in; pushes are an explicit human-controlled event
-that the loop never performs on its own.
-
----
+- deterministic source under `lib/`, `bin/`, `schemas/`, `templates/`;
+- tests and validation under `tests/`, `validate.sh`, `release_gate.sh`;
+- Claude integration under `skills/`, `agents/`, `hooks/`, `.claude-plugin/`;
+- portable host-neutral skills under `.agents/skills/`;
+- adapter metadata/docs under `adapters/` and `docs/architecture/`;
+- public project surfaces such as `README.md`, `SECURITY.md`, `CHANGELOG.md`;
+- CI under `.github/workflows/`.
 
 ## Core versus adapter authority
 
-OwnFramework Loop's deterministic protocol is agent-neutral. The core owns:
+The deterministic core owns:
 
 - work-packet parsing and validation;
-- interactive human approval and packet-hash binding;
-- lifecycle transitions and locks;
-- scope, runtime, and repair budgets;
-- candidate Git SHA identity;
-- exact-SHA verdict binding;
-- terminal-state semantics and the boundary before human promotion.
+- spec-time baseline capture;
+- first-start execution sealing;
+- lifecycle transitions and locking;
+- scope/runtime/repair budgets;
+- candidate branch/worktree identity;
+- exact candidate Git SHA;
+- build receipts and exact-SHA verdict binding;
+- crash reconciliation and terminal semantics;
+- the boundary before operator promotion.
 
-Agent adapters may provide skills, agents, hooks, discovery, installation,
-and host-specific enforcement. They must not create a parallel approval,
-state, repair, candidate, verdict, or promotion path.
+Adapters may provide host-specific skills, agents, hooks, installers, discovery,
+and loop UX. They must not create a parallel execution-seal, state, repair,
+candidate, verdict, or promotion truth.
 
-Claude Code is the stable/reference adapter and currently has stronger native
-hook/interception hardening. Experimental adapters must not claim equivalent
-host enforcement without live evidence.
+Claude Code is the stable/reference adapter. `generic-cli` is the portability
+floor. Codex remains experimental until live host evidence justifies stronger
+claims.
 
----
+## Authority boundaries
+
+A run start authorizes bounded local engineering only. It never grants authority
+to:
+
+- push, merge, deploy, publish, or create/change unrelated remotes;
+- send email/SMS/DMs or mutate customer systems;
+- charge, refund, or make payments;
+- perform unrelated external effects.
+
+`APPROVED` means protocol-approved and eligible for operator promotion. It is
+not promotion authority.
+
+The historical `APPROVAL.json` filename is a compatibility detail. For current
+runs it normally stores an execution seal (`approval_method=build_start`,
+`binding_kind=execution_seal`). Do not interpret compatibility field names such
+as `approved_at` as proof that a human typed a token.
 
 ## What an agent may do in this repository
 
-An agent operating on this repository may:
+An agent may:
 
-- Inspect, edit, refactor, test, commit, and push coherent validated
-  work when appropriate to complete an assigned task.
-- Run the loop's local validation lane: `validate.sh`,
-  `release_gate.sh`, the focused test suite, adapter conformance, and
-  `git diff --check`.
-- Run the loop's hooks and helper scripts in the working copy without
-  touching system-wide install paths unless an explicit isolated install
-  proof is part of the task.
+- inspect, edit, refactor, test, and commit coherent validated work;
+- use GitHub Actions as independent public validation compute;
+- run `./validate.sh`, `./release_gate.sh`, focused tests, adapter conformance,
+  `git diff --check`, and secret scans;
+- update public documentation when behavior changes;
+- use supported repository APIs/tooling when the operator explicitly asks for
+  repository maintenance.
 
-What an agent may **not** do without explicit operator authorization:
+An agent may not:
 
-- Force-push, push to `--all`, push `--tags`, push `--mirror`, push
-  to non-named branches, or perform destructive history rewrites.
-- Delete or rewrite prior commits for aesthetics.
-- Bypass textual/mechanical command guardrails by indirection
-  (`eval`, hidden Python `subprocess`, variable assembly).
-- Modify `.git/` metadata directly.
-- Edit authoritative run artifacts (`STATE.json`, `BUILD_RECEIPT.json`,
-  `REVIEW_VERDICT.json`, `WORK_PACKET.md`, `APPROVAL.json`,
-  `EVENTS.log`, `LOCK`, `STOP`) by direct write — those go through
-  the `ofloop` CLI/core.
-- Create an adapter-specific approval or lifecycle truth that can diverge
-  from the deterministic core.
-- Inject real customer, prospect, vendor, payroll, bank, tax, legal,
-  employee, or production data, real tokens, live payment instruments,
-  production secrets, or `.env*` files into the repository.
+- deliberately route around a guard refusal using `eval`, encoded commands,
+  hidden Python subprocess construction, aliases, or equivalent indirection;
+- force-push, mirror-push, rewrite history, or delete unrelated branches without
+  explicit scope;
+- hand-edit `.git/` metadata;
+- directly author authoritative run artifacts such as `STATE.json`,
+  execution-binding `APPROVAL.json`, `BUILD_RECEIPT.json`,
+  `REVIEW_VERDICT.json`, `EVENTS.log`, locks, or stop markers in production
+  workflows;
+- create adapter-specific lifecycle truth;
+- inject real customer/prospect/payment/secrets data into this repository.
 
-Reporting fields such as `COMMIT_MADE`, `PUSH_MADE`, and
-`REMOTE_TARGETS` document what occurred; they are not permission
-gates.
-
----
+Tool-surface guards are guardrails, not an OS sandbox. Same-user arbitrary-code
+containment is not claimed. A guard refusal is still a boundary and must not be
+treated as a puzzle to bypass.
 
 ## Repository-local engineering rules
 
-These rules apply to **work in this repository**. They are either
-product-envelope rules (what this repo's runtime must not do) or
-engineering quality rules (how work in this repo should be done).
+### Source of truth
 
-### Canonical remote policy
+`master` is the canonical product branch. Keep source, tests, docs, adapter
+metadata, and installed-version truth coherent.
 
-This repository has a canonical remote configured under the project
-maintainer's GitHub namespace. The operating agent commits locally and
-pushes to the canonical remote when coherent validated work is ready,
-unless the operator explicitly excludes the push.
+For risky repository surgery, a temporary validation branch/PR may be used to
+exercise GitHub Actions before fast-forwarding the exact validated commit to
+`master`. Temporary validation branches are not a second product branch.
 
-The expected closeout field is `PUSH_MADE=yes` when a push occurred,
-`PUSH_MADE=no` when the work stayed local. Local-only runs (commits
-without a push) are explicitly authorized and do not require a remote
-to be configured.
+### Synthetic/non-customer data only
 
-Reverting this policy to a local-only stance is an explicit
-task-scope event and is called out in the closeout block when
-applied.
+Normal tests and fixtures use synthetic data only. Do not add real tokens,
+customer/prospect records, bank/payment data, production secrets, or `.env*`
+files.
 
-### Synthetic / non-customer data only
+### No public side effects from tests
 
-- No real customer, prospect, vendor, payroll, bank, tax, legal, or
-  employee data.
-- No real tokens, no live payment instruments, no production
-  secrets, no `.env*` in source.
-- Fixtures under `tests/`, `examples/`, and any synthetic seed data
-  are the only acceptable source of test data.
+Normal tests must not deploy, publish, send messages, mutate customer systems,
+or perform production cloud changes. Public package discovery/install checks in
+CI are allowed where explicitly part of adapter validation.
 
-### No public side effects from normal tests
+### Deterministic protocol ownership
 
-Normal tests must not:
+Do not reconstruct from prose what deterministic preparation already returns.
+In particular, the model/adapter must not invent:
 
-- Publish, deploy, or call outbound network services except explicit CI
-  package/discovery checks against public package registries.
-- Send mail, post to social media, push notifications, or trigger
-  customer-facing flows.
-- Modify the system beyond a temporary scratch directory, isolated test HOME,
-  and the repository worktree.
+- baseline SHA;
+- candidate branch;
+- builder/reviewer worktree paths;
+- checkpoint/work-unit identity;
+- pass-scoped semantic-result paths.
 
-### Public action
+Consume the exact supported core/CLI outputs.
 
-- No public deploy, newsletter, social post, customer-facing or vendor-facing
-  outbound from ordinary repository authoring activity.
-- Publishing artifacts from this repo happens through an explicit
-  maintainer-authorized release lane, not as part of an ordinary
-  authoring commit.
+### Sealed-run immutability
 
-### Loop / install / rollback scripts
-
-- `install.sh`, `uninstall.sh`, `rollback.sh`, `release_gate.sh`,
-  `validate.sh`, and the helpers under `bin/`, `lib/`, `scripts/`,
-  and `hooks/` are the canonical local surfaces for the loop.
-- The loop runs in the working copy. It is **not** edited by
-  hand-editing an installed copy elsewhere on disk — installed copies
-  are regenerated from this repo.
-
-### Hooks, skills, adapters, and templates
-
-- Hooks under `hooks/` and templates under `templates/` are part of
-  the loop's local reproduction. They are version-controlled here.
-- Claude's stable plugin skill surface remains under `skills/` and
-  `.claude-plugin/` for backward compatibility.
-- Portable host-neutral Agent Skills live under `.agents/skills/`.
-- Adapter metadata/docs live under `adapters/` and `docs/architecture/`.
-- Installed copies elsewhere are regenerated from this repo or through the
-  documented host installer/discovery mechanism.
-
----
+Before first start, packet editing is allowed through supported spec surfaces.
+After the execution seal exists, packet/source identity is immutable. A changed
+mission requires a fresh run; do not reopen a sealed run through a re-approval
+cycle.
 
 ## Validation contract
 
-Before declaring any change complete, an agent must prove:
+Before declaring repository work complete:
 
-1. `./validate.sh` — the canonical proof lane for the loop.
-2. Where the change touches `release_gate.sh` or `rollback.sh`, the
-   focused test suite covers the boundary.
-3. Adapter changes run the adapter conformance/portability/doctor checks.
-4. `git diff --check` — no whitespace or conflict markers.
+1. `./validate.sh` passes.
+2. `./release_gate.sh` passes at release boundaries.
+3. Adapter changes pass adapter conformance/portability/doctor checks.
+4. `git diff --check` is clean.
+5. Public-surface changes pass checkout portability and secret/public-surface
+   checks.
+6. Runtime authority/concurrency changes have behavioral regression coverage,
+   including both success/failure process exit codes where concurrency matters.
 
-At release/promotion boundaries, `./release_gate.sh` must pass in a suitable
-host environment. GitHub Actions may separate cross-platform source validation
-from host-pressure release gating because live runner load is an environmental
-property, not a source-correctness assertion.
+GitHub Actions is an independent compatibility/pressure surface, not the sole
+release authority. A release should have both coherent source validation and
+cross-platform CI evidence.
 
-If any required check fails, the change is not done.
+## Commit and publication discipline
 
-When the change touches the public-surface set (`README.md`,
-`AGENTS.md`, `CONTRIBUTING.md`, `SECURITY.md`, `CHANGELOG.md`,
-`LICENSE`, `THIRD_PARTY_NOTICES.md`, `.claude-plugin/`, `.agents/skills/`,
-`adapters/`, `docs/architecture/`, or `.github/workflows/`), also run the
-checkout-portability/public-surface scan, README/link checks where applicable,
-and the standard secret scan.
-
----
-
-## Commit / push discipline
-
-- One local commit per coherent slice.
-- Commit message style: `ownframework-loop: <verb> <slice>`.
-- Push to the canonical remote when coherent validated work is ready,
-  unless the operator explicitly excludes the push. `PUSH_MADE=yes`
-  is the expected closeout field when the work was pushed. Local-only
-  commits (`PUSH_MADE=no`) are explicitly authorized and do not
-  require the absence of a remote.
-- Force-push, `--tags`, `--all`, `--mirror`, pushes to non-named
-  branches, and destructive history rewrites remain explicit
-  task-scope concerns and must be called out in the closeout block
-  when used.
-
----
+- Prefer one coherent commit per release/hardening slice.
+- Commit messages should describe the product behavior changed.
+- Never intentionally bypass a Loop/host guard to publish.
+- If a local agent cannot push because a guard withholds that authority, stop and
+  hand the operator the exact command rather than disguising it.
+- Repository APIs may be used directly when the operator explicitly delegates
+  repository maintenance to the system performing the change; this is separate
+  from a governed Loop run's no-push authority.
 
 ## Reporting
 
-Every agent task that touches this repo reports using a compact,
-evidence-oriented closeout. The closeout lists what was done, what
-was proven, what was not done, and what is recommended next. It does
-not contain giant logs, raw bodies, secrets, or free-form text outside
-the structured fields.
+Closeouts should distinguish:
 
----
+- source/runtime behavior actually proven;
+- tests executed and their exact results;
+- CI results;
+- installed parity when relevant;
+- known limitations or unproven claims;
+- whether promotion/publication occurred.
+
+Do not turn weak grep checks or final counter values into stronger concurrency or
+security claims than they prove.
 
 ## See also
 
-- `README.md`, `CHANGELOG.md`, `THIRD_PARTY_NOTICES.md`,
-  `CONTRIBUTING.md`, `SECURITY.md`, `LICENSE`.
-- `docs/architecture/`, `docs/ADAPTER_DEVELOPMENT.md`,
-  `docs/ARCHITECTURE.md`, `docs/STATE_MACHINE.md`,
-  `docs/SECURITY_MODEL.md`, `docs/OPERATOR_RUNBOOK.md`.
-- `docs/history/` — preserved engineering snapshots from earlier
-  releases, kept for context only.
+- `README.md`
+- `SECURITY.md`
+- `docs/SECURITY_MODEL.md`
+- `docs/OPERATOR_RUNBOOK.md`
+- `docs/architecture/`
+- `docs/ADAPTER_DEVELOPMENT.md`
+- `CHANGELOG.md`
