@@ -30,6 +30,7 @@ tests/integration/test_v054_execution_start.sh
 tests/integration/test_public_contract_truth.sh
 tests/integration/test_v060_supervisor_architecture.sh
 tests/integration/test_v060_reviewer_cache_isolation.sh
+tests/integration/test_v060_dispatch_exception_classification.sh
 tests/integration/test_repair_loop.sh
 
 # v0.4+ adapter contract tests

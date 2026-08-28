@@ -108,7 +108,7 @@ def semantic_result_ready(work_order: dict[str, Any]) -> tuple[bool, str]:
     packet_path = state_mod.run_dir(repo, run_id) / "WORK_PACKET.md"
     try:
         meta, _ = packet_mod.parse_packet_file(packet_path)
-    except Exception:
+    except (OSError, ValueError):
         return False, "packet_unreadable"
 
     def expected_ids(items: list[Any], prefix: str) -> set[str]:
@@ -203,17 +203,36 @@ def claim_next(*, canonical_repo: Path, run_id: str) -> dict[str, Any]:
 
             # v0.6 executable packet authority — refuse legacy/auto-promote shapes
             # before any core claim.
+            #
+            # Two distinct classifications with distinct narrow catches:
+            #
+            #   1. The packet file is unreadable / unparseable → "packet unreadable"
+            #   2. The packet parses cleanly but is not executable under current
+            #      authority (e.g. legacy `merge_authority=auto`, the
+            #      `external_action_authority=delegated` shape, or
+            #      `promotion_policy=merge_on_approved`) → "packet not
+            #      executable under current authority"
+            #
+            # The previous `except (ValueError, Exception)` was equivalent to
+            # `except Exception` and silently mislabeled legitimate
+            # non-executable-authority refusals as "packet unreadable", AND
+            # swallowed unexpected programmer defects in the authority path as
+            # packet-read failures. We split the two phases so each phase
+            # carries its own narrow, honest error classification, and any
+            # unexpected internal exception from the authority evaluator
+            # propagates unchanged so the supervisor sees the real failure.
             packet_path = run_dir / "WORK_PACKET.md"
             try:
                 pmeta, _ = packet_mod.parse_packet_file(packet_path)
-                ok, reasons = packet_mod.packet_is_executable_under_current_authority(pmeta)
-                if not ok:
-                    raise DispatchError(
-                        "packet not executable under current authority: "
-                        + "; ".join(reasons)
-                    )
-            except (ValueError, Exception) as exc:
+            except (OSError, ValueError) as exc:
                 raise DispatchError(f"packet unreadable: {exc}") from exc
+
+            ok, reasons = packet_mod.packet_is_executable_under_current_authority(pmeta)
+            if not ok:
+                raise DispatchError(
+                    "packet not executable under current authority: "
+                    + "; ".join(reasons)
+                )
 
             if state in TERMINAL_STATES:
                 return _terminal(run_id, state)
