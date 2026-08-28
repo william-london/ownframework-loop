@@ -276,7 +276,7 @@ Start with:
 
 ## Core invariants
 
-1. v0.5.2: approval ceremony removed. The first legitimate build start auto-seals the run (binding_method=build_start, binding_kind=execution_seal). Legacy tty_confirmation remains for backward-compatible / optional strict pre-seal.
+1. v0.5.3: approval ceremony removed. The first legitimate build start auto-seals the run (binding_method=build_start, binding_kind=execution_seal). Legacy tty_confirmation remains for backward-compatible / optional strict pre-seal.
 2. Approval binds the exact work-packet bytes/hash.
 3. Builders operate inside approved scope and budgets.
 4. Candidate identity is an exact Git SHA.
@@ -345,7 +345,7 @@ Codex is required only when evaluating the experimental Codex adapter.
 
 ## Project status
 
-Current release line: **0.5.2** (canonical sources: `.claude-plugin/plugin.json` `version` and `lib/ownframework_loop/__init__.py` `__version__`).
+Current release line: **0.5.3** (canonical sources: `.claude-plugin/plugin.json` `version` and `lib/ownframework_loop/__init__.py` `__version__`).
 
 v0.4.0 introduced the agent-neutral core/adapter contract with Claude Code as the stable reference adapter and Codex as an experimental named adapter.
 

@@ -696,19 +696,6 @@ def cmd_build_claim(args: argparse.Namespace) -> None:
             return
     except locking.LockBusyError as e:
         _emit_error(f"build claim lock contention: {e}", exit_code=4)
-    state_mod.append_event(
-        repo, args.run_id,
-        event_type="build_claimed",
-        old_state=cur_state, new_state="BUILDING",
-        actor=args.actor or "of-builder",
-    )
-    _emit({
-        "ok": True,
-        "run_id": args.run_id,
-        "state": "BUILDING",
-        "build_pass_count": new_pass_count,
-        "replayed": False,
-    })
 def cmd_review_claim(args: argparse.Namespace) -> None:
     """Claim a review pass. The single durable owner of review_pass_count.
 
@@ -792,8 +779,6 @@ def cmd_review_claim(args: argparse.Namespace) -> None:
             return
     except locking.LockBusyError as e:
         _emit_error(f"review claim lock contention: {e}", exit_code=4)
-
-
 def cmd_build_transition(args: argparse.Namespace) -> None:
     repo = _repo_path(args.repo)
     state_mod.transition(

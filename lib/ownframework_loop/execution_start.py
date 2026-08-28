@@ -218,12 +218,11 @@ def ensure_executable(*, canonical_repo, run_id, actor=None, binding_method="bui
                     cur = state_mod.load(canonical_repo, run_id)
                     if cur.get("state") in ("AWAITING_APPROVAL", "READY_TO_START"):
                         _ensure_program_for_sealed(canonical_repo, run_id, packet, existing)
-                        try:
-                            state_mod.transition(canonical_repo, run_id, to_state="READY_TO_BUILD",
-                                                 actor=actor or "operator",
-                                                 reason="auto-sealed at first build start")
-                        except Exception:
-                            pass
+                        _activate_sealed_run(
+                            canonical_repo, run_id,
+                            actor=actor or "operator",
+                            reason="auto-sealed at first build start",
+                        )
                     return existing
                 baseline_sha = git_checks.current_head(canonical_repo)
                 if not baseline_sha:
@@ -270,12 +269,11 @@ def ensure_executable(*, canonical_repo, run_id, actor=None, binding_method="bui
                 _ensure_program_for_sealed(canonical_repo, run_id, packet, seal)
                 cur = state_mod.load(canonical_repo, run_id)
                 if cur.get("state") in ("AWAITING_APPROVAL", "READY_TO_START"):
-                    try:
-                        state_mod.transition(canonical_repo, run_id, to_state="READY_TO_BUILD",
-                                             actor=actor or "operator",
-                                             reason="auto-sealed at first build start")
-                    except Exception:
-                        pass
+                    _activate_sealed_run(
+                        canonical_repo, run_id,
+                        actor=actor or "operator",
+                        reason="auto-sealed at first build start",
+                    )
                 return seal
     except LockBusyError as e:
         raise RuntimeError(f"could not acquire v0.5.0 start lock: {e}") from e
