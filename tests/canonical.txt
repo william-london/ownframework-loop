@@ -10,6 +10,7 @@ tests/unit/test_v045_hardening.sh
 tests/unit/test_v046_hardening.sh
 tests/unit/test_v050_hardening.sh
 tests/unit/test_lifecycle.sh
+tests/unit/test_no_silent_tests.sh
 
 # Integration tests
 tests/integration/test_v032_bytecode_boundary.sh
@@ -28,9 +29,11 @@ tests/integration/test_checkout_portability.sh
 tests/integration/test_v054_execution_start.sh
 tests/integration/test_public_contract_truth.sh
 tests/integration/test_v060_supervisor_architecture.sh
+tests/integration/test_v060_reviewer_cache_isolation.sh
+tests/integration/test_repair_loop.sh
 
 # v0.4+ adapter contract tests
-tests/run_adapter_conformance.sh
+tests/test_run_adapter_conformance.sh
 tests/integration/test_adapter_portability.sh
 tests/integration/test_adapter_cli.sh
 tests/integration/test_codex_adapter_install.sh

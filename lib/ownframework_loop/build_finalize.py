@@ -67,13 +67,26 @@ def _read_json(path: Path, default: Any = None) -> Any:
         return default
 
 
-def _run_validation_command(cwd: Path, command: str, *, timeout_seconds: int) -> dict[str, Any]:
+def _run_validation_command(
+    cwd: Path,
+    command: str,
+    *,
+    timeout_seconds: int,
+    canonical_repo: Path,
+    run_id: str,
+) -> dict[str, Any]:
     """Run a validation command, capture exit code, stdout, stderr, duration.
 
     Read output via bounded subprocess so candidate diffs containing
     embedded secrets never flow into the Python source as a string.
+
+    Uses hermetic_subprocess_env so Python bytecode, pytest cache, and
+    other ephemeral runtime state land in the supervisor-owned runtime-cache
+    directory rather than the exact-SHA candidate worktree. This keeps
+    the dirty-worktree check honest.
     """
     import subprocess
+    from . import runtime_env
     start = time.monotonic()
     try:
         proc = subprocess.run(
@@ -83,6 +96,7 @@ def _run_validation_command(cwd: Path, command: str, *, timeout_seconds: int) ->
             text=True,
             timeout=timeout_seconds,
             check=False,
+            env=runtime_env.hermetic_subprocess_env(canonical_repo, run_id, "validation"),
         )
         duration = time.monotonic() - start
         # Cap captured output to 64 KiB to prevent unbounded memory.
@@ -438,7 +452,13 @@ def finalize_build(
                 "required_validation command refused by deterministic guard: "
                 + "; ".join(command_policy.get("forbidden") or ["forbidden command"])
             )
-        result = _run_validation_command(builder_wt, cmd, timeout_seconds=timeout)
+        result = _run_validation_command(
+            builder_wt,
+            cmd,
+            timeout_seconds=timeout,
+            canonical_repo=canonical_repo,
+            run_id=run_id,
+        )
         validations.append({
             "name": name,
             "command": cmd,

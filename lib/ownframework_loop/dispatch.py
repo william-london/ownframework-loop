@@ -212,7 +212,7 @@ def claim_next(*, canonical_repo: Path, run_id: str) -> dict[str, Any]:
                         "packet not executable under current authority: "
                         + "; ".join(reasons)
                     )
-            except packet_mod.PacketError as exc:
+            except (ValueError, Exception) as exc:
                 raise DispatchError(f"packet unreadable: {exc}") from exc
 
             if state in TERMINAL_STATES:

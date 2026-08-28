@@ -151,4 +151,38 @@ grep -Fq 'semantic REVIEW_AGENT_ASSESSMENT.json is required' "$ROOT/lib/ownframe
   || fail "review finalizer still permits missing semantic reviewer result"
 pass "finalizer authority cannot approve without semantic passes"
 
+# 9. Folded from legacy test_orchestrator.sh: Python shim + constants.
+echo "TEST 9: Python run_single_mode is a refusal shim"
+R_SHIM="$(make_tmp_repo)"
+"$OFLOOP" spec new "$R_SHIM" "shim-test" >/dev/null
+RID_SHIM="$(ls -1t "$R_SHIM/.ownframework-loop" | head -n1)"
+PYTHONPATH="$LIB_DIR" python3 - "$R_SHIM" "$RID_SHIM" <<'PY'
+import sys
+from pathlib import Path
+sys.path.insert(0, "${OFLOOP_LIB:-$LIB_DIR}")
+from ownframework_loop import orchestrator
+out = orchestrator.run_single_mode(
+    canonical_repo=Path(sys.argv[1]),
+    run_id=sys.argv[2],
+)
+assert out["ok"] is False, out
+assert out["reason"] == "legacy_unattended_orchestrator_retired_use_supervisor", out
+print("RETIRED_SHIM_OK")
+PY
+assert_contains "RETIRED_SHIM_OK" "RETIRED_SHIM_OK" "orchestrator.run_single_mode refuses with retirement reason"
+
+echo "TEST 10: orchestrator constants remain for compatibility reads"
+PYTHONPATH="$LIB_DIR" python3 - <<'PY'
+import sys
+sys.path.insert(0, "${OFLOOP_LIB:-$LIB_DIR}")
+from ownframework_loop import orchestrator
+assert "APPROVED" in orchestrator.TERMINAL_STATES
+assert "BLOCKED" in orchestrator.TERMINAL_STATES
+assert "STOPPED" in orchestrator.TERMINAL_STATES
+assert orchestrator.MAX_REPAIR_ROUNDS_DEFAULT >= 1
+assert orchestrator.RETIREMENT_REASON == "legacy_unattended_orchestrator_retired_use_supervisor"
+print("CONSTANTS_OK")
+PY
+assert_contains "CONSTANTS_OK" "CONSTANTS_OK" "orchestrator constants remain readable"
+
 echo "V060_SUPERVISOR_ARCHITECTURE=PASS"

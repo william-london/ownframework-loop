@@ -94,10 +94,24 @@ def _validation_shape_ok(cmd: dict[str, Any]) -> bool:
     return isinstance(cmd, dict) and "command" in cmd and "name" in cmd
 
 
-def _run_validation_command(cwd: Path, command: str, *, timeout_seconds: int) -> dict[str, Any]:
+def _run_validation_command(
+    cwd: Path,
+    command: str,
+    *,
+    timeout_seconds: int,
+    canonical_repo: Path,
+    run_id: str,
+) -> dict[str, Any]:
     """Mirrors build_finalize._run_validation_command — kept separate to
-    avoid shared mutable state."""
+    avoid shared mutable state.
+
+    Uses hermetic_subprocess_env so Python bytecode, pytest cache, and
+    other ephemeral runtime state land in the supervisor-owned runtime-cache
+    directory rather than the exact-SHA reviewer worktree. This keeps
+    the dirty-worktree check honest.
+    """
     import subprocess
+    from . import runtime_env
     start = time.monotonic()
     try:
         proc = subprocess.run(
@@ -107,6 +121,7 @@ def _run_validation_command(cwd: Path, command: str, *, timeout_seconds: int) ->
             text=True,
             timeout=timeout_seconds,
             check=False,
+            env=runtime_env.hermetic_subprocess_env(canonical_repo, run_id, "validation"),
         )
         duration = time.monotonic() - start
         max_capture = 64 * 1024
@@ -368,7 +383,13 @@ def finalize_review(
                 "required_validation command refused by deterministic guard: "
                 + "; ".join(command_policy.get("forbidden") or ["forbidden command"])
             )
-        result = _run_validation_command(reviewer_wt, cmd, timeout_seconds=timeout)
+        result = _run_validation_command(
+            reviewer_wt,
+            cmd,
+            timeout_seconds=timeout,
+            canonical_repo=canonical_repo,
+            run_id=run_id,
+        )
         expected_exit = int(v.get("expected_exit_code") or 0)
         ok_v = (result["exit_code"] == expected_exit)
         if not ok_v:

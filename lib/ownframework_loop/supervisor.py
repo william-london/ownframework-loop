@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import dispatch as dispatch_mod
+from . import dispatch as dispatch_mod, runtime_env
 
 SCHEMA = "ownframework-loop-supervisor/v1"
 ACTIVE = {"QUEUED", "BACKOFF", "RUNNING"}
@@ -380,6 +380,9 @@ class ClaudeCodeRunner:
             stderr=stderr_fh,
             text=True,
             start_new_session=True,
+            env=runtime_env.hermetic_subprocess_env(
+                Path(worktree), str(work_order.get("run_id") or ""), role
+            ),
         )
         try:
             proc.stdin.write(prompt)  # type: ignore[union-attr]

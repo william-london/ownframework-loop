@@ -86,7 +86,7 @@ jobs:
         with:
           python-version: '3.12'
       - name: Adapter conformance
-        run: bash tests/run_adapter_conformance.sh
+        run: bash tests/test_run_adapter_conformance.sh
       - name: Adapter portability
         run: bash tests/integration/test_adapter_portability.sh
       - name: Adapter CLI
