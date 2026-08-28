@@ -18,7 +18,6 @@ class WorktreeError(RuntimeError):
 
 
 def ensure_worktree_parent(canonical_repo: Path) -> Path:
-    """Create the .worktrees/ownframework-loop/ parent directory."""
     parent = worktrees_dir(canonical_repo)
     parent.mkdir(parents=True, exist_ok=True)
     return parent
@@ -29,17 +28,19 @@ def list_worktrees(canonical_repo: Path) -> list[dict[str, Any]]:
 
 
 def _wt_lock_path(canonical_repo: Path, run_id: str, role: str) -> Path:
-    """Per-(repo, run_id, role) flock path for serializing worktree creation.
-
-    v0.3.5 (F-4-02): the exists-check + git worktree add sequence is a
-    TOCTOU window without serialization. Multiple concurrent callers can
-    both see "no worktree yet" and both call `git worktree add`, which
-    fails for the second caller. This lockfile is local to the worktree
-    directory so it does not contend with the run-state LOCK.
-    """
     parent = worktrees_dir(canonical_repo) / ".locks"
     parent.mkdir(parents=True, exist_ok=True)
     return parent / f"wt-{role}-{run_id}.lock"
+
+
+def _require_builder_branch(wt: Path, expected_branch: str) -> str:
+    """Return actual branch or fail closed on detached/mismatched worktree."""
+    actual = current_branch(wt)
+    if actual != expected_branch:
+        raise WorktreeError(
+            f"builder worktree branch {actual!r} != frozen candidate branch {expected_branch!r}; refusing reuse"
+        )
+    return actual
 
 
 def add_builder_worktree(
@@ -49,37 +50,24 @@ def add_builder_worktree(
     branch: str,
     base_sha: str | None = None,
 ) -> dict[str, Any]:
-    """Create a fresh builder worktree on a candidate branch.
+    """Create/reuse the exact run builder worktree on the frozen branch.
 
-    If the branch already exists with a worktree, return that worktree info.
-
-    v0.3.5 (F-4-02): the exists-check + git worktree add sequence is
-    serialized via flock on a per-(repo, run_id, role) lockfile. On
-    acquire, the exists-check is re-run; if a valid worktree now
-    exists, return it deterministically with existed=True.
+    Existing, race-created, and newly-created worktrees are all verified by
+    asking Git for their actual branch. Detached HEAD is a mismatch; the core
+    never substitutes the expected branch for missing Git identity.
     """
     wt = builder_worktree(canonical_repo, run_id)
-    parent = ensure_worktree_parent(canonical_repo)
-    parent.mkdir(parents=True, exist_ok=True)
-
+    ensure_worktree_parent(canonical_repo).mkdir(parents=True, exist_ok=True)
     lock = _wt_lock_path(canonical_repo, run_id, "builder")
     with flock_exclusive(lock):
         if wt.exists():
             head = current_head(wt)
-            # Defect 5A (v0.4.4): refuse if the existing worktree is on
-            # a different branch than the frozen candidate branch. We do
-            # NOT silently heal branch drift during an active approved run.
-            actual_branch = current_branch(wt)
-            if actual_branch and actual_branch != branch:
-                raise WorktreeError(
-                    f"existing builder worktree is on branch {actual_branch!r} "
-                    f"but frozen candidate branch is {branch!r}; refusing to "
-                    f"reuse without explicit remediation"
-                )
-            return {"path": str(wt), "branch": branch, "head": head,
-                    "actual_branch": actual_branch or branch, "existed": True}
+            actual_branch = _require_builder_branch(wt, branch)
+            return {
+                "path": str(wt), "branch": branch, "head": head,
+                "actual_branch": actual_branch, "existed": True,
+            }
 
-        # Base sha: the receiver picks; default to current HEAD of canonical.
         if base_sha is None:
             base_sha = current_head(canonical_repo)
         if base_sha is None:
@@ -91,20 +79,21 @@ def add_builder_worktree(
         ]
         r = run_subprocess(cmd, timeout=30)
         if r.returncode != 0:
-            # v0.3.5 (F-4-02): the previous caller may have just created
-            # the worktree between our pre-flock exists-check and the
-            # git invocation. Re-check inside the flock and reclassify
-            # the failure if it is a benign race.
             if wt.exists():
                 head = current_head(wt)
-                actual_branch = current_branch(wt)
-                return {"path": str(wt), "branch": branch, "head": head,
-                        "actual_branch": actual_branch or branch, "existed": True}
+                actual_branch = _require_builder_branch(wt, branch)
+                return {
+                    "path": str(wt), "branch": branch, "head": head,
+                    "actual_branch": actual_branch, "existed": True,
+                }
             raise WorktreeError(f"git worktree add failed: {r.stderr.strip()}")
+
         head = current_head(wt)
-        actual_branch = current_branch(wt)
-        return {"path": str(wt), "branch": branch, "head": head,
-                "actual_branch": actual_branch or branch, "existed": False}
+        actual_branch = _require_builder_branch(wt, branch)
+        return {
+            "path": str(wt), "branch": branch, "head": head,
+            "actual_branch": actual_branch, "existed": False,
+        }
 
 
 def add_reviewer_worktree(
@@ -116,30 +105,17 @@ def add_reviewer_worktree(
 ) -> dict[str, Any]:
     """Create a detached reviewer worktree pinned to candidate_sha.
 
-    If the worktree already exists at the right SHA, return it.
-    If it exists at a different SHA, remove and re-add.
-
-    `expected_setup_sha`, when provided, is recorded as the
-    `setup_candidate_sha` in the returned dict. The reviewer's mutation
-    detector uses this to distinguish a *controlled* refresh from
-    external drift: a HEAD change where `before == expected_setup_sha`
-    and `after == candidate_sha` is the legitimate reviewer re-pin, not
-    a mutation.
-
-    v0.3.5 (F-4-02): the exists-check + tear-down + git worktree add
-    sequence is serialized via flock on a per-(repo, run_id, role)
-    lockfile. Concurrent callers cannot interleave the tear-down with
-    another caller's add.
+    If the worktree already exists at the right SHA, return it. If it exists at
+    a different SHA, remove and re-add. Cleanliness is enforced by the
+    authoritative verdict writer, so an exact SHA can never be approved from a
+    dirty reviewer filesystem.
     """
     wt = reviewer_worktree(canonical_repo, run_id)
     ensure_worktree_parent(canonical_repo)
 
     lock = _wt_lock_path(canonical_repo, run_id, "reviewer")
     with flock_exclusive(lock):
-        existing_sha = None
-        if wt.exists():
-            existing_sha = current_head(wt)
-
+        existing_sha = current_head(wt) if wt.exists() else None
         if existing_sha and existing_sha == candidate_sha:
             return {
                 "path": str(wt),
@@ -149,20 +125,15 @@ def add_reviewer_worktree(
             }
 
         if wt.exists():
-            # Tear down the existing reviewer worktree before re-adding.
             r = run_subprocess(
                 ["git", "-C", str(canonical_repo), "worktree", "remove", "--force", str(wt)],
                 timeout=30,
             )
-            # Belt-and-suspenders: if the directory still exists (e.g., remove
-            # succeeded at the registration level but left a stale path), remove
-            # it manually so `git worktree add` does not refuse.
             if wt.exists():
                 import shutil
                 shutil.rmtree(wt, ignore_errors=True)
-            if r.returncode != 0:
-                # The directory may already be gone; only fail if re-add will.
-                pass
+            if r.returncode != 0 and wt.exists():
+                raise WorktreeError(f"git worktree remove failed: {r.stderr.strip()}")
 
         cmd = [
             "git", "-C", str(canonical_repo), "worktree", "add",
@@ -170,17 +141,22 @@ def add_reviewer_worktree(
         ]
         r = run_subprocess(cmd, timeout=30)
         if r.returncode != 0:
-            # v0.3.5 (F-4-02): benign-race check after the add.
             if wt.exists():
                 head = current_head(wt)
+                if head != candidate_sha:
+                    raise WorktreeError(
+                        f"race-created reviewer worktree HEAD {head!r} != candidate {candidate_sha!r}"
+                    )
                 return {
-                    "path": str(wt),
-                    "head": head,
-                    "existed": True,
+                    "path": str(wt), "head": head, "existed": True,
                     "setup_candidate_sha": expected_setup_sha,
                 }
             raise WorktreeError(f"git worktree add (detached) failed: {r.stderr.strip()}")
         head = current_head(wt)
+        if head != candidate_sha:
+            raise WorktreeError(
+                f"reviewer worktree HEAD {head!r} != candidate {candidate_sha!r} after setup"
+            )
         return {
             "path": str(wt),
             "head": head,
@@ -190,24 +166,15 @@ def add_reviewer_worktree(
 
 
 def cleanup_reviewer_worktree(canonical_repo: Path, run_id: str) -> tuple[bool, str]:
-    """Remove the run-specific reviewer worktree only.
-
-    Returns (removed, message). Refuses to remove any other path.
-    """
     wt = reviewer_worktree(canonical_repo, run_id)
     if not wt.exists():
         return False, "reviewer worktree not present"
-
-    # Verify the worktree is registered to this repo. Compare canonical paths
-    # to handle macOS /var/folders symlinks and other path normalization.
     try:
         wt_canonical = wt.resolve(strict=False)
     except OSError:
         wt_canonical = wt
     registered = False
     for entry in worktree_list(canonical_repo):
-        # git worktree list --porcelain emits `worktree <path>` lines; the
-        # dictionary key is therefore "worktree", not "path".
         candidate = entry.get("worktree") or entry.get("path") or ""
         try:
             entry_path = Path(candidate).resolve(strict=False)
@@ -218,7 +185,6 @@ def cleanup_reviewer_worktree(canonical_repo: Path, run_id: str) -> tuple[bool, 
             break
     if not registered:
         return False, "reviewer worktree path is not a registered worktree of this repo"
-
     r = run_subprocess(
         ["git", "-C", str(canonical_repo), "worktree", "remove", "--force", str(wt)],
         timeout=30,
@@ -249,12 +215,6 @@ def record_worktree_status(
     stage: str,
     setup_candidate_sha: str | None = None,
 ) -> dict[str, Any]:
-    """Capture current state of a worktree for mutation detection.
-
-    `setup_candidate_sha` records the SHA the reviewer was supposed to be
-    pinned to at setup time. The detector compares this against the
-    `before` HEAD to classify controlled-vs-external drift.
-    """
     if role == "reviewer":
         wt = reviewer_worktree(canonical_repo, run_id)
     elif role == "builder":
@@ -281,68 +241,29 @@ def diff_tracked_mutation(
     *,
     expected_candidate_sha: str | None = None,
 ) -> dict[str, Any]:
-    """Compare two worktree status records and classify the kind of drift.
-
-    Returns one of:
-      - `mutated: False` — no drift at all.
-      - `mutated: False, kind: controlled_refresh` — HEAD changed but the
-        change is the reviewer's own re-pin to a new candidate SHA. This
-        is the legitimate path between review pass starts.
-      - `mutated: True, kind: external_drift` — HEAD changed in a way that
-        is NOT a controlled refresh. The reviewer should refuse to approve.
-      - `mutated: True, kind: unexpected_initial_drift` — `before` had no
-        recorded HEAD (e.g. setup never happened) but `after` does.
-
-    `expected_candidate_sha`, when provided, is the SHA the reviewer was
-    just re-pinned to. If `before.head` matches it, the change is a
-    controlled refresh, not external drift.
-    """
     before_sha = before.get("head")
     after_sha = after.get("head")
-
     if before_sha == after_sha:
         return {
-            "mutated": False,
-            "kind": "no_change",
-            "before_sha": before_sha,
-            "after_sha": after_sha,
+            "mutated": False, "kind": "no_change",
+            "before_sha": before_sha, "after_sha": after_sha,
         }
-
     if before_sha is None and after_sha is not None:
         return {
-            "mutated": True,
-            "kind": "unexpected_initial_drift",
-            "before_sha": before_sha,
-            "after_sha": after_sha,
+            "mutated": True, "kind": "unexpected_initial_drift",
+            "before_sha": before_sha, "after_sha": after_sha,
         }
-
-    # The change IS a HEAD movement. Classify: controlled vs external.
     if expected_candidate_sha is None:
         return {
-            "mutated": True,
-            "kind": "external_drift",
-            "before_sha": before_sha,
-            "after_sha": after_sha,
+            "mutated": True, "kind": "external_drift",
+            "before_sha": before_sha, "after_sha": after_sha,
         }
-
-    # A controlled refresh: before_sha == expected_candidate_sha's old value,
-    # after_sha == expected_candidate_sha. We approximate "the before was at
-    # the previous candidate" by saying: if after_sha matches expected AND
-    # expected differs from after_sha, it is a re-pin (control). Otherwise it
-    # is external drift.
     if expected_candidate_sha and after_sha and after_sha == expected_candidate_sha:
-        # Either we are now pinned to expected (re-pin complete), or expected
-        # is a prefix of after — both indicate a controlled movement.
         return {
-            "mutated": False,
-            "kind": "controlled_refresh",
-            "before_sha": before_sha,
-            "after_sha": after_sha,
+            "mutated": False, "kind": "controlled_refresh",
+            "before_sha": before_sha, "after_sha": after_sha,
         }
-
     return {
-        "mutated": True,
-        "kind": "external_drift",
-        "before_sha": before_sha,
-        "after_sha": after_sha,
+        "mutated": True, "kind": "external_drift",
+        "before_sha": before_sha, "after_sha": after_sha,
     }

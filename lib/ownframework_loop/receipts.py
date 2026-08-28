@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from . import git_checks
 from .util import (
     atomic_write_json, builder_worktree, run_dir, run_subprocess,
     short_sha, utc_now_iso,
@@ -95,7 +96,41 @@ def new_receipt(
     return out
 
 
+def _assert_exact_clean_builder_candidate(
+    canonical_repo: Path,
+    run_id: str,
+    receipt: dict[str, Any],
+) -> None:
+    """Fail closed unless the authoritative receipt describes the exact clean tree.
+
+    The deterministic finalizer validates commands against the builder worktree.
+    The receipt must therefore never be written while that worktree contains
+    staged, tracked, or untracked changes outside the recorded candidate commit.
+    Otherwise validation could observe bytes that are absent from candidate_sha.
+    """
+    wt = builder_worktree(canonical_repo, run_id)
+    if not wt.exists():
+        raise RuntimeError("refusing BUILD_RECEIPT: builder worktree missing")
+    expected_sha = str(receipt.get("candidate_sha") or "")
+    expected_branch = str(receipt.get("candidate_branch") or "")
+    actual_sha = git_checks.current_head(wt)
+    actual_branch = git_checks.current_branch(wt)
+    if not expected_sha or actual_sha != expected_sha:
+        raise RuntimeError(
+            f"refusing BUILD_RECEIPT: builder HEAD {actual_sha!r} != candidate {expected_sha!r}"
+        )
+    if not expected_branch or actual_branch != expected_branch:
+        raise RuntimeError(
+            f"refusing BUILD_RECEIPT: builder branch {actual_branch!r} != candidate branch {expected_branch!r}"
+        )
+    if git_checks.is_dirty(wt):
+        raise RuntimeError(
+            "refusing BUILD_RECEIPT: builder worktree is dirty; candidate SHA does not describe validated filesystem"
+        )
+
+
 def write_receipt(canonical_repo: Path, run_id: str, receipt: dict[str, Any]) -> Path:
+    _assert_exact_clean_builder_candidate(canonical_repo, run_id, receipt)
     p = receipt_path(canonical_repo, run_id)
     atomic_write_json(p, receipt, mode=0o600)
     return p

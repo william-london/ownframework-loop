@@ -1,42 +1,10 @@
 #!/usr/bin/env bash
 # OwnFramework Loop — PreToolUse Write/Edit/MultiEdit/NotebookEdit guard.
 #
-# Exact-run / exact-role scoping:
-#
-#   Hook authority derives from the actual canonical execution context:
-#     - cwd exactly equals ".worktrees/ownframework-loop/<run-id>/builder"  -> builder
-#     - cwd exactly equals ".worktrees/ownframework-loop/<run-id>/reviewer" -> reviewer
-#     - any path inside .ownframework-loop/<run-id>/                        -> exact-run-state
-#     - any other cwd under an active ownframework-loop repo                -> no authority
-#
-#   Builder sources may edit ANY path inside the exact builder worktree.
-#   Reviewer sources may write ONLY to:
-#     - <repo>/.ownframework-loop/<run-id>/scratch/reviewer/  (BOUNDED scratch)
-#     - the exact reviewer worktree (ignored artifacts only)
-#   The reviewer MAY NOT edit candidate source under any circumstance.
-#
-#   Authoritative artifacts (WORK_PACKET.md, APPROVAL.json, STATE.json,
-#   BUILD_RECEIPT.json, REVIEW_VERDICT.json, EVENTS.log) may NOT be written
-#   via Write/Edit directly; they MUST go through the ofloop CLI.
-#
-#   Cross-run writes (Run A writing to Run B's state or worktree) are refused.
-#   Writes to the canonical checkout during an active build are refused.
-#
-# Outside an active run, the hook is a no-op.
-#
-# Hook failure policy:
-#   - malformed JSON                                -> refuse (exit 2)
-#   - tool classification error (high-risk target)  -> refuse
-#   - read-only inspection tools                    -> allow and log
-#   - unknown external-side-effect tool             -> refuse during active run
-#   - ordinary engineering tool                     -> allow
-#
-# This hook NEVER modifies permission settings, sandbox, or model routing.
-#
-# v0.3.4 hook bytecode suppression: export PYTHONDONTWRITEBYTECODE=1
-# BEFORE every Python invocation so this hook does NOT write .pyc files
-# into the active managed plugin cache tree. Every `python3` here is
-# also invoked with `-B`.
+# Builder source writes are confined to the exact builder worktree. Reviewer
+# source is read-only. Semantic result/assessment writes are confined to the
+# exact active run AND exact currently claimed pass. Authoritative protocol
+# artifacts must be written by the deterministic ofloop CLI.
 
 set -eo pipefail
 export PYTHONDONTWRITEBYTECODE=1
@@ -54,31 +22,22 @@ except Exception as e:
     print("PARSE_ERROR", e); sys.exit(0)
 print(json.dumps(obj))
 ' 2>/dev/null || echo "PARSE_ERROR")"
-
 if [[ "$parsed" == "PARSE_ERROR"* ]]; then
   echo "  [of-loop hook] malformed JSON; refusing for safety" 1>&2
   exit 2
 fi
 
 tool_name="$(printf '%s' "$parsed" | python3 -B -c 'import sys, json; print(json.loads(sys.stdin.read()).get("tool_name", ""))' 2>/dev/null || true)"
-
 case "$tool_name" in
   Write|Edit|MultiEdit|NotebookEdit) ;;
   *) exit 0 ;;
 esac
 
 file_path="$(printf '%s' "$parsed" | python3 -B -c 'import sys, json; print(json.loads(sys.stdin.read()).get("tool_input", {}).get("file_path", ""))' 2>/dev/null || true)"
-
-if [[ -z "$file_path" ]]; then
-  exit 0
-fi
-
+[[ -n "$file_path" ]] || exit 0
 cwd="$(printf '%s' "$parsed" | python3 -B -c 'import sys, json; print(json.loads(sys.stdin.read()).get("cwd", ""))' 2>/dev/null || true)"
-if [[ -z "$cwd" ]]; then
-  cwd="$(pwd 2>/dev/null || true)"
-fi
+[[ -n "$cwd" ]] || cwd="$(pwd 2>/dev/null || true)"
 
-# Resolve both paths to canonical absolute form (macOS /var/folders → /private/var/folders).
 abs_path="$(python3 -B -c 'import sys
 from pathlib import Path
 p = sys.argv[1] if len(sys.argv) > 1 else ""
@@ -88,7 +47,6 @@ from pathlib import Path
 c = sys.argv[1] if len(sys.argv) > 1 else ""
 print(str(Path(c).expanduser().resolve(strict=False))) if c else print("")' "$cwd" 2>/dev/null || echo "$cwd")"
 
-# Find the canonical repo by walking up from cwd.
 canonical_repo=""
 if [[ -n "$abs_cwd" ]]; then
   d="$abs_cwd"
@@ -98,23 +56,17 @@ if [[ -n "$abs_cwd" ]]; then
       break
     fi
     parent="$(dirname "$d" 2>/dev/null)"
-    if [[ -z "$parent" || "$parent" == "$d" ]]; then break; fi
+    [[ -n "$parent" && "$parent" != "$d" ]] || break
     d="$parent"
   done
 fi
-
-# Outside an active run: no-op.
-if [[ -z "$canonical_repo" ]]; then
-  exit 0
-fi
+[[ -n "$canonical_repo" ]] || exit 0
 
 run_root="$canonical_repo/.ownframework-loop"
 wt_root="$canonical_repo/.worktrees/ownframework-loop"
 
-# --------------- shared helper ----------------
 emit_block() {
-  local code="$1"
-  local reason="$2"
+  local code="$1" reason="$2"
   python3 -B - "$code" "$reason" <<'PY'
 import json, sys
 code, reason = sys.argv[1], sys.argv[2]
@@ -130,7 +82,6 @@ print(json.dumps({
 PY
 }
 
-# --------------- discover runs ----------------
 declare -a RUN_IDS
 for d in "$run_root"/*/; do
   [[ -d "$d" ]] || continue
@@ -138,16 +89,11 @@ for d in "$run_root"/*/; do
   [[ -n "$rid" && "$rid" != "*" ]] && RUN_IDS+=("$rid")
 done
 
-# --------------- cross-run block ----------------
-# If the target hits another run's directory while the active context
-# belongs to a different run, refuse.
 target_run_id=""
 for rid in "${RUN_IDS[@]}"; do
-  if [[ "$abs_path" == "$run_root/$rid"/* || "$abs_path" == "$run_root/$rid" ]]; then
-    target_run_id="$rid"
-    break
-  fi
-  if [[ "$abs_path" == "$wt_root/$rid"/* ]]; then
+  if [[ "$abs_path" == "$run_root/$rid" || "$abs_path" == "$run_root/$rid/"* ||
+        "$abs_path" == "$wt_root/$rid/builder" || "$abs_path" == "$wt_root/$rid/builder/"* ||
+        "$abs_path" == "$wt_root/$rid/reviewer" || "$abs_path" == "$wt_root/$rid/reviewer/"* ]]; then
     target_run_id="$rid"
     break
   fi
@@ -155,31 +101,24 @@ done
 
 active_run_id=""
 for rid in "${RUN_IDS[@]}"; do
-  if [[ "$abs_cwd" == "$run_root/$rid"/* || "$abs_cwd" == "$run_root/$rid" ]]; then
-    active_run_id="$rid"
-    break
-  fi
-  if [[ "$abs_cwd" == "$wt_root/$rid/builder"* || "$abs_cwd" == "$wt_root/$rid/reviewer"* ]]; then
+  if [[ "$abs_cwd" == "$run_root/$rid" || "$abs_cwd" == "$run_root/$rid/"* ||
+        "$abs_cwd" == "$wt_root/$rid/builder" || "$abs_cwd" == "$wt_root/$rid/builder/"* ||
+        "$abs_cwd" == "$wt_root/$rid/reviewer" || "$abs_cwd" == "$wt_root/$rid/reviewer/"* ]]; then
     active_run_id="$rid"
     break
   fi
 done
 
 if [[ -n "$target_run_id" && -n "$active_run_id" && "$target_run_id" != "$active_run_id" ]]; then
-  emit_block "CROSS_RUN_WRITE" \
-    "Cross-run write refused: active run=$active_run_id, target run=$target_run_id"
+  emit_block "CROSS_RUN_WRITE" "Cross-run write refused: active run=$active_run_id, target run=$target_run_id"
   exit 0
 fi
 
-# --------------- hard rules ----------------
-
-# Refuse writes to .git metadata anywhere.
 if [[ "$abs_path" == *"/.git/"* || "$abs_path" == *"/.git" ]]; then
   emit_block "GIT_METADATA" "Writes to .git metadata are refused."
   exit 0
 fi
 
-# Authoritative artifacts may NOT be written via Edit/Write/NotebookEdit.
 case "$(basename "$abs_path")" in
   WORK_PACKET.md|APPROVAL.json|STATE.json|BUILD_RECEIPT.json|REVIEW_VERDICT.json|EVENTS.log|LOCK|STOP)
     if [[ "$abs_path" == "$run_root"/* ]]; then
@@ -190,36 +129,39 @@ case "$(basename "$abs_path")" in
     ;;
 esac
 
-# v0.4.5: semantic scratch is authorized by exact target run + live phase.
-# These files are non-authoritative; finalizers independently validate all
-# identity/security claims before writing authoritative receipts or verdicts.
+# Semantic scratch is evidence, not a general writable directory. Bind it to
+# both the live phase and the exact currently claimed pass number so old/future
+# pass evidence cannot be rewritten while the run is active.
 if [[ -n "$target_run_id" ]]; then
   target_state_file="$run_root/$target_run_id/STATE.json"
   target_state=""
+  target_build_pass="0"
+  target_review_pass="0"
   if [[ -f "$target_state_file" ]]; then
-    target_state="$(python3 -B -c 'import sys, json
+    state_tuple="$(python3 -B -c 'import json,sys
 try:
-    print(json.load(open(sys.argv[1])).get("state",""))
+ d=json.load(open(sys.argv[1])); print("%s\t%s\t%s" % (d.get("state",""), int(d.get("build_pass_count") or 0), int(d.get("review_pass_count") or 0)))
 except Exception:
-    pass' "$target_state_file" 2>/dev/null || true)"
+ print("\t0\t0")' "$target_state_file" 2>/dev/null || printf '\t0\t0')"
+    IFS=$'\t' read -r target_state target_build_pass target_review_pass <<< "$state_tuple"
   fi
 
-  builder_rel="${abs_path#"$run_root/$target_run_id/scratch/builder/"}"
-  if [[ "$target_state" == "BUILDING" && "$abs_path" == "$run_root/$target_run_id/scratch/builder/"* ]]; then
-    if [[ "$builder_rel" =~ ^pass-[0-9]{4,}/BUILD_AGENT_RESULT\.json$ ]]; then
+  if [[ "$target_state" == "BUILDING" && "$target_build_pass" -gt 0 ]]; then
+    printf -v expected_builder_pass 'pass-%04d' "$target_build_pass"
+    expected_builder="$run_root/$target_run_id/scratch/builder/$expected_builder_pass/BUILD_AGENT_RESULT.json"
+    if [[ "$abs_path" == "$expected_builder" ]]; then
       exit 0
     fi
   fi
-
-  reviewer_rel="${abs_path#"$run_root/$target_run_id/scratch/reviewer/"}"
-  if [[ "$target_state" == "REVIEWING" && "$abs_path" == "$run_root/$target_run_id/scratch/reviewer/"* ]]; then
-    if [[ "$reviewer_rel" =~ ^pass-[0-9]{4,}/REVIEW_AGENT_ASSESSMENT\.json$ ]]; then
+  if [[ "$target_state" == "REVIEWING" && "$target_review_pass" -gt 0 ]]; then
+    printf -v expected_reviewer_pass 'pass-%04d' "$target_review_pass"
+    expected_reviewer="$run_root/$target_run_id/scratch/reviewer/$expected_reviewer_pass/REVIEW_AGENT_ASSESSMENT.json"
+    if [[ "$abs_path" == "$expected_reviewer" ]]; then
       exit 0
     fi
   fi
 fi
 
-# Builder worktree writable, reviewer worktree source-read-only.
 is_builder_wt=0
 is_reviewer_wt=0
 if [[ "$abs_path" == "$wt_root"/*/builder || "$abs_path" == "$wt_root"/*/builder/* ]]; then
@@ -229,17 +171,13 @@ if [[ "$abs_path" == "$wt_root"/*/reviewer || "$abs_path" == "$wt_root"/*/review
   is_reviewer_wt=1
 fi
 
-# Canonical checkout outside worktrees: refuse during an active build/review.
-if [[ "$abs_path" == "$canonical_repo"/* && "$abs_path" != "$run_root"/*" && "$abs_path" != "$wt_root"/*" ]]; then
+if [[ "$abs_path" == "$canonical_repo"/* && "$abs_path" != "$run_root"/* && "$abs_path" != "$wt_root"/* ]]; then
   for rid in "${RUN_IDS[@]}"; do
     state_file="$run_root/$rid/STATE.json"
     if [[ -f "$state_file" ]]; then
-      cur_state="$(python3 -B -c 'import sys, json
-p = sys.argv[1] if len(sys.argv) > 1 else ""
-try:
-    print(json.load(open(p)).get("state",""))
-except Exception:
-    pass' "$state_file" 2>/dev/null || true)"
+      cur_state="$(python3 -B -c 'import sys,json
+try: print(json.load(open(sys.argv[1])).get("state",""))
+except Exception: pass' "$state_file" 2>/dev/null || true)"
       if [[ "$cur_state" == "BUILDING" || "$cur_state" == "REVIEWING" ]]; then
         emit_block "CANONICAL_CHECKOUT_WRITE_DURING_BUILD" \
           "Writes to canonical checkout refused while run $rid is in $cur_state. Builder writes go through the builder worktree."
@@ -251,15 +189,13 @@ fi
 
 if [[ "$is_reviewer_wt" -eq 1 ]]; then
   emit_block "REVIEWER_SOURCE_WRITE" \
-    "Reviewer may not write candidate source. Only the current pass-scoped REVIEW_AGENT_ASSESSMENT.json scratch artifact is writable."
+    "Reviewer may not write candidate source. Only the exact current pass assessment scratch artifact is writable."
   exit 0
 fi
-
 if [[ "$is_builder_wt" -eq 1 ]]; then
   exit 0
 fi
 
-# Anything else: refuse to be safe.
 emit_block "PROTECTED_PATH" \
-  "Write refused: target $abs_path is not within the active builder worktree or approved scratch."
+  "Write refused: target $abs_path is not within the active builder worktree or exact current-pass scratch."
 exit 0

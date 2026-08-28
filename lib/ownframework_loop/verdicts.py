@@ -6,7 +6,8 @@ import json
 from pathlib import Path
 from typing import Any
 
-from .util import atomic_write_json, run_dir, utc_now_iso
+from . import git_checks
+from .util import atomic_write_json, reviewer_worktree, run_dir, utc_now_iso
 
 
 SCHEMA_VERSION = "ownframework-loop-review-verdict/v2"
@@ -47,11 +48,7 @@ def new_verdict(
     commands_executed: list[str] | None = None,
     builder_pass_number_ref: int | None = None,
 ) -> dict[str, Any]:
-    """Build a review-verdict document. Does not write.
-
-    All required fields are accepted as positional kwargs; the verdict
-    is schema-valid by construction (additionalProperties: false).
-    """
+    """Build a review-verdict document. Does not write."""
     if verdict not in VERDICTS:
         raise ValueError(f"invalid verdict: {verdict}")
     out: dict[str, Any] = {
@@ -88,7 +85,29 @@ def new_verdict(
     return out
 
 
+def _assert_exact_clean_review_candidate(
+    canonical_repo: Path,
+    run_id: str,
+    verdict: dict[str, Any],
+) -> None:
+    """Refuse an authoritative verdict unless the reviewer tree is exact and clean."""
+    wt = reviewer_worktree(canonical_repo, run_id)
+    if not wt.exists():
+        raise RuntimeError("refusing REVIEW_VERDICT: reviewer worktree missing")
+    expected_sha = str(verdict.get("candidate_sha_reviewed") or "")
+    actual_sha = git_checks.current_head(wt)
+    if not expected_sha or actual_sha != expected_sha:
+        raise RuntimeError(
+            f"refusing REVIEW_VERDICT: reviewer HEAD {actual_sha!r} != reviewed candidate {expected_sha!r}"
+        )
+    if git_checks.is_dirty(wt):
+        raise RuntimeError(
+            "refusing REVIEW_VERDICT: reviewer worktree is dirty; reviewed SHA does not describe verifier filesystem"
+        )
+
+
 def write_verdict(canonical_repo: Path, run_id: str, verdict: dict[str, Any]) -> Path:
+    _assert_exact_clean_review_candidate(canonical_repo, run_id, verdict)
     p = verdict_path(canonical_repo, run_id)
     atomic_write_json(p, verdict, mode=0o600)
     return p
@@ -133,18 +152,7 @@ def classify_mutation(
     *,
     expected_candidate_sha: str | None = None,
 ) -> dict[str, Any]:
-    """Wrap a diff_tracked_mutation() result and translate it to a verdict
-    action.
-
-    Returns `{kind, action, ...}` where `action` is one of:
-      - `approve_candidate`  — no drift.
-      - `controlled_refresh` — head moved but it was the reviewer's own re-pin.
-      - `external_drift_block` — external drift, must BLOCK.
-      - `unexpected_initial_drift_block` — must BLOCK.
-
-    The reviewer must call this before stamping the verdict and adapt the
-    recommended_next_state per the action.
-    """
+    """Translate a worktree-mutation classification into a verdict action."""
     kind = mutation.get("kind", "no_change")
     if kind == "no_change":
         return {"kind": kind, "action": "approve_candidate"}

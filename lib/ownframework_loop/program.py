@@ -7,30 +7,21 @@ the graph: a checkpoint with `depends_on: [CP-X, CP-Y]` becomes
 *claimable* only after CP-X and CP-Y are both terminal-APPROVED.
 
 Genericity: this module is product-agnostic. It neither imports nor
-references any specific product (ERP, Phase 9, etc.). It only consumes
-packet metadata + git state.
+references any specific product. It only consumes packet metadata + git state.
 
-Implements (per governing manual):
+Core invariants:
   - finite packet-bound checkpoint DAG
-  - DAG validation (no cycles, no unknown deps, no duplicate ids)
   - deterministic dependency-ready checkpoint selection
   - packet-bound checkpoint order and budgets
   - checkpoint-local build/review/repair counters
-  - per-checkpoint maximum 8 build, 8 review, 3 repair
+  - bounded per-checkpoint and cumulative pass ceilings
   - cumulative caps == min(human-approved global envelope, checkpoint-cap sum)
-  - global source ceilings: 500 unique changed files, 30000 diff lines
   - no post-approval widening (graph SHA frozen at program start)
   - one candidate branch per run, shared across all checkpoints
-  - immutable checkpoint evidence (sha256 over canonicalized evidence manifest)
-  - automatic checkpoint advancement when its deps finish
-  - automatic checkpoint repair against packet+global ceilings
-  - guarded nonterminal checkpoint approval (refused — `nonterminal_cp_approval`)
-  - crash reconciliation at checkpoint boundaries (idempotent on resume)
-  - one final integrated original-baseline-to-final exact-SHA review
+  - immutable checkpoint evidence
+  - automatic checkpoint advancement when dependencies finish
+  - fail-closed repair exhaustion
   - one program-level APPROVED|BLOCKED|STOPPED result
-  - packet-configurable `promotion_policy` (default `human_gate`)
-  - guarded `merge_on_approved` (refused if packets\' human_only authority mismatch,
-    or run-level deliverable is already published)
 """
 
 from __future__ import annotations
@@ -41,31 +32,18 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-from .util import (
-    sha256_text,
-    utc_now_iso,
-)
+from .util import sha256_text, utc_now_iso
 from .integrity import canonical_json_dumps
 from .state import is_program_state, load as state_load, append_event, save as state_save
 
 
-
 PROGRAM_SCHEMA_VERSION = "ownframework-work-packet/v3"
 STATE_PROGRAM_KEY = "program"
-# v0.3.7 (F-3-01 / F-7-01): per-cp caps lifted to match the
-# limits.MAX_* emergency caps. The packet is still authoritative for
-# the per-cp risk_budget; the per-cp caps here are only the
-# validation-time fallback when a packet omits a per-cp value.
 MAX_CP_BUILD_PASSES = 32
 MAX_CP_REVIEW_PASSES = 32
 MAX_CP_REPAIR_ROUNDS = 32
 GLOBAL_MAX_UNIQUE_CHANGED_FILES = 500
 GLOBAL_MAX_BASELINE_TO_FINAL_DIFF_LINES = 30000
-
-
-# --------------------------------------------------------------------------- #
-# Errors
-# --------------------------------------------------------------------------- #
 
 
 class ProgramGraphError(ValueError):
@@ -76,11 +54,6 @@ class ProgramStateError(RuntimeError):
     """Live state contract violation (frozen graph drift, ceiling breach)."""
 
 
-# --------------------------------------------------------------------------- #
-# Validation
-# --------------------------------------------------------------------------- #
-
-
 _CP_RE = re.compile(r"^CP-[0-9]+$")
 
 
@@ -89,11 +62,6 @@ def _cp_id(s: Any) -> bool:
 
 
 def resolve_execution_mode(meta: dict[str, Any]) -> str:
-    """Return 'single' or 'program'.
-
-    Default (when the field is absent) is 'single' — preserves
-    backwards compatibility with v1/v2 packets.
-    """
     v = meta.get("execution_mode")
     if v is None:
         return "single"
@@ -103,10 +71,6 @@ def resolve_execution_mode(meta: dict[str, Any]) -> str:
 
 
 def validate_checkpoint_graph(packet: dict[str, Any]) -> list[str]:
-    """Static structural validation of a v3 checkpoint_graph.
-
-    Returns a list of error messages (empty list == valid).
-    """
     errors: list[str] = []
     cg = packet.get("checkpoint_graph")
     if not isinstance(cg, dict):
@@ -134,17 +98,13 @@ def validate_checkpoint_graph(packet: dict[str, Any]) -> list[str]:
             errors.append(f"duplicate checkpoint id: {cid}")
             continue
         by_id[cid] = cp
-
         if not isinstance(cp.get("title"), str) or not cp["title"]:
             errors.append(f"{cid}: title missing/empty")
         if not isinstance(cp.get("scope"), str) or not cp["scope"]:
             errors.append(f"{cid}: scope missing/empty")
-
-        rb = cp.get("risk_budget")
-        if not isinstance(rb, dict):
+        if not isinstance(cp.get("risk_budget"), dict):
             errors.append(f"{cid}: risk_budget missing")
 
-    # Pass 2: check budgets and deps (now that by_id is fully populated).
     for cid, cp in by_id.items():
         rb = cp.get("risk_budget") or {}
         for k, mx in (
@@ -155,7 +115,6 @@ def validate_checkpoint_graph(packet: dict[str, Any]) -> list[str]:
             v = rb.get(k)
             if not isinstance(v, int) or v < 1 or v > mx:
                 errors.append(f"{cid}: {k} must be int in [1..{mx}], got {v!r}")
-
         deps = cp.get("depends_on", [])
         if not isinstance(deps, list):
             errors.append(f"{cid}: depends_on must be a list")
@@ -168,7 +127,6 @@ def validate_checkpoint_graph(packet: dict[str, Any]) -> list[str]:
             elif d not in by_id:
                 errors.append(f"{cid}: depends on unknown checkpoint {d}")
 
-    # Order must list every checkpoint exactly once.
     seen = set()
     for cid in order:
         if not _cp_id(cid):
@@ -184,7 +142,6 @@ def validate_checkpoint_graph(packet: dict[str, Any]) -> list[str]:
     if missing:
         errors.append(f"execution_order omits checkpoints: {sorted(missing)}")
 
-    # Acyclic: a checkpoint can never precede one of its dependencies.
     position = {cid: i for i, cid in enumerate(order)}
     for cid, idx in position.items():
         cp = by_id[cid]
@@ -193,11 +150,9 @@ def validate_checkpoint_graph(packet: dict[str, Any]) -> list[str]:
                 continue
             if position[d] >= idx:
                 errors.append(
-                    f"execution order invalid: {cid} (idx {idx}) "
-                    f"must come AFTER dependency {d} (idx {position[d]})"
+                    f"execution order invalid: {cid} (idx {idx}) must come AFTER dependency {d} (idx {position[d]})"
                 )
 
-    # Global source ceilings — either from packet or use universal max.
     sc = cg.get("global_source_ceilings", {})
     if isinstance(sc, dict):
         for k, mx in (
@@ -211,16 +166,10 @@ def validate_checkpoint_graph(packet: dict[str, Any]) -> list[str]:
                 errors.append(
                     f"global_source_ceilings.{k} must be int in [1..{mx}], got {v!r}"
                 )
-
     return errors
 
 
 def checkpoint_graph_sha256(packet: dict[str, Any]) -> str:
-    """Frozen canonical hash of the checkpoint_graph dict.
-
-    Readers re-compute and verify before acting; any post-approval
-    widening of the graph fails the check.
-    """
     cg = packet.get("checkpoint_graph") or {}
     body = {
         "execution_order": cg.get("execution_order", []),
@@ -231,7 +180,6 @@ def checkpoint_graph_sha256(packet: dict[str, Any]) -> str:
 
 
 def resolve_promotion_policy(packet: dict[str, Any]) -> str:
-    """Return "human_gate" (default) or "merge_on_approved"."""
     p = packet.get("promotion_policy")
     if p is None:
         return "human_gate"
@@ -240,23 +188,12 @@ def resolve_promotion_policy(packet: dict[str, Any]) -> str:
     return p
 
 
-# --------------------------------------------------------------------------- #
-# State materialization
-# --------------------------------------------------------------------------- #
-
-
 def materialise_initial_program_state(
     packet: dict[str, Any],
     *,
     baseline_sha: str,
     candidate_branch: str,
 ) -> dict[str, Any]:
-    """Build the v2 `program` block for a freshly-approved v3 packet.
-
-    Single source of truth for initial program-state shape. Captured at
-    program start so any later edit to the packet (post-approval widening)
-    is detectable by recomputing `checkpoint_graph_sha256` and refusing.
-    """
     errors = validate_checkpoint_graph(packet)
     if errors:
         raise ProgramGraphError("checkpoint graph invalid: " + "; ".join(errors))
@@ -275,59 +212,31 @@ def materialise_initial_program_state(
             "terminal": "",
         })
 
-    # Cumulative caps = min(operator-approved global cap, sum of per-CP caps).
-    #
-    # v0.4.3 hardening: the per-checkpoint risk_budgets may sum to MORE
-    # than the packet-level global risk_budget (each CP carries its own
-    # independent budget). Without this clamp, the cumulative ceiling
-    # would silently grant MORE total passes than the operator approved.
-    #
-    # The effective ceiling MUST NEVER exceed the operator-approved
-    # global envelope. The smaller of the two wins.
-    global_rb = (packet.get("risk_budget") or {})
+    global_rb = packet.get("risk_budget") or {}
     global_build_cap = int(global_rb.get("max_build_passes", 0))
     global_review_cap = int(global_rb.get("max_review_passes", 0))
     global_repair_cap = int(global_rb.get("max_repair_rounds", 0))
 
-    # Sum of per-checkpoint budgets (the existing deterministic total).
-    sum_build = 0
-    sum_review = 0
-    sum_repair = 0
-    for cp in packet["checkpoint_graph"]["checkpoints"]:
-        rb = cp["risk_budget"]
-        sum_build += int(rb["max_build_passes"])
-        sum_review += int(rb["max_review_passes"])
-        sum_repair += int(rb["max_repair_rounds"])
+    sum_build = sum(int(cp["risk_budget"]["max_build_passes"]) for cp in packet["checkpoint_graph"]["checkpoints"])
+    sum_review = sum(int(cp["risk_budget"]["max_review_passes"]) for cp in packet["checkpoint_graph"]["checkpoints"])
+    sum_repair = sum(int(cp["risk_budget"]["max_repair_rounds"]) for cp in packet["checkpoint_graph"]["checkpoints"])
 
-    # Pre-approval consistency: the global cap must permit at least one
-    # build and one review pass per required checkpoint. Repair budget
-    # may legitimately be smaller than the checkpoint count because
-    # successful checkpoints need no repair.
     n_cps = len(packet["checkpoint_graph"]["checkpoints"])
     if global_build_cap and global_build_cap < n_cps:
         raise ProgramGraphError(
-            f"packet-level max_build_passes={global_build_cap} cannot "
-            f"accommodate {n_cps} checkpoints (need >=1 build per CP)"
+            f"packet-level max_build_passes={global_build_cap} cannot accommodate {n_cps} checkpoints (need >=1 build per CP)"
         )
     if global_review_cap and global_review_cap < n_cps:
         raise ProgramGraphError(
-            f"packet-level max_review_passes={global_review_cap} cannot "
-            f"accommodate {n_cps} checkpoints (need >=1 review per CP)"
+            f"packet-level max_review_passes={global_review_cap} cannot accommodate {n_cps} checkpoints (need >=1 review per CP)"
         )
 
-    # Effective = min(global, sum). When global is missing/zero we fall
-    # back to the sum so legacy packets that pre-date the global envelope
-    # still get a usable ceiling.
     cumulative = {
         "max_build_passes": min(global_build_cap, sum_build) if global_build_cap else sum_build,
         "max_review_passes": min(global_review_cap, sum_review) if global_review_cap else sum_review,
         "max_repair_rounds": min(global_repair_cap, sum_repair) if global_repair_cap else sum_repair,
     }
-    # Record the inputs in source_sha_provenance so an auditor can
-    # prove the clamp happened, not just see the post-clamp value.
-    # (inserted below into source_sha_provenance block)
-
-    sc = (packet["checkpoint_graph"].get("global_source_ceilings") or {})
+    sc = packet["checkpoint_graph"].get("global_source_ceilings") or {}
     cumulative["max_unique_changed_files"] = int(
         sc.get("max_unique_changed_files", GLOBAL_MAX_UNIQUE_CHANGED_FILES)
     )
@@ -335,23 +244,15 @@ def materialise_initial_program_state(
         sc.get("max_baseline_to_final_diff_lines", GLOBAL_MAX_BASELINE_TO_FINAL_DIFF_LINES)
     )
 
-    # current_checkpoints: the topological first CP with no blocking deps.
-    deps_map = {
-        cp["id"]: [d for d in cp.get("depends_on", [])]
-        for cp in packet["checkpoint_graph"]["checkpoints"]
-    }
-    finalized_ids: set[str] = set()
-    remaining = [cid for cid in packet["checkpoint_graph"]["execution_order"]
-                 if cid not in finalized_ids]
+    deps_map = {cp["id"]: list(cp.get("depends_on", [])) for cp in packet["checkpoint_graph"]["checkpoints"]}
+    remaining = list(packet["checkpoint_graph"]["execution_order"])
     current: list[str] = []
     for cid in remaining:
-        if all(d in finalized_ids for d in deps_map.get(cid, [])):
-            current.append(cid)
-            break
-    if not current:
-        for cid in remaining:
+        if not deps_map.get(cid):
             current = [cid]
             break
+    if not current and remaining:
+        current = [remaining[0]]
 
     return {
         "execution_mode": "program",
@@ -388,23 +289,12 @@ def materialise_initial_program_state(
     }
 
 
-# --------------------------------------------------------------------------- #
-# Selection
-# --------------------------------------------------------------------------- #
-
-
-def select_next_checkpoint(
-    packet: dict[str, Any], program_state: dict[str, Any]
-) -> str | None:
-    """Return the deterministic next claimable checkpoint id, or None."""
+def select_next_checkpoint(packet: dict[str, Any], program_state: dict[str, Any]) -> str | None:
     cur = program_state.get("current_checkpoints") or []
-    if not cur:
-        return None
-    return cur[0]
+    return cur[0] if cur else None
 
 
 def ready_to_claim(cp_state: dict[str, Any], packet_cp: dict[str, Any]) -> tuple[bool, str]:
-    """(ok, reason)."""
     if cp_state.get("terminal"):
         return False, f"terminal={cp_state['terminal']}"
     rb = packet_cp["risk_budget"]
@@ -424,31 +314,24 @@ def finalize_checkpoint(
     terminal_state: str,
     evidence_manifest: dict[str, Any],
 ) -> dict[str, Any]:
-    """Mark a checkpoint as finalized. Returns updated program_state.
-
-    Refuses APPROVED for any checkpoint whose counters are not at >=1
-    or whose global counters exceed caps. BLOCKED and STOPPED may be
-    set from any state.
-    """
     if terminal_state not in ("APPROVED", "BLOCKED", "STOPPED"):
         raise ProgramStateError(f"invalid terminal_state: {terminal_state}")
 
     cp = _find_cp(program_state, cp_id)
-    if cp.get("terminal") is not None:
+    # Nonterminal checkpoints are represented by the legacy falsy empty string.
+    # Never confuse that with an already-finalized checkpoint.
+    if cp.get("terminal"):
         raise ProgramStateError(
-            f"checkpoint {cp_id} already terminal={cp.get('terminal')}; "
-            "duplicate finalization refused"
+            f"checkpoint {cp_id} already terminal={cp.get('terminal')}; duplicate finalization refused"
         )
     if any(fc.get("id") == cp_id for fc in (program_state.get("finalized_checkpoints") or [])):
         raise ProgramStateError(
-            f"checkpoint {cp_id} already present in finalized_checkpoints; "
-            "duplicate finalization refused"
+            f"checkpoint {cp_id} already present in finalized_checkpoints; duplicate finalization refused"
         )
     if terminal_state == "APPROVED":
         if cp["build_pass_count"] < 1 or cp["review_pass_count"] < 1:
             raise ProgramStateError(
-                "nonterminal_cp_approval_refused: cannot finalize APPROVED "
-                "with no build+review pass"
+                "nonterminal_cp_approval_refused: cannot finalize APPROVED with no build+review pass"
             )
         cc = program_state["cumulative_counters"]
         ce = program_state["cumulative_ceilings"]
@@ -460,7 +343,6 @@ def finalize_checkpoint(
     new = _deepcopy_program(program_state)
     cp_new = _find_cp(new, cp_id)
     cp_new["terminal"] = terminal_state
-
     finalized = list(new.get("finalized_checkpoints", []))
     finalized.append({
         "id": cp_id,
@@ -469,19 +351,15 @@ def finalize_checkpoint(
         "evidence_sha256": sha256_text(canonical_json_dumps(evidence_manifest)),
     })
     new["finalized_checkpoints"] = finalized
-
     new["current_checkpoints"] = [c for c in new["current_checkpoints"] if c != cp_id]
     _refresh_current_checkpoints(new, packet_for=evidence_manifest.get("_packet"))
     return new
 
 
 def advance_to_next(program_state: dict[str, Any], packet: dict[str, Any]) -> dict[str, Any]:
-    """Compute the deterministic next checkpoint after a finalization."""
     new = _deepcopy_program(program_state)
     _refresh_current_checkpoints(new, packet_for=packet)
     return new
-
-
 
 
 def advance_after_review_approval(
@@ -495,34 +373,8 @@ def advance_after_review_approval(
     review_pass_number: int,
     actor: str,
 ) -> dict[str, Any]:
-    """Single deterministic helper that finalizes the current PROGRAM
-    checkpoint after a review APPROVED and advances to the next one.
-
-    v0.4.4 (defect 3): BOTH the Claude-native review_finalize path and
-    orchestrator.run_program_mode route through this helper. No second
-    PROGRAM state machine; no duplicated advancement logic.
-
-    Required semantics after an APPROVED review in PROGRAM mode:
-
-      1. identify the exact current checkpoint;
-      2. record/finalize its approved checkpoint evidence;
-      3. update checkpoint/cumulative accounting exactly once;
-      4. mark current checkpoint terminal APPROVED;
-      5. resolve the next claimable checkpoint from the frozen graph;
-      6. if another checkpoint exists: top-level state becomes
-         READY_TO_BUILD; else top-level state becomes APPROVED;
-      7. preserve exact candidate SHA / evidence lineage;
-      8. fail closed on accounting, graph, SHA, state, or budget
-         inconsistency.
-
-    Returns: dict with keys { advanced_to_cp, finalized_cp, next_top_state,
-    evidence_manifest_sha256, terminal_state }.
-    """
-    # 0. Preconditions.
     if not is_program_state(state):
-        raise ProgramStateError(
-            "advance_after_review_approval called on a non-program run"
-        )
+        raise ProgramStateError("advance_after_review_approval called on a non-program run")
     if state.get("state") != "REVIEWING":
         raise ProgramStateError(
             f"program advancement requires top-level REVIEWING, got {state.get('state')!r}"
@@ -540,12 +392,9 @@ def advance_after_review_approval(
         )
     cur_cps = list(cur.get("current_checkpoints") or [])
     if not cur_cps:
-        raise ProgramStateError(
-            "no current checkpoint in program state; cannot advance"
-        )
+        raise ProgramStateError("no current checkpoint in program state; cannot advance")
     cp_id = cur_cps[0]
 
-    # 1-2. Build the evidence manifest (deterministic canonical JSON).
     evidence_manifest = {
         "_packet": packet,
         "candidate_sha": candidate_sha,
@@ -555,32 +404,35 @@ def advance_after_review_approval(
         "approved_actor": actor,
         "cp_id": cp_id,
     }
-
-    # 3-4. Finalize the current checkpoint as APPROVED.
     new_program = finalize_checkpoint(
         program_state=cur,
         cp_id=cp_id,
         terminal_state="APPROVED",
         evidence_manifest=evidence_manifest,
     )
-
-    # 5. Advance to the next claimable CP from the frozen graph.
     new_program = advance_to_next(new_program, packet)
-
-    # 6. Decide next top-level state from the new current_checkpoints.
     new_cps = list(new_program.get("current_checkpoints") or [])
     next_top_state = "READY_TO_BUILD" if new_cps else "APPROVED"
 
-    # 7. Build the new top-level state.
+    now = utc_now_iso()
     new_top = dict(state)
     new_top["program"] = new_program
     new_top["state"] = next_top_state
     new_top["last_candidate_sha"] = candidate_sha
-
-    # Save and append event so a crash between transitions and counter
-    # writes cannot desync. state_save uses flock under the hood.
+    new_top["updated_at"] = now
+    new_top["last_actor"] = actor
+    new_top["transitions_count"] = int(state.get("transitions_count", 0)) + 1
+    history = list(state.get("state_history") or [])
+    history.append({
+        "from": state.get("state"),
+        "to": next_top_state,
+        "at": now,
+        "actor": actor,
+        "reason": f"checkpoint {cp_id} approved; program advancement",
+    })
+    new_top["state_history"] = history
+    new_top["terminal_reason"] = "all_checkpoints_approved" if next_top_state == "APPROVED" else ""
     state_save(canonical_repo, run_id, new_top)
-
     append_event(
         canonical_repo, run_id,
         event_type="program_advanced",
@@ -588,8 +440,7 @@ def advance_after_review_approval(
         new_state=next_top_state,
         actor=actor,
         commit_sha=candidate_sha,
-        reason=f"CP {cp_id} APPROVED via review pass {review_pass_number}; "
-               f"next top state={next_top_state}, current_checkpoints={new_cps}",
+        reason=f"CP {cp_id} APPROVED via review pass {review_pass_number}; next top state={next_top_state}, current_checkpoints={new_cps}",
         extras={
             "cp_id_finalized": cp_id,
             "cp_terminal": "APPROVED",
@@ -597,7 +448,6 @@ def advance_after_review_approval(
             "next_checkpoints": new_cps,
         },
     )
-
     return {
         "advanced_to_cp": new_cps[0] if new_cps else "",
         "finalized_cp": cp_id,
@@ -605,10 +455,6 @@ def advance_after_review_approval(
         "evidence_manifest_sha256": sha256_text(canonical_json_dumps(evidence_manifest)),
         "terminal_state": "APPROVED",
     }
-
-# --------------------------------------------------------------------------- #
-# Cumulative counters & gates
-# --------------------------------------------------------------------------- #
 
 
 def increment_cp_counter(
@@ -618,17 +464,8 @@ def increment_cp_counter(
     counter: str,
     packet_cp: dict[str, Any],
 ) -> dict[str, Any]:
-    """Increment a per-checkpoint counter, refusing past per-cp caps.
-
-    The `cumulative_counters` (build/review/repair) are also bumped.
-    For unique-files / diff-lines cumulative counts, callers pass through
-    `record_aggregate_change` to keep them in lockstep with the source tree.
-    """
-    if counter not in (
-        "build_pass_count", "review_pass_count", "repair_round_count",
-    ):
+    if counter not in ("build_pass_count", "review_pass_count", "repair_round_count"):
         raise ProgramStateError(f"unknown counter {counter!r}")
-
     new = _deepcopy_program(program_state)
     cp = _find_cp(new, cp_id)
     cap_key = {
@@ -643,12 +480,10 @@ def increment_cp_counter(
         )
     cp[counter] += 1
     new["cumulative_counters"][counter] += 1
-
     cum_cap = new["cumulative_ceilings"][cap_key]
     if new["cumulative_counters"][counter] > cum_cap:
         raise ProgramStateError(
-            f"cumulative cap reached for {counter}: "
-            f"{new['cumulative_counters'][counter]}/{cum_cap}"
+            f"cumulative cap reached for {counter}: {new['cumulative_counters'][counter]}/{cum_cap}"
         )
     return new
 
@@ -660,18 +495,7 @@ def _bump_counter_one(
     counter: str,
     packet_cp: dict[str, Any],
 ) -> dict[str, Any]:
-    """Pure-Python helper: bump per-cp + cumulative counters in memory.
-
-    Both caps are checked *before* any mutation. Raises on cap breach.
-    Returns a deep-copied program_state with the counters bumped.
-
-    Used by both the legacy `increment_cp_counter` and the unified
-    `claim_*_pass` owner functions so the cap logic exists in exactly
-    one place.
-    """
-    if counter not in (
-        "build_pass_count", "review_pass_count", "repair_round_count",
-    ):
+    if counter not in ("build_pass_count", "review_pass_count", "repair_round_count"):
         raise ProgramStateError(f"unknown counter {counter!r}")
     cap_key = {
         "build_pass_count": "max_build_passes",
@@ -680,18 +504,15 @@ def _bump_counter_one(
     }[counter]
     cp_cap = int(packet_cp["risk_budget"][cap_key])
     cum_cap = int(program_state["cumulative_ceilings"][cap_key])
-
     new = _deepcopy_program(program_state)
     cp = _find_cp(new, cp_id)
     if cp[counter] >= cp_cap:
         raise ProgramStateError(
-            f"per-checkpoint cap reached for {counter} on {cp_id}: "
-            f"{cp[counter]}/{cp_cap}"
+            f"per-checkpoint cap reached for {counter} on {cp_id}: {cp[counter]}/{cp_cap}"
         )
     if new["cumulative_counters"][counter] >= cum_cap:
         raise ProgramStateError(
-            f"cumulative cap reached for {counter}: "
-            f"{new['cumulative_counters'][counter]}/{cum_cap}"
+            f"cumulative cap reached for {counter}: {new['cumulative_counters'][counter]}/{cum_cap}"
         )
     cp[counter] += 1
     new["cumulative_counters"][counter] += 1
@@ -699,12 +520,7 @@ def _bump_counter_one(
 
 
 class ClaimRefused(ProgramStateError):
-    """Raised by claim_*_pass when the program has refused a claim.
-
-    Carries a stable `code` (machine-readable) and a human `message`.
-    Subclass of ProgramStateError so existing exception handlers in
-    callers still catch it without code change.
-    """
+    """A deterministic PROGRAM pass claim was refused."""
 
 
 def _resolve_packet_cp(packet: dict[str, Any], cp_id: str) -> dict[str, Any]:
@@ -723,64 +539,20 @@ def _unified_claim_pass(
     pass_kind: str,
     source_evidence_sha: str | None = None,
 ) -> dict[str, Any]:
-    """Single durable owner of the PROGRAM build/review/repair claim.
+    from . import state as state_mod
 
-    Performs EVERY step of the claim under ONE flock-protected state
-    save so per-cp, cumulative, and top-level mirror counters cannot
-    desync on a crash between any two writes.
-
-    Steps (in order, under one flock):
-
-      1. verify STATE.json present and program block present
-      2. verify schema == ownframework-loop-state/v2
-      3. verify frozen graph SHA matches packet (no post-approval widening)
-      4. resolve the current claimable checkpoint (select_next_checkpoint)
-      5. verify the cp is not yet terminal
-      6. enforce per-checkpoint cap (pre-mutation check, refuses before bump)
-      7. enforce approved program cumulative cap (pre-mutation check)
-      8. increment per-cp counter exactly once
-      9. increment cumulative counter exactly once
-     10. mirror the increment into the top-level state counter exactly once
-     11. persist STATE.json atomically (single write)
-     12. return the stable claimed pass numbers
-
-    Replay safety: if the current FSM state already corresponds to the
-    claimed pass (e.g. BUILDING for build_pass_count) AND the source
-    evidence SHA matches the recorded evidence for that cp, the
-    function returns the existing pass number WITHOUT incrementing.
-
-    v0.3.5 (F-4-01): for repair_round_count, the replay guard is
-    keyed on `source_evidence_sha` rather than the (state, cum>0)
-    pair. Each repair round has different evidence (the candidate
-    SHA changes between rounds); a duplicate evidence SHA is a
-    genuine retry. This allows max_repair_rounds > 1 to actually
-    function.
-    """
-    from . import state as state_mod  # late import to avoid cycle at module load
-
-    if counter not in (
-        "build_pass_count", "review_pass_count", "repair_round_count",
-    ):
+    if counter not in ("build_pass_count", "review_pass_count", "repair_round_count"):
         raise ClaimRefused(f"unsupported counter for claim: {counter!r}")
-
     top_counter_name = {
         "build_pass_count": "build_pass_count",
         "review_pass_count": "review_pass_count",
         "repair_round_count": "repair_round",
     }[counter]
-
-    # Repair replay state: CHANGES_REQUESTED (the state entered after
-    # review_finalize returns CHANGES_REQUESTED). Setting it to "BUILDING"
-    # would poison the next build claim's replay guard.
-    # After a successful claim_repair_round, the explicit post-hook forces
-    # state back to READY_TO_BUILD (or CHANGES_REQUESTED) so the next build
-    # claim is NOT replayed.
     replay_states = {
         "build_pass_count": "BUILDING",
         "review_pass_count": "REVIEWING",
         "repair_round_count": "CHANGES_REQUESTED",
     }
-
     cap_key = {
         "build_pass_count": "max_build_passes",
         "review_pass_count": "max_review_passes",
@@ -788,70 +560,38 @@ def _unified_claim_pass(
     }[counter]
 
     with state_mod._locked_state(canonical_repo, run_id) as cur:
-        # 1. STATE.json must be present.
         if not isinstance(cur, dict):
             raise ClaimRefused("STATE.json missing or unreadable")
-        # 2. Schema must be v2 (program).
         if cur.get("schema") != state_mod.PROGRAM_STATE_SCHEMA_VERSION:
-            raise ClaimRefused(
-                f"program state required (got schema={cur.get('schema')!r})"
-            )
+            raise ClaimRefused(f"program state required (got schema={cur.get('schema')!r})")
         program_state = cur.get("program")
         if not isinstance(program_state, dict):
             raise ClaimRefused("missing program block")
-        # 3. Frozen graph must match.
         ok, reason = verify_frozen_graph(packet, program_state)
         if not ok:
             raise ClaimRefused(f"frozen-graph drift: {reason}")
 
-        # Replay guard. Two cases:
-        #
-        # (a) build_pass_count / review_pass_count — keyed on the FSM
-        #     state. After a successful claim, the state is set to
-        #     BUILDING / REVIEWING. A retried claim sees the same
-        #     state and returns the existing pass number without
-        #     incrementing. This is the original guard.
-        #
-        # (b) repair_round_count — keyed on source_evidence_sha per-cp.
-        #     v0.3.5 (F-4-01): the FSM state alone is insufficient
-        #     because CHANGES_REQUESTED is the persistent state for
-        #     repair claims. Each repair round has different evidence
-        #     (the candidate SHA changes between rounds); a duplicate
-        #     evidence SHA is a genuine retry.
         cur_state = cur.get("state")
         existing_cum = int(program_state["cumulative_counters"].get(counter, 0))
-        # Resolve the current cp id once so both guard branches use it.
         cp_id_replay = select_next_checkpoint(packet, program_state)
-        existing_cp = (
-            next(
-                (c for c in program_state["checkpoints"]
-                 if c["id"] == cp_id_replay),
-                None,
-            ) if cp_id_replay else None
-        )
-        existing_cp_pass = (
-            int(existing_cp[counter]) if existing_cp else 0
-        )
-        # Per-cp evidence tracking: stores the source_evidence_sha
-        # of the last claim on this cp, keyed by counter.
-        last_evidence = (
-            (existing_cp or {}).get("last_evidence_sha_by_counter") or {}
-        )
+        existing_cp = next(
+            (c for c in program_state["checkpoints"] if c["id"] == cp_id_replay),
+            None,
+        ) if cp_id_replay else None
+        existing_cp_pass = int(existing_cp[counter]) if existing_cp else 0
+        last_evidence = (existing_cp or {}).get("last_evidence_sha_by_counter") or {}
         last_evidence_for_counter = last_evidence.get(counter)
 
         is_replay = False
         if counter == "repair_round_count":
-            # Repair replay: same cp AND same evidence SHA = replay.
             if (
                 existing_cp_pass > 0
                 and source_evidence_sha is not None
                 and source_evidence_sha == last_evidence_for_counter
             ):
                 is_replay = True
-        else:
-            # Build/review replay: state must already match.
-            if cur_state == replay_states[counter] and existing_cum > 0:
-                is_replay = True
+        elif cur_state == replay_states[counter] and existing_cum > 0:
+            is_replay = True
 
         if is_replay:
             existing_top = int(cur.get(top_counter_name, 0) or 0)
@@ -863,38 +603,25 @@ def _unified_claim_pass(
                 "cp_id": cp_id_replay,
                 "claimed_pass_number": existing_top,
                 "cp_pass_number": existing_cp_pass,
-                "cumulative": int(
-                    program_state["cumulative_counters"].get(counter, 0)
-                ),
-                "cap": int(
-                    program_state["cumulative_ceilings"].get(cap_key, 0)
-                ),
+                "cumulative": int(program_state["cumulative_counters"].get(counter, 0)),
+                "cap": int(program_state["cumulative_ceilings"].get(cap_key, 0)),
                 "replayed": True,
             }
 
-        # 4+5. Resolve current cp and verify it's claimable.
         cp_id = select_next_checkpoint(packet, program_state)
         if cp_id is None:
             raise ClaimRefused("no claimable checkpoint")
         packet_cp = _resolve_packet_cp(packet, cp_id)
         cp_live = _find_cp(program_state, cp_id)
         if cp_live.get("terminal"):
-            raise ClaimRefused(
-                f"checkpoint {cp_id} is terminal: {cp_live['terminal']}"
-            )
+            raise ClaimRefused(f"checkpoint {cp_id} is terminal: {cp_live['terminal']}")
 
-        # 6+7+8+9. Bump per-cp + cumulative under deep-copy, refusing if
-        # either cap would be exceeded. Pure-Python; no I/O until step 11.
         new_program = _bump_counter_one(
             program_state,
             cp_id=cp_id,
             counter=counter,
             packet_cp=packet_cp,
         )
-
-        # v0.3.5 (F-4-01): record the source_evidence_sha on the cp
-        # so the replay guard can distinguish a fresh repair round
-        # from a duplicate retry.
         new_program_evidence = _deepcopy_program(new_program)
         cp_new = _find_cp(new_program_evidence, cp_id)
         ev_map = dict(cp_new.get("last_evidence_sha_by_counter") or {})
@@ -902,26 +629,14 @@ def _unified_claim_pass(
             ev_map[counter] = source_evidence_sha
         cp_new["last_evidence_sha_by_counter"] = ev_map
 
-        # 10. Mirror into top-level state counter and transition FSM so the
-        #     replay guard (state==BUILDING|REVIEWING) detects re-claims.
         new_state = dict(cur)
         new_state["program"] = new_program_evidence
         new_state[top_counter_name] = int(cur.get(top_counter_name, 0) or 0) + 1
         new_state["updated_at"] = state_mod.utc_now_iso()
         new_state["last_actor"] = "of-loop-claim"
-        # Repair claim returns to CHANGES_REQUESTED (we just claimed a
-        # repair round on a CHANGES_REQUESTED state) so the next build
-        # claim is NOT replayed. Build/review claims stay in BUILDING/
-        # REVIEWING so legitimate replay returns idempotent.
         new_state["state"] = replay_states[counter]
-        # Mirror build_pass_count into the program.state counter so
-        # downstream readers (which check both v1 and v2 counters) stay
-        # consistent with the program block.
-
-        # 11. Persist atomically (under flock from the with-block).
         state_mod._write_state_locked(canonical_repo, run_id, new_state)
 
-        # 12. Return stable pass numbers.
         cp_pass = int(_find_cp(new_program, cp_id)[counter])
         cum = int(new_program["cumulative_counters"][counter])
         return {
@@ -938,19 +653,7 @@ def _unified_claim_pass(
         }
 
 
-def claim_build_pass(
-    *,
-    canonical_repo: Path,
-    run_id: str,
-    packet: dict[str, Any],
-) -> dict[str, Any]:
-    """Atomically claim one PROGRAM build pass. Single durable owner.
-
-    Routes through `_unified_claim_pass` which is the ONLY function
-    allowed to mutate program-build counters. Both the CLI
-    (`cmd_build_claim`) and the orchestrator's `_drive_build_cycle`
-    must call this; no separate counter increments are permitted.
-    """
+def claim_build_pass(*, canonical_repo: Path, run_id: str, packet: dict[str, Any]) -> dict[str, Any]:
     return _unified_claim_pass(
         canonical_repo=canonical_repo,
         run_id=run_id,
@@ -960,13 +663,7 @@ def claim_build_pass(
     )
 
 
-def claim_review_pass(
-    *,
-    canonical_repo: Path,
-    run_id: str,
-    packet: dict[str, Any],
-) -> dict[str, Any]:
-    """Atomically claim one PROGRAM review pass. Single durable owner."""
+def claim_review_pass(*, canonical_repo: Path, run_id: str, packet: dict[str, Any]) -> dict[str, Any]:
     return _unified_claim_pass(
         canonical_repo=canonical_repo,
         run_id=run_id,
@@ -983,22 +680,39 @@ def claim_repair_round(
     packet: dict[str, Any],
     source_evidence_sha: str | None = None,
 ) -> dict[str, Any]:
-    """Atomically claim one PROGRAM repair round. Single durable owner.
+    """Claim one repair round; any refusal is fail-closed for the active run.
 
-    v0.3.5 (F-4-01): accepts `source_evidence_sha` so the replay
-    guard can distinguish a fresh repair round (different evidence,
-    e.g. a new candidate SHA) from a duplicate retry (same evidence).
-    The caller should pass the candidate SHA from the most recent
-    build receipt so each round has fresh evidence.
+    A native reviewer must never reopen READY_TO_BUILD after the approved repair
+    envelope has been exhausted. If the deterministic repair claim cannot be
+    granted, transition CHANGES_REQUESTED -> BLOCKED before surfacing refusal.
     """
-    return _unified_claim_pass(
-        canonical_repo=canonical_repo,
-        run_id=run_id,
-        packet=packet,
-        counter="repair_round_count",
-        pass_kind="repair",
-        source_evidence_sha=source_evidence_sha,
-    )
+    try:
+        return _unified_claim_pass(
+            canonical_repo=canonical_repo,
+            run_id=run_id,
+            packet=packet,
+            counter="repair_round_count",
+            pass_kind="repair",
+            source_evidence_sha=source_evidence_sha,
+        )
+    except ClaimRefused as refusal:
+        from . import state as state_mod
+        cur = state_mod.load(canonical_repo, run_id)
+        if isinstance(cur, dict) and cur.get("state") == "CHANGES_REQUESTED":
+            try:
+                state_mod.transition(
+                    canonical_repo,
+                    run_id,
+                    to_state="BLOCKED",
+                    actor="of-loop-repair-gate",
+                    reason=f"repair claim refused: {refusal}",
+                    commit_sha=cur.get("last_candidate_sha") or None,
+                )
+            except Exception as transition_error:
+                raise ClaimRefused(
+                    f"{refusal}; failed to seal run BLOCKED after repair refusal: {transition_error}"
+                ) from transition_error
+        raise
 
 
 def record_aggregate_change(
@@ -1007,7 +721,6 @@ def record_aggregate_change(
     files_changed_unique_delta: int,
     diff_lines_delta: int,
 ) -> dict[str, Any]:
-    """Bump the cumulative source-tree counters and enforce global caps."""
     if files_changed_unique_delta < 0 or diff_lines_delta < 0:
         raise ProgramStateError("aggregate change must be non-negative")
     new = _deepcopy_program(program_state)
@@ -1026,13 +739,7 @@ def record_aggregate_change(
     return new
 
 
-# --------------------------------------------------------------------------- #
-# Reader / verification
-# --------------------------------------------------------------------------- #
-
-
 def verify_frozen_graph(packet: dict[str, Any], program_state: dict[str, Any]) -> tuple[bool, str]:
-    """Verify the program_state\'s frozen graph hash matches the packet."""
     cur = program_state.get("checkpoint_graph_sha256")
     want = checkpoint_graph_sha256(packet)
     if cur != want:
@@ -1040,13 +747,7 @@ def verify_frozen_graph(packet: dict[str, Any], program_state: dict[str, Any]) -
     return True, "ok"
 
 
-# --------------------------------------------------------------------------- #
-# Result synthesis
-# --------------------------------------------------------------------------- #
-
-
 def is_program_terminal(program_state: dict[str, Any]) -> tuple[bool, str]:
-    """Return (is_terminal, terminal_state-or-empty)."""
     cur = program_state.get("current_checkpoints") or []
     if cur:
         return False, ""
@@ -1073,24 +774,15 @@ def program_terminal_reason(program_state: dict[str, Any]) -> str:
     return "all_checkpoints_approved"
 
 
-# --------------------------------------------------------------------------- #
-# Promotion gate
-# --------------------------------------------------------------------------- #
-
-
 def promotion_allowed(packet: dict[str, Any], program_state: dict[str, Any]) -> tuple[bool, str]:
-    """Decide whether a program-level APPROVED run may proceed to merge."""
     policy = resolve_promotion_policy(packet)
     if policy != "merge_on_approved":
         return False, "human_gate_required"
-
     if packet.get("merge_authority") != "delegated":
         return False, "merge_authority_must_be_delegated"
-
     is_term, term = is_program_terminal(program_state)
     if not is_term or term != "APPROVED":
         return False, f"not_terminal_approved:{term}"
-
     cum = program_state["cumulative_counters"]
     ce = program_state["cumulative_ceilings"]
     if cum["files_changed_unique"] > ce["max_unique_changed_files"]:
@@ -1098,11 +790,6 @@ def promotion_allowed(packet: dict[str, Any], program_state: dict[str, Any]) -> 
     if cum["diff_lines_total"] > ce["max_baseline_to_final_diff_lines"]:
         return False, "diff_lines_cap_breach"
     return True, "ok"
-
-
-# --------------------------------------------------------------------------- #
-# Internal helpers
-# --------------------------------------------------------------------------- #
 
 
 def _find_cp(program_state: dict[str, Any], cp_id: str) -> dict[str, Any]:
@@ -1113,7 +800,6 @@ def _find_cp(program_state: dict[str, Any], cp_id: str) -> dict[str, Any]:
 
 
 def _deepcopy_program(program_state: dict[str, Any]) -> dict[str, Any]:
-    """Deep copy without importing copy (we already json-roundtrip inputs)."""
     return json.loads(canonical_json_dumps(program_state))
 
 
@@ -1122,14 +808,15 @@ def _refresh_current_checkpoints(
     *,
     packet_for: dict[str, Any] | None,
 ) -> None:
-    """Recompute the deterministic next claimable checkpoint."""
     if packet_for is None:
         return
     order: list[str] = packet_for["checkpoint_graph"]["execution_order"]
     by_id: dict[str, dict[str, Any]] = {
         cp["id"]: cp for cp in packet_for["checkpoint_graph"]["checkpoints"]
     }
-    finalized_ids = {fc["id"]: fc["terminal_state"] for fc in program_state["finalized_checkpoints"]}
+    finalized_ids = {
+        fc["id"]: fc["terminal_state"] for fc in program_state["finalized_checkpoints"]
+    }
     new_current: list[str] = []
     for cid in order:
         if cid in finalized_ids:
@@ -1142,22 +829,17 @@ def _refresh_current_checkpoints(
     program_state["current_checkpoints"] = new_current
 
 
-# --------------------------------------------------------------------------- #
-# Source-tree accounting (used by the build finalizer in program mode)
-# --------------------------------------------------------------------------- #
-
-
 def source_tree_accounting(
     *,
     canonical_repo: Path,
     baseline_sha: str,
     candidate_sha: str,
 ) -> dict[str, int]:
-    """Return files_changed_unique, diff_lines for candidate vs baseline."""
     diff = subprocess.run(
-        ["git", "-C", str(canonical_repo), "diff", "--no-color",
-         baseline_sha, candidate_sha, "--numstat"],
-        capture_output=True, text=True, check=True,
+        ["git", "-C", str(canonical_repo), "diff", "--no-color", baseline_sha, candidate_sha, "--numstat"],
+        capture_output=True,
+        text=True,
+        check=True,
     )
     files = 0
     diff_lines = 0
@@ -1187,12 +869,11 @@ __all__ = [
     "checkpoint_graph_sha256", "resolve_promotion_policy",
     "materialise_initial_program_state",
     "select_next_checkpoint", "ready_to_claim",
-    "finalize_checkpoint", "advance_to_next",
+    "finalize_checkpoint", "advance_to_next", "advance_after_review_approval",
     "increment_cp_counter", "record_aggregate_change",
     "ClaimRefused", "claim_build_pass", "claim_review_pass",
     "claim_repair_round", "_unified_claim_pass", "_bump_counter_one",
     "verify_frozen_graph",
     "is_program_terminal", "program_terminal_reason",
-    "promotion_allowed",
-    "source_tree_accounting",
+    "promotion_allowed", "source_tree_accounting",
 ]
