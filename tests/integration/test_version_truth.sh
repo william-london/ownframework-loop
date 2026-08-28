@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
 # OwnFramework Loop — version-truth gate (fail-closed).
+# v0.4.2: derives the expected version from lib/ownframework_loop/__init__.py
+# (canonical single source of truth) and asserts every other release surface
+# matches. Future patches only need to update lib + the matching JSON/Markdown
+# files; this test follows automatically.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/../.." && pwd)"
@@ -8,7 +12,19 @@ export ROOT
 python3 -B <<'PYEOF'
 import json, os, re, sys
 ROOT = os.environ["ROOT"]
-EXPECTED = "0.4.1"
+
+# Derive EXPECTED from the canonical lib version. Fall back to a string
+# match if the regex misses (so a test-time lib bug doesn't silently
+# compare against empty).
+try:
+    lib_text = open(os.path.join(ROOT, "lib/ownframework_loop/__init__.py")).read()
+    m = re.search(r'^__version__\s*=\s*["\']([^"\']+)', lib_text, re.MULTILINE)
+    EXPECTED = m.group(1) if m else ""
+except Exception:
+    EXPECTED = ""
+if not EXPECTED:
+    print("  FAIL: could not derive EXPECTED from lib/ownframework_loop/__init__.py")
+    sys.exit(1)
 failures = []
 
 def check(label, ok, detail=""):

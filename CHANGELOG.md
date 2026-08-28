@@ -1,5 +1,62 @@
 # Changelog
 
+## 0.4.2 — Autonomy Micro-Repair (2026-08-28)
+
+**Scope.** Surgical post-commissioning fixes for the four concrete defects
+the v0.4.1 live-host proof exposed. No architecture changes; all safety
+boundaries preserved.
+
+**Packet / allowed_paths self-consistency**
+
+- Added `validate_packet_self_consistency` in `lib/ownframework_loop/packet.py`.
+  When the deterministic finalizer runs (spec approve, build finalize,
+  review finalize, approval binding), the combined
+  `validate_packet_for_approval` rejects packets whose work_units prose
+  references a known root-level file (e.g. `pyproject.toml`) that is not
+  in `allowed_paths` and not in `protected_paths`. The KNEW list lives
+  in `KNOWN_ROOT_FILES`.
+- Updated `skills/spec/SKILL.md` to make the new path-coverage contract
+  explicit: NEW_REPOSITORY Python missions must include `pyproject.toml`
+  in `allowed_paths` from the start.
+
+**Reviewer assessment first-pass conformance**
+
+- Added `templates/REVIEW_AGENT_ASSESSMENT.template.json` — the
+  deterministic skeleton every reviewer agent starts from.
+- Added `lib/ownframework_loop/assessment.py` with `build_skeleton` and
+  `write_skeleton`. Pre-populates every required top-level key with the
+  exact casing, the run id, candidate SHA, packet SHA, approval SHA,
+  and reviewer worktree path.
+- Added CLI subcommand `ofloop review assessment-skeleton <repo> <run-id>`
+  that materializes the skeleton at the run scratch path.
+- Rewrote the "Output" section of `agents/of-reviewer.md` to be a
+  three-step deterministic workflow: materialize, fill runtime values,
+  submit. The agent is no longer re-deriving the JSON shape from prose.
+
+**validate.sh --installed canonical name**
+
+- `validate.sh --installed` (bare) now resolves the canonical
+  `of-loop@ownframework` plugin from `claude plugin list --json`. The
+  legacy `of-loop@ownframework-local` reference is gone. The explicit
+  `--installed <path>` form is unchanged.
+
+**Operator CLI shim**
+
+- `install.sh` now creates `~/.local/bin/ofloop` as a symlink pointing
+  into the managed cache, so a fresh operator shell can invoke `ofloop`
+  without `cd`-ing to the source tree. Idempotent and refuses to
+  overwrite an unmanaged binary at the same path. Override with
+  `OFLOOP_SHIM_DIR`; skip with `OFLOOP_SKIP_SHIM=1`.
+- `uninstall.sh` removes the shim, but only if it points into the
+  ownframework cache — never an unrelated binary at the same path.
+
+**Safety boundaries preserved.** All four repairs operate strictly on
+the producer side (packet self-check, reviewer schema, validator name,
+CLI discoverability). The deterministic finalizers, approval binding,
+exact-SHA review, and external-action guards are unchanged. Reviewer
+schema enforcement is tightened (the contract is now pre-shaped) but
+not weakened (malformed assessments are still refused).
+
 ## 0.4.1 — Generic Host Portability (2026-08-16)
 
 **Scope.** Expands the v0.4 agent-neutral architecture into a vendor-neutral portability floor while preserving Claude Code as the stable, hardened reference adapter.

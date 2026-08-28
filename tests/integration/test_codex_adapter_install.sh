@@ -16,7 +16,9 @@ mkdir -p "$HOME" "$OFLOOP_BIN_DIR" "$OFLOOP_AGENT_SKILLS_DIR"
 bash install-adapter.sh codex | tee "$TMP/install.txt"
 grep -F 'ADAPTER_INSTALL=PASS' "$TMP/install.txt" >/dev/null
 grep -F 'ADAPTER=codex' "$TMP/install.txt" >/dev/null
-grep -F 'VERSION=0.4.1' "$TMP/install.txt" >/dev/null
+# v0.4.2: derive expected VERSION from lib/ownframework_loop/__init__.py
+EXPECTED_VERSION="$(PYTHONDONTWRITEBYTECODE=1 python3 -B -c "import sys; sys.path.insert(0, '$ROOT/lib'); from ownframework_loop import __version__; print(__version__)")"
+grep -F "VERSION=$EXPECTED_VERSION" "$TMP/install.txt" >/dev/null
 
 test -x "$OFLOOP_BIN_DIR/ofloop"
 "$OFLOOP_BIN_DIR/ofloop" adapter show codex | tee "$TMP/adapter.json"

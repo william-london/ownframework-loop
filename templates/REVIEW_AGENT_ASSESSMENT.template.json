@@ -1,0 +1,53 @@
+{
+  "_comment": "Deterministic skeleton for REVIEW_AGENT_ASSESSMENT.json. The reviewer agent MUST copy this file verbatim into the per-run scratch path, then fill in the values. Every required field name, casing, and enum value is part of the contract — do not rename, lowercase, or omit. The deterministic review finalizer refuses any assessment that does not validate against this shape.",
+
+  "schema": "ownframework-loop-review-agent-assessment/v1",
+  "run_id": "<fill: run-...Z-...>",
+
+  "candidate_sha_claimed": "<fill: exact 40-hex candidate SHA from BUILD_RECEIPT.json.candidate_sha>",
+  "reviewer_worktree": "<fill: absolute path to .worktrees/ownframework-loop/<run-id>/reviewer>",
+  "reviewer_head_before": "<fill: same value as candidate_sha_claimed; if it differs, emit STALE_CANDIDATE>",
+  "reviewer_head_after":  "<fill: same value as candidate_sha_claimed; if it differs, BLOCK with the changed paths>",
+
+  "packet_sha256_recomputed": "<fill: recompute sha256 of WORK_PACKET.md bytes; must equal approval.packet_sha256>",
+  "approval_sha256":          "<fill: approval_artifact_sha256(approval_doc) — see approval.py>",
+
+  "scope_findings":      [],
+  "protected_findings":  [],
+  "secret_findings":     [],
+
+  "validation_results": [
+    {
+      "label":            "<fill: e.g. 'pytest' or 'go test'>",
+      "command":          "<fill: exact command string>",
+      "exit_code":        0,
+      "stdout":           "<fill: truncated output, max 64 KiB>",
+      "stderr":           "",
+      "duration_seconds": 0.0
+    }
+  ],
+
+  "acceptance_results": [
+    {
+      "id":      "AC-1",
+      "result":  "pass",
+      "evidence": "<one sentence: which file/line/test proves it>"
+    }
+  ],
+
+  "non_goal_results": [
+    {
+      "id":      "NG-1",
+      "result":  "preserved",
+      "evidence": "<one sentence: why no violation>"
+    }
+  ],
+
+  "findings": [],
+
+  "recommended_verdict": "APPROVED",
+  "_recommended_verdict_enum": "Must be exactly one of: APPROVED | CHANGES_REQUESTED | BLOCKED | HUMAN_REVIEW_REQUIRED | STALE_CANDIDATE — UPPERCASE, no quotes mismatch.",
+
+  "reviewer_identity": "of-reviewer",
+  "timestamp":         "<fill: UTC ISO 8601, e.g. 2026-08-28T02:39:00Z>"
+}

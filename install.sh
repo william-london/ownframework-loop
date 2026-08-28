@@ -158,5 +158,41 @@ echo "# file_count=$ENTRY_COUNT" >> "$MANIFEST.tmp"
 mv "$MANIFEST.tmp" "$MANIFEST"
 log "payload manifest written: $MANIFEST (with $ENTRY_COUNT files)"
 
+# --- operator CLI shim ---
+# Install a small symlink so a fresh operator shell can invoke `ofloop`
+# directly without `cd`-ing to the source tree or relying on the
+# user's shell config to know about the source bin directory. Idempotent
+# and refuses to overwrite an unmanaged binary at the same path.
+#
+# Default shim location: $HOME/.local/bin (already on most shells' PATH
+# via Homebrew / platform defaults). Override with OFLOOP_SHIM_DIR.
+# Set OFLOOP_SKIP_SHIM=1 to skip this step entirely.
+if [[ "${OFLOOP_SKIP_SHIM:-0}" == "1" ]]; then
+    log "operator CLI shim: skipped (OFLOOP_SKIP_SHIM=1)"
+else
+    SHIM_DIR="${OFLOOP_SHIM_DIR:-$HOME/.local/bin}"
+    SHIM_PATH="$SHIM_DIR/ofloop"
+    SHIM_TARGET="$EXPECTED_CACHE/bin/ofloop"
+    if [[ ! -d "$SHIM_DIR" ]]; then
+        log "operator CLI shim: creating $SHIM_DIR"
+        mkdir -p "$SHIM_DIR"
+    fi
+    if [[ -L "$SHIM_PATH" ]]; then
+        EXISTING_TARGET="$(readlink "$SHIM_PATH" 2>/dev/null || true)"
+        if [[ "$EXISTING_TARGET" == "$SHIM_TARGET" ]]; then
+            log "operator CLI shim: already installed at $SHIM_PATH"
+        else
+            log "operator CLI shim: replacing stale shim $SHIM_PATH -> $SHIM_TARGET (was $EXISTING_TARGET)"
+            ln -sfn "$SHIM_TARGET" "$SHIM_PATH"
+        fi
+    elif [[ -e "$SHIM_PATH" ]]; then
+        log "operator CLI shim: refusing to overwrite unmanaged binary at $SHIM_PATH"
+        log "  remove it manually, or set OFLOOP_SHIM_DIR to a different location"
+    else
+        ln -sfn "$SHIM_TARGET" "$SHIM_PATH"
+        log "operator CLI shim: created $SHIM_PATH -> $SHIM_TARGET"
+    fi
+fi
+
 log "managed install complete; reload with: claude /reload-plugins"
 exit 0

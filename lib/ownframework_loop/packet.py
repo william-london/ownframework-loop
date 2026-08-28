@@ -139,6 +139,114 @@ def validate_packet_metadata(meta: dict[str, Any]) -> list[str]:
     return errors
 
 
+# Known project root files (no slash, dotfile or extension-bearing filename
+# at the repository root). When a NEW_REPOSITORY or TRACKED_CONTRACT work
+# unit's prose names one of these, allowed_paths MUST include it.
+# Conservative list — only files that are unambiguous root-level artifacts.
+KNOWN_ROOT_FILES: frozenset[str] = frozenset(
+    {
+        "pyproject.toml", "setup.py", "setup.cfg",
+        "README.md", "README.rst", "README",
+        "LICENSE", "LICENSE.md", "LICENSE.txt",
+        "CHANGELOG.md", "CONTRIBUTING.md",
+        "Makefile", "Dockerfile",
+        ".gitignore", ".dockerignore", ".editorconfig", ".env.example",
+        "package.json", "Cargo.toml", "go.mod",
+    }
+)
+
+
+# Regex matching a literal root-level file reference in prose. Matches:
+#   pyproject.toml      (alphanum/underscore/dot/dash, with extension)
+#   .gitignore          (leading-dot dotfile)
+#   README              (alphanum word with no extension)
+# Conservative — only matches tokens that look like filenames (no slash).
+_ROOT_FILE_TOKEN_RE = re.compile(
+    r"(?<![\w./-])"                                # not preceded by word/slash/dot/dash
+    r"(?:"                                          # one of:
+    r"\.[A-Za-z][A-Za-z0-9_.-]{0,32}"               #   .dotfile (e.g. .gitignore)
+    r"|[A-Za-z][A-Za-z0-9_-]{0,32}\.[A-Za-z0-9]{1,5}"  # name.ext (e.g. pyproject.toml)
+    r"|[A-Z][A-Z0-9_-]{1,32}"                       # ALL-CAPS (e.g. README, LICENSE, Makefile)
+    r")"
+    r"(?![\w./-])"                                  # not followed by word/slash/dot/dash
+)
+
+
+def _extract_root_file_references(meta: dict[str, Any]) -> set[str]:
+    """Return root-level filename tokens referenced in work_units + title.
+
+    Conservative: only tokens in KNOWN_ROOT_FILES are returned (this avoids
+    false positives like 'should', 'http', 'make', etc.). The caller decides
+    whether to surface a missing-from-allowed_paths error.
+    """
+    tokens: set[str] = set()
+    blob_parts: list[str] = []
+    title = meta.get("title")
+    if isinstance(title, str):
+        blob_parts.append(title)
+    for wu in meta.get("work_units") or []:
+        if not isinstance(wu, dict):
+            continue
+        for k in ("title", "scope"):
+            v = wu.get(k)
+            if isinstance(v, str):
+                blob_parts.append(v)
+    blob = "\n ".join(blob_parts)
+    for m in _ROOT_FILE_TOKEN_RE.finditer(blob):
+        tok = m.group(0)
+        if tok in KNOWN_ROOT_FILES:
+            tokens.add(tok)
+    return tokens
+
+
+def validate_packet_self_consistency(meta: dict[str, Any]) -> list[str]:
+    """Detect packet prose vs allowed_paths drift.
+
+    A packet is self-inconsistent when its work_units or title reference a
+    known project root file (e.g. ``pyproject.toml``) but ``allowed_paths``
+    does not include it. This is the deterministic pre-approval check that
+    prevents the v0.4.1 commissioning failure where a generated packet
+    required ``pyproject.toml`` (WU-1 prose) yet ``allowed_paths`` only
+    listed ``src/`` and ``tests/``.
+
+    Returns a list of human-readable error strings (empty == consistent).
+    Run this AFTER ``validate_packet_metadata``; it does not duplicate
+    schema-level checks.
+    """
+    errors: list[str] = []
+    allowed = list(meta.get("allowed_paths") or [])
+    protected = list(meta.get("protected_paths") or [])
+    if not isinstance(allowed, list):
+        return errors  # covered by validate_packet_metadata
+    referenced = _extract_root_file_references(meta)
+    if not referenced:
+        return errors
+    allowed_norm = {p.rstrip("/") for p in allowed if isinstance(p, str)}
+    protected_norm = {p.rstrip("/") for p in protected if isinstance(p, str)}
+    missing = sorted(t for t in referenced if t not in allowed_norm and t not in protected_norm)
+    if missing:
+        names = ", ".join(missing)
+        errors.append(
+            "work_units reference root-level file(s) that are NOT in allowed_paths "
+            f"or protected_paths: {names}. Either include them in allowed_paths "
+            "or remove the reference from work_units prose."
+        )
+    return errors
+
+
+def validate_packet_for_approval(meta: dict[str, Any]) -> list[str]:
+    """Combined metadata + self-consistency validator used pre-approval.
+
+    Returns the concatenated errors of ``validate_packet_metadata`` and
+    ``validate_packet_self_consistency``. Use this in every code path that
+    admits a packet into the lifecycle (spec approve, build finalize,
+    review finalize, approval binding).
+    """
+    errors: list[str] = list(validate_packet_metadata(meta))
+    errors.extend(validate_packet_self_consistency(meta))
+    return errors
+
+
 def is_approved(meta: dict[str, Any]) -> bool:
     """V1 packet-shape approval check — legacy fields only.
 

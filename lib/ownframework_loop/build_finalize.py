@@ -228,7 +228,7 @@ def finalize_build(
 
     # 1. Validate approval binding.
     meta, _ = packet_mod.parse_packet_file(packet_path)
-    errors = packet_mod.validate_packet_metadata(meta)
+    errors = packet_mod.validate_packet_for_approval(meta)
     if errors:
         raise RuntimeError("packet invalid: " + "; ".join(errors))
     approval_doc = approval.load_approval(canonical_repo, run_id)

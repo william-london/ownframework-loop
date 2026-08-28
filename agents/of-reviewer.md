@@ -86,36 +86,71 @@ do not test them.
 
 ## Output
 
-Write your verdict via the CLI:
+**v0.4.2: the assessment shape is deterministic. Use the skeleton helper.**
+
+Step 1 — Materialize a schema-conformant skeleton at the run scratch path:
 
 ```
-ofloop review write-verdict <canonical_repo> <run-id> <verdict.json>
+ofloop review assessment-skeleton <canonical_repo> <run-id> [--overwrite]
 ```
 
-The verdict JSON MUST validate against `schemas/review-verdict.schema.json`
-and contain:
+This writes `REVIEW_AGENT_ASSESSMENT.json` with EVERY required top-level
+key, the exact casing, and the run-scoped fields pre-populated from
+`BUILD_RECEIPT.json` and `APPROVAL.json`. The skeleton is sourced from
+the bundled template `templates/REVIEW_AGENT_ASSESSMENT.template.json`
+in the source tree (the CLI auto-discovers it from the install root).
 
-- `schema: ownframework-loop-review-verdict/v1`
-- `run_id`, `packet_sha256`
-- `candidate_sha_reviewed` — the exact SHA you reviewed
-- `baseline_sha`
-- `review_pass_number`
-- `verdict` — one of `APPROVED`, `CHANGES_REQUESTED`, `BLOCKED`,
-  `HUMAN_REVIEW_REQUIRED`, `STALE_CANDIDATE`
-- `acceptance_results[]` — one entry per `AC-N`, with `result` of `pass`,
-  `fail`, or `inconclusive`, plus `evidence`
-- `non_goal_results[]` — one entry per `NG-N`, with `result` of `preserved`,
-  `violated`, or `inconclusive`, plus `evidence`
-- `findings[]` — each with stable `finding_id`, `severity`,
-  `classification` (`must_fix` or `advisory`), `title`, `description`,
-  optional `file` and `line`
-- `tracked_mutation_check` — `{detected, before_sha, after_sha, changed_paths}`
-- `stale_sha_check` — `{sha_match, receipt_match, packet_hash_match}`
-- `reviewer_identity: "of-reviewer"`
-- `timestamp`
-- `recommended_next_state` — one of `APPROVED`, `CHANGES_REQUESTED`,
-  `BLOCKED`, `READY_FOR_REVIEW`, `STOPPED`
-- `escalation_recommended` (boolean) and optional `escalation_reason`
+Step 2 — Fill in ONLY the runtime-dependent values. Do NOT rename,
+remove, or add top-level keys. Do NOT lowercase any field name or any
+enum value. The deterministic review finalizer (`review_finalize.py`)
+will refuse any assessment that does not validate against the contract.
+
+Top-level fields you must fill in:
+
+- `validation_results[]` — one entry per required-validation command.
+  Each: `{label, command, exit_code, stdout, stderr, duration_seconds}`.
+- `acceptance_results[]` — one entry per `AC-N` in the packet. Each:
+  `{id: "AC-N", result: "pass" | "fail" | "inconclusive", evidence: "<…>"}`.
+- `non_goal_results[]` — one entry per `NG-N`. Each:
+  `{id: "NG-N", result: "preserved" | "violated" | "inconclusive", evidence: "<…>"}`.
+- `findings[]` — each: `{finding_id: "F-<slug>", severity: "critical" |
+  "high" | "medium" | "low" | "info", classification: "must_fix" |
+  "advisory", title: "<…>", description: "<…>", file?, line?}`.
+- `recommended_verdict` — EXACTLY one of: `APPROVED`, `CHANGES_REQUESTED`,
+  `BLOCKED`, `HUMAN_REVIEW_REQUIRED`, `STALE_CANDIDATE`. **UPPERCASE.**
+- `timestamp` — UTC ISO 8601, e.g. `2026-08-28T02:39:00Z`.
+
+Top-level fields you MUST NOT change:
+
+- `schema` — must remain `ownframework-loop-review-agent-assessment/v1`.
+- `run_id` — set by the skeleton.
+- `candidate_sha_claimed`, `reviewer_worktree`, `reviewer_head_before`,
+  `reviewer_head_after` — set by the skeleton from BUILD_RECEIPT. If
+  any of these drift between skeleton-write and assessment-write, STOP
+  and re-run the skeleton (or emit `STALE_CANDIDATE`).
+- `packet_sha256_recomputed` — must equal `approval.packet_sha256`.
+- `approval_sha256` — set by the skeleton.
+- `reviewer_identity` — must remain `"of-reviewer"`.
+- `scope_findings`, `protected_findings`, `secret_findings` — leave as
+  empty lists unless you have specific findings to record (with
+  stable finding_ids in `findings[]`).
+
+Step 3 — Submit the assessment:
+
+```
+ofloop review finalize <canonical_repo> <run-id> <path/to/REVIEW_AGENT_ASSESSMENT.json>
+```
+
+The deterministic finalizer independently verifies the candidate SHA,
+runs the validations, scans for secrets, classifies findings, and
+writes the authoritative `REVIEW_VERDICT.json` and the terminal state
+transition. The model cannot influence the finalizer's verdict on any
+of those checks.
+
+If your first-pass assessment is refused by the finalizer, do NOT
+hand-edit the JSON. Re-run `ofloop review assessment-skeleton
+--overwrite` and re-fill the runtime values. Manual JSON repair is
+a smell — the contract is the source of truth.
 
 ## What you inspect independently
 

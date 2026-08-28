@@ -65,6 +65,24 @@ as `bash bin/ofloop`.
    block must be valid JSON inside a fenced code block
    (```json ... ```). Follow `schemas/work-packet.schema.json` (V2).
    Do NOT depend on a YAML parser.
+
+   **Path-coverage contract (v0.4.2, mandatory).** Before writing the
+   packet, scan the mission text and your draft work units for any
+   literal root-level file references (e.g. `pyproject.toml`,
+   `setup.py`, `README.md`, `Makefile`, `Dockerfile`, `LICENSE`,
+   `.gitignore`). Every such reference MUST appear in `allowed_paths`.
+   If a work unit says "add a minimal `pyproject.toml`", then
+   `allowed_paths` MUST contain `"pyproject.toml"`. The CLI runs the
+   deterministic `validate_packet_self_consistency` check before
+   approval and will refuse approval if any root-level file referenced
+   in `work_units.title`/`work_units.scope`/packet `title` is missing
+   from `allowed_paths` and missing from `protected_paths`. The
+   `KNOWN_ROOT_FILES` whitelist in `lib/ownframework_loop/packet.py`
+   lists every recognized root file. Do NOT widen `allowed_paths` to
+   `"."` or any equivalent global pattern — that defeats the safety
+   net. If the work class is `NEW_REPOSITORY` and the implementation
+   language is Python, `pyproject.toml` is almost always required for
+   pytest discovery; include it in `allowed_paths` from the start.
 7. Never include `human_approved`, `approved_packet_sha256`, `approved_at`,
    or `approved_actor` inside the packet metadata. Approval is a separate
    artifact.

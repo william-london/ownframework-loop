@@ -322,7 +322,7 @@ def cmd_spec_approve(args: argparse.Namespace) -> None:
     if not packet_path.exists():
         _emit_error("WORK_PACKET.md missing", exit_code=2)
     meta, _ = packet_mod.parse_packet_file(packet_path)
-    errors = packet_mod.validate_packet_metadata(meta)
+    errors = packet_mod.validate_packet_for_approval(meta)
     if errors:
         _emit_error("packet invalid", exit_code=2, errors=errors)
     # v0.3.5 (AUD2-P0-1): actor is recorded as attribution only; it is
@@ -471,7 +471,7 @@ def _require_valid_approval(repo: Path, run_id: str) -> tuple[dict[str, Any], di
     if not packet_path.exists():
         raise RuntimeError("WORK_PACKET.md missing")
     meta, _ = packet_mod.parse_packet_file(packet_path)
-    errors = packet_mod.validate_packet_metadata(meta)
+    errors = packet_mod.validate_packet_for_approval(meta)
     if errors:
         raise RuntimeError("packet invalid: " + "; ".join(errors))
     approval_doc = approval.load_approval(repo, run_id)
@@ -917,6 +917,35 @@ def cmd_review_finalize(args: argparse.Namespace) -> None:
     })
 
 
+def cmd_review_assessment_skeleton(args: argparse.Namespace) -> None:
+    """Write a schema-conformant REVIEW_AGENT_ASSESSMENT.json skeleton.
+
+    v0.4.2: the deterministic review finalizer refuses any assessment whose
+    top-level shape does not match the contract. This subcommand materializes
+    a pre-shaped skeleton at the run scratch path so the reviewer agent only
+    fills in runtime-dependent values (acceptance_results, non_goal_results,
+    findings, validation_results, evidence, timestamp). Idempotent unless
+    --overwrite is supplied.
+    """
+    from . import assessment as assessment_mod
+    repo = _repo_path(args.repo)
+    try:
+        path = assessment_mod.write_skeleton(
+            repo,
+            args.run_id,
+            overwrite=bool(args.overwrite),
+        )
+    except RuntimeError as e:
+        _emit_error(str(e), exit_code=4)
+    print(json.dumps({
+        "ok": True,
+        "run_id": args.run_id or path.parent.name,
+        "assessment_path": str(path),
+        "shape": "ownframework-loop-review-agent-assessment/v1",
+        "overwritten": bool(args.overwrite),
+    }, indent=2))
+
+
 def cmd_review_marker(args: argparse.Namespace) -> None:
     repo = _repo_path(args.repo)
     cur = state_mod.load(repo, args.run_id)
@@ -1257,6 +1286,15 @@ def _build_parser() -> argparse.ArgumentParser:
     r_mk.add_argument("repo")
     r_mk.add_argument("run_id")
     r_mk.set_defaults(func=cmd_review_marker)
+    r_skel = rev_sub.add_parser(
+        "assessment-skeleton",
+        help="write a deterministic REVIEW_AGENT_ASSESSMENT.json skeleton at the run scratch path",
+    )
+    r_skel.add_argument("repo")
+    r_skel.add_argument("run_id", nargs="?", default=None)
+    r_skel.add_argument("--overwrite", action="store_true",
+                       help="overwrite an existing REVIEW_AGENT_ASSESSMENT.json")
+    r_skel.set_defaults(func=cmd_review_assessment_skeleton)
 
     # loop run — single-mode unattended orchestrator
     from . import orchestrator as orch_mod

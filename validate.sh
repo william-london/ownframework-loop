@@ -72,7 +72,7 @@ Usage:
 Source root : OFLOOP_VALIDATE_SOURCE_ROOT (or repo of this script)
 Install root: explicit path argument, OR the active managed install
               reported by \`claude plugin list --json\` for
-              of-loop@ownframework-local (enabled, non-empty installPath).
+              of-loop@ownframework (enabled, non-empty installPath).
 
 The legacy path \$HOME/.claude/skills/of-loop is a rolled-back backup
 artifact and is NEVER auto-selected as the active install.
@@ -92,7 +92,7 @@ ok() { echo "  PASS: $*"; }
 bad() { echo "  FAIL: $*"; exit 1; }
 
 # Active installed-cache discovery: query the Claude Code plugin registry
-# for the single enabled of-loop@ownframework-local entry. The legacy
+# for the single enabled of-loop@ownframework entry. The legacy
 # skills-dir copy is intentionally NOT consulted as a fallback; if the
 # registry has no live entry, bare --installed fails closed with a clear
 # error.
@@ -116,7 +116,7 @@ matches = []
 for e in data or []:
     if not isinstance(e, dict):
         continue
-    if e.get("id") != "of-loop@ownframework-local":
+    if e.get("id") != "of-loop@ownframework":
         continue
     if not e.get("enabled", False):
         continue
@@ -153,7 +153,7 @@ if [[ "$INSTALLED_MODE" -eq 1 ]]; then
     # to the legacy skills-dir path or to OFLOOP_VALIDATE_INSTALL_ROOT.
     discovered="$(discover_active_install_path || true)"
     if [[ -z "$discovered" ]]; then
-      bad "bare --installed requested but claude plugin list --json returned no enabled of-loop@ownframework-local entry; re-run install.sh"
+      bad "bare --installed requested but claude plugin list --json returned no enabled of-loop@ownframework entry; re-run install.sh"
     fi
     ROOT="$discovered"
     echo "  discovered active install: $ROOT"

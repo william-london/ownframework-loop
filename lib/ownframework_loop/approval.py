@@ -318,7 +318,7 @@ def request_human_approval(
             "an interactive terminal."
         )
     meta, _ = packet_mod.parse_packet_file(packet_path)
-    errors = packet_mod.validate_packet_metadata(meta)
+    errors = packet_mod.validate_packet_for_approval(meta)
     if errors:
         raise RuntimeError("packet invalid: " + "; ".join(errors))
     if not git_checks.is_git_repo(canonical_repo):

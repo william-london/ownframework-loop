@@ -35,7 +35,7 @@ echo "Test 1: $SELF_BASENAME source mentions live registry discovery"
 out1=$(PYTHONDONTWRITEBYTECODE=1 python3 -B - "$SELF_PATH" <<'PYCHK'
 import sys, pathlib
 src = pathlib.Path(sys.argv[1]).read_text()
-ok = "claude plugin list --json" in src and "of-loop@ownframework-local" in src
+ok = "claude plugin list --json" in src and "of-loop@ownframework" in src
 print("OK" if ok else "MISSING")
 PYCHK
 )
@@ -138,7 +138,7 @@ out6=$(PYTHONDONTWRITEBYTECODE=1 python3 -B - <<'PY'
 import json
 raw = """
 [
-  {"id": "of-loop@ownframework-local", "version": "0.3.3", "scope": "user", "enabled": true, "installPath": "/tmp/expected/cache/0.3.3"},
+  {"id": "of-loop@ownframework", "version": "0.3.3", "scope": "user", "enabled": true, "installPath": "/tmp/expected/cache/0.3.3"},
   {"id": "of-loop.rolled-back@skills-dir", "version": "unknown", "scope": "user", "enabled": false, "installPath": ""}
 ]
 """
@@ -147,7 +147,7 @@ matches = []
 for e in data or []:
     if not isinstance(e, dict):
         continue
-    if e.get("id") != "of-loop@ownframework-local":
+    if e.get("id") != "of-loop@ownframework":
         continue
     if not e.get("enabled", False):
         continue
@@ -170,7 +170,7 @@ out7=$(PYTHONDONTWRITEBYTECODE=1 python3 -B - <<'PY'
 import json
 data = json.loads("[]")
 matches = [e["installPath"] for e in data if isinstance(e, dict)
-           and e.get("id") == "of-loop@ownframework-local"
+           and e.get("id") == "of-loop@ownframework"
            and e.get("enabled")
            and e.get("installPath")]
 print("MATCH_COUNT=", len(matches))
@@ -197,7 +197,7 @@ import json, subprocess
 r = subprocess.run(["claude", "plugin", "list", "--json"], capture_output=True, text=True)
 data = json.loads(r.stdout) if r.stdout.strip() else []
 matches = [e["installPath"] for e in data if isinstance(e, dict)
-           and e.get("id") == "of-loop@ownframework-local"
+           and e.get("id") == "of-loop@ownframework"
            and e.get("enabled")
            and e.get("installPath")]
 print("MATCH_COUNT=", len(matches))

@@ -343,7 +343,7 @@ Codex is required only when evaluating the experimental Codex adapter.
 
 ## Project status
 
-Current release line: **0.4.1**
+Current release line: **0.4.2**
 
 v0.4.0 introduced the agent-neutral core/adapter contract with Claude Code as the stable reference adapter and Codex as an experimental named adapter.
 
