@@ -170,7 +170,11 @@ builder worktree is left intact for manual inspection.
 
 ## PROGRAM mode (v3 packets)
 
-For v3 packets with `execution_mode: program`, the spec skill ONLY
-handles packet writing and APPROVAL.json (as usual). The check-point
-graph is materialized by `ofloop program init` and consumed by
-`ofloop loop run`. The spec skill never writes program state itself.
+A validated PROGRAM packet uses the same single human TTY approval. On successful
+approval, the CLI materializes the frozen checkpoint graph exactly once before
+transitioning to `READY_TO_BUILD`. The operator does not run a second
+`program init` command in normal operation.
+
+The Claude-native builder/reviewer lanes consume and advance that deterministic
+PROGRAM state. The spec skill never advances checkpoints and never performs
+approval itself.
