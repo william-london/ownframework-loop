@@ -248,6 +248,85 @@ def _terminal(run_id: str, state: str) -> dict[str, Any]:
     }
 
 
+def _repair_context_from_verdict(
+    *,
+    canonical_repo: Path,
+    run_id: str,
+    state_doc: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Return deterministic reviewer feedback for a fresh repair builder.
+
+    The context is non-authoritative transport. REVIEW_VERDICT.json remains
+    authoritative. A fresh semantic worker should not have to rediscover the
+    prior review failure from scratch, but it remains free to reason about the
+    best coherent fix.
+    """
+    repair_round = int(state_doc.get("repair_round") or 0)
+    if repair_round <= 0:
+        return None
+
+    path = state_mod.run_dir(canonical_repo, run_id) / "REVIEW_VERDICT.json"
+    verdict = _load_json_file(path)
+    if verdict is None:
+        raise DispatchError(
+            "repair context unavailable: REVIEW_VERDICT.json missing or invalid"
+        )
+    if verdict.get("schema") != "ownframework-loop-review-verdict/v2":
+        raise DispatchError("repair context unavailable: review verdict schema mismatch")
+    if verdict.get("run_id") != run_id:
+        raise DispatchError("repair context unavailable: review verdict run_id mismatch")
+
+    # PROGRAM repair counters are cumulative. A later checkpoint can have a
+    # non-zero top-level repair counter while the latest verdict is APPROVED.
+    # Only an exact latest CHANGES_REQUESTED verdict creates repair context.
+    if verdict.get("verdict") != "CHANGES_REQUESTED":
+        return None
+
+    reviewed_sha = str(verdict.get("candidate_sha_reviewed") or "")
+    state_candidate = str(state_doc.get("last_candidate_sha") or "")
+    if not reviewed_sha or (state_candidate and reviewed_sha != state_candidate):
+        raise DispatchError(
+            "repair context unavailable: reviewed candidate does not match state"
+        )
+
+    acceptance = verdict.get("acceptance_results") or []
+    non_goals = verdict.get("non_goal_results") or []
+    findings = verdict.get("findings") or []
+    validations = verdict.get("validation_results") or []
+    if not all(
+        isinstance(items, list)
+        for items in (acceptance, non_goals, findings, validations)
+    ):
+        raise DispatchError("repair context unavailable: review evidence shape invalid")
+
+    failed_acceptance = [
+        item for item in acceptance
+        if isinstance(item, dict)
+        and str(item.get("result") or "").lower() != "pass"
+    ]
+    violated_non_goals = [
+        item for item in non_goals
+        if isinstance(item, dict)
+        and str(item.get("result") or "").lower() != "preserved"
+    ]
+
+    return {
+        "schema": "ownframework-loop-repair-context/v1",
+        "source": str(path.resolve(strict=False)),
+        "repair_round": repair_round,
+        "review_pass_number": verdict.get("review_pass_number"),
+        "candidate_sha_reviewed": reviewed_sha,
+        "verdict": "CHANGES_REQUESTED",
+        "failure_reason": verdict.get("failure_reason") or "",
+        "failed_acceptance_results": failed_acceptance,
+        "violated_non_goal_results": violated_non_goals,
+        "findings": findings,
+        "validation_results": validations,
+        "escalation_recommended": bool(verdict.get("escalation_recommended")),
+        "escalation_reason": verdict.get("escalation_reason"),
+    }
+
+
 def claim_next(*, canonical_repo: Path, run_id: str) -> dict[str, Any]:
     """Return exactly one BUILD, REVIEW, WAIT, or TERMINAL work order.
 
@@ -311,6 +390,11 @@ def claim_next(*, canonical_repo: Path, run_id: str) -> dict[str, Any]:
                 return _terminal(run_id, state)
 
             if state in BUILD_STATES:
+                repair_context = _repair_context_from_verdict(
+                    canonical_repo=repo,
+                    run_id=run_id,
+                    state_doc=cur,
+                )
                 claim = _run_cli(
                     ["build", "claim", str(repo), run_id, "--actor", "ofloop-supervisor"]
                 )
@@ -331,6 +415,7 @@ def claim_next(*, canonical_repo: Path, run_id: str) -> dict[str, Any]:
                     "canonical_repo": str(repo),
                     "worktree": prep.get("builder_worktree"),
                     "semantic_path": semantic_path,
+                    "repair_context": repair_context,
                     "claim": claim,
                     "prepare": prep,
                 }

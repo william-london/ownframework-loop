@@ -33,6 +33,7 @@ SHA1="$(git -C "$WT1" rev-parse HEAD)"
 
 BUILD1="$("$OFLOOP" dispatch claim "$REP" "$RUN_ID")"
 assert_eq "$(printf '%s' "$BUILD1" | jq -r '.decision')" "BUILD" "round 1 dispatch BUILD"
+assert_eq "$(printf '%s' "$BUILD1" | jq -r '.repair_context')" "null" "initial build has no repair context"
 BSEM1="$(printf '%s' "$BUILD1" | jq -r '.semantic_path')"
 python3 - "$BSEM1" "$RUN_ID" <<'PY'
 import json, sys
@@ -92,6 +93,11 @@ SHA2="$(git -C "$WT2" rev-parse HEAD)"
 BUILD2="$("$OFLOOP" dispatch claim "$REP" "$RUN_ID")"
 assert_eq "$(printf '%s' "$BUILD2" | jq -r '.decision')" "BUILD" "round 2 dispatch BUILD"
 assert_eq "$(printf '%s' "$BUILD2" | jq -r '.replayed')" "false" "round 2 is a fresh pass, not a replay"
+assert_eq "$(printf '%s' "$BUILD2" | jq -r '.repair_context.schema')" "ownframework-loop-repair-context/v1" "repair context schema"
+assert_eq "$(printf '%s' "$BUILD2" | jq -r '.repair_context.verdict')" "CHANGES_REQUESTED" "repair context carries prior verdict"
+assert_eq "$(printf '%s' "$BUILD2" | jq -r '.repair_context.candidate_sha_reviewed')" "$SHA1" "repair context exact reviewed SHA"
+assert_eq "$(printf '%s' "$BUILD2" | jq -r '.repair_context.failed_acceptance_results[0].id')" "AC-1" "repair context carries failed AC"
+assert_eq "$(printf '%s' "$BUILD2" | jq -r '.repair_context.findings[0].summary')" "needs repair" "repair context carries reviewer finding"
 BSEM2="$(printf '%s' "$BUILD2" | jq -r '.semantic_path')"
 python3 - "$BSEM2" "$RUN_ID" <<'PY'
 import json, sys
