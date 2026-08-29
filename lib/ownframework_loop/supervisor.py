@@ -24,9 +24,42 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import dispatch as dispatch_mod, runtime_env, state as state_mod
+from . import dispatch as dispatch_mod, packet as packet_mod, runtime_env, state as state_mod
 
 SCHEMA = "ownframework-loop-supervisor/v1"
+DEFAULT_SEMANTIC_TIMEOUT_SECONDS = 3600
+DEFAULT_CLAUDE_ALLOWED_TOOLS = "Read,Edit,Write,Bash,Glob,Grep,WebSearch,WebFetch,Agent,Skill"
+
+
+def resolve_semantic_timeout(
+    packet_meta: dict[str, Any] | None,
+    supervisor_timeout_seconds: int | float = 0,
+) -> int:
+    """Resolve one semantic-pass timeout.
+
+    Packet max_pass_runtime_seconds is authority. A positive supervisor
+    timeout may narrow it operationally but cannot widen it. With neither,
+    preserve the historical one-hour fallback.
+    """
+    rb = (packet_meta or {}).get("risk_budget") or {}
+    packet_limit = 0
+    if isinstance(rb, dict):
+        try:
+            packet_limit = int(rb.get("max_pass_runtime_seconds") or 0)
+        except (TypeError, ValueError):
+            packet_limit = 0
+    try:
+        operational = int(supervisor_timeout_seconds or 0)
+    except (TypeError, ValueError):
+        operational = 0
+    if packet_limit > 0 and operational > 0:
+        return min(packet_limit, operational)
+    if packet_limit > 0:
+        return packet_limit
+    if operational > 0:
+        return operational
+    return DEFAULT_SEMANTIC_TIMEOUT_SECONDS
+
 ACTIVE = {"QUEUED", "BACKOFF", "RUNNING"}
 TERMINAL = {"DONE", "QUARANTINED"}
 
@@ -997,6 +1030,48 @@ def _job_dict(row: sqlite3.Row, db: Path) -> dict[str, Any]:
             or d.get("last_failure_class")
             or d.get("last_error")
         )
+    now = time.time()
+    worker_started = float(d.get("worker_started_at") or 0.0)
+    execution_started = float(d.get("execution_started_at") or 0.0)
+    updated_at = float(d.get("updated_at") or 0.0)
+    d["worker_elapsed_seconds"] = (
+        max(0.0, now - worker_started)
+        if str(d.get("status") or "") == "RUNNING" and worker_started > 0
+        else 0.0
+    )
+    d["execution_elapsed_seconds"] = (
+        max(0.0, now - execution_started) if execution_started > 0 else 0.0
+    )
+    d["seconds_since_job_update"] = (
+        max(0.0, now - updated_at) if updated_at > 0 else 0.0
+    )
+    log_activity: dict[str, Any] = {}
+    for label, key in (("stdout", "worker_stdout_path"), ("stderr", "worker_stderr_path")):
+        raw_path = str(d.get(key) or "")
+        if not raw_path:
+            continue
+        try:
+            st = Path(raw_path).stat()
+            log_activity[label] = {
+                "path": raw_path,
+                "bytes": int(st.st_size),
+                "mtime": float(st.st_mtime),
+                "seconds_since_write": max(0.0, now - float(st.st_mtime)),
+            }
+        except OSError:
+            log_activity[label] = {"path": raw_path, "unavailable": True}
+    d["worker_log_activity"] = log_activity
+    try:
+        packet_path = state_mod.run_dir(
+            Path(str(row["repo"])), str(row["run_id"])
+        ) / "WORK_PACKET.md"
+        pmeta, _ = packet_mod.parse_packet_file(packet_path)
+        rb = pmeta.get("risk_budget") or {}
+        d["packet_max_pass_runtime_seconds"] = int(
+            rb.get("max_pass_runtime_seconds") or 0
+        ) if isinstance(rb, dict) else 0
+    except Exception:
+        d["packet_max_pass_runtime_seconds"] = 0
     try:
         d.update(_core_snapshot(Path(str(row["repo"])), str(row["run_id"])))
     except Exception as exc:
@@ -1122,7 +1197,7 @@ class ClaudeCodeRunner:
         extra = shlex.split(os.environ.get("OFLOOP_CLAUDE_EXTRA_ARGS", ""))
         allowed_tools = os.environ.get(
             "OFLOOP_CLAUDE_ALLOWED_TOOLS",
-            "Read,Edit,Write,Bash,Glob,Grep,WebSearch,WebFetch",
+            DEFAULT_CLAUDE_ALLOWED_TOOLS,
         )
         # Pipe the prompt via stdin. Passing it as an argv string lets Claude
         # CLI mis-parse leading `---` (YAML frontmatter in the role file) as
@@ -1707,7 +1782,7 @@ def _ensure_execution_started(conn: sqlite3.Connection, job_id: int) -> float:
     return float(row[0])
 
 
-def run_one(*, db_path: Path | None = None, timeout_seconds: int = 3600) -> dict[str, Any]:
+def run_one(*, db_path: Path | None = None, timeout_seconds: int = 0) -> dict[str, Any]:
     """Execute at most one semantic BUILD/REVIEW action."""
     db = db_path or default_db_path()
     with _connect(db) as conn:
@@ -1897,9 +1972,17 @@ def run_one(*, db_path: Path | None = None, timeout_seconds: int = 3600) -> dict
                 conn, job=job, role=role
             )
 
+            packet_path = state_mod.run_dir(
+                Path(str(job["repo"])), str(job["run_id"])
+            ) / "WORK_PACKET.md"
+            packet_meta, _ = packet_mod.parse_packet_file(packet_path)
+            semantic_timeout_seconds = resolve_semantic_timeout(
+                packet_meta, timeout_seconds
+            )
+
             result = _runner(str(job["runner"])).run(
                 work_order,
-                timeout_seconds=timeout_seconds,
+                timeout_seconds=semantic_timeout_seconds,
                 on_start=lambda pid, started_role: _set_worker_pid(
                     conn,
                     int(job["id"]),
@@ -2089,7 +2172,7 @@ def serve(
     *,
     db_path: Path | None = None,
     poll_seconds: float = 2.0,
-    timeout_seconds: int = 3600,
+    timeout_seconds: int = 0,
     once: bool = False,
 ) -> dict[str, Any] | None:
     """Run the durable execution clock. Idle iterations make zero model calls."""

@@ -1724,7 +1724,10 @@ def _build_parser() -> argparse.ArgumentParser:
     s_srv = sup_sub.add_parser("serve", help="run the durable supervisor execution clock")
     s_srv.add_argument("--db", default=None)
     s_srv.add_argument("--poll-seconds", type=float, default=2.0)
-    s_srv.add_argument("--timeout-seconds", type=int, default=3600)
+    s_srv.add_argument(
+        "--timeout-seconds", type=int, default=0,
+        help="optional per-pass narrowing ceiling; <=0 uses packet max_pass_runtime_seconds or 3600s fallback",
+    )
     s_srv.add_argument("--once", action="store_true")
     s_srv.set_defaults(func=cmd_supervisor_serve)
     s_res = sup_sub.add_parser(

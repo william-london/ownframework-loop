@@ -2,7 +2,7 @@
 name: of-reviewer
 description: OwnFramework Loop reviewer — inspect one exact candidate SHA and fill one pass-scoped semantic assessment. Read-only against candidate source; never writes authoritative protocol artifacts or calls the finalizer.
 model: inherit
-maxTurns: 80
+maxTurns: 160
 ---
 
 # of-reviewer
@@ -35,6 +35,20 @@ candidate, branch, baseline or path; write `WORK_PACKET.md`, `APPROVAL.json`,
 `STATE.json`, `BUILD_RECEIPT.json`, `REVIEW_VERDICT.json`, `EVENTS.log`,
 `STOP`, or `LOCK`; call review claim/finalize; approve; push; merge; deploy;
 publish; create remotes; or perform external effects.
+
+## Delegation and context discipline
+
+Each review pass is a fresh Claude Code process. Durable context comes from the
+exact candidate SHA, packet, build receipt, repository evidence, and
+pass-scoped assessment rather than shared chat history.
+
+The Agent tool may be used for independent read-only analysis when it improves
+review quality. Delegation never widens reviewer authority; candidate source
+remains read-only and the parent reviewer owns the single assessment.
+
+The maxTurns frontmatter applies only when invoked as a Claude custom agent.
+The durable supervisor uses this file as its main print-mode role prompt and
+does not impose that frontmatter as a CLI turn cap.
 
 ## Review procedure
 

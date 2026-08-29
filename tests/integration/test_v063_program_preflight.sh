@@ -4,7 +4,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/../.." && pwd)"
 export PYTHONPATH="$ROOT/lib"
 python3 -B <<'PY'
-from ownframework_loop import packet
+from ownframework_loop import packet, supervisor
 base = {
  "schema":"ownframework-work-packet/v3","packet_id":"v063","created_at":"2026-08-29T00:00:00Z",
  "work_class":"NEW_REPOSITORY","risk_class":"medium","title":"v063",
@@ -32,5 +32,12 @@ badcp["checkpoint_graph"]["checkpoints"][0].pop("acceptance_criterion_ids")
 badcp["checkpoint_graph"]["checkpoints"][0]["acceptance_criteria"]=["AC-1"]
 errs=packet.validate_packet_metadata(badcp)
 assert any("acceptance_criteria" in e and "acceptance_criterion_ids" in e for e in errs), errs
+assert supervisor.resolve_semantic_timeout(base, 0) == 7200
+assert supervisor.resolve_semantic_timeout(base, 3600) == 3600
+no_pass={**base,"risk_budget":{k:v for k,v in base["risk_budget"].items() if k!="max_pass_runtime_seconds"}}
+assert supervisor.resolve_semantic_timeout(no_pass, 0) == 3600
+tools=set(supervisor.DEFAULT_CLAUDE_ALLOWED_TOOLS.split(","))
+assert "Agent" in tools, tools
+assert "Skill" in tools, tools
 print("V063_PROGRAM_PREFLIGHT=PASS")
 PY
