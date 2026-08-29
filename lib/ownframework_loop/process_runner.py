@@ -68,26 +68,31 @@ def run_bounded(
 
 
 def process_group_drained(pgid: int) -> bool:
-    """Return true when the caller's process group has no foreign members.
+    """Return true when the caller has no live direct descendants.
 
-    "Drained" means: every process currently sharing the caller's pgid is
-    the caller itself. Anything else in our pgid is a leaked child that
-    joined our session and never exited — the gate's `start_new_session`
-    children all carry their own pgid, so any other-pgid process in our
-    pgid is unambiguously a leak. The previous implementation flagged our
-    OWN pgid as not-drained whenever our shell session had any siblings
-    (which it always does on a real CI runner or developer machine),
-    making the probe useless on any environment with a populated shell.
+    "Drained" of leaked children means: every process whose parent is the
+    caller has already exited. The gate uses `run_bounded` with
+    `start_new_session=True` for every subprocess, so each child becomes
+    the leader of its own session and process group and is reaped by the
+    gate via `proc.communicate()`. Any process still alive with ppid ==
+    our pid at the end of the gate would therefore be a leak.
+
+    Earlier implementations probed the caller's own pgid, but on any
+    real shell (CI runner or developer terminal) the caller's pgid is
+    shared with the launching shell and its other children, which made
+    that probe useless on populated environments. Direct-parent probing
+    is the narrowest correct check for "did we leak a child?".
 
     FAIL-CLOSED: any probe failure (non-zero returncode, empty stdout,
-    TimeoutExpired, FileNotFoundError, OSError, missing our own PID in
-    the ps listing) returns False. "Unknown process state" is NEVER
-    collapsed to "drained" — the release gate and recovery paths must
-    prove the tree is empty rather than assume it.
+    TimeoutExpired, FileNotFoundError, OSError) returns False. "Unknown
+    process state" is NEVER collapsed to "drained" — the release gate
+    and recovery paths must prove the tree is empty rather than assume
+    it.
     """
+    _ = pgid  # accepted for API symmetry; the drain semantics is by-ppid
     try:
         result = subprocess.run(
-            ["ps", "-axo", "pid=,pgid="],
+            ["ps", "-axo", "pid=,ppid="],
             capture_output=True, text=True, check=False, timeout=5,
         )
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
@@ -95,21 +100,17 @@ def process_group_drained(pgid: int) -> bool:
     if result.returncode != 0 or not result.stdout.strip():
         return False
     own_pid = os.getpid()
-    foreign_members = 0
+    live_children = 0
     for line in result.stdout.splitlines():
         line = line.strip()
         if not line:
             continue
         try:
-            pid_str, pgid_str = line.split()
-            pid = int(pid_str)
-            pgrp = int(pgid_str)
+            pid_str, ppid_str = line.split()
+            ppid = int(ppid_str)
         except (ValueError, IndexError):
-            # Skip malformed lines rather than mis-classify them as leaks.
             continue
-        if pgrp != pgid:
+        if ppid != own_pid:
             continue
-        if pid == own_pid:
-            continue
-        foreign_members += 1
-    return foreign_members == 0
+        live_children += 1
+    return live_children == 0
