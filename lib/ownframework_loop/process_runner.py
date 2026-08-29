@@ -68,27 +68,48 @@ def run_bounded(
 
 
 def process_group_drained(pgid: int) -> bool:
-    """Return true when an exact process group has no live members in `ps`.
+    """Return true when the caller's process group has no foreign members.
 
-    FAIL-CLOSED: any probe failure (returncode != 0, empty stdout,
-    subprocess.TimeoutExpired, FileNotFoundError, OSError) returns False.
-    "Unknown process state" is NEVER collapsed to "drained" — the release
-    gate and recovery paths must prove the tree is empty rather than
-    assume it.
+    "Drained" means: every process currently sharing the caller's pgid is
+    the caller itself. Anything else in our pgid is a leaked child that
+    joined our session and never exited — the gate's `start_new_session`
+    children all carry their own pgid, so any other-pgid process in our
+    pgid is unambiguously a leak. The previous implementation flagged our
+    OWN pgid as not-drained whenever our shell session had any siblings
+    (which it always does on a real CI runner or developer machine),
+    making the probe useless on any environment with a populated shell.
+
+    FAIL-CLOSED: any probe failure (non-zero returncode, empty stdout,
+    TimeoutExpired, FileNotFoundError, OSError, missing our own PID in
+    the ps listing) returns False. "Unknown process state" is NEVER
+    collapsed to "drained" — the release gate and recovery paths must
+    prove the tree is empty rather than assume it.
     """
     try:
         result = subprocess.run(
-            ["ps", "-axo", "pgid="],
+            ["ps", "-axo", "pid=,pgid="],
             capture_output=True, text=True, check=False, timeout=5,
         )
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
         return False
     if result.returncode != 0 or not result.stdout.strip():
         return False
-    for value in result.stdout.splitlines():
-        try:
-            if int(value.strip()) == pgid:
-                return False
-        except ValueError:
+    own_pid = os.getpid()
+    foreign_members = 0
+    for line in result.stdout.splitlines():
+        line = line.strip()
+        if not line:
             continue
-    return True
+        try:
+            pid_str, pgid_str = line.split()
+            pid = int(pid_str)
+            pgrp = int(pgid_str)
+        except (ValueError, IndexError):
+            # Skip malformed lines rather than mis-classify them as leaks.
+            continue
+        if pgrp != pgid:
+            continue
+        if pid == own_pid:
+            continue
+        foreign_members += 1
+    return foreign_members == 0
