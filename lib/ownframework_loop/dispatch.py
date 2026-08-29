@@ -387,7 +387,36 @@ def finalize_work_order(work_order: dict[str, Any]) -> dict[str, Any]:
     semantic = Path(str(work_order.get("semantic_path") or "")).resolve(strict=False)
     if not repo or not run_id or not semantic.is_file():
         raise DispatchError("semantic result is missing; refusing finalization")
-    ready, reason = semantic_result_ready(work_order)
+
+    # Finalization identity is deterministic core truth, not caller authority.
+    # The supervisor may pass the original prepared work order, while the CLI
+    # intentionally carries only repo/run/decision/semantic_path. Hydrate any
+    # omitted identity from canonical protocol/runtime state and reject drift.
+    repo_path = Path(repo).resolve(strict=False)
+    hydrated = dict(work_order)
+    if decision == "BUILD":
+        expected_wt = util.builder_worktree(repo_path, run_id).resolve(strict=False)
+        supplied_wt = str(hydrated.get("worktree") or "")
+        if supplied_wt and Path(supplied_wt).resolve(strict=False) != expected_wt:
+            raise DispatchError("builder worktree identity drift before finalization")
+        hydrated["worktree"] = str(expected_wt)
+    else:
+        expected_wt = util.reviewer_worktree(repo_path, run_id).resolve(strict=False)
+        supplied_wt = str(hydrated.get("worktree") or "")
+        if supplied_wt and Path(supplied_wt).resolve(strict=False) != expected_wt:
+            raise DispatchError("reviewer worktree identity drift before finalization")
+        hydrated["worktree"] = str(expected_wt)
+
+        state = state_mod.load_verified(repo_path, run_id)
+        expected_candidate = str(state.get("last_candidate_sha") or "")
+        if not expected_candidate:
+            raise DispatchError("review candidate missing from protocol state")
+        supplied_candidate = str(hydrated.get("candidate_sha") or "")
+        if supplied_candidate and supplied_candidate != expected_candidate:
+            raise DispatchError("review candidate identity drift before finalization")
+        hydrated["candidate_sha"] = expected_candidate
+
+    ready, reason = semantic_result_ready(hydrated)
     if not ready:
         raise DispatchError(
             f"semantic result is incomplete ({reason}); refusing finalization"
