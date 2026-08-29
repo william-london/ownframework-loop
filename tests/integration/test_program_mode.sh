@@ -33,13 +33,18 @@ packet = {
         "execution_order": ["CP-1", "CP-2"],
         "checkpoints": [
             {"id": "CP-1", "title": "foundation", "scope": "create first feature slice",
-             "depends_on": [], "risk_budget": {"max_build_passes": 2, "max_review_passes": 2, "max_repair_rounds": 1}},
+             "depends_on": [], "acceptance_criterion_ids": ["AC-FOUNDATION"],
+             "risk_budget": {"max_build_passes": 2, "max_review_passes": 2, "max_repair_rounds": 1}},
             {"id": "CP-2", "title": "extension", "scope": "extend same candidate",
-             "depends_on": ["CP-1"], "risk_budget": {"max_build_passes": 2, "max_review_passes": 2, "max_repair_rounds": 1}}
+             "depends_on": ["CP-1"], "acceptance_criterion_ids": ["AC-EXTENSION"],
+             "risk_budget": {"max_build_passes": 2, "max_review_passes": 2, "max_repair_rounds": 1}}
         ]
     },
     "promotion_policy": "human_gate",
-    "acceptance_criteria": [{"id": "AC-1", "text": "program reaches APPROVED"}],
+    "acceptance_criteria": [
+        {"id": "AC-FOUNDATION", "text": "foundation checkpoint is correct"},
+        {"id": "AC-EXTENSION", "text": "extension checkpoint is correct"}
+    ],
     "non_goals": [],
     "allowed_paths": ["src/"],
     "protected_paths": [".ownframework-loop/"],
@@ -61,32 +66,34 @@ p.write_text(fence + "json\n" + json.dumps(packet, sort_keys=True) + "\n" + fenc
 PY
 
 fill_build_semantic() {
-  local semantic="$1" label="$2"
-  python3 - "$semantic" "$label" <<'PY'
+  local semantic="$1" label="$2" ac_id="$3"
+  python3 - "$semantic" "$label" "$ac_id" <<'PY'
 import json, sys
 from pathlib import Path
 p = Path(sys.argv[1])
 label = sys.argv[2]
+ac_id = sys.argv[3]
 d = json.loads(p.read_text())
 d["summary"] = f"synthetic semantic builder completed {label}"
 d["outcome_requested"] = "candidate_ready"
 d["unit_ids_completed"] = ["UNIT-1"]
-d["acceptance_addressed"] = ["AC-1"]
+d["acceptance_addressed"] = [ac_id]
 d["notes"] = "provider-free PROGRAM dispatch integration proof"
 p.write_text(json.dumps(d, indent=2, sort_keys=True) + "\n")
 PY
 }
 
 fill_review_semantic() {
-  local semantic="$1" label="$2"
-  python3 - "$semantic" "$label" <<'PY'
+  local semantic="$1" label="$2" ac_id="$3"
+  python3 - "$semantic" "$label" "$ac_id" <<'PY'
 import json, sys
 from pathlib import Path
 p = Path(sys.argv[1])
 label = sys.argv[2]
+ac_id = sys.argv[3]
 d = json.loads(p.read_text())
 d["validation_results"] = []
-d["acceptance_results"] = [{"id": "AC-1", "result": "pass", "evidence": f"{label} exact-SHA review"}]
+d["acceptance_results"] = [{"id": ac_id, "result": "pass", "evidence": f"{label} exact-SHA review"}]
 d["non_goal_results"] = []
 d["findings"] = []
 d["recommended_verdict"] = "APPROVED"
@@ -95,7 +102,7 @@ PY
 }
 
 run_checkpoint() {
-  local cp="$1" value="$2"
+  local cp="$1" value="$2" ac_id="$3"
 
   set +e
   BUILD_ORDER="$("$OFLOOP" dispatch claim "$REPO" "$RUN_ID" 2>&1)"
@@ -104,6 +111,7 @@ run_checkpoint() {
   [[ "$BUILD_RC" -eq 0 ]] || fail "$cp dispatch BUILD command failed rc=$BUILD_RC output=$BUILD_ORDER"
   assert_eq "$(printf '%s' "$BUILD_ORDER" | jq -r '.decision')" "BUILD" "$cp dispatch BUILD"
   assert_eq "$(printf '%s' "$BUILD_ORDER" | jq -r '.prepare.cp_id')" "$cp" "$cp build identity"
+  assert_eq "$(printf '%s' "$BUILD_ORDER" | jq -r '.acceptance_criterion_ids[0]')" "$ac_id" "$cp BUILD scoped AC"
 
   WT="$(printf '%s' "$BUILD_ORDER" | jq -r '.worktree')"
   BSEM="$(printf '%s' "$BUILD_ORDER" | jq -r '.semantic_path')"
@@ -118,7 +126,7 @@ PY
   git -C "$WT" add src/program_feature.py
   git -C "$WT" commit -m "test: $cp program candidate" >/dev/null
 
-  fill_build_semantic "$BSEM" "$cp"
+  fill_build_semantic "$BSEM" "$cp" "$ac_id"
   set +e
   BUILD_FINALIZE_OUT="$("$OFLOOP" dispatch finalize "$REPO" "$RUN_ID" BUILD "$BSEM" 2>&1)"
   BUILD_FINALIZE_RC=$?
@@ -128,13 +136,17 @@ PY
 
   REVIEW_ORDER="$("$OFLOOP" dispatch claim "$REPO" "$RUN_ID")"
   assert_eq "$(printf '%s' "$REVIEW_ORDER" | jq -r '.decision')" "REVIEW" "$cp dispatch REVIEW"
+  assert_eq "$(printf '%s' "$REVIEW_ORDER" | jq -r '.checkpoint_id')" "$cp" "$cp REVIEW checkpoint identity"
+  assert_eq "$(printf '%s' "$REVIEW_ORDER" | jq -r '.acceptance_criterion_ids[0]')" "$ac_id" "$cp REVIEW scoped AC"
   RSEM="$(printf '%s' "$REVIEW_ORDER" | jq -r '.semantic_path')"
   assert_file_exists "$RSEM" "$cp reviewer semantic skeleton exists"
-  fill_review_semantic "$RSEM" "$cp"
+  fill_review_semantic "$RSEM" "$cp" "$ac_id"
   "$OFLOOP" dispatch finalize "$REPO" "$RUN_ID" REVIEW "$RSEM" >/dev/null
+  assert_eq "$(jq -r '.checkpoint_id' "$REPO/.ownframework-loop/$RUN_ID/REVIEW_VERDICT.json")" "$cp" "$cp verdict checkpoint"
+  assert_eq "$(jq -r '.expected_acceptance_criterion_ids[0]' "$REPO/.ownframework-loop/$RUN_ID/REVIEW_VERDICT.json")" "$ac_id" "$cp verdict scoped AC"
 }
 
-run_checkpoint "CP-1" "one"
+run_checkpoint "CP-1" "one" "AC-FOUNDATION"
 python3 - "$REPO" "$RUN_ID" <<'PY'
 import json, sys
 from pathlib import Path
@@ -145,7 +157,7 @@ assert [x["id"] for x in s["program"]["finalized_checkpoints"]] == ["CP-1"], s["
 print("PASS CP-1 advanced deterministically to CP-2")
 PY
 
-run_checkpoint "CP-2" "two"
+run_checkpoint "CP-2" "two" "AC-EXTENSION"
 TERMINAL="$("$OFLOOP" dispatch claim "$REPO" "$RUN_ID")"
 assert_eq "$(printf '%s' "$TERMINAL" | jq -r '.decision')" "TERMINAL" "PROGRAM dispatch terminal"
 assert_eq "$(printf '%s' "$TERMINAL" | jq -r '.state')" "APPROVED" "PROGRAM terminal APPROVED"
@@ -161,6 +173,32 @@ assert [x["id"] for x in prog["finalized_checkpoints"]] == ["CP-1", "CP-2"], pro
 assert prog["cumulative_counters"]["build_pass_count"] == 2, prog
 assert prog["cumulative_counters"]["review_pass_count"] == 2, prog
 print("PASS PROGRAM finalized CP-1 and CP-2 exactly once")
+PY
+
+python3 - "$REPO/.ownframework-loop/$RUN_ID/WORK_PACKET.md" <<'PY'
+import copy, json, re, sys
+from pathlib import Path
+from ownframework_loop import program
+text = Path(sys.argv[1]).read_text()
+meta = json.loads(re.search(r"```json\s*\n(.*?)\n```", text, re.S).group(1))
+assert program.validate_checkpoint_graph(meta) == [], program.validate_checkpoint_graph(meta)
+
+legacy = copy.deepcopy(meta)
+for cp in legacy["checkpoint_graph"]["checkpoints"]:
+    cp.pop("acceptance_criterion_ids", None)
+assert program.validate_checkpoint_graph(legacy) == [], program.validate_checkpoint_graph(legacy)
+
+partial = copy.deepcopy(meta)
+partial["checkpoint_graph"]["checkpoints"][1].pop("acceptance_criterion_ids")
+errs = program.validate_checkpoint_graph(partial)
+assert any("every checkpoint must declare" in e for e in errs), errs
+
+unknown = copy.deepcopy(meta)
+unknown["checkpoint_graph"]["checkpoints"][1]["acceptance_criterion_ids"] = ["AC-NOT-REAL"]
+errs = program.validate_checkpoint_graph(unknown)
+assert any("unknown ids" in e for e in errs), errs
+assert any("do not cover packet AC ids" in e for e in errs), errs
+print("PASS PROGRAM checkpoint acceptance scoping validation")
 PY
 
 echo "PROGRAM_MODE_DISPATCH_TEST=PASS"

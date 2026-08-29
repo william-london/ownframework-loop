@@ -21,8 +21,14 @@ This skill is a host adapter over the deterministic ofloop core.
 2. Inspect only enough repository context to draft an accurate bounded packet.
 3. Use ofloop spec new <repo> "<mission>" to create the run.
 4. Draft WORK_PACKET.md using the repository schema and packet conventions.
-5. Validate the packet shape with the supported validator.
-6. Return to the operator:
+5. For PROGRAM packets with checkpoint-specific outcomes, keep the complete
+   mission acceptance contract at top level and assign it deterministically
+   with each checkpoint's `acceptance_criterion_ids`. If any checkpoint uses
+   scoped AC ids, every checkpoint must declare a non-empty list and the union
+   must cover every top-level AC id. Do not use `not_applicable` for future
+   checkpoint criteria merely to satisfy coverage.
+6. Validate the packet shape with the supported validator.
+7. Return to the operator:
 
    * repo
    * run_id
@@ -35,7 +41,7 @@ This skill is a host adapter over the deterministic ofloop core.
    * optional FOREGROUND / DEBUG builder: /loop /of-loop:build <run-id>
    * optional FOREGROUND / DEBUG reviewer: /loop /of-loop:review <run-id>
 
-7. STOP. Normal background operation is supervisor-first. Enqueue the run; an
+8. STOP. Normal background operation is supervisor-first. Enqueue the run; an
    already commissioned supervisor service consumes it, or `ofloop supervisor
    serve` may run the execution clock manually. The first actionable BUILD
    creates the immutable execution seal automatically.
