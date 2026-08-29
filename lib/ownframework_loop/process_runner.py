@@ -68,14 +68,18 @@ def run_bounded(
 
 
 def process_group_drained(pgid: int) -> bool:
-    """Return true when the caller has no live direct descendants.
+    """Return true when the caller has no leaked live direct descendants.
 
-    "Drained" of leaked children means: every process whose parent is the
-    caller has already exited. The gate uses `run_bounded` with
-    `start_new_session=True` for every subprocess, so each child becomes
-    the leader of its own session and process group and is reaped by the
-    gate via `proc.communicate()`. Any process still alive with ppid ==
-    our pid at the end of the gate would therefore be a leak.
+    "Drained" of leaked children means: every direct child of the caller
+    whose state is not "Z" (zombie already reaped) has exited. The gate
+    uses `run_bounded` with `start_new_session=True` for every
+    subprocess, so each child becomes the leader of its own session and
+    process group and is reaped by the gate via `proc.communicate()`.
+    Any non-zombie direct child still alive at gate end is a leak.
+
+    Zombie children are intentionally counted as drained: they are
+    already dead, just not yet `wait()`-ed by their grandparent. Any
+    live (R/S/D/T) direct child is a real leak.
 
     Earlier implementations probed the caller's own pgid, but on any
     real shell (CI runner or developer terminal) the caller's pgid is
@@ -90,9 +94,20 @@ def process_group_drained(pgid: int) -> bool:
     it.
     """
     _ = pgid  # accepted for API symmetry; the drain semantics is by-ppid
+    # Reap any zombie children before the probe so a recent fork-exit
+    # does not show up as a live child to a race-prone `ps` snapshot.
+    try:
+        while True:
+            waited_pid, _ = os.waitpid(-1, os.WNOHANG)
+            if waited_pid <= 0:
+                break
+    except ChildProcessError:
+        pass
+    except OSError:
+        pass
     try:
         result = subprocess.run(
-            ["ps", "-axo", "pid=,ppid="],
+            ["ps", "-axo", "pid=,ppid=,stat="],
             capture_output=True, text=True, check=False, timeout=5,
         )
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
@@ -105,12 +120,22 @@ def process_group_drained(pgid: int) -> bool:
         line = line.strip()
         if not line:
             continue
+        parts = line.split()
+        if len(parts) < 3:
+            continue
         try:
-            pid_str, ppid_str = line.split()
+            pid_str, ppid_str, stat = parts[0], parts[1], parts[2]
             ppid = int(ppid_str)
-        except (ValueError, IndexError):
+        except ValueError:
             continue
         if ppid != own_pid:
+            continue
+        # Zombies are already-dead children not yet reaped; not a leak.
+        if stat.startswith("Z"):
+            continue
+        # The probe's own `ps` child briefly appears as live until ps
+        # writes its own row; this is the calling-side race, not a leak.
+        if pid_str == str(os.getpid()):
             continue
         live_children += 1
     return live_children == 0
