@@ -104,16 +104,23 @@ def effective_cap(counter: str, packet: dict | None) -> int | None:
 
     Precedence (highest to lowest):
       1. packet.risk_budget.<key>            (operator declaration)
-      2. util.ABSOLUTE_BUDGET_CEILING.<key>  (physical envelope)
-      3. limits.MAX_*                        (emergency V1 fuse)
+      2. limits.MAX_*                        (default emergency fuse)
+      3. util.ABSOLUTE_BUDGET_CEILING.<key>  (fallback physical envelope)
+
+    A wider physical envelope exists so v3 PROGRAM packets can deliberately
+    fund many checkpoint-local passes. It must not silently widen an
+    unbudgeted legacy/single run.
     """
     pkt_cap = packet_lowers_cap(counter, packet)
     if pkt_cap is not None:
         return pkt_cap
+    default_cap = cap_for(counter)
+    if default_cap is not None:
+        return default_cap
     absolute = _absolute_cap(counter)
     if absolute is not None:
         return absolute
-    return cap_for(counter)
+    return None
 
 
 def enforce(counter: str, current_value: int, packet: dict | None) -> int:
