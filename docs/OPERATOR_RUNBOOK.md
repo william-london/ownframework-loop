@@ -23,6 +23,9 @@ Enqueue the existing run:
 ```bash
 ofloop supervisor enqueue /absolute/path/to/repo <run-id> \
   --max-cost-usd 25 \
+  --max-total-tokens 0 \
+  --max-infra-failures 3 \
+  --max-transient-failures 8 \
   --max-wall-seconds 28800
 ```
 
@@ -46,9 +49,27 @@ Operational status / morning evidence:
 ofloop supervisor status /absolute/path/to/repo <run-id>
 ```
 
-Status combines supervisor queue/retry/cost evidence with a read-only snapshot
-of core state, candidate SHA, pass counters, PROGRAM checkpoint, and latest
-review verdict.
+Status combines supervisor queue/retry/cost/token evidence with a read-only
+snapshot of core state, candidate SHA, pass counters, PROGRAM checkpoint, and
+latest review verdict. It also returns the five most recent semantic attempts,
+durable stdout/stderr paths, classified failure evidence, and a derived
+quarantine reason.
+
+Operational failures are not all treated alike:
+
+- deterministic dispatch/invariant and obvious runner-configuration failures
+  quarantine immediately;
+- ordinary unclassified runner failures use the bounded
+  `max_infra_failures` streak;
+- recognized transient provider/network failures use a separate, more generous
+  `max_transient_failures` streak with exponential backoff;
+- unknown model cost still fails closed;
+- unknown token usage fails closed only when the operator explicitly enabled a
+  token ceiling.
+
+Token telemetry is provider-reported operational evidence. The default
+`--max-total-tokens 0` disables the token ceiling, which is useful for
+subscription/prepaid runners where USD cost is not the scarce resource.
 
 On macOS, after commissioning the exact checkout:
 

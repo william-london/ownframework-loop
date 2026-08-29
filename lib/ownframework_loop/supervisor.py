@@ -93,8 +93,16 @@ def _connect(path: Path) -> sqlite3.Connection:
           status TEXT NOT NULL DEFAULT 'QUEUED',
           infra_failures INTEGER NOT NULL DEFAULT 0,
           max_infra_failures INTEGER NOT NULL DEFAULT 3,
+          transient_failures INTEGER NOT NULL DEFAULT 0,
+          max_transient_failures INTEGER NOT NULL DEFAULT 8,
           total_cost_usd REAL NOT NULL DEFAULT 0,
+          total_input_tokens INTEGER NOT NULL DEFAULT 0,
+          total_output_tokens INTEGER NOT NULL DEFAULT 0,
+          total_cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+          total_cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
           last_error TEXT,
+          last_failure_class TEXT,
+          last_failure_reason TEXT,
           next_attempt_at REAL NOT NULL DEFAULT 0,
           created_at REAL NOT NULL,
           updated_at REAL NOT NULL,
@@ -102,6 +110,7 @@ def _connect(path: Path) -> sqlite3.Connection:
           worker_started_at REAL,
           worker_role TEXT,
           max_total_cost_usd REAL NOT NULL DEFAULT 25,
+          max_total_tokens INTEGER NOT NULL DEFAULT 0,
           max_wall_seconds INTEGER NOT NULL DEFAULT 28800,
           execution_started_at REAL,
           worker_stdout_path TEXT,
@@ -127,7 +136,14 @@ def _connect(path: Path) -> sqlite3.Connection:
           stderr_path TEXT NOT NULL,
           returncode INTEGER,
           cost_usd REAL NOT NULL DEFAULT 0,
-          cost_accounted INTEGER NOT NULL DEFAULT 0
+          cost_accounted INTEGER NOT NULL DEFAULT 0,
+          input_tokens INTEGER NOT NULL DEFAULT 0,
+          output_tokens INTEGER NOT NULL DEFAULT 0,
+          cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+          cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
+          tokens_known INTEGER NOT NULL DEFAULT 0,
+          failure_class TEXT,
+          failure_reason TEXT
         );
         CREATE INDEX IF NOT EXISTS semantic_attempts_job_idx
           ON semantic_attempts(job_id, started_at);
@@ -148,9 +164,35 @@ def _connect(path: Path) -> sqlite3.Connection:
         "worker_stderr_path": "ALTER TABLE jobs ADD COLUMN worker_stderr_path TEXT",
         "worker_attempt_id": "ALTER TABLE jobs ADD COLUMN worker_attempt_id TEXT",
         "latest_attempt_id": "ALTER TABLE jobs ADD COLUMN latest_attempt_id TEXT",
+        "transient_failures": "ALTER TABLE jobs ADD COLUMN transient_failures INTEGER NOT NULL DEFAULT 0",
+        "max_transient_failures": "ALTER TABLE jobs ADD COLUMN max_transient_failures INTEGER NOT NULL DEFAULT 8",
+        "total_input_tokens": "ALTER TABLE jobs ADD COLUMN total_input_tokens INTEGER NOT NULL DEFAULT 0",
+        "total_output_tokens": "ALTER TABLE jobs ADD COLUMN total_output_tokens INTEGER NOT NULL DEFAULT 0",
+        "total_cache_read_tokens": "ALTER TABLE jobs ADD COLUMN total_cache_read_tokens INTEGER NOT NULL DEFAULT 0",
+        "total_cache_creation_tokens": "ALTER TABLE jobs ADD COLUMN total_cache_creation_tokens INTEGER NOT NULL DEFAULT 0",
+        "max_total_tokens": "ALTER TABLE jobs ADD COLUMN max_total_tokens INTEGER NOT NULL DEFAULT 0",
+        "last_failure_class": "ALTER TABLE jobs ADD COLUMN last_failure_class TEXT",
+        "last_failure_reason": "ALTER TABLE jobs ADD COLUMN last_failure_reason TEXT",
     }
     for name, statement in migrations.items():
         if name not in columns:
+            conn.execute(statement)
+
+    attempt_columns = {
+        str(row["name"])
+        for row in conn.execute("PRAGMA table_info(semantic_attempts)").fetchall()
+    }
+    attempt_migrations = {
+        "input_tokens": "ALTER TABLE semantic_attempts ADD COLUMN input_tokens INTEGER NOT NULL DEFAULT 0",
+        "output_tokens": "ALTER TABLE semantic_attempts ADD COLUMN output_tokens INTEGER NOT NULL DEFAULT 0",
+        "cache_read_tokens": "ALTER TABLE semantic_attempts ADD COLUMN cache_read_tokens INTEGER NOT NULL DEFAULT 0",
+        "cache_creation_tokens": "ALTER TABLE semantic_attempts ADD COLUMN cache_creation_tokens INTEGER NOT NULL DEFAULT 0",
+        "tokens_known": "ALTER TABLE semantic_attempts ADD COLUMN tokens_known INTEGER NOT NULL DEFAULT 0",
+        "failure_class": "ALTER TABLE semantic_attempts ADD COLUMN failure_class TEXT",
+        "failure_reason": "ALTER TABLE semantic_attempts ADD COLUMN failure_reason TEXT",
+    }
+    for name, statement in attempt_migrations.items():
+        if name not in attempt_columns:
             conn.execute(statement)
     conn.commit()
     return conn
@@ -291,6 +333,51 @@ def _parse_cost_from_durable_stdout(path: str | None) -> float | None:
     return value if math.isfinite(value) and value >= 0 else None
 
 
+def _parse_token_usage_from_durable_stdout(path: str | None) -> dict[str, int] | None:
+    """Recover provider-reported token usage from one durable JSON envelope.
+
+    Token telemetry is operational evidence, not engineering truth. Unknown
+    token usage is tolerated unless the operator explicitly enabled a token
+    ceiling for the job.
+    """
+    if not path:
+        return None
+    p = Path(path)
+    if not p.is_file():
+        return None
+    try:
+        payload = json.loads(p.read_text(encoding="utf-8", errors="replace"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    usage = payload.get("usage")
+    if not isinstance(usage, dict):
+        return None
+
+    keys = {
+        "input_tokens": "input_tokens",
+        "output_tokens": "output_tokens",
+        "cache_read_tokens": "cache_read_input_tokens",
+        "cache_creation_tokens": "cache_creation_input_tokens",
+    }
+    recovered: dict[str, int] = {}
+    observed = False
+    for out_key, source_key in keys.items():
+        if source_key not in usage:
+            recovered[out_key] = 0
+            continue
+        try:
+            value = int(usage.get(source_key) or 0)
+        except (TypeError, ValueError):
+            return None
+        if value < 0:
+            return None
+        recovered[out_key] = value
+        observed = True
+    return recovered if observed else None
+
+
 def _account_attempt_cost(
     conn: sqlite3.Connection,
     *,
@@ -299,10 +386,27 @@ def _account_attempt_cost(
     cost_usd: float,
     returncode: int | None = None,
     status_value: str = "COMPLETED",
+    input_tokens: int = 0,
+    output_tokens: int = 0,
+    cache_read_tokens: int = 0,
+    cache_creation_tokens: int = 0,
+    tokens_known: bool = False,
 ) -> float:
-    """Account one durable semantic attempt exactly once by attempt identity."""
+    """Account one durable semantic attempt exactly once by attempt identity.
+
+    Cost and token telemetry share the same attempt-identity fence so retries
+    can never double-count either resource.
+    """
     if not math.isfinite(float(cost_usd)) or float(cost_usd) < 0:
         raise RuntimeError("semantic attempt cost is not a finite non-negative value")
+    usage_values = (
+        int(input_tokens),
+        int(output_tokens),
+        int(cache_read_tokens),
+        int(cache_creation_tokens),
+    )
+    if any(value < 0 for value in usage_values):
+        raise RuntimeError("semantic attempt token usage must be non-negative")
     conn.execute("BEGIN IMMEDIATE")
     attempt = conn.execute(
         "SELECT * FROM semantic_attempts WHERE attempt_id=? AND job_id=?",
@@ -315,13 +419,35 @@ def _account_attempt_cost(
     if not already:
         conn.execute(
             """UPDATE semantic_attempts SET status=?, completed_at=?,
-               returncode=?, cost_usd=?, cost_accounted=1
+               returncode=?, cost_usd=?, cost_accounted=1,
+               input_tokens=?, output_tokens=?, cache_read_tokens=?,
+               cache_creation_tokens=?, tokens_known=?
                WHERE attempt_id=?""",
-            (status_value, time.time(), returncode, float(cost_usd), attempt_id),
+            (
+                status_value,
+                time.time(),
+                returncode,
+                float(cost_usd),
+                *usage_values,
+                1 if tokens_known else 0,
+                attempt_id,
+            ),
         )
         conn.execute(
-            "UPDATE jobs SET total_cost_usd=total_cost_usd+?, updated_at=? WHERE id=?",
-            (float(cost_usd), time.time(), int(job_id)),
+            """UPDATE jobs SET
+               total_cost_usd=total_cost_usd+?,
+               total_input_tokens=total_input_tokens+?,
+               total_output_tokens=total_output_tokens+?,
+               total_cache_read_tokens=total_cache_read_tokens+?,
+               total_cache_creation_tokens=total_cache_creation_tokens+?,
+               updated_at=?
+               WHERE id=?""",
+            (
+                float(cost_usd),
+                *usage_values,
+                time.time(),
+                int(job_id),
+            ),
         )
     else:
         conn.execute(
@@ -384,6 +510,33 @@ def _recover_stale_running(conn: sqlite3.Connection) -> int:
                     )
                     conn.commit()
                     continue
+                recovered_usage = _parse_token_usage_from_durable_stdout(
+                    attempt["stdout_path"]
+                )
+                if int(row["max_total_tokens"] or 0) > 0 and recovered_usage is None:
+                    conn.execute(
+                        """UPDATE semantic_attempts SET status='TOKENS_UNKNOWN',
+                           completed_at=? WHERE attempt_id=?""",
+                        (time.time(), attempt_id),
+                    )
+                    conn.execute(
+                        """UPDATE jobs SET status='QUARANTINED',
+                           last_error=?, last_failure_class='usage_unknown',
+                           last_failure_reason=?,
+                           worker_pid=NULL, worker_started_at=NULL,
+                           worker_role=NULL, next_attempt_at=0, updated_at=?
+                           WHERE id=?""",
+                        (
+                            "semantic worker died and token usage could not be recovered "
+                            "while a token ceiling is enabled",
+                            "token_usage_unknown_during_crash_recovery",
+                            time.time(),
+                            row["id"],
+                        ),
+                    )
+                    conn.commit()
+                    continue
+                usage = recovered_usage or {}
                 _account_attempt_cost(
                     conn,
                     job_id=int(row["id"]),
@@ -391,6 +544,11 @@ def _recover_stale_running(conn: sqlite3.Connection) -> int:
                     cost_usd=recovered_cost,
                     returncode=None,
                     status_value="RECOVERED",
+                    input_tokens=int(usage.get("input_tokens", 0)),
+                    output_tokens=int(usage.get("output_tokens", 0)),
+                    cache_read_tokens=int(usage.get("cache_read_tokens", 0)),
+                    cache_creation_tokens=int(usage.get("cache_creation_tokens", 0)),
+                    tokens_known=recovered_usage is not None,
                 )
 
         conn.execute(
@@ -421,7 +579,9 @@ def enqueue(
     runner: str = "claude-code",
     db_path: Path | None = None,
     max_infra_failures: int = 3,
+    max_transient_failures: int = 8,
     max_total_cost_usd: float = 25.0,
+    max_total_tokens: int = 0,
     max_wall_seconds: int = 28800,
 ) -> dict[str, Any]:
     state_mod.validate_run_id(run_id)
@@ -436,13 +596,17 @@ def enqueue(
             """
             INSERT INTO jobs
               (repo, run_id, runner, status, infra_failures,
-               max_infra_failures, total_cost_usd, next_attempt_at,
-               max_total_cost_usd, max_wall_seconds, created_at, updated_at)
-            VALUES (?, ?, ?, 'QUEUED', 0, ?, 0, 0, ?, ?, ?, ?)
+               max_infra_failures, transient_failures, max_transient_failures,
+               total_cost_usd, next_attempt_at,
+               max_total_cost_usd, max_total_tokens, max_wall_seconds,
+               created_at, updated_at)
+            VALUES (?, ?, ?, 'QUEUED', 0, ?, 0, ?, 0, 0, ?, ?, ?, ?, ?)
             ON CONFLICT(repo, run_id) DO UPDATE SET
               runner=excluded.runner,
               max_infra_failures=excluded.max_infra_failures,
+              max_transient_failures=excluded.max_transient_failures,
               max_total_cost_usd=excluded.max_total_cost_usd,
+              max_total_tokens=excluded.max_total_tokens,
               max_wall_seconds=excluded.max_wall_seconds,
               updated_at=excluded.updated_at
             """,
@@ -451,7 +615,9 @@ def enqueue(
                 run_id,
                 runner,
                 int(max_infra_failures),
+                int(max_transient_failures),
                 float(max_total_cost_usd),
+                int(max_total_tokens),
                 int(max_wall_seconds),
                 now,
                 now,
@@ -544,8 +710,35 @@ def _job_dict(row: sqlite3.Row, db: Path) -> dict[str, Any]:
                 ).fetchone()
             if ar is not None:
                 d["latest_attempt"] = dict(ar)
+            with sqlite3.connect(db, timeout=5) as history_conn:
+                history_conn.row_factory = sqlite3.Row
+                history = history_conn.execute(
+                    """SELECT attempt_id, role, status, started_at, completed_at,
+                              worker_pid, returncode, cost_usd, cost_accounted,
+                              input_tokens, output_tokens, cache_read_tokens,
+                              cache_creation_tokens, tokens_known,
+                              failure_class, failure_reason, stdout_path, stderr_path
+                       FROM semantic_attempts
+                       WHERE job_id=?
+                       ORDER BY started_at DESC
+                       LIMIT 5""",
+                    (int(row["id"]),),
+                ).fetchall()
+            d["attempt_history"] = [dict(item) for item in history]
         except sqlite3.Error as exc:
             d["attempt_snapshot_error"] = type(exc).__name__
+    d["observed_total_tokens"] = (
+        int(d.get("total_input_tokens") or 0)
+        + int(d.get("total_output_tokens") or 0)
+        + int(d.get("total_cache_read_tokens") or 0)
+        + int(d.get("total_cache_creation_tokens") or 0)
+    )
+    if str(d.get("status") or "") == "QUARANTINED":
+        d["quarantine_reason"] = (
+            d.get("last_failure_reason")
+            or d.get("last_failure_class")
+            or d.get("last_error")
+        )
     try:
         d.update(_core_snapshot(Path(str(row["repo"])), str(row["run_id"])))
     except Exception as exc:
@@ -597,6 +790,11 @@ class RunnerResult:
     stderr: str
     pid: int | None = None
     cost_known: bool = True
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cache_read_tokens: int = 0
+    cache_creation_tokens: int = 0
+    tokens_known: bool = False
 
 
 class ClaudeCodeRunner:
@@ -754,6 +952,11 @@ class ClaudeCodeRunner:
 
         cost = 0.0
         cost_known = False
+        input_tokens = 0
+        output_tokens = 0
+        cache_read_tokens = 0
+        cache_creation_tokens = 0
+        tokens_known = False
         parsed: dict[str, Any] | None = None
         try:
             data = json.loads(stdout_data or "")
@@ -764,6 +967,31 @@ class ClaudeCodeRunner:
                     if math.isfinite(candidate_cost) and candidate_cost >= 0:
                         cost = candidate_cost
                         cost_known = True
+                usage = data.get("usage")
+                if isinstance(usage, dict):
+                    token_keys = (
+                        ("input_tokens", "input_tokens"),
+                        ("output_tokens", "output_tokens"),
+                        ("cache_read_tokens", "cache_read_input_tokens"),
+                        ("cache_creation_tokens", "cache_creation_input_tokens"),
+                    )
+                    values: dict[str, int] = {}
+                    usage_valid = False
+                    for target, source in token_keys:
+                        if source not in usage:
+                            values[target] = 0
+                            continue
+                        candidate = int(usage.get(source) or 0)
+                        if candidate < 0:
+                            raise ValueError("negative token usage")
+                        values[target] = candidate
+                        usage_valid = True
+                    if usage_valid:
+                        input_tokens = values["input_tokens"]
+                        output_tokens = values["output_tokens"]
+                        cache_read_tokens = values["cache_read_tokens"]
+                        cache_creation_tokens = values["cache_creation_tokens"]
+                        tokens_known = True
         except (json.JSONDecodeError, TypeError, ValueError):
             parsed = None
 
@@ -789,6 +1017,11 @@ class ClaudeCodeRunner:
             stderr=(stderr_data or "")[-65536:],
             pid=int(proc.pid),
             cost_known=cost_known,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cache_read_tokens=cache_read_tokens,
+            cache_creation_tokens=cache_creation_tokens,
+            tokens_known=tokens_known,
         )
 
 
@@ -818,6 +1051,140 @@ def _runner(name: str):
             + ", ".join(sorted(_RUNNER_REGISTRY))
         )
     return _RUNNER_REGISTRY[name]
+
+
+def _classify_runner_failure(result: RunnerResult) -> tuple[str, str]:
+    """Classify operational runner failure without interpreting engineering truth.
+
+    Classification only selects retry/quarantine policy. It can never alter
+    packet authority, candidate identity, checkpoint state, or review verdict.
+    """
+    text = f"{result.stderr}\n{result.stdout}".lower()
+    if result.returncode == 124 or "runner timed out" in text:
+        return "timeout", "runner_timeout"
+
+    configuration_markers = (
+        "not authenticated",
+        "authentication failed",
+        "invalid api key",
+        "invalid_api_key",
+        "unauthorized",
+        "forbidden",
+        "login required",
+        "command not found",
+        "no such file or directory",
+    )
+    if result.returncode in {126, 127} or any(
+        marker in text for marker in configuration_markers
+    ):
+        return "configuration", "runner_configuration_failure"
+
+    transient_markers = (
+        "rate limit",
+        "rate-limit",
+        "too many requests",
+        "429",
+        "overloaded",
+        "capacity",
+        "temporarily unavailable",
+        "service unavailable",
+        "bad gateway",
+        "gateway timeout",
+        "502",
+        "503",
+        "504",
+        "connection reset",
+        "connection refused",
+        "network error",
+        "network unavailable",
+        "econnreset",
+        "etimedout",
+        "upstream",
+    )
+    if any(marker in text for marker in transient_markers):
+        return "transient", "runner_transient_failure"
+    return "runner", "runner_unclassified_failure"
+
+
+def _classify_exception(exc: BaseException) -> tuple[str, str]:
+    if isinstance(exc, dispatch_mod.DispatchError):
+        return "invariant", "dispatch_refused"
+    if isinstance(exc, (FileNotFoundError, PermissionError)):
+        return "configuration", type(exc).__name__
+    if isinstance(exc, (TimeoutError, ConnectionError)):
+        return "transient", type(exc).__name__
+    message = str(exc).lower()
+    if (
+        "not registered" in message
+        or "runner prompt missing" in message
+        or "prepared worktree missing" in message
+    ):
+        return "configuration", type(exc).__name__
+    return "supervisor", type(exc).__name__
+
+
+def _apply_failure_policy(
+    conn: sqlite3.Connection,
+    *,
+    job_id: int,
+    failure_class: str,
+    failure_reason: str,
+    detail: str,
+    total_cost_usd: float | None = None,
+) -> dict[str, Any]:
+    """Apply operational retry policy while leaving engineering state untouched."""
+    row = conn.execute("SELECT * FROM jobs WHERE id=?", (int(job_id),)).fetchone()
+    if row is None:
+        raise RuntimeError(f"supervisor job missing during failure policy: {job_id}")
+
+    immediate = failure_class in {
+        "configuration",
+        "invariant",
+        "usage_unknown",
+        "timeout_usage_unknown",
+    }
+    infra_failures = int(row["infra_failures"] or 0)
+    transient_failures = int(row["transient_failures"] or 0)
+
+    if failure_class == "transient":
+        transient_failures += 1
+        ceiling = int(row["max_transient_failures"] or 0)
+        quarantined = ceiling > 0 and transient_failures >= ceiling
+        streak = transient_failures
+        backoff = min(300.0, float(5 * (2 ** max(0, streak - 1))))
+    elif immediate:
+        quarantined = True
+        streak = 1
+        backoff = 0.0
+    else:
+        infra_failures += 1
+        ceiling = int(row["max_infra_failures"] or 0)
+        quarantined = ceiling > 0 and infra_failures >= ceiling
+        streak = infra_failures
+        backoff = min(300.0, float(5 * (2 ** max(0, streak - 1))))
+
+    status_value = "QUARANTINED" if quarantined else "BACKOFF"
+    next_attempt = 0.0 if quarantined else time.time() + backoff
+    _update_job(
+        conn,
+        int(job_id),
+        status_value=status_value,
+        infra_failures=infra_failures,
+        transient_failures=transient_failures,
+        total_cost_usd=total_cost_usd,
+        last_error=detail[-4000:],
+        last_failure_class=failure_class,
+        last_failure_reason=failure_reason,
+        next_attempt_at=next_attempt,
+    )
+    return {
+        "status": status_value,
+        "failure_class": failure_class,
+        "failure_reason": failure_reason,
+        "infra_failures": infra_failures,
+        "transient_failures": transient_failures,
+        "backoff_seconds": 0.0 if quarantined else backoff,
+    }
 
 
 def _take_next_job(conn: sqlite3.Connection) -> sqlite3.Row | None:
@@ -945,8 +1312,11 @@ def _update_job(
     *,
     status_value: str,
     infra_failures: int | None = None,
+    transient_failures: int | None = None,
     total_cost_usd: float | None = None,
     last_error: str | None = None,
+    last_failure_class: str | None = None,
+    last_failure_reason: str | None = None,
     next_attempt_at: float | None = None,
 ) -> None:
     row = conn.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
@@ -957,8 +1327,11 @@ def _update_job(
         UPDATE jobs SET
           status=?,
           infra_failures=?,
+          transient_failures=?,
           total_cost_usd=?,
           last_error=?,
+          last_failure_class=?,
+          last_failure_reason=?,
           next_attempt_at=?,
           worker_pid=NULL,
           worker_started_at=NULL,
@@ -970,8 +1343,11 @@ def _update_job(
         (
             status_value,
             int(row["infra_failures"] if infra_failures is None else infra_failures),
+            int(row["transient_failures"] if transient_failures is None else transient_failures),
             float(row["total_cost_usd"] if total_cost_usd is None else total_cost_usd),
             last_error,
+            last_failure_class,
+            last_failure_reason,
             float(row["next_attempt_at"] if next_attempt_at is None else next_attempt_at),
             time.time(),
             job_id,
@@ -1036,7 +1412,10 @@ def run_one(*, db_path: Path | None = None, timeout_seconds: int = 3600) -> dict
                     job["id"],
                     status_value="QUEUED",
                     infra_failures=0,
+                    transient_failures=0,
                     last_error=None,
+                    last_failure_class=None,
+                    last_failure_reason=None,
                     next_attempt_at=0,
                 )
                 return {
@@ -1054,6 +1433,13 @@ def run_one(*, db_path: Path | None = None, timeout_seconds: int = 3600) -> dict
             max_wall = int(job["max_wall_seconds"] or 0)
             max_cost = float(job["max_total_cost_usd"] or 0.0)
             spent = float(job["total_cost_usd"] or 0.0)
+            max_tokens = int(job["max_total_tokens"] or 0)
+            spent_tokens = (
+                int(job["total_input_tokens"] or 0)
+                + int(job["total_output_tokens"] or 0)
+                + int(job["total_cache_read_tokens"] or 0)
+                + int(job["total_cache_creation_tokens"] or 0)
+            )
             if max_wall > 0 and elapsed >= max_wall:
                 _update_job(
                     conn,
@@ -1087,6 +1473,29 @@ def run_one(*, db_path: Path | None = None, timeout_seconds: int = 3600) -> dict
                     "reason": "cost_ceiling",
                     "total_cost_usd": spent,
                     "max_total_cost_usd": max_cost,
+                }
+
+            if max_tokens > 0 and spent_tokens >= max_tokens:
+                _update_job(
+                    conn,
+                    job["id"],
+                    status_value="QUARANTINED",
+                    last_error=(
+                        f"operational token ceiling reached: "
+                        f"{spent_tokens} >= {max_tokens}"
+                    ),
+                    last_failure_class="usage_ceiling",
+                    last_failure_reason="token_ceiling",
+                    next_attempt_at=0,
+                )
+                return {
+                    "schema": SCHEMA,
+                    "ok": False,
+                    "action": "QUARANTINED",
+                    "job_id": job["id"],
+                    "reason": "token_ceiling",
+                    "observed_total_tokens": spent_tokens,
+                    "max_total_tokens": max_tokens,
                 }
 
             role = str(work_order.get("role") or "builder")
@@ -1123,6 +1532,16 @@ def run_one(*, db_path: Path | None = None, timeout_seconds: int = 3600) -> dict
                         "semantic worker completed without a trustworthy finite "
                         "total_cost_usd; refusing to assume zero cost"
                     ),
+                    last_failure_class=(
+                        "timeout_usage_unknown"
+                        if int(result.returncode) == 124
+                        else "usage_unknown"
+                    ),
+                    last_failure_reason=(
+                        "runner_timeout_cost_unknown"
+                        if int(result.returncode) == 124
+                        else "model_cost_unknown"
+                    ),
                     next_attempt_at=0,
                 )
                 return {
@@ -1134,6 +1553,42 @@ def run_one(*, db_path: Path | None = None, timeout_seconds: int = 3600) -> dict
                     "attempt_id": attempt_id,
                 }
 
+            if int(job["max_total_tokens"] or 0) > 0 and not result.tokens_known:
+                conn.execute(
+                    """UPDATE semantic_attempts SET status='TOKENS_UNKNOWN',
+                       completed_at=?, returncode=?,
+                       failure_class='usage_unknown',
+                       failure_reason='token_usage_unknown'
+                       WHERE attempt_id=? AND job_id=?""",
+                    (
+                        time.time(),
+                        int(result.returncode),
+                        attempt_id,
+                        int(job["id"]),
+                    ),
+                )
+                conn.commit()
+                _update_job(
+                    conn,
+                    job["id"],
+                    status_value="QUARANTINED",
+                    last_error=(
+                        "semantic worker completed without trustworthy token usage "
+                        "while a token ceiling is enabled"
+                    ),
+                    last_failure_class="usage_unknown",
+                    last_failure_reason="token_usage_unknown",
+                    next_attempt_at=0,
+                )
+                return {
+                    "schema": SCHEMA,
+                    "ok": False,
+                    "action": "QUARANTINED",
+                    "job_id": job["id"],
+                    "reason": "token_usage_unknown",
+                    "attempt_id": attempt_id,
+                }
+
             new_cost = _account_attempt_cost(
                 conn,
                 job_id=int(job["id"]),
@@ -1141,31 +1596,46 @@ def run_one(*, db_path: Path | None = None, timeout_seconds: int = 3600) -> dict
                 cost_usd=float(result.cost_usd),
                 returncode=int(result.returncode),
                 status_value="COMPLETED",
+                input_tokens=result.input_tokens,
+                output_tokens=result.output_tokens,
+                cache_read_tokens=result.cache_read_tokens,
+                cache_creation_tokens=result.cache_creation_tokens,
+                tokens_known=result.tokens_known,
             )
             if not result.ok:
-                failures = int(job["infra_failures"]) + 1
-                max_failures = int(job["max_infra_failures"])
-                quarantined = failures >= max_failures
-                backoff = min(300.0, float(5 * (2 ** max(0, failures - 1))))
-                _update_job(
+                failure_class, failure_reason = _classify_runner_failure(result)
+                detail = (
+                    f"runner rc={result.returncode}: "
+                    f"{result.stderr or result.stdout}"
+                )[-4000:]
+                conn.execute(
+                    """UPDATE semantic_attempts SET
+                       failure_class=?, failure_reason=?
+                       WHERE attempt_id=? AND job_id=?""",
+                    (
+                        failure_class,
+                        failure_reason,
+                        attempt_id,
+                        int(job["id"]),
+                    ),
+                )
+                conn.commit()
+                policy = _apply_failure_policy(
                     conn,
-                    job["id"],
-                    status_value="QUARANTINED" if quarantined else "BACKOFF",
-                    infra_failures=failures,
+                    job_id=int(job["id"]),
+                    failure_class=failure_class,
+                    failure_reason=failure_reason,
+                    detail=detail,
                     total_cost_usd=new_cost,
-                    last_error=(
-                        f"runner rc={result.returncode}: "
-                        f"{result.stderr or result.stdout}"
-                    )[-4000:],
-                    next_attempt_at=0 if quarantined else time.time() + backoff,
                 )
                 return {
                     "schema": SCHEMA,
                     "ok": False,
-                    "action": "QUARANTINED" if quarantined else "BACKOFF",
+                    "action": policy["status"],
                     "job_id": job["id"],
                     "returncode": result.returncode,
                     "cost_usd": result.cost_usd,
+                    **policy,
                 }
 
             finalized = dispatch_mod.finalize_work_order(work_order)
@@ -1174,8 +1644,11 @@ def run_one(*, db_path: Path | None = None, timeout_seconds: int = 3600) -> dict
                 job["id"],
                 status_value="QUEUED",
                 infra_failures=0,
+                transient_failures=0,
                 total_cost_usd=new_cost,
                 last_error=None,
+                last_failure_class=None,
+                last_failure_reason=None,
                 next_attempt_at=0,
             )
             return {
@@ -1187,10 +1660,6 @@ def run_one(*, db_path: Path | None = None, timeout_seconds: int = 3600) -> dict
                 "finalized": finalized,
             }
         except Exception as exc:
-            failures = int(job["infra_failures"]) + 1
-            max_failures = int(job["max_infra_failures"])
-            quarantined = failures >= max_failures
-            backoff = min(300.0, float(5 * (2 ** max(0, failures - 1))))
             # Completed semantic attempts are accounted transactionally by
             # attempt identity. If an exception happened before completion,
             # stale-worker recovery will inspect the durable attempt/output;
@@ -1201,21 +1670,23 @@ def run_one(*, db_path: Path | None = None, timeout_seconds: int = 3600) -> dict
             total_attempted_cost = float(
                 (current_cost_row[0] if current_cost_row is not None else 0.0) or 0.0
             )
-            _update_job(
+            failure_class, failure_reason = _classify_exception(exc)
+            detail = f"{type(exc).__name__}: {exc}"[-4000:]
+            policy = _apply_failure_policy(
                 conn,
-                job["id"],
-                status_value="QUARANTINED" if quarantined else "BACKOFF",
-                infra_failures=failures,
+                job_id=int(job["id"]),
+                failure_class=failure_class,
+                failure_reason=failure_reason,
+                detail=detail,
                 total_cost_usd=total_attempted_cost,
-                last_error=f"{type(exc).__name__}: {exc}"[-4000:],
-                next_attempt_at=0 if quarantined else time.time() + backoff,
             )
             return {
                 "schema": SCHEMA,
                 "ok": False,
-                "action": "QUARANTINED" if quarantined else "BACKOFF",
+                "action": policy["status"],
                 "job_id": job["id"],
                 "error": str(exc),
+                **policy,
             }
 
 
@@ -1266,7 +1737,9 @@ def resume(
     run_id: str,
     db_path: Path | None = None,
     max_infra_failures: int | None = None,
+    max_transient_failures: int | None = None,
     max_total_cost_usd: float | None = None,
+    max_total_tokens: int | None = None,
     max_wall_seconds: int | None = None,
     reset_execution_started_at: bool = True,
 ) -> dict[str, Any]:
@@ -1324,8 +1797,11 @@ def resume(
     sets = [
         "status='QUEUED'",
         "infra_failures=0",
+        "transient_failures=0",
         "next_attempt_at=0",
         "last_error=NULL",
+        "last_failure_class=NULL",
+        "last_failure_reason=NULL",
         "worker_pid=NULL",
         "worker_started_at=NULL",
         "worker_role=NULL",
@@ -1335,9 +1811,15 @@ def resume(
     if max_infra_failures is not None:
         sets.append("max_infra_failures=?")
         params.append(int(max_infra_failures))
+    if max_transient_failures is not None:
+        sets.append("max_transient_failures=?")
+        params.append(int(max_transient_failures))
     if max_total_cost_usd is not None:
         sets.append("max_total_cost_usd=?")
         params.append(float(max_total_cost_usd))
+    if max_total_tokens is not None:
+        sets.append("max_total_tokens=?")
+        params.append(int(max_total_tokens))
     if max_wall_seconds is not None:
         sets.append("max_wall_seconds=?")
         params.append(int(max_wall_seconds))

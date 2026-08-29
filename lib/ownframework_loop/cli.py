@@ -1636,7 +1636,9 @@ def _build_parser() -> argparse.ArgumentParser:
             runner=args.runner,
             db_path=Path(args.db).expanduser() if args.db else None,
             max_infra_failures=args.max_infra_failures,
+            max_transient_failures=args.max_transient_failures,
             max_total_cost_usd=args.max_cost_usd,
+            max_total_tokens=args.max_total_tokens,
             max_wall_seconds=args.max_wall_seconds,
         )
         _emit(out)
@@ -1665,8 +1667,12 @@ def _build_parser() -> argparse.ArgumentParser:
         kwargs = {}
         if getattr(args, "max_infra_failures", None) is not None:
             kwargs["max_infra_failures"] = int(args.max_infra_failures)
+        if getattr(args, "max_transient_failures", None) is not None:
+            kwargs["max_transient_failures"] = int(args.max_transient_failures)
         if getattr(args, "max_cost_usd", None) is not None:
             kwargs["max_total_cost_usd"] = float(args.max_cost_usd)
+        if getattr(args, "max_total_tokens", None) is not None:
+            kwargs["max_total_tokens"] = int(args.max_total_tokens)
         if getattr(args, "max_wall_seconds", None) is not None:
             kwargs["max_wall_seconds"] = int(args.max_wall_seconds)
         kwargs["reset_execution_started_at"] = not bool(args.keep_execution_clock)
@@ -1687,8 +1693,16 @@ def _build_parser() -> argparse.ArgumentParser:
     s_enq.add_argument("--db", default=None)
     s_enq.add_argument("--max-infra-failures", type=int, default=3)
     s_enq.add_argument(
+        "--max-transient-failures", type=int, default=8,
+        help="retry ceiling for classified transient provider/network failures; <=0 disables the ceiling",
+    )
+    s_enq.add_argument(
         "--max-cost-usd", type=float, default=25.0,
         help="operational model-cost ceiling per enqueued run; <=0 disables",
+    )
+    s_enq.add_argument(
+        "--max-total-tokens", type=int, default=0,
+        help="optional provider-reported token ceiling; <=0 disables",
     )
     s_enq.add_argument(
         "--max-wall-seconds", type=int, default=28800,
@@ -1715,7 +1729,9 @@ def _build_parser() -> argparse.ArgumentParser:
     s_res.add_argument("run_id")
     s_res.add_argument("--db", default=None)
     s_res.add_argument("--max-infra-failures", type=int, default=None)
+    s_res.add_argument("--max-transient-failures", type=int, default=None)
     s_res.add_argument("--max-cost-usd", type=float, default=None)
+    s_res.add_argument("--max-total-tokens", type=int, default=None)
     s_res.add_argument("--max-wall-seconds", type=int, default=None)
     s_res.add_argument(
         "--keep-execution-clock", action="store_true",

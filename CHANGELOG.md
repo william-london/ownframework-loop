@@ -48,6 +48,32 @@ Sealed `WORK_PACKET.md` immutability is preserved: the packet's
 `allowed_paths` cannot be widened after execution seal to repair an
 incident like this one. Changed scope after sealing requires a new run.
 
+### Operational retry and usage telemetry
+
+A real PROGRAM benchmark exposed that the supervisor's original operational
+retry policy treated every non-successful runner result as the same failure
+class. v0.6.1 now keeps engineering truth unchanged while making the execution
+clock more informative and less brittle:
+
+- classified transient provider/network failures have an independent bounded
+  retry streak and exponential backoff;
+- obvious runner configuration failures and deterministic dispatch/invariant
+  refusals quarantine immediately instead of burning three indistinguishable
+  retries;
+- ordinary unclassified runner failures retain the conservative infrastructure
+  retry ceiling;
+- status exposes the latest five semantic attempts, durable log paths, failure
+  class/reason, and a direct quarantine reason;
+- provider-reported input/output/cache token telemetry is accounted exactly
+  once under the same semantic-attempt identity fence as model cost;
+- an optional per-run token ceiling is available without making token telemetry
+  an authority source; unknown token usage fails closed only when that ceiling
+  is explicitly enabled.
+
+This changes only operational scheduling/telemetry. BUILD/REVIEW authority,
+checkpoint progression, candidate identity, review verdicts, and promotion
+remain owned by the deterministic core.
+
 ### What did NOT change
 
 - The v0.6.0 release tag and GitHub Release were not modified.
