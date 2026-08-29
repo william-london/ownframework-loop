@@ -126,7 +126,7 @@ def _resolve_run_id(canonical_repo: Path, run_id: str | None) -> str:
     """Resolve the run id from an explicit arg or the single active run."""
     if run_id:
         return run_id
-    rd = state_mod.run_dir(canonical_repo, "")
+    rd = Path(canonical_repo) / ".ownframework-loop"
     runs = sorted(p.name for p in rd.iterdir() if p.is_dir() and p.name.startswith("run-"))
     if not runs:
         raise RuntimeError(
