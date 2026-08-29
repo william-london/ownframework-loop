@@ -97,7 +97,11 @@ PY
 run_checkpoint() {
   local cp="$1" value="$2"
 
-  BUILD_ORDER="$("$OFLOOP" dispatch claim "$REPO" "$RUN_ID")"
+  set +e
+  BUILD_ORDER="$("$OFLOOP" dispatch claim "$REPO" "$RUN_ID" 2>&1)"
+  BUILD_RC=$?
+  set -e
+  [[ "$BUILD_RC" -eq 0 ]] || fail "$cp dispatch BUILD command failed rc=$BUILD_RC output=$BUILD_ORDER"
   assert_eq "$(printf '%s' "$BUILD_ORDER" | jq -r '.decision')" "BUILD" "$cp dispatch BUILD"
   assert_eq "$(printf '%s' "$BUILD_ORDER" | jq -r '.prepare.cp_id')" "$cp" "$cp build identity"
 
