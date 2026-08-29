@@ -1,6 +1,6 @@
 ---
 name: spec
-description: OwnFramework Loop - create, inspect, amend, or stop an OwnFramework Loop run. Returns the run id plus the canonical builder/reviewer commands.
+description: OwnFramework Loop - create, inspect, amend, or stop a run. Returns the supervisor-first unattended handoff plus optional foreground/debug commands.
 user-invocable: true
 ---
 
