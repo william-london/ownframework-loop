@@ -4,7 +4,7 @@
 # Live unattended commissioning of the practice MVP exposed a real recovery
 # seam: a structurally complete BUILD_AGENT_RESULT over a dirty builder
 # worktree was being replay-finalized across retries. The deterministic
-# finalize correctly refused each attempt ("builder worktree is dirty"),
+# finalize correctly refused each attempt (`builder_worktree_dirty`),
 # each refusal was counted as an infra_failure, and the supervisor
 # correctly quarantined at max_infra_failures — but each retry was wasted
 # because the same complete semantic artifact cannot repair the filesystem.
@@ -232,7 +232,7 @@ T3_FIRST_RC=$?
 set -e
 echo "first finalize rc=$T3_FIRST_RC (expected non-zero; dirty refusal)"
 [[ "$T3_FIRST_RC" -ne 0 ]] || fail "TEST 3: first finalize should refuse on dirty worktree"
-grep -Fq "builder worktree is dirty" /tmp/v061_t3_first.log \
+grep -Fq "builder_worktree_dirty" /tmp/v061_t3_first.log \
   || fail "TEST 3: first finalize refusal reason missing"
 
 PRE_BUILD_PASS=$(jq -r '.build_pass_count' "$REPO3/.ownframework-loop/$RID3/STATE.json")
@@ -366,7 +366,7 @@ for attempt in 1 2 3; do
   set -e
   echo "attempt $attempt rc=$ATTEMPT_RC"
   [[ "$ATTEMPT_RC" -ne 0 ]] || fail "TEST 6: attempt $attempt should refuse dirty"
-  grep -Fq "builder worktree is dirty" /tmp/v061_t6_$attempt.log \
+  grep -Fq "builder_worktree_dirty" /tmp/v061_t6_$attempt.log \
     || fail "TEST 6: attempt $attempt missing dirty refusal"
 done
 
