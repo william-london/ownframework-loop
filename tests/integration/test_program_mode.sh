@@ -119,7 +119,11 @@ PY
   git -C "$WT" commit -m "test: $cp program candidate" >/dev/null
 
   fill_build_semantic "$BSEM" "$cp"
-  "$OFLOOP" dispatch finalize "$REPO" "$RUN_ID" BUILD "$BSEM" >/dev/null
+  set +e
+  BUILD_FINALIZE_OUT="$("$OFLOOP" dispatch finalize "$REPO" "$RUN_ID" BUILD "$BSEM" 2>&1)"
+  BUILD_FINALIZE_RC=$?
+  set -e
+  [[ "$BUILD_FINALIZE_RC" -eq 0 ]] || fail "$cp dispatch BUILD finalize failed rc=$BUILD_FINALIZE_RC output=$BUILD_FINALIZE_OUT"
   assert_eq "$(jq -r '.state' "$REPO/.ownframework-loop/$RUN_ID/STATE.json")" "READY_FOR_REVIEW" "$cp ready for review"
 
   REVIEW_ORDER="$("$OFLOOP" dispatch claim "$REPO" "$RUN_ID")"
