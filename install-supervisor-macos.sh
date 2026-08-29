@@ -162,8 +162,8 @@ env_vars = {
 # actually commissioned. Writing a bogus path here would let the
 # supervisor execute the wrong Claude binary later (or fail to start
 # semantic workers). Omitting it preserves the supported idle-only
-# installation behavior — the service runs but no semantic workers
-# can spawn until Claude is installed and the installer is re-run.
+# installation behavior — the service waits without semantic attempts
+# and automatically continues if Claude later appears on the persisted service PATH.
 if claude_bin:
     env_vars["OFLOOP_CLAUDE_BIN"] = claude_bin
 
