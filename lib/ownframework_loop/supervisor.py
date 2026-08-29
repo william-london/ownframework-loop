@@ -11,6 +11,7 @@ from __future__ import annotations
 import sys
 
 import json
+import math
 import os
 import shlex
 import signal
@@ -284,10 +285,10 @@ def _parse_cost_from_durable_stdout(path: str | None) -> float | None:
     if not isinstance(payload, dict) or "total_cost_usd" not in payload:
         return None
     try:
-        value = float(payload.get("total_cost_usd") or 0.0)
+        value = float(payload.get("total_cost_usd"))
     except (TypeError, ValueError):
         return None
-    return value if value >= 0 else None
+    return value if math.isfinite(value) and value >= 0 else None
 
 
 def _account_attempt_cost(
@@ -300,6 +301,8 @@ def _account_attempt_cost(
     status_value: str = "COMPLETED",
 ) -> float:
     """Account one durable semantic attempt exactly once by attempt identity."""
+    if not math.isfinite(float(cost_usd)) or float(cost_usd) < 0:
+        raise RuntimeError("semantic attempt cost is not a finite non-negative value")
     conn.execute("BEGIN IMMEDIATE")
     attempt = conn.execute(
         "SELECT * FROM semantic_attempts WHERE attempt_id=? AND job_id=?",
@@ -565,6 +568,26 @@ def _load_role_prompt(role: str) -> str:
     return path.read_text(encoding="utf-8")
 
 
+def _terminate_group(proc: subprocess.Popen[str], grace_seconds: float = 3.0) -> None:
+    """Terminate and reap one semantic worker process group."""
+    if proc.poll() is not None:
+        return
+    try:
+        os.killpg(proc.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    try:
+        proc.wait(timeout=grace_seconds)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    proc.wait()
+
+
 @dataclass
 class RunnerResult:
     ok: bool
@@ -573,6 +596,7 @@ class RunnerResult:
     stdout: str
     stderr: str
     pid: int | None = None
+    cost_known: bool = True
 
 
 class ClaudeCodeRunner:
@@ -659,8 +683,11 @@ class ClaudeCodeRunner:
         if on_start is not None:
             try:
                 on_start(int(proc.pid), role)
-            except Exception as on_start_exc:
+            except Exception:
                 _terminate_group(proc)
+                if durable_files is not None:
+                    stdout_fh.close()  # type: ignore[union-attr]
+                    stderr_fh.close()  # type: ignore[union-attr]
                 raise
 
         timed_out = False
@@ -687,6 +714,12 @@ class ClaudeCodeRunner:
                 except ProcessLookupError:
                     pass
                 stdout_data, stderr_data = proc.communicate()
+        except BaseException:
+            _terminate_group(proc)
+            if durable_files is not None:
+                stdout_fh.close()  # type: ignore[union-attr]
+                stderr_fh.close()  # type: ignore[union-attr]
+            raise
 
         if durable_files is not None:
             # Close our handles; the child holds its own dup until exit.
@@ -716,17 +749,23 @@ class ClaudeCodeRunner:
                 stdout=(stdout_data or "")[-65536:],
                 stderr=((stderr_data or "") + "\nclaude runner timed out")[-65536:],
                 pid=int(proc.pid),
+                cost_known=False,
             )
 
         cost = 0.0
+        cost_known = False
         parsed: dict[str, Any] | None = None
         try:
             data = json.loads(stdout_data or "")
             if isinstance(data, dict):
                 parsed = data
-                cost = float(data.get("total_cost_usd") or 0.0)
-        except Exception:
-            pass
+                if "total_cost_usd" in data:
+                    candidate_cost = float(data.get("total_cost_usd"))
+                    if math.isfinite(candidate_cost) and candidate_cost >= 0:
+                        cost = candidate_cost
+                        cost_known = True
+        except (json.JSONDecodeError, TypeError, ValueError):
+            parsed = None
 
         # Treat Claude as success when its structured JSON output says
         # is_error is false AND there is a substantive result. Claude CLI
@@ -743,12 +782,13 @@ class ClaudeCodeRunner:
                 claude_ok = True
 
         return RunnerResult(
-            ok=bool(claude_ok and (parsed is not None)) or proc.returncode == 0,
+            ok=bool(claude_ok and (parsed is not None)),
             returncode=int(proc.returncode or 0),
             cost_usd=cost,
             stdout=(stdout_data or "")[-65536:],
             stderr=(stderr_data or "")[-65536:],
             pid=int(proc.pid),
+            cost_known=cost_known,
         )
 
 
@@ -1068,6 +1108,32 @@ def run_one(*, db_path: Path | None = None, timeout_seconds: int = 3600) -> dict
                 ),
                 durable_files=durable_files,
             )
+            if not result.cost_known:
+                conn.execute(
+                    """UPDATE semantic_attempts SET status='COST_UNKNOWN',
+                       completed_at=?, returncode=? WHERE attempt_id=? AND job_id=?""",
+                    (time.time(), int(result.returncode), attempt_id, int(job["id"])),
+                )
+                conn.commit()
+                _update_job(
+                    conn,
+                    job["id"],
+                    status_value="QUARANTINED",
+                    last_error=(
+                        "semantic worker completed without a trustworthy finite "
+                        "total_cost_usd; refusing to assume zero cost"
+                    ),
+                    next_attempt_at=0,
+                )
+                return {
+                    "schema": SCHEMA,
+                    "ok": False,
+                    "action": "QUARANTINED",
+                    "job_id": job["id"],
+                    "reason": "model_cost_unknown",
+                    "attempt_id": attempt_id,
+                }
+
             new_cost = _account_attempt_cost(
                 conn,
                 job_id=int(job["id"]),

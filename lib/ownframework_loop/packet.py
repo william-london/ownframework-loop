@@ -76,9 +76,14 @@ def _scope_path_error(value: Any) -> str | None:
         return "must not contain NUL or backslash separators"
     if raw.startswith("/") or raw.startswith("~") or Path(raw).is_absolute():
         return "must be repository-relative, not absolute/home-relative"
+    if raw.startswith("./"):
+        raw = raw[2:]
+    raw = raw.rstrip("/")
+    if not raw:
+        return "must identify a repository-relative file or directory"
     parts = raw.split("/")
     if any(part in (".", "..", "") for part in parts):
-        return "must not contain '.', '..', or empty path components"
+        return "must not contain traversal or empty path components"
     return None
 
 

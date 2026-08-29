@@ -34,7 +34,8 @@ base = {
 }
 assert packet.validate_packet_metadata(base) == []
 
-for bad in ("../outside", "/tmp/outside", "src/../outside", "src\\outside", "./src", "src//x"):
+assert packet.validate_packet_metadata({**base, "allowed_paths": ["./src/", "tests/"]}) == []
+for bad in ("../outside", "/tmp/outside", "src/../outside", "src\\outside", "src//x"):
     m = dict(base)
     m["allowed_paths"] = [bad]
     errs = packet.validate_packet_metadata(m)

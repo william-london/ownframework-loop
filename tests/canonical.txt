@@ -50,3 +50,5 @@ tests/integration/test_codex_adapter_install.sh
 tests/integration/test_v061_authority_tail_hardening.sh
 
 tests/integration/test_v061_packet_identity_hardening.sh
+
+tests/integration/test_v061_runner_cost_proof.sh
