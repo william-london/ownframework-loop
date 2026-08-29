@@ -59,8 +59,19 @@ mkdir -p "$HOME"
 # works; non-executable and idle-only cases use distinct fixtures.
 REAL_PY="$(command -v python3)"
 REAL_OFLOOP="$ROOT/bin/ofloop"
-REAL_CLAUDE=""
-command -v claude >/dev/null 2>&1 && REAL_CLAUDE="$(command -v claude)"
+# ALWAYS provide a fake claude binary in the fakebin dir so the
+# installer cannot fall back to a system-installed claude via PATH
+# resolution. The test creates a real executable file at a
+# deterministic path and uses that for the fakery. This ensures the
+# provenance + plist write exactly the symlink target regardless of
+# whether a real claude is installed on the runner.
+REAL_CLAUDE="$SANDBOX/fakebin-claude/real-claude"
+mkdir -p "$SANDBOX/fakebin-claude"
+cat > "$REAL_CLAUDE" <<'FAKE_EOF'
+#!/usr/bin/env bash
+exit 0
+FAKE_EOF
+chmod +x "$REAL_CLAUDE"
 
 write_fake_symlink() {
   local name="$1"
@@ -74,7 +85,7 @@ write_fake_symlink() {
 PYTHON_FAKE_DIR="$SANDBOX/fakebins"
 PYTHON_FAKE="$(write_fake_symlink python3 "$REAL_PY")"
 OFLOOP_FAKE="$(write_fake_symlink ofloop "$REAL_OFLOOP")"
-[[ -n "$REAL_CLAUDE" ]] && CLAUDE_FAKE="$(write_fake_symlink claude "$REAL_CLAUDE")" || CLAUDE_FAKE=""
+CLAUDE_FAKE="$(write_fake_symlink claude "$REAL_CLAUDE")"
 
 # Stub launchctl so the installer doesn't touch the real macOS service.
 STUB_BIN_DIR="$SANDBOX/stub-bin"
