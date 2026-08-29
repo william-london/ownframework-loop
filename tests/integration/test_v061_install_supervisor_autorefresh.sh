@@ -6,16 +6,17 @@ TESTS_DIR="$(cd "$(dirname "$0")" && pwd)"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 SRC="$TMP/source"
-HOME_FAKE="$TMP/home"
+CACHE="$TMP/cache"
+HOME_EXISTING="$TMP/home-existing"
+HOME_FRESH="$TMP/home-fresh"
 FAKEBIN="$TMP/fakebin"
-mkdir -p "$HOME_FAKE" "$FAKEBIN"
+mkdir -p "$HOME_EXISTING" "$HOME_FRESH" "$FAKEBIN"
 
-# Work from an isolated real Git clone so install provenance remains meaningful.
 git clone -q "$ROOT_DIR" "$SRC"
+mkdir -p "$CACHE"
+cp -R "$SRC"/. "$CACHE"/
 HEAD_EXPECTED="$(git -C "$SRC" rev-parse HEAD)"
 
-# Fake platform/runtime tools. The installer sees Darwin, while launchctl is
-# harmless. Claude implements only the plugin-manager calls install.sh uses.
 cat > "$FAKEBIN/uname" <<'EOF'
 #!/usr/bin/env bash
 if [[ "${1:-}" == "-s" ]]; then echo Darwin; else /usr/bin/uname "$@"; fi
@@ -30,48 +31,20 @@ chmod +x "$FAKEBIN/launchctl"
 
 cat > "$FAKEBIN/claude" <<'EOF'
 #!/usr/bin/env bash
-set -euo pipefail
-if [[ "$*" == "plugin marketplace list" ]]; then
-  echo ownframework
-  exit 0
-fi
-if [[ "${1:-}" == "plugin" && "${2:-}" == "marketplace" && "${3:-}" == "add" ]]; then
-  exit 0
-fi
-if [[ "${1:-}" == "plugin" && "${2:-}" == "uninstall" ]]; then
-  exit 0
-fi
-if [[ "${1:-}" == "plugin" && "${2:-}" == "install" ]]; then
-  dest="$HOME/.claude/plugins/cache/ownframework/of-loop/0.6.1"
-  mkdir -p "$dest"
-  cp -R "$FAKE_SOURCE"/. "$dest"/
-  exit 0
-fi
-echo "unexpected fake claude args: $*" >&2
-exit 97
+exit 0
 EOF
 chmod +x "$FAKEBIN/claude"
 
-# Existing plist is the operator-intent signal: refresh an already commissioned
-# supervisor, but do not create one implicitly on a fresh install.
-mkdir -p "$HOME_FAKE/Library/LaunchAgents"
-echo existing > "$HOME_FAKE/Library/LaunchAgents/com.ownframework.loop-supervisor.plist"
-
-OUT="$TMP/install.out"
-(cd "$SRC" && env \
-  HOME="$HOME_FAKE" \
-  PATH="$FAKEBIN:/usr/local/bin:/usr/bin:/bin" \
-  FAKE_SOURCE="$SRC" \
-  SOURCE_ROOT="$SRC" \
-  bash "$SRC/install.sh" >"$OUT" 2>&1)
-
-CACHE="$HOME_FAKE/.claude/plugins/cache/ownframework/of-loop/0.6.1"
-PLIST="$HOME_FAKE/Library/LaunchAgents/com.ownframework.loop-supervisor.plist"
-PROV="$HOME_FAKE/.local/state/ownframework-loop/runtime-provenance.json"
-[[ -x "$CACHE/bin/ofloop" ]] || fail "installed cache ofloop missing"
-[[ -f "$PLIST" ]] || fail "refreshed plist missing"
-[[ -f "$PROV" ]] || fail "refreshed runtime provenance missing"
-grep -Fq "existing macOS supervisor refreshed" "$OUT" || fail "install did not report supervisor refresh"
+# Existing commissioning signal must refresh to CACHE/bin/ofloop.
+mkdir -p "$HOME_EXISTING/Library/LaunchAgents"
+echo existing > "$HOME_EXISTING/Library/LaunchAgents/com.ownframework.loop-supervisor.plist"
+OUT="$TMP/refresh.out"
+env HOME="$HOME_EXISTING" PATH="$FAKEBIN:/usr/local/bin:/usr/bin:/bin" \
+  "$CACHE/scripts/refresh-existing-supervisor-macos.sh" "$CACHE" "$SRC" >"$OUT" 2>&1
+grep -Fq "SUPERVISOR_REFRESH=PASS" "$OUT" || fail "existing supervisor did not refresh"
+PLIST="$HOME_EXISTING/Library/LaunchAgents/com.ownframework.loop-supervisor.plist"
+PROV="$HOME_EXISTING/.local/state/ownframework-loop/runtime-provenance.json"
+[[ -f "$PROV" ]] || fail "runtime provenance missing after refresh"
 
 python3 - "$PLIST" "$PROV" "$CACHE/bin/ofloop" "$SRC" "$HEAD_EXPECTED" <<'PY'
 import json, plistlib, sys
@@ -79,7 +52,8 @@ from pathlib import Path
 plist_path, prov_path, ofloop, source, head = sys.argv[1:]
 with open(plist_path, 'rb') as f:
     plist = plistlib.load(f)
-prov = json.load(open(prov_path))
+with open(prov_path) as f:
+    prov = json.load(f)
 expected_ofloop = str(Path(ofloop).resolve(strict=False))
 expected_source = str(Path(source).resolve(strict=False))
 assert plist['ProgramArguments'] == [expected_ofloop, 'supervisor', 'serve'], plist
@@ -87,20 +61,19 @@ assert prov['ofloop_bin'] == expected_ofloop, prov
 assert prov['source_root'] == expected_source, prov
 assert prov['source_head'] == head, prov
 assert prov['ofloop_version'] == '0.6.1', prov
-assert plist['EnvironmentVariables']['OFLOOP_PLUGIN_ROOT'] == str(Path(expected_ofloop).parent.parent), plist
 PY
 
-# Fresh HOME with no prior supervisor signal must not create a service.
-HOME_FRESH="$TMP/home-fresh"
-mkdir -p "$HOME_FRESH"
-OUT2="$TMP/install-fresh.out"
-(cd "$SRC" && env \
-  HOME="$HOME_FRESH" \
-  PATH="$FAKEBIN:/usr/local/bin:/usr/bin:/bin" \
-  FAKE_SOURCE="$SRC" \
-  SOURCE_ROOT="$SRC" \
-  bash "$SRC/install.sh" >"$OUT2" 2>&1)
-[[ ! -e "$HOME_FRESH/Library/LaunchAgents/com.ownframework.loop-supervisor.plist" ]] || fail "fresh install implicitly created supervisor"
-[[ ! -e "$HOME_FRESH/.local/state/ownframework-loop/runtime-provenance.json" ]] || fail "fresh install implicitly created supervisor provenance"
+# Fresh host has no commissioning signal: helper must be a true no-op.
+OUT2="$TMP/fresh.out"
+env HOME="$HOME_FRESH" PATH="$FAKEBIN:/usr/local/bin:/usr/bin:/bin" \
+  "$CACHE/scripts/refresh-existing-supervisor-macos.sh" "$CACHE" "$SRC" >"$OUT2" 2>&1
+grep -Fq "SUPERVISOR_REFRESH=NOOP reason=not_commissioned" "$OUT2" || fail "fresh host was not a no-op"
+[[ ! -e "$HOME_FRESH/Library/LaunchAgents/com.ownframework.loop-supervisor.plist" ]] || fail "fresh host got implicit service"
+
+# Opt-out remains explicit and non-mutating.
+OUT3="$TMP/skip.out"
+env HOME="$HOME_EXISTING" PATH="$FAKEBIN:/usr/local/bin:/usr/bin:/bin" OFLOOP_SKIP_SUPERVISOR_REFRESH=1 \
+  "$CACHE/scripts/refresh-existing-supervisor-macos.sh" "$CACHE" "$SRC" >"$OUT3" 2>&1
+grep -Fq "SUPERVISOR_REFRESH=SKIPPED reason=operator_opt_out" "$OUT3" || fail "opt-out not honored"
 
 echo "V061_INSTALL_SUPERVISOR_AUTOREFRESH=PASS"

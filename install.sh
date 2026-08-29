@@ -196,29 +196,19 @@ else
 fi
 
 # --- refresh an already-commissioned macOS supervisor ---
-# Installing the plugin should not leave launchd executing an older cache
-# payload. Preserve operator intent: refresh only when a supervisor was
-# already commissioned; never create a new background service implicitly.
-if [[ "${OFLOOP_SKIP_SUPERVISOR_REFRESH:-0}" != "1" && "$(uname -s)" == "Darwin" ]]; then
-    SUPERVISOR_LABEL="com.ownframework.loop-supervisor"
-    SUPERVISOR_PLIST="$HOME/Library/LaunchAgents/$SUPERVISOR_LABEL.plist"
-    SUPERVISOR_STATE_ROOT="${XDG_STATE_HOME:-$HOME/.local/state}/ownframework-loop"
-    SUPERVISOR_PROVENANCE="$SUPERVISOR_STATE_ROOT/runtime-provenance.json"
-    if [[ -f "$SUPERVISOR_PLIST" || -f "$SUPERVISOR_PROVENANCE" ]]; then
-        INSTALLED_SUPERVISOR_INSTALLER="$EXPECTED_CACHE/install-supervisor-macos.sh"
-        INSTALLED_OFLOOP="$EXPECTED_CACHE/bin/ofloop"
-        if [[ ! -x "$INSTALLED_SUPERVISOR_INSTALLER" || ! -x "$INSTALLED_OFLOOP" ]]; then
-            log "supervisor refresh FAILED: installed supervisor payload missing/executable bit lost"
-            exit 9
-        fi
-        log "refreshing existing macOS supervisor to installed payload $EXPECTED_VERSION"
-        if ! SOURCE_ROOT_OVERRIDE="$SOURCE_ROOT" OFLOOP_BIN="$INSTALLED_OFLOOP" \
-            bash "$INSTALLED_SUPERVISOR_INSTALLER" >"$SOURCE_ROOT/.supervisor-refresh.log" 2>&1; then
-            log "supervisor refresh FAILED; see $SOURCE_ROOT/.supervisor-refresh.log"
-            exit 9
-        fi
-        log "existing macOS supervisor refreshed to $INSTALLED_OFLOOP"
-    fi
+# Delegate to a narrow helper so install orchestration stays acyclic/testable.
+REFRESH_HELPER="$EXPECTED_CACHE/scripts/refresh-existing-supervisor-macos.sh"
+if [[ ! -x "$REFRESH_HELPER" ]]; then
+    log "supervisor refresh helper missing from installed payload: $REFRESH_HELPER"
+    exit 9
+fi
+if ! OFLOOP_SKIP_SUPERVISOR_REFRESH="${OFLOOP_SKIP_SUPERVISOR_REFRESH:-0}" \
+    "$REFRESH_HELPER" "$EXPECTED_CACHE" "$SOURCE_ROOT" >"$SOURCE_ROOT/.supervisor-refresh.log" 2>&1; then
+    log "supervisor refresh FAILED; see $SOURCE_ROOT/.supervisor-refresh.log"
+    exit 9
+fi
+if grep -Fq "SUPERVISOR_REFRESH=PASS" "$SOURCE_ROOT/.supervisor-refresh.log"; then
+    log "existing macOS supervisor refreshed to installed payload $EXPECTED_VERSION"
 fi
 
 log "managed install complete; reload with: claude /reload-plugins"
