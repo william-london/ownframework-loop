@@ -229,6 +229,20 @@ def main() -> int:
         # drained.
         from . import process_runner
         own_pgid = os.getpgrp()
+        own_pid = os.getpid()
+        # DEBUG
+        import subprocess as _sp
+        _r = _sp.run(['ps', '-axo', 'pid=,ppid=,stat=,comm='], capture_output=True, text=True, timeout=5)
+        for _line in _r.stdout.splitlines():
+            _line = _line.strip()
+            if not _line: continue
+            _parts = _line.split(None, 3)
+            if len(_parts) < 4: continue
+            try:
+                if int(_parts[1]) == own_pid:
+                    _emit(output, f"DEBUG_CHILD={_line}")
+            except ValueError:
+                continue
         if process_runner.process_group_drained(own_pgid):
             _emit(output, "PROCESS_TREE_DRAIN=PASS")
         else:
