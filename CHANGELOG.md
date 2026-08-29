@@ -95,6 +95,12 @@ different executable.
 This is operational self-healing only; it does not change packet authority,
 engineering passes, review evidence, or promotion.
 
+Known-cost classified provider/network outages now also have a bounded circuit
+breaker. The ordinary transient streak still applies; after it is exhausted,
+Loop can cool down for 10 minutes and retry automatically for two recovery
+cycles by default. The circuit never resets model cost, token usage, or the
+run wall-clock ceiling, and exhaustion still ends in quarantine.
+
 On macOS, canonical `install.sh` now also refreshes an already-commissioned
 launchd supervisor to the newly installed cache payload. It never creates a
 background service implicitly, and the supervisor installer accepts a separate

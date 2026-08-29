@@ -88,8 +88,12 @@ Operational failures are not all treated alike:
   quarantine immediately;
 - ordinary unclassified runner failures use the bounded
   `max_infra_failures` streak;
-- recognized transient provider/network failures use a separate, more generous
-  `max_transient_failures` streak with exponential backoff;
+- recognized transient provider/network failures use a separate
+  `max_transient_failures` streak with exponential backoff. By default, when
+  that streak is exhausted the supervisor opens a 10-minute circuit and
+  retries the same pass automatically; two bounded recovery cycles are allowed
+  before final transient quarantine. Cost, token, and wall-clock ledgers are
+  never reset by this recovery;
 - unknown model cost still fails closed;
 - unknown token usage fails closed only when the operator explicitly enabled a
   token ceiling.

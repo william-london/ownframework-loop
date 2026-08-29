@@ -96,6 +96,8 @@ def _connect(path: Path) -> sqlite3.Connection:
           max_infra_failures INTEGER NOT NULL DEFAULT 3,
           transient_failures INTEGER NOT NULL DEFAULT 0,
           max_transient_failures INTEGER NOT NULL DEFAULT 8,
+          transient_recovery_cycles INTEGER NOT NULL DEFAULT 0,
+          max_transient_recovery_cycles INTEGER NOT NULL DEFAULT 2,
           total_cost_usd REAL NOT NULL DEFAULT 0,
           total_input_tokens INTEGER NOT NULL DEFAULT 0,
           total_output_tokens INTEGER NOT NULL DEFAULT 0,
@@ -167,6 +169,8 @@ def _connect(path: Path) -> sqlite3.Connection:
         "latest_attempt_id": "ALTER TABLE jobs ADD COLUMN latest_attempt_id TEXT",
         "transient_failures": "ALTER TABLE jobs ADD COLUMN transient_failures INTEGER NOT NULL DEFAULT 0",
         "max_transient_failures": "ALTER TABLE jobs ADD COLUMN max_transient_failures INTEGER NOT NULL DEFAULT 8",
+        "transient_recovery_cycles": "ALTER TABLE jobs ADD COLUMN transient_recovery_cycles INTEGER NOT NULL DEFAULT 0",
+        "max_transient_recovery_cycles": "ALTER TABLE jobs ADD COLUMN max_transient_recovery_cycles INTEGER NOT NULL DEFAULT 2",
         "total_input_tokens": "ALTER TABLE jobs ADD COLUMN total_input_tokens INTEGER NOT NULL DEFAULT 0",
         "total_output_tokens": "ALTER TABLE jobs ADD COLUMN total_output_tokens INTEGER NOT NULL DEFAULT 0",
         "total_cache_read_tokens": "ALTER TABLE jobs ADD COLUMN total_cache_read_tokens INTEGER NOT NULL DEFAULT 0",
@@ -581,6 +585,7 @@ def enqueue(
     db_path: Path | None = None,
     max_infra_failures: int = 3,
     max_transient_failures: int = 8,
+    max_transient_recovery_cycles: int = 2,
     max_total_cost_usd: float = 25.0,
     max_total_tokens: int = 0,
     max_wall_seconds: int = 28800,
@@ -598,14 +603,16 @@ def enqueue(
             INSERT INTO jobs
               (repo, run_id, runner, status, infra_failures,
                max_infra_failures, transient_failures, max_transient_failures,
+               transient_recovery_cycles, max_transient_recovery_cycles,
                total_cost_usd, next_attempt_at,
                max_total_cost_usd, max_total_tokens, max_wall_seconds,
                created_at, updated_at)
-            VALUES (?, ?, ?, 'QUEUED', 0, ?, 0, ?, 0, 0, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, 'QUEUED', 0, ?, 0, ?, 0, ?, 0, 0, ?, ?, ?, ?, ?)
             ON CONFLICT(repo, run_id) DO UPDATE SET
               runner=excluded.runner,
               max_infra_failures=excluded.max_infra_failures,
               max_transient_failures=excluded.max_transient_failures,
+              max_transient_recovery_cycles=excluded.max_transient_recovery_cycles,
               max_total_cost_usd=excluded.max_total_cost_usd,
               max_total_tokens=excluded.max_total_tokens,
               max_wall_seconds=excluded.max_wall_seconds,
@@ -617,6 +624,7 @@ def enqueue(
                 runner,
                 int(max_infra_failures),
                 int(max_transient_failures),
+                int(max_transient_recovery_cycles),
                 float(max_total_cost_usd),
                 int(max_total_tokens),
                 int(max_wall_seconds),
@@ -1446,13 +1454,25 @@ def _apply_failure_policy(
     }
     infra_failures = int(row["infra_failures"] or 0)
     transient_failures = int(row["transient_failures"] or 0)
+    transient_recovery_cycles = int(row["transient_recovery_cycles"] or 0)
 
     if failure_class == "transient":
         transient_failures += 1
         ceiling = int(row["max_transient_failures"] or 0)
-        quarantined = ceiling > 0 and transient_failures >= ceiling
-        streak = transient_failures
-        backoff = min(300.0, float(5 * (2 ** max(0, streak - 1))))
+        max_cycles = int(row["max_transient_recovery_cycles"] or 0)
+        threshold_hit = ceiling > 0 and transient_failures >= ceiling
+        if threshold_hit and transient_recovery_cycles < max_cycles:
+            # Open a bounded provider circuit instead of requiring an operator
+            # resume. Cost/token/wall-clock ledgers are preserved and keep
+            # bounding the run; only the transient streak is cooled down.
+            transient_recovery_cycles += 1
+            transient_failures = 0
+            quarantined = False
+            backoff = 600.0
+        else:
+            quarantined = threshold_hit
+            streak = transient_failures
+            backoff = min(300.0, float(5 * (2 ** max(0, streak - 1))))
     elif immediate:
         quarantined = True
         streak = 1
@@ -1472,6 +1492,7 @@ def _apply_failure_policy(
         status_value=status_value,
         infra_failures=infra_failures,
         transient_failures=transient_failures,
+        transient_recovery_cycles=transient_recovery_cycles,
         total_cost_usd=total_cost_usd,
         last_error=detail[-4000:],
         last_failure_class=failure_class,
@@ -1484,6 +1505,14 @@ def _apply_failure_policy(
         "failure_reason": failure_reason,
         "infra_failures": infra_failures,
         "transient_failures": transient_failures,
+        "transient_recovery_cycles": transient_recovery_cycles,
+        "max_transient_recovery_cycles": int(row["max_transient_recovery_cycles"] or 0),
+        "circuit_opened": bool(
+            failure_class == "transient"
+            and not quarantined
+            and backoff == 600.0
+            and transient_failures == 0
+        ),
         "backoff_seconds": 0.0 if quarantined else backoff,
     }
 
@@ -1613,6 +1642,7 @@ def _update_job(
     status_value: str,
     infra_failures: int | None = None,
     transient_failures: int | None = None,
+    transient_recovery_cycles: int | None = None,
     total_cost_usd: float | None = None,
     last_error: str | None = None,
     last_failure_class: str | None = None,
@@ -1628,6 +1658,7 @@ def _update_job(
           status=?,
           infra_failures=?,
           transient_failures=?,
+          transient_recovery_cycles=?,
           total_cost_usd=?,
           last_error=?,
           last_failure_class=?,
@@ -1644,6 +1675,7 @@ def _update_job(
             status_value,
             int(row["infra_failures"] if infra_failures is None else infra_failures),
             int(row["transient_failures"] if transient_failures is None else transient_failures),
+            int(row["transient_recovery_cycles"] if transient_recovery_cycles is None else transient_recovery_cycles),
             float(row["total_cost_usd"] if total_cost_usd is None else total_cost_usd),
             last_error,
             last_failure_class,
@@ -1730,6 +1762,7 @@ def run_one(*, db_path: Path | None = None, timeout_seconds: int = 3600) -> dict
                     status_value="QUEUED",
                     infra_failures=0,
                     transient_failures=0,
+                    transient_recovery_cycles=0,
                     last_error=None,
                     last_failure_class=None,
                     last_failure_reason=None,
@@ -2004,6 +2037,7 @@ def run_one(*, db_path: Path | None = None, timeout_seconds: int = 3600) -> dict
                 status_value="QUEUED",
                 infra_failures=0,
                 transient_failures=0,
+                transient_recovery_cycles=0,
                 total_cost_usd=new_cost,
                 last_error=None,
                 last_failure_class=None,
@@ -2098,6 +2132,7 @@ def resume(
     db_path: Path | None = None,
     max_infra_failures: int | None = None,
     max_transient_failures: int | None = None,
+    max_transient_recovery_cycles: int | None = None,
     max_total_cost_usd: float | None = None,
     max_total_tokens: int | None = None,
     max_wall_seconds: int | None = None,
@@ -2158,6 +2193,7 @@ def resume(
         "status='QUEUED'",
         "infra_failures=0",
         "transient_failures=0",
+        "transient_recovery_cycles=0",
         "next_attempt_at=0",
         "last_error=NULL",
         "last_failure_class=NULL",
@@ -2174,6 +2210,9 @@ def resume(
     if max_transient_failures is not None:
         sets.append("max_transient_failures=?")
         params.append(int(max_transient_failures))
+    if max_transient_recovery_cycles is not None:
+        sets.append("max_transient_recovery_cycles=?")
+        params.append(int(max_transient_recovery_cycles))
     if max_total_cost_usd is not None:
         sets.append("max_total_cost_usd=?")
         params.append(float(max_total_cost_usd))

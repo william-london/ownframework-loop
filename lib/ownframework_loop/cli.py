@@ -1637,6 +1637,7 @@ def _build_parser() -> argparse.ArgumentParser:
             db_path=Path(args.db).expanduser() if args.db else None,
             max_infra_failures=args.max_infra_failures,
             max_transient_failures=args.max_transient_failures,
+            max_transient_recovery_cycles=args.max_transient_recovery_cycles,
             max_total_cost_usd=args.max_cost_usd,
             max_total_tokens=args.max_total_tokens,
             max_wall_seconds=args.max_wall_seconds,
@@ -1669,6 +1670,8 @@ def _build_parser() -> argparse.ArgumentParser:
             kwargs["max_infra_failures"] = int(args.max_infra_failures)
         if getattr(args, "max_transient_failures", None) is not None:
             kwargs["max_transient_failures"] = int(args.max_transient_failures)
+        if getattr(args, "max_transient_recovery_cycles", None) is not None:
+            kwargs["max_transient_recovery_cycles"] = int(args.max_transient_recovery_cycles)
         if getattr(args, "max_cost_usd", None) is not None:
             kwargs["max_total_cost_usd"] = float(args.max_cost_usd)
         if getattr(args, "max_total_tokens", None) is not None:
@@ -1694,7 +1697,11 @@ def _build_parser() -> argparse.ArgumentParser:
     s_enq.add_argument("--max-infra-failures", type=int, default=3)
     s_enq.add_argument(
         "--max-transient-failures", type=int, default=8,
-        help="retry ceiling for classified transient provider/network failures; <=0 disables the ceiling",
+        help="per-streak retry ceiling for classified transient provider/network failures; <=0 disables",
+    )
+    s_enq.add_argument(
+        "--max-transient-recovery-cycles", type=int, default=2,
+        help="bounded 10-minute circuit-breaker recoveries before transient quarantine; <=0 disables auto-recovery",
     )
     s_enq.add_argument(
         "--max-cost-usd", type=float, default=25.0,
@@ -1730,6 +1737,7 @@ def _build_parser() -> argparse.ArgumentParser:
     s_res.add_argument("--db", default=None)
     s_res.add_argument("--max-infra-failures", type=int, default=None)
     s_res.add_argument("--max-transient-failures", type=int, default=None)
+    s_res.add_argument("--max-transient-recovery-cycles", type=int, default=None)
     s_res.add_argument("--max-cost-usd", type=float, default=None)
     s_res.add_argument("--max-total-tokens", type=int, default=None)
     s_res.add_argument("--max-wall-seconds", type=int, default=None)

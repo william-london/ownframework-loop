@@ -27,10 +27,12 @@ s = supervisor.enqueue(
     db_path=db,
     max_infra_failures=2,
     max_transient_failures=3,
+    max_transient_recovery_cycles=0,
     max_total_cost_usd=50,
     max_total_tokens=10000,
 )
 assert s["max_transient_failures"] == 3, s
+assert s["max_transient_recovery_cycles"] == 0, s
 assert s["max_total_tokens"] == 10000, s
 
 # Classification changes retry policy only; it does not interpret engineering state.
@@ -126,6 +128,60 @@ assert res["resumed"] is True and res["status"] == "QUEUED", res
 assert res["infra_failures"] == 0 and res["transient_failures"] == 0, res
 assert res["max_transient_failures"] == 9, res
 assert res["max_total_tokens"] == 50000, res
+
+# Bounded circuit breaker removes manual resume for known transient outages.
+res = supervisor.resume(
+    canonical_repo=repo,
+    run_id="run-policy",
+    db_path=db,
+    max_transient_failures=2,
+    max_transient_recovery_cycles=2,
+)
+assert res["resumed"] is False and res["reason"] == "resume_requires_quarantined", res
+with supervisor._connect(db) as conn:
+    conn.execute(
+        """UPDATE jobs SET status='RUNNING', transient_failures=0,
+           transient_recovery_cycles=0, max_transient_failures=2,
+           max_transient_recovery_cycles=2 WHERE run_id='run-policy'"""
+    )
+    conn.commit()
+
+# First two threshold hits open a 10-minute circuit and continue automatically.
+for expected_cycle in (1, 2):
+    for _ in range(2):
+        with supervisor._connect(db) as conn:
+            conn.execute("UPDATE jobs SET status='RUNNING' WHERE run_id='run-policy'")
+            conn.commit()
+            job = conn.execute("SELECT * FROM jobs WHERE run_id='run-policy'").fetchone()
+            policy = supervisor._apply_failure_policy(
+                conn,
+                job_id=job["id"],
+                failure_class="transient",
+                failure_reason="runner_transient_failure",
+                detail="provider temporarily unavailable",
+            )
+    assert policy["status"] == "BACKOFF", policy
+    assert policy["circuit_opened"] is True, policy
+    assert policy["backoff_seconds"] == 600.0, policy
+    assert policy["transient_failures"] == 0, policy
+    assert policy["transient_recovery_cycles"] == expected_cycle, policy
+
+# After the finite recovery envelope is exhausted, the next threshold quarantines.
+for _ in range(2):
+    with supervisor._connect(db) as conn:
+        conn.execute("UPDATE jobs SET status='RUNNING' WHERE run_id='run-policy'")
+        conn.commit()
+        job = conn.execute("SELECT * FROM jobs WHERE run_id='run-policy'").fetchone()
+        policy = supervisor._apply_failure_policy(
+            conn,
+            job_id=job["id"],
+            failure_class="transient",
+            failure_reason="runner_transient_failure",
+            detail="provider still unavailable",
+        )
+assert policy["status"] == "QUARANTINED", policy
+assert policy["transient_recovery_cycles"] == 2, policy
+assert policy["circuit_opened"] is False, policy
 
 # Configuration failures quarantine immediately and do not masquerade as a streak.
 with supervisor._connect(db) as conn:
