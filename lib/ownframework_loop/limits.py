@@ -24,7 +24,13 @@ from __future__ import annotations
 MAX_BUILD_PASSES = 32
 MAX_REVIEW_PASSES = 32
 MAX_REPAIR_ROUNDS = 32
-MAX_CONSECUTIVE_NO_PROGRESS_PASSES = 16
+# Aligned with util.ABSOLUTE_BUDGET_CEILING and the packet schemas (all 8):
+# the default emergency fuse, the packet-declarable maximum, and the
+# absolute envelope must agree, or an unbudgeted run operates under a
+# looser fuse than any packet is allowed to declare. The streak advances
+# only on byte-identical repeat candidate SHAs, so 8 identical passes is
+# already a decisive non-convergence signal.
+MAX_CONSECUTIVE_NO_PROGRESS_PASSES = 8
 MAX_IDENTICAL_FINDING_REPEATS = 8
 
 # Counter names (used as keys in STATE.json).

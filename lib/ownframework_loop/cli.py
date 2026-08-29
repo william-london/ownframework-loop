@@ -392,6 +392,22 @@ def cmd_spec_approve(args: argparse.Namespace) -> None:
     if errors:
         _emit_error("packet invalid", exit_code=2, errors=errors)
 
+    # Executable authority contract: a packet that parses cleanly but carries
+    # legacy delegated authority or merge_on_approved promotion is NOT
+    # executable — dispatch refuses every claim for it. Approving such a
+    # packet would only mint a dead run and an approval artifact that can
+    # never reach execution, so refuse BEFORE asking the operator for the
+    # confirmation token. Historical approved packets remain readable for
+    # audit; this gate only bounds NEW approvals.
+    exec_ok, exec_reasons = packet_mod.packet_is_executable_under_current_authority(meta)
+    if not exec_ok:
+        _emit_error(
+            "packet not executable under current authority contract",
+            exit_code=2,
+            classification="OF_LOOP_PACKET_NOT_EXECUTABLE",
+            errors=exec_reasons,
+        )
+
     # v0.4.5: prove that an approved PROGRAM can be materialized BEFORE
     # asking the human to authorize it. This prevents an approval artifact
     # from being created for a graph/envelope that cannot initialize.
@@ -884,7 +900,9 @@ def cmd_build_transition(args: argparse.Namespace) -> None:
                 _emit_error(f"repair claim refused: {e}", exit_code=4)
             # v0.3.5 (F-4-01): post-hook — transition CHANGES_REQUESTED
             # back to READY_TO_BUILD so the next build pass is not
-            # classified as a replay of the previous repair.
+            # classified as a replay of the previous repair. Tolerate only
+            # the idempotent races (state already buildable); any other
+            # FSM failure is a real desync and must surface.
             try:
                 state_mod.transition(
                     repo, args.run_id,
@@ -892,22 +910,45 @@ def cmd_build_transition(args: argparse.Namespace) -> None:
                     actor=args.actor or "operator",
                     reason="repair_round claimed; ready for next build",
                 )
-            except Exception:
-                pass  # Idempotent: if state is already READY_TO_BUILD, the
-                      # FSM refuses (no edge from CHANGES_REQUESTED in
-                      # single-mode). Tolerate this race; the next build
-                      # claim will start from the current state.
+            except transitions.InvalidTransitionError:
+                now = state_mod.load(repo, args.run_id)
+                if (now or {}).get("state") not in ("READY_TO_BUILD", "CHANGES_REQUESTED"):
+                    raise
             _emit({"ok": True, "run_id": args.run_id, "state": args.to})
             return
-        # Single-mode V1 path: direct increment.
-        cur["repair_round"] = int(cur.get("repair_round", 0)) + 1
+        # Single-mode V1 path: increment through the capped counter owner so
+        # the repair envelope fails closed at claim time. The build finalizer
+        # no longer blocks on repair_round >= cap (that starved the final
+        # funded repair of its review); when no funded round remains, the run
+        # seals BLOCKED here instead of funding another pass.
+        try:
+            meta, _approval_doc, _packet_path = _require_valid_approval(repo, args.run_id)
+        except RuntimeError:
+            meta = None
+        try:
+            new_round = state_mod.increment_counter(
+                repo, args.run_id, counter="repair_round",
+                actor=args.actor or "of-builder", packet=meta, hard_cap=True,
+            )
+        except limits_mod.RepairLimitExceeded as e:
+            _seal_blocked_on_cap_exhaustion(
+                repo, args.run_id,
+                actor="of-loop-cap-gate",
+                reason=f"repair cap exhausted: {e}",
+            )
+            _emit_error(
+                f"repair claim refused (cap exhausted; run sealed BLOCKED): {e}",
+                exit_code=4,
+                classification="OF_LOOP_CLAIM_CAP_EXHAUSTED",
+            )
+        cur = state_mod.load(repo, args.run_id)
         cur["no_progress_streak"] = 0
         state_mod.save(repo, args.run_id, cur)
         state_mod.append_event(
             repo, args.run_id, event_type="repair_round_incremented",
             old_state=None, new_state=None,
             actor=args.actor or "of-builder",
-            extras={"repair_round": cur["repair_round"]},
+            extras={"repair_round": new_round},
         )
     _emit({"ok": True, "run_id": args.run_id, "state": args.to})
 
@@ -1702,18 +1743,20 @@ def _build_parser() -> argparse.ArgumentParser:
         # envelope; it was validated at packet time but historically never
         # consumed, leaving every unattended run under accidental fixed
         # ceilings. Explicit operator flags always win over the packet.
+        # Unspecified values stay None so a repeated enqueue PRESERVES an
+        # already configured envelope instead of wiping it with defaults.
         max_wall_seconds = args.max_wall_seconds
         if max_wall_seconds is None:
-            max_wall_seconds = 0
             packet_path = state_mod.run_dir(repo, args.run_id) / "WORK_PACKET.md"
             if packet_path.exists():
                 try:
                     pmeta, _ = packet_mod.parse_packet_file(packet_path)
                     rb = pmeta.get("risk_budget") or {}
                     if isinstance(rb, dict):
-                        max_wall_seconds = int(rb.get("max_runtime_seconds") or 0)
+                        declared = int(rb.get("max_runtime_seconds") or 0)
+                        max_wall_seconds = declared if declared > 0 else None
                 except (OSError, ValueError):
-                    max_wall_seconds = 0
+                    max_wall_seconds = None
         out = supervisor_mod.enqueue(
             canonical_repo=repo,
             run_id=args.run_id,
@@ -1762,7 +1805,12 @@ def _build_parser() -> argparse.ArgumentParser:
             kwargs["max_total_tokens"] = int(args.max_total_tokens)
         if getattr(args, "max_wall_seconds", None) is not None:
             kwargs["max_wall_seconds"] = int(args.max_wall_seconds)
-        kwargs["reset_execution_started_at"] = not bool(args.keep_execution_clock)
+        # The wall-clock origin is preserved unless the operator explicitly
+        # grants a fresh clock. --keep-execution-clock remains accepted for
+        # compatibility and now matches the default.
+        kwargs["reset_execution_started_at"] = bool(
+            getattr(args, "reset_execution_clock", False)
+        )
         out = supervisor_mod.resume(
             canonical_repo=repo,
             run_id=args.run_id,
@@ -1778,24 +1826,34 @@ def _build_parser() -> argparse.ArgumentParser:
     s_enq.add_argument("run_id")
     s_enq.add_argument("--runner", default="claude-code")
     s_enq.add_argument("--db", default=None)
-    s_enq.add_argument("--max-infra-failures", type=int, default=3)
     s_enq.add_argument(
-        "--max-transient-failures", type=int, default=8,
-        help="per-streak retry ceiling for classified transient provider/network failures; <=0 disables",
+        "--max-infra-failures", type=int, default=None,
+        help="infrastructure-failure ceiling; default 3 for a new job; "
+             "omitting on re-enqueue preserves the configured value",
     )
     s_enq.add_argument(
-        "--max-transient-recovery-cycles", type=int, default=2,
-        help="bounded 10-minute circuit-breaker recoveries before transient quarantine; <=0 disables auto-recovery",
+        "--max-transient-failures", type=int, default=None,
+        help="per-streak retry ceiling for classified transient provider/network "
+             "failures; <=0 disables; default 8 for a new job; omitting on "
+             "re-enqueue preserves the configured value",
     )
     s_enq.add_argument(
-        "--max-cost-usd", type=float, default=0.0,
+        "--max-transient-recovery-cycles", type=int, default=None,
+        help="bounded 10-minute circuit-breaker recoveries before transient "
+             "quarantine; <=0 disables auto-recovery; default 2 for a new job; "
+             "omitting on re-enqueue preserves the configured value",
+    )
+    s_enq.add_argument(
+        "--max-cost-usd", type=float, default=None,
         help="operational model-cost ceiling per enqueued run; <=0 disables "
              "(disabled by default: unattended progress is bounded by semantic "
-             "pass/repair caps and no-progress detection, not cost conservation)",
+             "pass/repair caps and no-progress detection, not cost conservation); "
+             "omitting on re-enqueue preserves the configured ceiling",
     )
     s_enq.add_argument(
-        "--max-total-tokens", type=int, default=0,
-        help="optional provider-reported token ceiling; <=0 disables",
+        "--max-total-tokens", type=int, default=None,
+        help="optional provider-reported token ceiling; <=0 disables; "
+             "omitting on re-enqueue preserves the configured ceiling",
     )
     s_enq.add_argument(
         "--max-wall-seconds", type=int, default=None,
@@ -1833,8 +1891,14 @@ def _build_parser() -> argparse.ArgumentParser:
     s_res.add_argument("--max-total-tokens", type=int, default=None)
     s_res.add_argument("--max-wall-seconds", type=int, default=None)
     s_res.add_argument(
+        "--reset-execution-clock", action="store_true",
+        help="explicitly grant a fresh wall-clock origin (an operator budget "
+             "decision; normally paired with --max-wall-seconds); the default "
+             "preserves the funded wall-clock origin",
+    )
+    s_res.add_argument(
         "--keep-execution-clock", action="store_true",
-        help="preserve the existing execution_started_at wall-clock origin",
+        help="deprecated no-op: preserving the wall-clock origin is now the default",
     )
     s_res.set_defaults(func=cmd_supervisor_resume)
 

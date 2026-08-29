@@ -23,8 +23,15 @@ The finalizer independently:
  14. Scans the candidate diff and changed files for hard secret patterns.
  15. Executes the packet's required-validation commands itself.
  16. Captures exact exit codes and durations.
+ 16b. Re-proves builder worktree HEAD, worktree cleanliness, and
+      canonical-branch identity AFTER validation, so validation can
+      never mutate the candidate behind the receipt's back.
+ 16c. For PROGRAM runs, re-measures the absolute baseline-to-candidate
+      source accounting against the packet's global source ceilings.
  17. Detects no progress and repeated candidate SHA.
- 18. Enforces pass and repair limits.
+ 18. Enforces pass limits (repair-round limits are enforced
+      fail-closed at repair-claim time, so the final funded repair
+      always reaches its review).
  19. Generates BUILD_RECEIPT.json itself.
  20. Writes the receipt atomically.
  21. Appends the event.
@@ -44,8 +51,9 @@ from typing import Any
 
 from . import (
     approval, git_checks, guards, integrity, limits as limits_mod,
-    packet as packet_mod, receipts, secrets_v2, state as state_mod,
-    transitions, util, worktrees, build_agent as build_agent_mod,
+    packet as packet_mod, program as program_mod, receipts, secrets_v2,
+    state as state_mod, transitions, util, worktrees,
+    build_agent as build_agent_mod,
 )
 
 
@@ -400,6 +408,42 @@ def finalize_build(
     if not budget_ok:
         raise RuntimeError("budget over absolute ceiling: " + "; ".join(budget_violations))
 
+    # 11b. PROGRAM global source ceilings.
+    #
+    # The packet-bound ceilings (max_unique_changed_files /
+    # max_baseline_to_final_diff_lines) are declared in unique-file,
+    # baseline-to-final semantics. They are therefore re-measured
+    # absolutely against baseline..candidate at every build finalization
+    # — the only accounting that matches the declaration. Additive
+    # per-pass deltas would double-count files touched by multiple
+    # passes and count reverted churn. A breach fails closed toward
+    # BLOCKED (a legitimate engineered stop, like cap exhaustion) and is
+    # recorded in the receipt and the program counters.
+    program_source_check: dict[str, Any] | None = None
+    if state_mod.is_program_state(state):
+        prog = state.get("program") or {}
+        ceilings = prog.get("cumulative_ceilings") or {}
+        unique_files = int(stats["files_changed"])
+        diff_line_total = int(stats["added_lines"]) + int(stats["removed_lines"])
+        try:
+            program_mod.record_source_accounting(
+                prog,
+                files_changed_unique=unique_files,
+                diff_lines_total=diff_line_total,
+            )
+            program_source_breach = ""
+        except program_mod.ProgramStateError as exc:
+            program_source_breach = str(exc)
+        program_source_check = {
+            "result": "fail" if program_source_breach else "pass",
+            "accounting": "absolute_baseline_to_candidate",
+            "files_changed_unique": unique_files,
+            "diff_lines_total": diff_line_total,
+            "max_unique_changed_files": int(ceilings.get("max_unique_changed_files") or 0),
+            "max_baseline_to_final_diff_lines": int(ceilings.get("max_baseline_to_final_diff_lines") or 0),
+            "breach": program_source_breach,
+        }
+
     # 12. Scope & 13. protected/elevated path checks.
     scope_findings: list[dict[str, Any]] = []
     protected_findings: list[dict[str, Any]] = []
@@ -496,13 +540,43 @@ def finalize_build(
     # own exit-code/marker contract and no command timed out.
     validation_pass = all(bool(v.get("passed")) for v in validations) if validations else True
 
+    # 16b. Candidate identity re-proof AFTER validation.
+    #
+    # Validation commands are packet-declared shell executed inside the
+    # builder worktree; the pre-validation identity checks (steps 5-9)
+    # prove nothing about what those commands subsequently did.
+    # Deterministic validation must never mutate the candidate behind the
+    # receipt's back: re-prove the full sealing identity here (builder
+    # HEAD, worktree cleanliness, canonical branch pinned at baseline).
+    # A breach fails closed toward BLOCKED with a legible receipt instead
+    # of an opaque finalize crash after the claimed pass was consumed.
+    reproof_head = git_checks.current_head(builder_wt)
+    reproof_cleanliness = git_checks.dirty_status(builder_wt)
+    canon_ok_post, canon_msg_post = _verify_canonical_branch_unchanged(
+        canonical_repo, baseline_sha, baseline_branch
+    )
+    identity_reproof = {
+        "result": "pass",
+        "head_before_validation": candidate_sha,
+        "head_after_validation": reproof_head or "",
+        "worktree_status_after_validation": reproof_cleanliness,
+        "canonical_branch_ok_after_validation": canon_ok_post,
+        "canonical_branch_detail_after_validation": canon_msg_post,
+    }
+    if reproof_head != candidate_sha:
+        identity_reproof["result"] = "fail"
+    if reproof_cleanliness != "clean":
+        identity_reproof["result"] = "fail"
+    if not canon_ok_post:
+        identity_reproof["result"] = "fail"
+
     # 17. No-progress detection (v0.3.7 F-4-01: progress-sensitive).
     #
     # The streak advances only when the candidate SHA matches the
     # previous run's candidate SHA EXACTLY. Any difference — even a
     # single character — is real progress and resets the streak to 0.
     # The threshold comes from packet.risk_budget.max_consecutive_no_progress_passes
-    # (default: limits.MAX_CONSECUTIVE_NO_PROGRESS_PASSES=16; packets may only
+    # (default: limits.MAX_CONSECUTIVE_NO_PROGRESS_PASSES=8; packets may only
     # narrow it) and acts as an emergency fuse, not a normal stop. Productive
     # passes continue indefinitely; identical-no-progress only stops at the
     # threshold.
@@ -514,17 +588,25 @@ def finalize_build(
     else:
         no_progress_streak = 0
 
-    # 18. Repair limits.
+    # 18. Pass limits.
     # build_pass_count is owned by the claim path (cmd_build_claim).
     # The finalizer reads the existing claimed count and uses it as
     # builder_pass_number. The finalizer never increments, so:
     #   - idempotent finalizer replay cannot double-count.
     #   - a crashed claim still consumes one pass (the claim committed it).
     #   - resume of the same claimed pass produces the same number.
+    #
+    # Repair-round limits are deliberately NOT decided here. They are
+    # enforced fail-closed at repair-claim time (review finalize /
+    # build-transition repair claim / program claim_repair_round): once a
+    # review rejects and no funded repair round remains, the run seals
+    # BLOCKED before any builder pass can start. Blocking HERE on
+    # repair_round >= cap would starve the final funded repair of its
+    # review: the repaired candidate must always be allowed to prove
+    # itself in review.
     new_build_pass_count = int(state.get("build_pass_count") or 0)
     new_repair_round = int(state.get("repair_round") or 0)
     cap_build = limits_mod.effective_cap("build_pass_count", meta)
-    cap_repair = limits_mod.effective_cap("repair_round", meta)
     if new_build_pass_count < 1:
         # Refuse: a finalizer must run AFTER a successful claim.
         raise RuntimeError(
@@ -537,6 +619,14 @@ def finalize_build(
     # no path back to AWAITING_APPROVAL from BUILDING.)
     if state_mod.is_stop_requested(canonical_repo, run_id):
         next_state = "STOPPED"
+    elif identity_reproof["result"] != "pass":
+        # Validation mutated the candidate worktree or the canonical
+        # branch behind the finalizer's back. The sealing contract is
+        # broken; terminalize deterministically with the evidence in the
+        # receipt rather than hand a tampered tree to review.
+        next_state = "BLOCKED"
+    elif program_source_check is not None and program_source_check["result"] != "pass":
+        next_state = "BLOCKED"
     elif hard_secret_blocks:
         next_state = "BLOCKED"
     elif protected_findings:
@@ -551,8 +641,6 @@ def finalize_build(
         next_state = "BLOCKED"
     elif outcome_requested == "stopped":
         next_state = "STOPPED"
-    elif cap_repair is not None and new_repair_round >= cap_repair:
-        next_state = "BLOCKED"
     elif no_progress_streak >= limits_mod.effective_cap("no_progress_streak", meta):
         next_state = "BLOCKED"
     else:
@@ -592,6 +680,8 @@ def finalize_build(
             "result": "elevated" if sensitive_findings else "none",
             "paths": [p["path"] for p in sensitive_findings],
         },
+        "candidate_identity_reproof": identity_reproof,
+        "program_source_ceiling_check": program_source_check or {"result": "not_applicable"},
         "additional_review_required": bool(meta.get("additional_review_required")) or bool(sensitive_findings),
         "timestamp": util.utc_now_iso(),
         "builder_agent": "of-builder",
@@ -602,8 +692,17 @@ def finalize_build(
         "escalation_reason": (agent_result.get("escalation_reason") if agent_result else None),
     }
 
-    # 21. Persist atomically.
-    receipts.write_receipt(canonical_repo, run_id, receipt)
+    # 21. Persist atomically. An identity-reproof failure is written
+    # directly: the clean-candidate assertion inside receipts.write_receipt
+    # cannot hold for a tree that validation tampered with, and the
+    # breach record in the receipt is precisely the evidence that keeps
+    # the run terminal (next_state=BLOCKED, no review can claim it).
+    if identity_reproof["result"] != "pass":
+        util.atomic_write_json(
+            receipts.receipt_path(canonical_repo, run_id), receipt, mode=0o600
+        )
+    else:
+        receipts.write_receipt(canonical_repo, run_id, receipt)
 
     # 22. Append event.
     state_mod.append_event(
@@ -630,6 +729,11 @@ def finalize_build(
     cur["no_progress_streak"] = no_progress_streak
     cur["last_candidate_sha"] = candidate_sha
     cur["build_pass_count"] = int(new_build_pass_count)
+    if program_source_check is not None and state_mod.is_program_state(cur):
+        counters = (cur.get("program") or {}).get("cumulative_counters")
+        if isinstance(counters, dict):
+            counters["files_changed_unique"] = program_source_check["files_changed_unique"]
+            counters["diff_lines_total"] = program_source_check["diff_lines_total"]
     state_mod.save(canonical_repo, run_id, cur)
 
     # 24. Transition if appropriate.

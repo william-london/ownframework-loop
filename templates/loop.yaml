@@ -1,4 +1,10 @@
 # OwnFramework Loop per-repository policy. Drop into <repo>/.claude/loop.yaml.
+#
+# NOTE: execution pacing is dispatch-driven. The supervisor hands the next
+# actionable BUILD/REVIEW work order to the next semantic pass with no
+# deliberate idle gap; there are NO polling intervals to configure. The
+# historical build/review interval_minutes keys belonged to the retired
+# polling orchestrator and must not be reintroduced.
 schema: ownframework-loop-policy/v1
 version: 0.1.0
 factory:
@@ -23,10 +29,6 @@ protected_paths:
   - .ownframework-loop/
   - .worktrees/ownframework-loop/
   - state/
-build:
-  interval_minutes: 10
-review:
-  interval_minutes: 15
 remotes:
   local_only_default: true
   block_remote_creation: true

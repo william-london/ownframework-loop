@@ -36,9 +36,11 @@ fi
 
 tool_name="$(printf '%s' "$parsed" | python3 -B -c 'import sys, json; print(json.loads(sys.stdin.read()).get("tool_name", ""))' 2>/dev/null || true)"
 
-if [[ -z "$tool_name" ]]; then
-  exit 0
-fi
+# NOTE: an empty tool_name is NOT an early exit. Outside an active semantic
+# lane the context check below still no-ops; INSIDE an active lane the
+# classifier fails closed on an unidentifiable (empty) tool name. An
+# external-authority gate must not treat "cannot identify the tool" as
+# "allowed".
 
 cwd="$(printf '%s' "$parsed" | python3 -B -c 'import sys, json; print(json.loads(sys.stdin.read()).get("cwd", ""))' 2>/dev/null || true)"
 if [[ -z "$cwd" ]]; then
@@ -112,11 +114,18 @@ active_run="$canonical_repo"
 
 encoded="$(printf '%s' "$parsed" | base64)"
 
-decision="$(CLAUDE_PLUGIN_ROOT="$CLAUDE_PLUGIN_ROOT" encoded_payload="$encoded" encoded_tool="$tool_name" python3 -B - <<'PY' 2>/dev/null || echo "ALLOW"
+# Fail-closed contract: a classifier crash, import failure, missing
+# interpreter, or unrecognized decision text must all yield a BLOCK.
+# An external-authority gate must never degrade to ALLOW because its
+# own machinery is unavailable. The classifier emits exactly one of
+# ALLOW, ALLOW_WITH_DIAGNOSTIC, or "BLOCK:<CODE>" + newline + reason;
+# anything else — including empty output from a dead interpreter — is
+# an external-authority failure and is refused.
+decision="$(CLAUDE_PLUGIN_ROOT="$CLAUDE_PLUGIN_ROOT" encoded_payload="$encoded" encoded_tool="$tool_name" python3 -B - <<'PY' 2>/dev/null
 import sys, os, base64, json
-sys.path.insert(0, os.path.join(os.environ["CLAUDE_PLUGIN_ROOT"], "lib"))
-from ownframework_loop import external_action
 try:
+    sys.path.insert(0, os.path.join(os.environ["CLAUDE_PLUGIN_ROOT"], "lib"))
+    from ownframework_loop import external_action
     payload = json.loads(base64.b64decode(os.environ["encoded_payload"]).decode("utf-8", errors="replace"))
     tool = payload.get("tool_name", "")
     decision = external_action.classify_tool_call(
@@ -126,9 +135,15 @@ try:
     )
     print(decision)
 except Exception:
-    print("BLOCK:OF_LOOP_EXTERNAL_UNKNOWN\\nactive semantic external-action classifier failed")
+    print("BLOCK:OF_LOOP_EXTERNAL_UNKNOWN\nactive semantic external-action classifier failed")
 PY
 )"
+
+case "$decision" in
+  ALLOW|ALLOW_WITH_DIAGNOSTIC|BLOCK:*) ;;
+  *) decision="BLOCK:OF_LOOP_EXTERNAL_UNKNOWN
+external-action classifier unavailable or returned an unrecognized decision; refusing external action fail-closed" ;;
+esac
 
 if [[ "$decision" == "ALLOW" ]]; then
   exit 0

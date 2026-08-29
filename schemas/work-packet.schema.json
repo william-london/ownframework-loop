@@ -108,13 +108,14 @@
     },
     "risk_budget": {
       "type": "object",
+      "description": "Budget maxima must match the executable runtime envelope (packet._validate_risk_budget_envelope / util.ABSOLUTE_BUDGET_CEILING); schema-valid packets that the runtime refuses are a validation lie and are no longer permitted.",
       "additionalProperties": false,
       "properties": {
         "max_build_passes": { "type": "integer", "minimum": 1, "maximum": 32 },
         "max_review_passes": { "type": "integer", "minimum": 1, "maximum": 32 },
         "max_repair_rounds": { "type": "integer", "minimum": 1, "maximum": 32 },
-        "max_diff_lines": { "type": "integer", "minimum": 1, "maximum": 50000 },
-        "max_files_changed": { "type": "integer", "minimum": 1, "maximum": 1000 },
+        "max_diff_lines": { "type": "integer", "minimum": 1, "maximum": 30000 },
+        "max_files_changed": { "type": "integer", "minimum": 1, "maximum": 500 },
         "max_runtime_seconds": { "type": "integer", "minimum": 60, "maximum": 28800 },
         "max_pass_runtime_seconds": { "type": "integer", "minimum": 60, "maximum": 7200 },
         "max_consecutive_no_progress_passes": { "type": "integer", "minimum": 1, "maximum": 8 },
@@ -145,9 +146,25 @@
       "type": "array",
       "items": { "type": "string" }
     },
-    "merge_authority": { "type": "string", "enum": ["human_only", "delegated"] },
-    "deploy_authority": { "type": "string", "enum": ["human_only", "delegated"] },
-    "push_authority": { "type": "string", "enum": ["human_only", "delegated"] },
-    "external_action_authority": { "type": "string", "enum": ["human_only", "delegated", "none"] }
+    "merge_authority": {
+      "type": "string",
+      "enum": ["human_only", "delegated"],
+      "description": "human_only is the only value executable under the current authority contract. 'delegated' is retained solely so historical approved packets remain parseable for audit; dispatch refuses to claim work for it and approval of new packets carrying it is rejected."
+    },
+    "deploy_authority": {
+      "type": "string",
+      "enum": ["human_only", "delegated"],
+      "description": "human_only is the only value executable under the current authority contract. 'delegated' is retained solely for audit-parseability of historical packets."
+    },
+    "push_authority": {
+      "type": "string",
+      "enum": ["human_only", "delegated"],
+      "description": "human_only is the only value executable under the current authority contract. 'delegated' is retained solely for audit-parseability of historical packets."
+    },
+    "external_action_authority": {
+      "type": "string",
+      "enum": ["human_only", "delegated", "none"],
+      "description": "none is the only value executable under the current authority contract. 'human_only'/'delegated' are retained solely for audit-parseability of historical packets."
+    }
   }
 }

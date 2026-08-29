@@ -49,8 +49,8 @@ against schemas/work-packet.schema.json before approval.
     "max_files_changed": 12,
     "max_runtime_seconds": 28800,
     "max_pass_runtime_seconds": 1800,
-    "max_consecutive_no_progress_passes": 2,
-    "max_identical_finding_repeats": 2
+    "max_consecutive_no_progress_passes": 8,
+    "max_identical_finding_repeats": 8
   },
   "work_units": [
     { "id": "UNIT-1", "title": "<one line>", "scope": "<one sentence>", "acceptance": ["AC-1"] }
@@ -58,7 +58,6 @@ against schemas/work-packet.schema.json before approval.
   "rollback_requirements": "Revert candidate branch; rerun full test suite.",
   "product_decisions": ["<decision id>"],
   "escalation_conditions": ["<trigger>"],
-  "human_approved": false,
   "merge_authority": "human_only",
   "deploy_authority": "human_only",
   "push_authority": "human_only",

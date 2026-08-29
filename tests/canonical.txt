@@ -64,3 +64,8 @@ tests/integration/test_v063_program_preflight.sh
 
 # v0.7.0 final autonomy architecture regression
 tests/integration/test_v070_autonomy_envelope.sh
+
+# v0.8.0 final architecture closure — negative authority-boundary regression
+tests/integration/test_v072_authority_negative.sh
+# v0.8.0 final architecture closure — execution-semantics regression
+tests/integration/test_v072_execution_closure.sh

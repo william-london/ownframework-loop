@@ -101,6 +101,75 @@ STDOUT_LOG="$STATE_ROOT/supervisor.stdout.log"
 STDERR_LOG="$STATE_ROOT/supervisor.stderr.log"
 RUNTIME_PROVENANCE="$STATE_ROOT/runtime-provenance.json"
 
+# 4b. LIVE-EXECUTION GUARD. A commissioned supervisor must never be
+#     replaced while it has an active semantic worker or a run in flight:
+#     bootout would orphan the worker mid-pass and hot-swap the runtime
+#     under a live sealed execution. Durable queue state (QUEUED/BACKOFF
+#     jobs) survives a swap safely — the between-pass moment is exactly
+#     the supported refresh window. The probe is read-only and fails
+#     closed: an unreadable ledger is treated as active work. The only
+#     override is an explicit operator declaration.
+SUPERVISOR_DB="$STATE_ROOT/supervisor.sqlite3"
+if [[ -f "$SUPERVISOR_DB" && "${OFLOOP_ALLOW_SUPERVISOR_SWAP_WITH_ACTIVE_WORK:-0}" != "1" ]]; then
+  ACTIVE_REPORT="$("$PYTHON_BIN" - "$SUPERVISOR_DB" <<'PY'
+import os, sqlite3, sys
+
+db = sys.argv[1]
+terminal_attempts = {
+    "COMPLETED", "COST_UNKNOWN", "TOKENS_UNKNOWN",
+    "FAILED", "RECOVERED", "SUPERSEDED",
+}
+
+def pid_alive(pid):
+    if pid is None:
+        return None  # unknown — fail closed upstream
+    try:
+        os.kill(int(pid), 0)
+        return True
+    except (ValueError, TypeError):
+        return None
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+
+try:
+    conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+except sqlite3.Error:
+    print("ledger_probe_failed")
+    sys.exit(0)
+conn.row_factory = sqlite3.Row
+problems = []
+try:
+    for row in conn.execute(
+        "SELECT id, run_id, worker_pid FROM jobs WHERE status='RUNNING'"
+    ):
+        alive = pid_alive(row["worker_pid"])
+        if alive is not False:  # alive OR unknown: refuse
+            problems.append(f"running_job={row['run_id']}")
+    for row in conn.execute(
+        """SELECT a.attempt_id AS attempt_id, a.status AS status,
+                  j.run_id AS run_id, j.worker_pid AS worker_pid
+           FROM semantic_attempts a JOIN jobs j ON j.id = a.job_id
+           WHERE j.status='RUNNING'"""
+    ):
+        if str(row["status"]) in terminal_attempts:
+            continue
+        if pid_alive(row["worker_pid"]) is False:
+            continue
+        problems.append(f"active_attempt={row['attempt_id']}:{row['status']}")
+except sqlite3.Error:
+    problems.append("ledger_probe_failed")
+print(";".join(problems[:4]))
+PY
+  )" || ACTIVE_REPORT="ledger_probe_failed"
+  if [[ -n "$ACTIVE_REPORT" ]]; then
+    echo "SUPERVISOR_INSTALL=REFUSED reason=active_semantic_work detail=$ACTIVE_REPORT" >&2
+    echo "hint: refresh again after the active pass completes, or set OFLOOP_ALLOW_SUPERVISOR_SWAP_WITH_ACTIVE_WORK=1 to force (unsafe: may orphan a live sealed execution)" >&2
+    exit 11
+  fi
+fi
+
 # 5. Build a minimal PATH for the noninteractive service so it can find
 #    Python, ofloop, claude, git, jq, etc. Persisted so a future
 #    operator can reproduce the environment exactly.

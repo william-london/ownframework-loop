@@ -899,27 +899,48 @@ def claim_repair_round(
         raise
 
 
-def record_aggregate_change(
+def record_source_accounting(
     program_state: dict[str, Any],
     *,
-    files_changed_unique_delta: int,
-    diff_lines_delta: int,
+    files_changed_unique: int,
+    diff_lines_total: int,
 ) -> dict[str, Any]:
-    if files_changed_unique_delta < 0 or diff_lines_delta < 0:
-        raise ProgramStateError("aggregate change must be non-negative")
+    """Set the program-wide source accounting from an ABSOLUTE
+    baseline-to-candidate measurement.
+
+    The global source ceilings (``max_unique_changed_files``,
+    ``max_baseline_to_final_diff_lines``) are declared in
+    unique-file / baseline-to-final semantics: they bound the total
+    source delta between the approved baseline and the current candidate
+    of the single shared candidate branch. The correct accounting is
+    therefore a re-measurement of ``baseline..candidate`` at each build
+    finalization, written absolutely — NOT an additive accumulation of
+    per-pass deltas. Additive per-pass accounting double-counts every
+    file touched by more than one pass, counts reverted churn, and
+    drifts above the true baseline-to-final delta, starving legitimate
+    multi-checkpoint programs.
+
+    Raises ``ProgramStateError`` when the measurement breaches a ceiling;
+    callers must treat a breach as a fail-closed stop of the run.
+    """
+    if files_changed_unique < 0 or diff_lines_total < 0:
+        raise ProgramStateError("source accounting must be non-negative")
     new = _deepcopy_program(program_state)
-    new["cumulative_counters"]["files_changed_unique"] += int(files_changed_unique_delta)
-    new["cumulative_counters"]["diff_lines_total"] += int(diff_lines_delta)
+    new["cumulative_counters"]["files_changed_unique"] = int(files_changed_unique)
+    new["cumulative_counters"]["diff_lines_total"] = int(diff_lines_total)
     ce = new["cumulative_ceilings"]
     cc = new["cumulative_counters"]
+    breaches: list[str] = []
     if cc["files_changed_unique"] > ce["max_unique_changed_files"]:
-        raise ProgramStateError(
+        breaches.append(
             f"global file cap reached: {cc['files_changed_unique']}/{ce['max_unique_changed_files']}"
         )
     if cc["diff_lines_total"] > ce["max_baseline_to_final_diff_lines"]:
-        raise ProgramStateError(
+        breaches.append(
             f"global diff-lines cap reached: {cc['diff_lines_total']}/{ce['max_baseline_to_final_diff_lines']}"
         )
+    if breaches:
+        raise ProgramStateError("; ".join(breaches))
     return new
 
 
@@ -956,24 +977,6 @@ def program_terminal_reason(program_state: dict[str, Any]) -> str:
     if bad:
         return f"{bad[0]['terminal_state'].lower()}:{bad[0]['id']}"
     return "all_checkpoints_approved"
-
-
-def promotion_allowed(packet: dict[str, Any], program_state: dict[str, Any]) -> tuple[bool, str]:
-    policy = resolve_promotion_policy(packet)
-    if policy != "merge_on_approved":
-        return False, "human_gate_required"
-    if packet.get("merge_authority") != "delegated":
-        return False, "merge_authority_must_be_delegated"
-    is_term, term = is_program_terminal(program_state)
-    if not is_term or term != "APPROVED":
-        return False, f"not_terminal_approved:{term}"
-    cum = program_state["cumulative_counters"]
-    ce = program_state["cumulative_ceilings"]
-    if cum["files_changed_unique"] > ce["max_unique_changed_files"]:
-        return False, "file_cap_breach"
-    if cum["diff_lines_total"] > ce["max_baseline_to_final_diff_lines"]:
-        return False, "diff_lines_cap_breach"
-    return True, "ok"
 
 
 def _find_cp(program_state: dict[str, Any], cp_id: str) -> dict[str, Any]:
@@ -1060,11 +1063,11 @@ __all__ = [
     "materialise_initial_program_state",
     "select_next_checkpoint", "ready_to_claim",
     "finalize_checkpoint", "advance_to_next", "advance_after_review_approval",
-    "increment_cp_counter", "record_aggregate_change",
+    "increment_cp_counter", "record_source_accounting",
     "ClaimRefused", "claim_build_pass", "claim_review_pass",
     "claim_repair_round", "_unified_claim_pass", "_bump_counter_one",
     "verify_frozen_graph",
     "is_program_terminal", "program_terminal_reason",
-    "promotion_allowed", "source_tree_accounting",
+    "source_tree_accounting",
     "ClaimCapExhausted",
 ]

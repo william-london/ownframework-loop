@@ -166,7 +166,11 @@ REVIEWER_ALLOWLIST_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"^\s*git\s+show\b"),
     re.compile(r"^\s*git\s+diff\b"),
     re.compile(r"^\s*git\s+rev-parse\b"),
-    re.compile(r"^\s*git\s+branch\b(?!.*-[dD])"),
+    # NOTE: `git branch` is intentionally NOT a plain allowlist entry. A
+    # bare positional argument to `git branch` CREATES a branch, and the
+    # historical `(?!.*-[dD])` lookahead only excluded delete flags.
+    # git-branch segments are handled by _reviewer_segment_allowed(),
+    # which admits listing forms only.
     re.compile(r"^\s*git\s+worktree\s+list\b"),
     re.compile(r"^\s*git\s+cat-file\b"),
     re.compile(r"^\s*git\s+ls-files\b"),
@@ -463,6 +467,17 @@ def _split_single_line(command: str) -> list[str]:
                 buf = []
                 i += 2
                 continue
+            # fd redirects are not chain separators: `2>&1`, `>&2`, `&>`.
+            # Splitting them fragments the command into stray `1`/`2`
+            # segments that fail every reviewer allowlist pattern and
+            # corrupts forbidden-token matching on the real segments.
+            if ch == "&":
+                prev_ch = command[i - 1] if i > 0 else ""
+                next_ch = command[i + 1] if i + 1 < n else ""
+                if prev_ch == ">" or next_ch == ">":
+                    buf.append(ch)
+                    i += 1
+                    continue
             parts.append("".join(buf).strip())
             buf = []
             i += 1
@@ -507,14 +522,94 @@ def _first_executable_word(segment: str) -> str | None:
     return None
 
 
+# Mutating shell redirects inside an otherwise-allowlisted reviewer segment.
+# `echo x > file` matches the `echo` allowlist entry, so write redirects must
+# be refused explicitly. Permitted: stderr capture (`2>`, `2>>`) and fd
+# duplication (`>&2`, `1>&2`, `> &2`). Refused: stdout/both-stream file
+# writes (`> f`, `>> f`, `1> f`, `&> f`, `>& f`) and read-write opens (`<>`).
+_REVIEWER_MUTATING_REDIRECT = re.compile(
+    r"&>>?"                        # bash &> / &>> — both-stream file write
+    r"|>&\s*(?![0-9])"             # cmd >& file (both-stream write), not fd dup
+    r"|(?<![0-9&])>>?(?!\s*&)"     # > f / >> f / 1> f; not 2>/..., not N>&M dup
+)
+
+# find(1) actions that mutate: deletion and arbitrary command execution.
+# Ordinary find predicates (-name, -type, -path, ...) remain allowed.
+_REVIEWER_FIND_MUTATION = re.compile(
+    r"\bfind\b.*\s-(?:delete|exec|execdir|ok|okdir)\b"
+)
+
+# git branch flags that create, move, copy, delete, or re-wire branches.
+_GIT_BRANCH_MUTATING_FLAGS = frozenset({
+    "-d", "-D", "-m", "-M", "-c", "-C", "-f", "-F", "-u",
+    "--delete", "--move", "--copy", "--force", "--edit-description",
+    "--set-upstream-to", "--unset-upstream", "--create-reflog",
+    "--track", "--no-track",
+})
+
+# git branch options that force LIST mode; with any of these present the
+# positional arguments are filter patterns, never branch creation targets.
+_GIT_BRANCH_LISTING_MARKERS = frozenset({
+    "--list", "-l", "-a", "--all", "-r", "--remotes",
+    "--contains", "--points-at", "--merged", "--no-merged",
+})
+
+
+def _reviewer_git_branch_listing(seg: str) -> bool:
+    """Return True iff the segment is a pure `git branch` LISTING form.
+
+    Bare `git branch` lists. Any other form is allowed only when a
+    list-mode marker is present (so positional words are patterns) and no
+    mutating flag appears anywhere. Everything else — `git branch foo`,
+    `git branch -f foo`, `git branch -m a b` — is a repository mutation
+    and is refused in the reviewer lane.
+    """
+    try:
+        tokens = shlex.split(seg)
+    except ValueError:
+        return False
+    if len(tokens) < 2 or tokens[0] != "git" or tokens[1] != "branch":
+        return False
+    rest = tokens[2:]
+    for tok in rest:
+        if tok.split("=", 1)[0] in _GIT_BRANCH_MUTATING_FLAGS:
+            return False
+    if not rest:
+        return True
+    return any(tok.split("=", 1)[0] in _GIT_BRANCH_LISTING_MARKERS for tok in rest)
+
+
+def _reviewer_segment_allowed(seg: str) -> bool:
+    """Classify one reviewer segment: allowlist match PLUS mutation-form
+    refusals.
+
+    The allowlist is executable-shaped; these checks close the mutating
+    forms that live INSIDE an allowlisted executable's syntax: shell write
+    redirects, find(1) delete/exec actions, and git-branch creation.
+    Arbitrary-execution toolchains (python, node, make, docker, package
+    managers) remain reviewer-available because the reviewer must be able
+    to run the project's own validation; their external effects are
+    covered by FORBIDDEN_PATTERNS plus the external-action guard, and any
+    candidate-source mutation is refused by the exact-SHA clean-worktree
+    proof in the review finalizer.
+    """
+    if _REVIEWER_MUTATING_REDIRECT.search(seg):
+        return False
+    if re.match(r"^\s*git\s+branch\b", seg):
+        return _reviewer_git_branch_listing(seg)
+    if _REVIEWER_FIND_MUTATION.search(seg):
+        return False
+    return any(p.search(seg) for p in REVIEWER_ALLOWLIST_PATTERNS)
+
+
 def is_reviewer_allowed(command: str) -> bool:
-    """Return True iff every segment of the command matches an allowed pattern."""
+    """Return True iff every segment of the command is reviewer-allowed."""
     segments = _split_command_chain(command)
     if not segments:
         # Multiline/unparseable: do not pretend it is allowed.
         return False
     for seg in segments:
-        if not any(p.search(seg) for p in REVIEWER_ALLOWLIST_PATTERNS):
+        if not _reviewer_segment_allowed(seg):
             return False
     return True
 

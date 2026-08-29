@@ -116,6 +116,33 @@
         "paths": { "type": "array", "items": { "type": "string" } }
       }
     },
+    "candidate_identity_reproof": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["result"],
+      "properties": {
+        "result": { "type": "string", "enum": ["pass", "fail"] },
+        "head_before_validation": { "type": "string" },
+        "head_after_validation": { "type": "string" },
+        "worktree_status_after_validation": { "type": "string", "enum": ["clean", "dirty", "unknown"] },
+        "canonical_branch_ok_after_validation": { "type": "boolean" },
+        "canonical_branch_detail_after_validation": { "type": "string" }
+      }
+    },
+    "program_source_ceiling_check": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["result"],
+      "properties": {
+        "result": { "type": "string", "enum": ["pass", "fail", "not_applicable"] },
+        "accounting": { "type": "string" },
+        "files_changed_unique": { "type": "integer", "minimum": 0 },
+        "diff_lines_total": { "type": "integer", "minimum": 0 },
+        "max_unique_changed_files": { "type": "integer", "minimum": 0 },
+        "max_baseline_to_final_diff_lines": { "type": "integer", "minimum": 0 },
+        "breach": { "type": "string" }
+      }
+    },
     "additional_review_required": { "type": "boolean" },
     "timestamp": { "type": "string", "format": "date-time" },
     "builder_agent": { "type": "string" },

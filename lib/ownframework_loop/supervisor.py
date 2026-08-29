@@ -633,14 +633,25 @@ def enqueue(
     run_id: str,
     runner: str = "claude-code",
     db_path: Path | None = None,
-    max_infra_failures: int = 3,
-    max_transient_failures: int = 8,
-    max_transient_recovery_cycles: int = 2,
-    max_total_cost_usd: float = 0.0,
-    max_total_tokens: int = 0,
-    max_wall_seconds: int = 0,
+    max_infra_failures: int | None = None,
+    max_transient_failures: int | None = None,
+    max_transient_recovery_cycles: int | None = None,
+    max_total_cost_usd: float | None = None,
+    max_total_tokens: int | None = None,
+    max_wall_seconds: int | None = None,
 ) -> dict[str, Any]:
     """Create or refresh one enqueued run's operational envelope.
+
+    Envelope values use ``None`` as the "unspecified" sentinel:
+
+      * NEW job row: unspecified fields take the engine defaults
+        (failure ceilings 3/8/2; budget ceilings OFF = 0).
+      * EXISTING job row: unspecified fields PRESERVE the configured
+        values. A repeated enqueue must never widen or remove an already
+        configured operational ceiling merely because the caller omitted
+        it — default sentinels are not operator intent. Only an explicit
+        value (including an explicit <= 0, which disables that ceiling)
+        overwrites the configured envelope.
 
     Budget ceilings are OFF unless deliberately funded: a value <= 0 disables
     that ceiling. Long PROGRAMs must not hit accidental global stop lines;
@@ -657,6 +668,30 @@ def enqueue(
     # configuration on an existing row. Operational state, backoff and worker
     # ownership are never rewritten by a repeated enqueue.
     with _connect(db) as conn:
+        existing = conn.execute(
+            "SELECT * FROM jobs WHERE repo=? AND run_id=?", (repo, run_id)
+        ).fetchone()
+        if existing is not None:
+            def _keep(field: str, supplied: Any, default: Any) -> Any:
+                return supplied if supplied is not None else existing[field]
+            eff_infra = _keep("max_infra_failures", max_infra_failures, 3)
+            eff_transient = _keep("max_transient_failures", max_transient_failures, 8)
+            eff_cycles = _keep(
+                "max_transient_recovery_cycles", max_transient_recovery_cycles, 2
+            )
+            eff_cost = _keep("max_total_cost_usd", max_total_cost_usd, 0.0)
+            eff_tokens = _keep("max_total_tokens", max_total_tokens, 0)
+            eff_wall = _keep("max_wall_seconds", max_wall_seconds, 0)
+        else:
+            eff_infra = max_infra_failures if max_infra_failures is not None else 3
+            eff_transient = max_transient_failures if max_transient_failures is not None else 8
+            eff_cycles = (
+                max_transient_recovery_cycles
+                if max_transient_recovery_cycles is not None else 2
+            )
+            eff_cost = max_total_cost_usd if max_total_cost_usd is not None else 0.0
+            eff_tokens = max_total_tokens if max_total_tokens is not None else 0
+            eff_wall = max_wall_seconds if max_wall_seconds is not None else 0
         conn.execute(
             """
             INSERT INTO jobs
@@ -681,12 +716,12 @@ def enqueue(
                 repo,
                 run_id,
                 runner,
-                int(max_infra_failures),
-                int(max_transient_failures),
-                int(max_transient_recovery_cycles),
-                float(max_total_cost_usd),
-                int(max_total_tokens),
-                int(max_wall_seconds),
+                int(eff_infra),
+                int(eff_transient),
+                int(eff_cycles),
+                float(eff_cost),
+                int(eff_tokens),
+                int(eff_wall),
                 now,
                 now,
             ),
@@ -2009,6 +2044,16 @@ def run_one(*, db_path: Path | None = None, timeout_seconds: int = 0) -> dict[st
             semantic_timeout_seconds = resolve_semantic_timeout(
                 packet_meta, timeout_seconds
             )
+            # The whole-run wall ceiling must constrain the pass actually
+            # launched, not only the between-pass checks: a pass started
+            # with one minute of budget left may not run for its full
+            # packet timeout. Clamp the pass timeout to the remaining wall
+            # budget whenever a wall ceiling is funded.
+            if max_wall > 0:
+                remaining_wall = max(0, int(max_wall - elapsed))
+                semantic_timeout_seconds = min(
+                    semantic_timeout_seconds, remaining_wall
+                )
 
             result = _runner(str(job["runner"])).run(
                 work_order,
@@ -2258,14 +2303,21 @@ def resume(
     max_total_cost_usd: float | None = None,
     max_total_tokens: int | None = None,
     max_wall_seconds: int | None = None,
-    reset_execution_started_at: bool = True,
+    reset_execution_started_at: bool = False,
 ) -> dict[str, Any]:
     """Clear operational quarantine and reset operational counters only.
 
     Does NOT alter STATE.json, packet scope, candidate SHA, review verdict, or
-    engineering pass counters. Cumulative observed cost is preserved; only the
-    wall-clock ceiling start is reset (if requested) so the run can make fresh
-    progress after an infrastructure ceiling was reached.
+    engineering pass counters. Cumulative observed cost is preserved.
+
+    The wall-clock origin is PRESERVED by default: resuming a run that
+    exhausted its funded wall budget must not silently grant a fresh
+    budget — the ceiling check would quarantine the run again, and
+    silently resetting the clock would make the funded wall ceiling
+    unenforceable across resumes. A fresh clock is an explicit budget
+    decision: pass ``reset_execution_started_at=True`` (operator
+    ``--reset-execution-clock``) — normally together with a widened
+    ``max_wall_seconds``.
 
     Returns the updated job dict (or NOT_ENQUEUED).
     """

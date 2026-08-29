@@ -457,16 +457,6 @@ def packet_is_program(meta: dict[str, Any]) -> bool:
     )
 
 
-def packet_promotion_policy(meta: dict[str, Any]) -> str:
-    """Return "human_gate" (default) or "merge_on_approved"."""
-    p = meta.get("promotion_policy")
-    if p is None:
-        return "human_gate"
-    if p not in ("human_gate", "merge_on_approved"):
-        raise ValueError(f"invalid promotion_policy: {p!r}")
-    return p
-
-
 # v0.6.0 — current executable packet authority model.
 # Distinct from validate_packet_metadata (which only checks parseable shape).
 # A packet MAY be parseable yet not executable under current 0.6 rules.

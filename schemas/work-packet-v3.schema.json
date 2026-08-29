@@ -116,7 +116,7 @@
       "type": "string",
       "enum": ["human_gate", "merge_on_approved"],
       "default": "human_gate",
-      "description": "human_gate: terminal APPROVED stops before promotion; merge_on_approved: one guarded merge to baseline branch on APPROVED."
+      "description": "human_gate is the only value executable under the current authority contract: terminal APPROVED stops before promotion and a human promotes. 'merge_on_approved' is retained solely for audit-parseability of historical packets; dispatch refuses to claim work for it and approval of new packets carrying it is rejected."
     },
     "acceptance_criteria": {
       "type": "array",
@@ -213,9 +213,25 @@
       "type": "array",
       "items": { "type": "string" }
     },
-    "merge_authority": { "type": "string", "enum": ["human_only", "delegated"] },
-    "deploy_authority": { "type": "string", "enum": ["human_only", "delegated"] },
-    "push_authority": { "type": "string", "enum": ["human_only", "delegated"] },
-    "external_action_authority": { "type": "string", "enum": ["human_only", "delegated", "none"] }
+    "merge_authority": {
+      "type": "string",
+      "enum": ["human_only", "delegated"],
+      "description": "human_only is the only value executable under the current authority contract. 'delegated' is retained solely for audit-parseability of historical packets."
+    },
+    "deploy_authority": {
+      "type": "string",
+      "enum": ["human_only", "delegated"],
+      "description": "human_only is the only value executable under the current authority contract. 'delegated' is retained solely for audit-parseability of historical packets."
+    },
+    "push_authority": {
+      "type": "string",
+      "enum": ["human_only", "delegated"],
+      "description": "human_only is the only value executable under the current authority contract. 'delegated' is retained solely for audit-parseability of historical packets."
+    },
+    "external_action_authority": {
+      "type": "string",
+      "enum": ["human_only", "delegated", "none"],
+      "description": "none is the only value executable under the current authority contract. 'human_only'/'delegated' are retained solely for audit-parseability of historical packets."
+    }
   }
 }

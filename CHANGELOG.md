@@ -4,6 +4,107 @@ All notable current-release changes to OwnFramework Loop are documented here.
 The complete historical changelog through 0.5.2 is preserved at
 [`docs/history/CHANGELOG-through-0.5.2.md`](docs/history/CHANGELOG-through-0.5.2.md).
 
+## 0.8.0 - Final End-to-End Architecture Closure (2026-08-29)
+
+v0.8.0 is the surgical closure pass adjudicating an independent source
+review of 0.7.0. The deterministic Loop model, execution seal, exact-SHA
+review, and all human authority boundaries are unchanged. Every fix below
+is fail-closed on an authority boundary and behavior-preserving for
+legitimate unattended work.
+
+### Authority gates fail closed (findings 1, 5, 6, 12)
+
+- external-action guard: a classifier crash, import failure, missing
+  interpreter, empty tool name, or unrecognized decision now yields a
+  BLOCK (previously the shell fallback could degrade to ALLOW);
+- external-action coverage: gh pr/issue/repo/gist/api mutations,
+  npm/pnpm/yarn/cargo/twine/helm/crane publishing, docker/compose push,
+  mutating HTTP (curl/wget) toward non-loopback hosts, and compound MCP
+  operation names containing any mutating verb are refused; loopback
+  mutation (local dev servers, e2e) stays allowed;
+- reviewer read-only policy: `git branch` admits listing forms only
+  (creation/rename/delete/force-move refused), shell write redirects
+  (`> f`, `>> f`, `&> f`, `cmd >& f`) are refused in the reviewer lane
+  while `2>`/`2>&1` capture stays allowed, `find -delete/-exec/-ok`
+  forms are refused, and the command-chain splitter no longer fragments
+  `2>&1` into stray segments;
+- spec approve now refuses packets that are not executable under the
+  current authority contract (delegated authority / merge_on_approved)
+  BEFORE the TTY confirmation gate; schemas keep the legacy values for
+  audit parseability of historical packets and document them as
+  non-executable;
+- dead auto-promotion evaluators (`program.promotion_allowed`,
+  `packet.packet_promotion_policy`) are removed; the retired legacy
+  orchestrator keeps its explicit-refusal stubs.
+
+### Program ceilings and sealing (findings 2, 4)
+
+- PROGRAM global source ceilings (max_unique_changed_files /
+  max_baseline_to_final_diff_lines) are now wired into live execution:
+  build finalization re-measures the ABSOLUTE baseline-to-candidate
+  accounting at every pass, persists it in the program counters, and
+  blocks the run on breach. Additive per-pass accounting (which
+  double-counted files touched by multiple passes) is removed;
+- build finalization re-proves candidate identity AFTER the packet
+  validation commands run (builder HEAD, worktree cleanliness, canonical
+  branch pinned at baseline). A candidate or canonical branch mutated by
+  validation fails closed to BLOCKED with a `candidate_identity_reproof`
+  evidence block in the receipt instead of an opaque finalize crash.
+
+### Repair funding and terminalization (findings 3, 16)
+
+- the final funded repair round always reaches its review: build
+  finalization no longer blocks on `repair_round >= cap` (that starved
+  the repaired candidate of its earned review). Repair envelopes are
+  enforced fail-closed AT CLAIM TIME in both modes; an exhausted
+  envelope seals BLOCKED before any unfunded builder pass can start;
+- broad `except Exception: pass` around repair/terminal transitions is
+  narrowed to tolerate only the idempotent already-at-target case; any
+  other FSM failure surfaces instead of silently desyncing the run.
+
+### Supervisor safety (findings 7, 8, 9, 10)
+
+- macOS supervisor install/refresh refuses while a semantic worker is
+  live (RUNNING job with alive/unknown worker pid, or non-terminal
+  attempt); durable QUEUED/BACKOFF state survives a swap safely. An
+  explicit operator override exists for stuck-worker recovery;
+- a funded wall ceiling now clamps the timeout of the pass actually
+  launched to the remaining wall budget, not only the between-pass
+  checks;
+- resume preserves the funded wall-clock origin by default
+  (`--reset-execution-clock` grants a fresh one explicitly;
+  `--keep-execution-clock` remains accepted as a no-op);
+- a repeated enqueue preserves every configured operational ceiling;
+  only explicit values (including an explicit `<= 0` disable) overwrite
+  the envelope. Unspecified envelope arguments are `None` sentinels.
+
+### Schema/envelope/template truth (findings 11, 13, 14)
+
+- v2 packet schema budget maxima now equal the executable runtime
+  envelope (max_files_changed 500, max_diff_lines 30000); schema-valid
+  packets the runtime refuses are no longer possible;
+- the no-progress emergency fuse agrees across default, absolute
+  envelope, and both schemas (8);
+- templates no longer reintroduce retired architecture: WORK_PACKET.md
+  drops the schema-invalid `human_approved` key and uses engine-default
+  fuse values; loop.yaml drops the retired polling interval keys.
+
+### Tests
+
+- new negative authority-boundary suite
+  (`tests/integration/test_v072_authority_negative.sh`): fail-closed
+  hook paths, external-action coverage matrix, reviewer mutation-form
+  refusals, non-executable-packet approval refusal, hermetic installer
+  live-work guard proof, envelope preservation;
+- new execution-closure suite
+  (`tests/integration/test_v072_execution_closure.sh`): final-funded-
+  repair reachability, claim-time exhaustion sealing, identity-reproof
+  BLOCKED path, PROGRAM ceiling enforcement with absolute accounting,
+  wall-time clamping, schema/envelope agreement probes;
+- new disposable semantic-canary harness (`tests/canary/`) for a future
+  deliberate real-model test; it prepares only and never touches the
+  live supervisor.
+
 ## 0.7.0 - Final Autonomy Architecture Pass (2026-08-29)
 
 v0.7.0 is the final surgical architecture pass before sealed PROGRAMs run

@@ -868,7 +868,10 @@ def finalize_review(
                 except program_mod.ClaimRefused as e:
                     # Defect B (v0.4.5): cap exhaustion fails closed. Seal
                     # the run BLOCKED so no further builder pass can start
-                    # without new human authorization.
+                    # without new human authorization. A failed seal must
+                    # NOT be swallowed: if the run stays CHANGES_REQUESTED
+                    # a builder claim could start an unfunded repair pass.
+                    # Tolerate only the idempotent already-sealed case.
                     try:
                         state_mod.transition(
                             canonical_repo,
@@ -878,16 +881,46 @@ def finalize_review(
                             reason=f"repair claim refused (cap exhausted): {e}",
                             commit_sha=receipt_candidate_sha,
                         )
-                    except Exception:
-                        pass  # idempotent; another post-hook may have already sealed.
+                    except transitions.InvalidTransitionError:
+                        now = state_mod.load(canonical_repo, run_id)
+                        if (now or {}).get("state") not in ("BLOCKED", "STOPPED"):
+                            raise
             else:
-                cur["repair_round"] = int(cur.get("repair_round", 0)) + 1
-                cur["no_progress_streak"] = 0
-                state_mod.save(canonical_repo, run_id, cur)
+                # Single mode: enforce the repair envelope AT CLAIM TIME,
+                # fail closed. The build finalizer no longer blocks on
+                # repair_round >= cap, so the final funded repair's
+                # candidate always reaches review; when this claim cannot
+                # be funded, no builder pass may start without new human
+                # authorization.
+                try:
+                    state_mod.increment_counter(
+                        canonical_repo, run_id, counter="repair_round",
+                        actor="review_finalize", packet=meta, hard_cap=True,
+                    )
+                except limits_mod.RepairLimitExceeded as e:
+                    state_mod.transition(
+                        canonical_repo, run_id,
+                        to_state="BLOCKED",
+                        actor="review_finalize",
+                        reason=f"repair claim refused (cap exhausted): {e}",
+                        commit_sha=receipt_candidate_sha,
+                    )
+                else:
+                    cur = state_mod.load(canonical_repo, run_id)
+                    cur["no_progress_streak"] = 0
+                    state_mod.save(canonical_repo, run_id, cur)
 
             # Single-mode post-hook: transition CHANGES_REQUESTED back to
-            # READY_TO_BUILD so the next build pass is reachable.
-            if not state_mod.is_program_state(state_mod.load(canonical_repo, run_id)):
+            # READY_TO_BUILD so the next build pass is reachable. Skipped
+            # when the run was sealed BLOCKED by repair-cap exhaustion. A
+            # failed transition is tolerated only when the run is already
+            # READY_TO_BUILD (idempotent replay); any other failure is a
+            # real state desync and must surface rather than be swallowed.
+            cur_after = state_mod.load(canonical_repo, run_id)
+            if (
+                not state_mod.is_program_state(cur_after)
+                and cur_after.get("state") == "CHANGES_REQUESTED"
+            ):
                 try:
                     state_mod.transition(
                         canonical_repo, run_id,
@@ -895,7 +928,9 @@ def finalize_review(
                         actor="review_finalize",
                         reason="repair_round claimed; ready for next build",
                     )
-                except Exception:
-                    pass
+                except transitions.InvalidTransitionError:
+                    now = state_mod.load(canonical_repo, run_id)
+                    if (now or {}).get("state") != "READY_TO_BUILD":
+                        raise
 
     return new_verdict

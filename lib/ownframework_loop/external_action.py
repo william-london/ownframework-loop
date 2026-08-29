@@ -48,6 +48,19 @@ _READ_ONLY_MCP_VERBS: tuple[str, ...] = (
     "find", "resolve", "check", "head", "tail",
 )
 
+# Mutating MCP operation tokens. MCP tool names are compound
+# (mcp__<server>__<operation...>); a mutating verb ANYWHERE in the operation
+# name refuses the call. Matching is exact-token, so `dataset_get` is not
+# caught by `set` and `settings` is not caught by `set`.
+_MUTATING_MCP_VERBS: frozenset[str] = frozenset({
+    "create", "delete", "remove", "drop", "update", "write", "set", "put",
+    "post", "patch", "send", "push", "merge", "deploy", "insert", "add",
+    "edit", "modify", "mutate", "upload", "publish", "pay", "charge",
+    "refund", "bill", "submit", "execute", "start", "stop", "restart",
+    "kill", "approve", "reject", "invite", "assign", "unassign", "move",
+    "rename", "archive", "close", "reopen", "reply", "comment", "apply",
+})
+
 
 # Block patterns for Bash commands that look external.
 _BLOCKED_BASH_PATTERNS: list[tuple[re.Pattern[str], str, str]] = [
@@ -64,7 +77,24 @@ _BLOCKED_BASH_PATTERNS: list[tuple[re.Pattern[str], str, str]] = [
     (re.compile(r"\btwilio\b"), "OF_LOOP_EXTERNAL_EMAIL", "twilio"),
     (re.compile(r"\bgh\s+pr\s+create\b"), "OF_LOOP_EXTERNAL_PR", "gh pr create"),
     (re.compile(r"\bgh\s+pr\s+merge\b"), "OF_LOOP_EXTERNAL_PR", "gh pr merge"),
+    (re.compile(r"\bgh\s+pr\s+(close|reopen|edit|comment|review|ready)\b"), "OF_LOOP_EXTERNAL_PR", "gh pr mutation"),
     (re.compile(r"\bgh\s+release\b"), "OF_LOOP_EXTERNAL_PUBLISH", "gh release"),
+    (re.compile(r"\bgh\s+api\b[^|;&]*-X\s*(POST|PUT|PATCH|DELETE)\b"), "OF_LOOP_EXTERNAL_PR", "gh api mutation"),
+    (re.compile(r"\bgh\s+repo\s+(create|delete|edit|rename|archive)\b"), "OF_LOOP_EXTERNAL_REMOTE", "gh repo mutation"),
+    (re.compile(r"\bgh\s+gist\s+(create|edit|delete)\b"), "OF_LOOP_EXTERNAL_PUBLISH", "gh gist mutation"),
+    (re.compile(r"\bgh\s+issue\s+(create|close|reopen|edit|delete|transfer)\b"), "OF_LOOP_EXTERNAL_PR", "gh issue mutation"),
+    # Registry publish / image push (external distribution effects). These are
+    # refused here as well as in guards.FORBIDDEN_PATTERNS (defense in depth).
+    (re.compile(r"\bnpm\s+publish\b"), "OF_LOOP_EXTERNAL_PUBLISH", "npm publish"),
+    (re.compile(r"\bpnpm\s+publish\b"), "OF_LOOP_EXTERNAL_PUBLISH", "pnpm publish"),
+    (re.compile(r"\byarn\s+publish\b"), "OF_LOOP_EXTERNAL_PUBLISH", "yarn publish"),
+    (re.compile(r"\bcargo\s+publish\b"), "OF_LOOP_EXTERNAL_PUBLISH", "cargo publish"),
+    (re.compile(r"\btwine\s+upload\b"), "OF_LOOP_EXTERNAL_PUBLISH", "twine upload"),
+    (re.compile(r"\bdocker\s+push\b"), "OF_LOOP_EXTERNAL_PUBLISH", "docker push"),
+    (re.compile(r"\bdocker\s+compose\s+push\b"), "OF_LOOP_EXTERNAL_PUBLISH", "docker compose push"),
+    (re.compile(r"\bdocker-compose\s+push\b"), "OF_LOOP_EXTERNAL_PUBLISH", "docker-compose push"),
+    (re.compile(r"\bhelm\s+push\b"), "OF_LOOP_EXTERNAL_PUBLISH", "helm push"),
+    (re.compile(r"\bcrane\s+push\b"), "OF_LOOP_EXTERNAL_PUBLISH", "crane push"),
     (re.compile(r"\bheroku\b.*--?deploy\b"), "OF_LOOP_EXTERNAL_DEPLOY", "heroku deploy"),
     (re.compile(r"\bvercel\b.*--?deploy\b"), "OF_LOOP_EXTERNAL_DEPLOY", "vercel deploy"),
     (re.compile(r"\bnetlify\b.*--?deploy\b"), "OF_LOOP_EXTERNAL_DEPLOY", "netlify deploy"),
@@ -93,29 +123,44 @@ def _is_mcp_tool(name: str) -> bool:
     return n.startswith("mcp__") or "_mcp__" in n or n.startswith("mcp-")
 
 
-def _mcp_verb(name: str) -> str:
-    """Return the trailing verb from an MCP-shaped tool name."""
+def _classify_mcp(name: str) -> str:
+    """Classify a compound MCP operation name fail-closed.
+
+    MCP operation names are compound (``mcp__<server>__<op...>``). Inspecting
+    only the trailing token is unsafe in both directions: a mutating verb in a
+    non-final position would slip through, and a harmless compound read such as
+    ``list_issues`` would be refused because its tail is not itself a read
+    verb. Scan every operation token instead:
+
+      * any mutating verb anywhere  -> BLOCK;
+      * else any read-only verb     -> ALLOW_WITH_DIAGNOSTIC;
+      * else (no recognizable verb) -> BLOCK (fail closed).
+    """
     n = name.lower()
-    # Strip leading mcp prefix and server prefix.
-    parts = re.split(r"[_\-]+", n)
-    if not parts:
-        return ""
-    # Drop empty leading parts.
-    parts = [p for p in parts if p]
-    if not parts:
-        return ""
-    if parts[0] in ("mcp", "server"):
-        return parts[-1] if len(parts) > 1 else ""
-    return parts[-1]
+    parts = [p for p in re.split(r"[_\-]+", n) if p]
+    if parts and parts[0] == "mcp":
+        parts = parts[1:]
+    mutating = [p for p in parts if p in _MUTATING_MCP_VERBS]
+    if mutating:
+        return (
+            "BLOCK:OF_LOOP_EXTERNAL_UNKNOWN\n"
+            "MCP operation contains mutating verb(s) "
+            f"{', '.join(sorted(set(mutating)))}: {name}"
+        )
+    if any(p in _READ_ONLY_MCP_VERBS for p in parts):
+        return "ALLOW_WITH_DIAGNOSTIC"
+    return "BLOCK:OF_LOOP_EXTERNAL_UNKNOWN\nunknown MCP operation: " + name
 
 
 def classify_tool_call(*, tool_name: str, tool_input: dict[str, Any], active_run: str) -> str:
     """Classify a tool call from the active-run context.
 
     Returns "ALLOW", "ALLOW_WITH_DIAGNOSTIC", or "BLOCK:<code>\\n<reason>".
+    An unidentifiable tool fails closed: external-authority classification must
+    never degrade to an allowance.
     """
     if not tool_name:
-        return "ALLOW_WITH_DIAGNOSTIC"
+        return "BLOCK:OF_LOOP_EXTERNAL_UNKNOWN\nempty tool name during active run"
 
     if tool_name in _ALLOWED_TOOLS:
         # Bash gets a deeper scan.
@@ -125,11 +170,7 @@ def classify_tool_call(*, tool_name: str, tool_input: dict[str, Any], active_run
 
     # MCP-shaped tools.
     if _is_mcp_tool(tool_name):
-        verb = _mcp_verb(tool_name)
-        if verb in _READ_ONLY_MCP_VERBS:
-            return "ALLOW_WITH_DIAGNOSTIC"
-        # Unknown MCP verb: refuse in active run.
-        return "BLOCK:OF_LOOP_EXTERNAL_UNKNOWN\nunknown MCP tool verb: " + tool_name
+        return _classify_mcp(tool_name)
 
     # Unknown tool: refuse during an active run.
     return "BLOCK:OF_LOOP_EXTERNAL_UNKNOWN\nunknown tool during active run: " + tool_name
@@ -166,7 +207,74 @@ def _classify_bash(tool_input: dict[str, Any]) -> str:
         for pattern, code, desc in _BLOCKED_BASH_PATTERNS:
             if pattern.search(seg):
                 return "BLOCK:" + code + "\n" + desc + " refused in active run"
+        http_violation = _http_mutation_violation(seg)
+        if http_violation:
+            return (
+                "BLOCK:OF_LOOP_EXTERNAL_UNKNOWN\n"
+                f"{http_violation} refused in active run"
+            )
     return "ALLOW"
+
+
+# Mutating HTTP request flags for curl/wget. Local development legitimately
+# issues POST/PUT against loopback services (dev servers, local APIs, e2e),
+# so mutation is refused only when a NON-loopback URL is visible in the same
+# segment. Mutating flags with no visible URL are treated as local scripting
+# and allowed — the textual layer cannot prove externality there.
+_CURL_MUTATING = re.compile(
+    r"(?:^|\s)(?:"
+    r"-X\s*(?:POST|PUT|DELETE|PATCH)\b"
+    r"|--request[=\s](?:POST|PUT|DELETE|PATCH)\b"
+    r"|--data(?:-binary|-raw|-urlencode|-ascii)?\b"
+    r"|-d\b"
+    r"|-F\b|--form\b"
+    r"|-T\b|--upload-file\b"
+    r"|--json\b"
+    r")",
+    re.IGNORECASE,
+)
+_WGET_MUTATING = re.compile(
+    r"(?:--post-data|--post-file|--body-data|--method[=\s](?:POST|PUT|DELETE|PATCH))",
+    re.IGNORECASE,
+)
+_URL_HOST = re.compile(r"https?://([^/:?\s]+)", re.IGNORECASE)
+_LOOPBACK_HOSTS = frozenset({
+    "localhost", "127.0.0.1", "::1", "0.0.0.0", "ip6-localhost",
+})
+
+
+def _host_is_loopback(host: str) -> bool:
+    h = host.lower().strip("[]")
+    if h in _LOOPBACK_HOSTS:
+        return True
+    if h.startswith("127."):
+        return True
+    if h == "localhost.localdomain" or h.endswith(".localhost"):
+        return True
+    return False
+
+
+def _http_mutation_violation(seg: str) -> str:
+    """Return a violation description when a segment performs a mutating HTTP
+    request against a non-loopback host; empty string otherwise."""
+    first = seg.split()[0] if seg.split() else ""
+    base = first.rsplit("/", 1)[-1].lower()
+    if base == "curl":
+        if not _CURL_MUTATING.search(seg):
+            return ""
+    elif base == "wget":
+        if not _WGET_MUTATING.search(seg):
+            return ""
+    else:
+        return ""
+    hosts = _URL_HOST.findall(seg)
+    external = [h for h in hosts if not _host_is_loopback(h)]
+    if external:
+        return (
+            f"mutating HTTP request toward non-loopback host(s) "
+            f"{', '.join(sorted(set(external)))}"
+        )
+    return ""
 
 
 def _normalize_python_argv(cmd: str) -> str:
