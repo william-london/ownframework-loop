@@ -105,7 +105,10 @@ bash install-supervisor-macos.sh
 ```
 
 This installs a per-user `launchd` service so the supervisor is independent of
-an open terminal or Claude session.
+an open terminal or Claude session. After a supervisor has been commissioned
+once, later canonical `install.sh` runs on macOS automatically refresh that
+existing service to the newly installed cache payload and preserve source-SHA
+provenance. A plugin install never creates a new launchd service implicitly.
 
 ## 3. Interactive foreground mode
 

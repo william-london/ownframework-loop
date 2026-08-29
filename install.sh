@@ -26,6 +26,7 @@
 #   SOURCE_ROOT     - the plugin source directory (default: script dir)
 #   SCOPE           - install scope: user (default) | project | local
 #   KEEP_MARKETPLACE - if set to 1, do not remove the marketplace on exit
+#   OFLOOP_SKIP_SUPERVISOR_REFRESH - set to 1 to skip refresh of an already-commissioned macOS supervisor
 
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -191,6 +192,32 @@ else
     else
         ln -sfn "$SHIM_TARGET" "$SHIM_PATH"
         log "operator CLI shim: created $SHIM_PATH -> $SHIM_TARGET"
+    fi
+fi
+
+# --- refresh an already-commissioned macOS supervisor ---
+# Installing the plugin should not leave launchd executing an older cache
+# payload. Preserve operator intent: refresh only when a supervisor was
+# already commissioned; never create a new background service implicitly.
+if [[ "${OFLOOP_SKIP_SUPERVISOR_REFRESH:-0}" != "1" && "$(uname -s)" == "Darwin" ]]; then
+    SUPERVISOR_LABEL="com.ownframework.loop-supervisor"
+    SUPERVISOR_PLIST="$HOME/Library/LaunchAgents/$SUPERVISOR_LABEL.plist"
+    SUPERVISOR_STATE_ROOT="${XDG_STATE_HOME:-$HOME/.local/state}/ownframework-loop"
+    SUPERVISOR_PROVENANCE="$SUPERVISOR_STATE_ROOT/runtime-provenance.json"
+    if [[ -f "$SUPERVISOR_PLIST" || -f "$SUPERVISOR_PROVENANCE" ]]; then
+        INSTALLED_SUPERVISOR_INSTALLER="$EXPECTED_CACHE/install-supervisor-macos.sh"
+        INSTALLED_OFLOOP="$EXPECTED_CACHE/bin/ofloop"
+        if [[ ! -x "$INSTALLED_SUPERVISOR_INSTALLER" || ! -x "$INSTALLED_OFLOOP" ]]; then
+            log "supervisor refresh FAILED: installed supervisor payload missing/executable bit lost"
+            exit 9
+        fi
+        log "refreshing existing macOS supervisor to installed payload $EXPECTED_VERSION"
+        if ! SOURCE_ROOT_OVERRIDE="$SOURCE_ROOT" OFLOOP_BIN="$INSTALLED_OFLOOP" \
+            bash "$INSTALLED_SUPERVISOR_INSTALLER" >"$SOURCE_ROOT/.supervisor-refresh.log" 2>&1; then
+            log "supervisor refresh FAILED; see $SOURCE_ROOT/.supervisor-refresh.log"
+            exit 9
+        fi
+        log "existing macOS supervisor refreshed to $INSTALLED_OFLOOP"
     fi
 fi
 

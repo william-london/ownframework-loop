@@ -76,7 +76,8 @@ fi
 # 2. Source provenance: derive from the current source checkout so the
 #    runtime record can later be cross-checked against the Git HEAD
 #    that backed the installed ofloop binary.
-SOURCE_ROOT="$(canon_path "$ROOT" "$PYTHON_BIN")"
+SOURCE_ROOT_RAW="${SOURCE_ROOT_OVERRIDE:-$ROOT}"
+SOURCE_ROOT="$(canon_path "$SOURCE_ROOT_RAW" "$PYTHON_BIN")"
 SOURCE_HEAD=""
 if git -C "$SOURCE_ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   SOURCE_HEAD="$(git -C "$SOURCE_ROOT" rev-parse HEAD 2>/dev/null || true)"

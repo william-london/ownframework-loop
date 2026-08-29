@@ -95,6 +95,12 @@ different executable.
 This is operational self-healing only; it does not change packet authority,
 engineering passes, review evidence, or promotion.
 
+On macOS, canonical `install.sh` now also refreshes an already-commissioned
+launchd supervisor to the newly installed cache payload. It never creates a
+background service implicitly, and the supervisor installer accepts a separate
+source-provenance root so installed runtime identity and Git source SHA remain
+both explicit.
+
 ### What did NOT change
 
 - The v0.6.0 release tag and GitHub Release were not modified.
