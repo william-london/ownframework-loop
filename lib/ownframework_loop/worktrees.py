@@ -112,7 +112,14 @@ def add_builder_worktree(
         r = run_subprocess(cmd, timeout=30)
         if r.returncode != 0:
             if wt.exists():
+                if not is_registered_worktree(canonical_repo, wt):
+                    raise WorktreeError(
+                        f"race-created builder path {wt} is not a registered worktree "
+                        "of the canonical repository"
+                    )
                 head = current_head(wt)
+                if head is None:
+                    raise WorktreeError("race-created builder worktree HEAD is not resolvable")
                 actual_branch = _require_builder_branch(wt, branch)
                 return {
                     "path": str(wt), "branch": branch, "head": head,
@@ -192,13 +199,23 @@ def add_reviewer_worktree(
         r = run_subprocess(cmd, timeout=30)
         if r.returncode != 0:
             if wt.exists():
+                if not is_registered_worktree(canonical_repo, wt):
+                    raise WorktreeError(
+                        f"race-created reviewer path {wt} is not a registered worktree "
+                        "of the canonical repository"
+                    )
                 head = current_head(wt)
                 if head != candidate_sha:
                     raise WorktreeError(
                         f"race-created reviewer worktree HEAD {head!r} != candidate {candidate_sha!r}"
                     )
+                if git_checks.dirty_status(wt) != "clean":
+                    raise WorktreeError(
+                        "race-created reviewer worktree is not provably clean"
+                    )
                 return {
                     "path": str(wt), "head": head, "existed": True,
+                    "reset": False, "reset_reason": "",
                     "setup_candidate_sha": expected_setup_sha,
                 }
             raise WorktreeError(f"git worktree add (detached) failed: {r.stderr.strip()}")

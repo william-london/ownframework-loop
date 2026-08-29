@@ -112,6 +112,35 @@ def load_verified(canonical_repo: Path, run_id: str) -> dict[str, Any]:
     return read_json(sp, default={}) or {}
 
 
+def _verify_mutation_integrity_locked(canonical_repo: Path, run_id: str) -> None:
+    """Fail closed before extending or mutating authoritative state history.
+
+    Caller MUST hold the per-run flock. Both the existing event-chain tail and
+    the STATE.json SHA binding are proven before any new write can bless current
+    bytes as authoritative. This prevents a later ordinary event/state update
+    from laundering prior tampering into a fresh trusted chain tail.
+    """
+    sp = state_path(canonical_repo, run_id)
+    ep = events_path(canonical_repo, run_id)
+
+    if ep.exists():
+        events = integrity.read_event_chain(ep)
+        if events:
+            recorded = integrity.get_event_chain_hash(ep)
+            actual = integrity.compute_event_chain_hash(ep)
+            if not recorded or recorded != actual:
+                raise integrity.TamperingDetected(
+                    "event chain integrity mismatch before state mutation"
+                )
+
+    if sp.exists() or ep.exists():
+        ok, msg = integrity.verify_state_sha(sp, ep)
+        if not ok:
+            raise integrity.TamperingDetected(
+                f"state integrity mismatch before mutation: {msg}"
+            )
+
+
 def save(canonical_repo: Path, run_id: str, payload: dict[str, Any]) -> None:
     """Persist state under flock and record an integrity event.
 
@@ -126,10 +155,7 @@ def save(canonical_repo: Path, run_id: str, payload: dict[str, Any]) -> None:
     with flock_exclusive(lock_path(canonical_repo, run_id)):
         # Existing durable history must verify before it can be overwritten.
         # A brand-new run legitimately has neither STATE nor EVENTS yet.
-        if sp.exists() or ep.exists():
-            ok, msg = integrity.verify_state_sha(sp, ep)
-            if not ok:
-                raise integrity.TamperingDetected(f"state save refused: {msg}")
+        _verify_mutation_integrity_locked(canonical_repo, run_id)
         old = read_json(sp, default={}) if sp.exists() else {}
         atomic_write_json(sp, payload, mode=0o600)
         ensure_mode(ep, 0o600)
@@ -161,6 +187,7 @@ def _locked_state(canonical_repo: Path, run_id: str):
     @contextlib.contextmanager
     def _ctx():
         with flock_exclusive(lock_path(canonical_repo, run_id)):
+            _verify_mutation_integrity_locked(canonical_repo, run_id)
             cur = read_json(state_path(canonical_repo, run_id))
             yield cur
     return _ctx()
@@ -291,6 +318,7 @@ def append_event(
     # window where two concurrent appenders could both compute their
     # chain hash from the same prior hash.
     with flock_exclusive(lock_path(canonical_repo, run_id)):
+        _verify_mutation_integrity_locked(canonical_repo, run_id)
         state_sha_now = integrity.sha256_file(sp) if sp.exists() else None
         record: dict[str, Any] = {
             "ts": utc_now_iso(),
@@ -360,9 +388,7 @@ def transition(
     with flock_exclusive(lock_path(canonical_repo, run_id)):
         # Verify and mutate under the same ownership lock; otherwise another
         # writer can change STATE/EVENTS between verification and the write.
-        ok, msg = integrity.verify_state_sha(sp, ep)
-        if not ok:
-            raise integrity.TamperingDetected(f"transition refused: {msg}")
+        _verify_mutation_integrity_locked(canonical_repo, run_id)
         current = read_json(sp)
         if current is None or current == {}:
             raise FileNotFoundError(f"STATE.json missing for run {run_id}")
@@ -420,9 +446,7 @@ def increment_counter(
     sp = state_path(canonical_repo, run_id)
     ep = events_path(canonical_repo, run_id)
     with flock_exclusive(lock_path(canonical_repo, run_id)):
-        ok, msg = integrity.verify_state_sha(sp, ep)
-        if not ok:
-            raise integrity.TamperingDetected(f"counter increment refused: {msg}")
+        _verify_mutation_integrity_locked(canonical_repo, run_id)
         current = read_json(sp)
         if current is None or current == {}:
             raise FileNotFoundError(f"STATE.json missing for run {run_id}")
@@ -514,11 +538,7 @@ def program_transition(
 
     with flock_exclusive(lp):
         # Verify under the same flock that owns the subsequent read/write.
-        ok, msg = integrity.verify_state_sha(sp, ep)
-        if not ok:
-            raise integrity.TamperingDetected(
-                f"program_transition refused: {msg}"
-            )
+        _verify_mutation_integrity_locked(canonical_repo, run_id)
         current = read_json(sp)
         if current is None or current == {}:
             raise FileNotFoundError(

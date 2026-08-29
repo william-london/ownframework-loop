@@ -147,15 +147,9 @@ def _run_validation_command(
             "timed_out": True,
         }
     except Exception as e:
-        duration = time.monotonic() - start
-        return {
-            "exit_code": 1,
-            "duration_seconds": float(duration),
-            "stdout": "",
-            "stderr": f"command failed: {type(e).__name__}",
-            "truncated": False,
-            "timed_out": False,
-        }
+        raise RuntimeError(
+            f"validation command could not execute: {type(e).__name__}"
+        ) from e
 
 
 def _ancestor_of(canonical_repo: Path, candidate_sha: str, baseline_sha: str) -> bool:
@@ -245,7 +239,7 @@ def finalize_review(
         raise RuntimeError(f"approval invalid: {msg}")
     baseline_sha = approval_doc["baseline_sha"]
 
-    active_state = state_mod.load(canonical_repo, run_id)
+    active_state = state_mod.load_verified(canonical_repo, run_id)
     if not active_state or active_state.get("state") != "REVIEWING":
         raise RuntimeError(
             f"review finalize requires REVIEWING state, got "
@@ -424,8 +418,24 @@ def finalize_review(
             canonical_repo=canonical_repo,
             run_id=run_id,
         )
-        expected_exit = int(v.get("expected_exit_code") or 0)
-        ok_v = (result["exit_code"] == expected_exit)
+        expected_exit = int(
+            v.get("expected_exit_code")
+            if v.get("expected_exit_code") is not None
+            else 0
+        )
+        expected_marker = v.get("expected_marker")
+        marker_match = (
+            True
+            if expected_marker is None
+            else str(expected_marker) in (
+                str(result.get("stdout") or "") + str(result.get("stderr") or "")
+            )
+        )
+        ok_v = (
+            not bool(result["timed_out"])
+            and int(result["exit_code"]) == expected_exit
+            and marker_match
+        )
         if not ok_v:
             validation_pass = False
         validations.append({

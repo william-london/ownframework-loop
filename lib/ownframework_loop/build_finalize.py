@@ -123,15 +123,9 @@ def _run_validation_command(
             "timed_out": True,
         }
     except Exception as e:
-        duration = time.monotonic() - start
-        return {
-            "exit_code": 1,
-            "duration_seconds": float(duration),
-            "stdout": "",
-            "stderr": f"command failed: {type(e).__name__}",
-            "truncated": False,
-            "timed_out": False,
-        }
+        raise RuntimeError(
+            f"validation command could not execute: {type(e).__name__}"
+        ) from e
 
 
 def _changed_paths_between(worktree: Path, baseline_sha: str, candidate_sha: str) -> list[str]:
@@ -269,7 +263,7 @@ def finalize_build(
     baseline_branch = approval_doc["baseline_branch"]
 
     # 2. Validate state.
-    state = state_mod.load(canonical_repo, run_id)
+    state = state_mod.load_verified(canonical_repo, run_id)
     if state.get("state") != "BUILDING":
         raise RuntimeError(
             f"build finalize requires BUILDING state, got {state.get('state')!r}"
@@ -353,13 +347,13 @@ def finalize_build(
     candidate_sha = git_checks.current_head(builder_wt)
     if candidate_sha is None:
         raise RuntimeError("builder worktree has no HEAD")
-    candidate_branch = git_checks.current_branch(builder_wt) or f"factory/candidate/{run_id}"
+    candidate_branch = git_checks.require_current_branch(builder_wt)
 
-    # Defect 5C (v0.4.4): the actual branch of the builder worktree must
-    # equal the approval-frozen candidate_branch. Do NOT accept whichever
-    # branch the worktree happens to be on. Use the approval_doc value as
-    # the authoritative frozen branch.
-    approval_frozen_branch = approval_doc.get("candidate_branch") or candidate_branch
+    # The actual branch must equal the approval-frozen candidate branch.
+    # Never fabricate either side of this comparison.
+    approval_frozen_branch = str(approval_doc.get("candidate_branch") or "")
+    if not approval_frozen_branch:
+        raise RuntimeError("approval missing frozen candidate_branch")
     if candidate_branch != approval_frozen_branch:
         raise RuntimeError(
             f"builder worktree actual branch {candidate_branch!r} != "
@@ -469,18 +463,40 @@ def finalize_build(
             canonical_repo=canonical_repo,
             run_id=run_id,
         )
+        expected_exit = int(
+            v.get("expected_exit_code")
+            if v.get("expected_exit_code") is not None
+            else 0
+        )
+        expected_marker = v.get("expected_marker")
+        marker_match = (
+            True
+            if expected_marker is None
+            else str(expected_marker) in (
+                str(result.get("stdout") or "") + str(result.get("stderr") or "")
+            )
+        )
+        passed = (
+            not bool(result["timed_out"])
+            and int(result["exit_code"]) == expected_exit
+            and marker_match
+        )
         validations.append({
             "name": name,
             "command": cmd,
             "kind": kind,
             "exit_code": int(result["exit_code"]),
             "duration_seconds": float(result["duration_seconds"]),
+            "expected_exit_code": expected_exit,
+            "passed": passed,
             "timed_out": result["timed_out"],
             "stdout_truncated": result["truncated"],
+            "marker_match": marker_match,
         })
 
-    # 16. Determine exit-code failures.
-    validation_pass = all(v["exit_code"] == (meta.get("expected_exit_code") or 0) for v in validations) if validations else True
+    # 16. Validation succeeds only when every declared command satisfies its
+    # own exit-code/marker contract and no command timed out.
+    validation_pass = all(bool(v.get("passed")) for v in validations) if validations else True
 
     # 17. No-progress detection (v0.3.7 F-4-01: progress-sensitive).
     #

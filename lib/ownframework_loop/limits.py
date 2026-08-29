@@ -64,14 +64,11 @@ def _absolute_cap(counter: str) -> int | None:
 
     Imported lazily to avoid a circular import with util.
     """
-    try:
-        from . import util as _util
-        key = _ABSOLUTE_KEYMAP.get(counter, "")
-        if not key:
-            return None
-        return _util.ABSOLUTE_BUDGET_CEILING.get(key)
-    except Exception:
+    from . import util as _util
+    key = _ABSOLUTE_KEYMAP.get(counter, "")
+    if not key:
         return None
+    return _util.ABSOLUTE_BUDGET_CEILING.get(key)
 
 
 def packet_lowers_cap(counter: str, packet: dict | None) -> int | None:

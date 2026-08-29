@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from . import git_checks
+from . import git_checks, worktrees
 from .util import (
     atomic_write_json, builder_worktree, run_dir, run_subprocess,
     short_sha, utc_now_iso,
@@ -123,7 +123,16 @@ def _assert_exact_clean_builder_candidate(
         raise RuntimeError(
             f"refusing BUILD_RECEIPT: builder branch {actual_branch!r} != candidate branch {expected_branch!r}"
         )
-    if git_checks.is_dirty(wt):
+    if not worktrees.is_registered_worktree(canonical_repo, wt):
+        raise RuntimeError(
+            "refusing BUILD_RECEIPT: builder path is not a registered worktree of the canonical repository"
+        )
+    cleanliness = git_checks.dirty_status(wt)
+    if cleanliness == "unknown":
+        raise RuntimeError(
+            "refusing BUILD_RECEIPT: builder worktree cleanliness is unknown; cannot prove candidate SHA describes validated filesystem"
+        )
+    if cleanliness == "dirty":
         raise RuntimeError(
             "refusing BUILD_RECEIPT: builder worktree is dirty; candidate SHA does not describe validated filesystem"
         )

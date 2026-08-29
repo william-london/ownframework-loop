@@ -46,3 +46,5 @@ tests/test_run_adapter_conformance.sh
 tests/integration/test_adapter_portability.sh
 tests/integration/test_adapter_cli.sh
 tests/integration/test_codex_adapter_install.sh
+
+tests/integration/test_v061_authority_tail_hardening.sh
