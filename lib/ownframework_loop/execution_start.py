@@ -161,6 +161,13 @@ def _validate_seal_against_current(
         )
 
     expected_repo = str(canonical_repo.resolve(strict=False))
+    packet_repo = str(((packet.get("target") or {}).get("repo") or "")).strip()
+    if (
+        not packet_repo
+        or Path(packet_repo).expanduser().resolve(strict=False)
+        != Path(expected_repo).resolve(strict=False)
+    ):
+        return False, "packet target.repo does not match canonical repo"
     sealed_repo = seal.get("canonical_repo", "")
     if Path(sealed_repo).resolve(strict=False) != Path(expected_repo).resolve(
         strict=False
@@ -181,6 +188,16 @@ def _validate_seal_against_current(
         return False, (
             f"canonical HEAD {current_head[:12]} does not match seal baseline_sha "
             f"{str(seal.get('baseline_sha', ''))[:12]}"
+        )
+
+    try:
+        expected_candidate_branch = _compute_candidate_branch(packet, run_id)
+    except Exception as exc:
+        return False, f"candidate branch could not be derived: {exc}"
+    if seal.get("candidate_branch") != expected_candidate_branch:
+        return False, (
+            f"seal candidate_branch={seal.get('candidate_branch')!r} != "
+            f"packet/run-derived candidate_branch={expected_candidate_branch!r}"
         )
 
     spec_sha = seal.get("spec_baseline_sha")
@@ -264,6 +281,13 @@ def ensure_executable(
         raise RuntimeError("packet invalid: " + "; ".join(errors))
     if not git_checks.is_git_repo(canonical_repo):
         raise RuntimeError("canonical repo is not a git repository")
+    packet_repo = str(((packet.get("target") or {}).get("repo") or "")).strip()
+    if (
+        not packet_repo
+        or Path(packet_repo).expanduser().resolve(strict=False)
+        != Path(canonical_repo).resolve(strict=False)
+    ):
+        raise RuntimeError("packet target.repo does not match canonical repository")
 
     target_branch = (packet.get("target") or {}).get("branch") or ""
     if not target_branch:

@@ -159,13 +159,9 @@ def _resolve_approval_sha256(canonical_repo: Path, run_id: str) -> str:
 
 
 def _safe_parse_packet(packet_path: Path) -> tuple[dict[str, Any], str]:
-    """Best-effort packet parse that never raises; returns ({}, raw_text)."""
+    """Historical name retained for compatibility; authoritative parsing is strict."""
     from . import packet as packet_mod  # local import to avoid cycles
-    try:
-        meta, raw = packet_mod.parse_packet_file(packet_path)
-        return meta, raw
-    except Exception:
-        return {}, packet_path.read_text(encoding="utf-8") if packet_path.exists() else ""
+    return packet_mod.parse_packet_file(packet_path)
 
 
 def _resolve_current_work_unit_id(canonical_repo: Path, run_id: str) -> str:
@@ -174,15 +170,15 @@ def _resolve_current_work_unit_id(canonical_repo: Path, run_id: str) -> str:
     For PROGRAM mode, this is the first work unit of the current
     checkpoint. For SINGLE mode, the first work unit of the packet.
 
-    Falls back to 'UNIT-1' so the schema contract stays satisfied; the
-    deterministic finalizer validates identity at receipt time.
+    Missing or malformed work-unit identity is an authority error. The
+    skeleton must never fabricate UNIT-1 merely to satisfy schema shape.
     """
     state = state_mod.load(canonical_repo, run_id)
     packet_p = state_mod.run_dir(canonical_repo, run_id) / "WORK_PACKET.md"
     meta, _ = _safe_parse_packet(packet_p)
     work_units = meta.get("work_units") or []
     if not work_units:
-        return "UNIT-1"
+        raise RuntimeError("packet has no work_units; cannot scaffold build identity")
 
     if state_mod.is_program_state(state):
         program = state.get("program") or {}
@@ -194,27 +190,33 @@ def _resolve_current_work_unit_id(canonical_repo: Path, run_id: str) -> str:
                 if cp.get("id") == cp_id:
                     cp_wus = cp.get("work_units") or []
                     if cp_wus:
-                        return cp_wus[0]
-    return work_units[0].get("id") or "UNIT-1"
+                        unit_id = cp_wus[0]
+                        if not isinstance(unit_id, str) or not unit_id:
+                            raise RuntimeError(
+                                f"checkpoint {cp_id} has invalid work-unit identity"
+                            )
+                        return unit_id
+            raise RuntimeError(
+                f"current checkpoint {cp_id!r} not found in packet checkpoint_graph"
+            )
+    first = work_units[0]
+    if not isinstance(first, dict):
+        raise RuntimeError("packet first work_unit is not an object")
+    unit_id = first.get("id")
+    if not isinstance(unit_id, str) or not unit_id:
+        raise RuntimeError("packet first work_unit missing id")
+    return unit_id
 
 
 def _resolve_candidate_branch(canonical_repo: Path, run_id: str) -> str:
-    """Return the source-of-truth candidate branch for the run.
-
-    v0.4.3 prefers the value frozen in APPROVAL.json (single source of
-    truth from spec approve). Falls back to
-    STATE.json.source_sha_provenance.candidate_branch, then to the
-    deterministic default factory/candidate/<run-id>.
-    """
-    from . import branch_resolver
+    """Return only the candidate branch frozen by the execution seal."""
     approval_doc = approval_mod.load_approval(canonical_repo, run_id)
-    if approval_doc and approval_doc.get("candidate_branch"):
-        return str(approval_doc["candidate_branch"])
-    state = state_mod.load(canonical_repo, run_id)
-    src = (state.get("source_sha_provenance") or {}) if state else {}
-    if src.get("candidate_branch"):
-        return str(src["candidate_branch"])
-    return branch_resolver.default_candidate_branch(run_id)
+    if not isinstance(approval_doc, dict):
+        raise RuntimeError("APPROVAL.json missing; cannot scaffold candidate branch")
+    branch = str(approval_doc.get("candidate_branch") or "")
+    if not branch or not git_checks.is_valid_branch_name(branch):
+        raise RuntimeError("APPROVAL.json candidate_branch missing or invalid")
+    return branch
 
 
 def build_skeleton(

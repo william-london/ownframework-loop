@@ -48,3 +48,5 @@ tests/integration/test_adapter_cli.sh
 tests/integration/test_codex_adapter_install.sh
 
 tests/integration/test_v061_authority_tail_hardening.sh
+
+tests/integration/test_v061_packet_identity_hardening.sh

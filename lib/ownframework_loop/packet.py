@@ -67,6 +67,21 @@ def _extract_metadata_block(text: str) -> dict[str, Any]:
         raise ValueError(f"WORK_PACKET.md metadata is not valid JSON: {e}") from e
 
 
+def _scope_path_error(value: Any) -> str | None:
+    """Return an error for scope paths that are not canonical repo-relative paths."""
+    if not isinstance(value, str) or not value.strip():
+        return "must be a non-empty string"
+    raw = value.strip()
+    if "\x00" in raw or "\\" in raw:
+        return "must not contain NUL or backslash separators"
+    if raw.startswith("/") or raw.startswith("~") or Path(raw).is_absolute():
+        return "must be repository-relative, not absolute/home-relative"
+    parts = raw.split("/")
+    if any(part in (".", "..", "") for part in parts):
+        return "must not contain '.', '..', or empty path components"
+    return None
+
+
 def validate_packet_metadata(meta: dict[str, Any]) -> list[str]:
     """Return list of validation errors (empty if valid).
 
@@ -142,6 +157,17 @@ def validate_packet_metadata(meta: dict[str, Any]) -> list[str]:
         errors.append("allowed_paths must be a non-empty array")
     if not isinstance(meta.get("protected_paths"), list) or not meta["protected_paths"]:
         errors.append("protected_paths must be a non-empty array")
+    for field in (
+        "relevant_paths", "allowed_paths", "protected_paths",
+        "sensitive_paths", "elevated_allowed_paths",
+    ):
+        values = meta.get(field) or []
+        if not isinstance(values, list):
+            continue
+        for idx, value in enumerate(values):
+            err = _scope_path_error(value)
+            if err:
+                errors.append(f"{field}[{idx}] {err}: {value!r}")
     for auth in ("merge_authority", "deploy_authority", "push_authority", "external_action_authority"):
         v = meta.get(auth)
         if v not in ("human_only", "delegated", "none"):

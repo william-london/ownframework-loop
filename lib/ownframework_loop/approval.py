@@ -261,6 +261,11 @@ def validate_approval_binding(
             f"current={expected_packet_sha[:12]}"
         )
     expected_repo = str(canonical_repo.resolve(strict=False))
+    packet_repo = str(((packet.get("target") or {}).get("repo") or "")).strip()
+    if not packet_repo:
+        return False, "packet target.repo missing"
+    if Path(packet_repo).expanduser().resolve(strict=False) != Path(expected_repo).resolve(strict=False):
+        return False, "packet target.repo does not match canonical repo"
     if approval["canonical_repo"].rstrip("/") != expected_repo.rstrip("/"):
         # Allow legacy slashes-only normalization.
         if Path(approval["canonical_repo"]).resolve(strict=False) != Path(expected_repo).resolve(strict=False):
@@ -285,6 +290,19 @@ def validate_approval_binding(
             f"canonical HEAD {current_head} does not match "
             f"approval baseline_sha {approval['baseline_sha']}"
         )
+    try:
+        expected_candidate_branch = (
+            ((packet.get("target") or {}).get("candidate_branch_prefix") or "")
+            or branch_resolver.default_candidate_branch(run_id)
+        )
+    except Exception as exc:
+        return False, f"candidate branch could not be derived: {exc}"
+    if approval.get("candidate_branch") != expected_candidate_branch:
+        return False, (
+            f"approval candidate_branch={approval.get('candidate_branch')!r} != "
+            f"packet/run-derived candidate_branch={expected_candidate_branch!r}"
+        )
+
     # Verify the confirmation token matches the deterministic token.
     expected_token = derive_confirmation_token(approval["packet_sha256"])
     if approval["confirmation_token"] != expected_token:
@@ -325,6 +343,13 @@ def request_human_approval(
         raise RuntimeError("packet invalid: " + "; ".join(errors))
     if not git_checks.is_git_repo(canonical_repo):
         raise RuntimeError("canonical repo is not a git repository")
+    target_repo = str(((meta.get("target") or {}).get("repo") or "")).strip()
+    if (
+        not target_repo
+        or Path(target_repo).expanduser().resolve(strict=False)
+        != canonical_repo.resolve(strict=False)
+    ):
+        raise RuntimeError("packet target.repo does not match canonical repository")
     packet_sha = util.sha256_text(packet_path.read_text(encoding="utf-8"))
     target_branch = (meta.get("target") or {}).get("branch")
     if not target_branch:

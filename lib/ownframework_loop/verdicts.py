@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from . import git_checks
+from . import git_checks, worktrees
 from .util import atomic_write_json, reviewer_worktree, run_dir, utc_now_iso
 
 
@@ -100,7 +100,18 @@ def _assert_exact_clean_review_candidate(
         raise RuntimeError(
             f"refusing REVIEW_VERDICT: reviewer HEAD {actual_sha!r} != reviewed candidate {expected_sha!r}"
         )
-    if git_checks.is_dirty(wt):
+    if not worktrees.is_registered_worktree(canonical_repo, wt):
+        raise RuntimeError(
+            "refusing REVIEW_VERDICT: reviewer path is not a registered worktree of the canonical repository"
+        )
+    if not git_checks.commit_exists(canonical_repo, expected_sha):
+        raise RuntimeError("refusing REVIEW_VERDICT: reviewed candidate is not a commit")
+    cleanliness = git_checks.dirty_status(wt)
+    if cleanliness == "unknown":
+        raise RuntimeError(
+            "refusing REVIEW_VERDICT: reviewer worktree cleanliness is unknown"
+        )
+    if cleanliness == "dirty":
         raise RuntimeError(
             "refusing REVIEW_VERDICT: reviewer worktree is dirty; reviewed SHA does not describe verifier filesystem"
         )
