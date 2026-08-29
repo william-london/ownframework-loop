@@ -582,7 +582,7 @@ echo "z" > "$WT14/z.py" && git -C "$WT14" add z.py && git -C "$WT14" commit -m z
 semantic_build_finalize "$T14" "$RID14" >/dev/null 2>&1 || true
 echo '{"tampered": true}' > "$T14/.ownframework-loop/$RID14/STATE.json"
 out72="$("$OFLOOP_BIN" build transition "$T14" "$RID14" --to READY_FOR_REVIEW 2>&1 || true)"
-assert_contains "$out72" "transition refused" "direct artifact tampering is detected"
+assert_contains "$out72" "state integrity mismatch before mutation" "direct artifact tampering is detected before mutation"
 
 # 73. event-chain machinery runs (strict-mode tampering detection).
 # v0.6.1 hardening: malformed non-empty lines in EVENTS.log MUST now raise
