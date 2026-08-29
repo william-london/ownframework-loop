@@ -295,8 +295,8 @@ set -e
 echo "negative-path finalize rc=$FIN_RC"
 echo "$FIN_OUT" | head -8
 [[ "$FIN_RC" -ne 0 ]] || fail "expected negative-path finalize to refuse but it succeeded"
-echo "$FIN_OUT" | grep -Fq "reviewer worktree is dirty" \
-  || fail "dirty reviewer worktree with real untracked file was NOT refused"
+echo "$FIN_OUT" | grep -Fq "reviewer_worktree_dirty" \
+  || fail "dirty reviewer worktree refusal classification missing"
 pass "real unexpected untracked file still detected by finalizer"
 
 git -C "$T2" worktree remove --force "$WT2" >/dev/null 2>&1 || true
