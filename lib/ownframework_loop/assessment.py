@@ -161,9 +161,11 @@ def _resolve_run_id(canonical_repo: Path, run_id: str | None) -> str:
     """Resolve the run id from an explicit arg or the single active run."""
     if run_id:
         return run_id
-    rd = state_mod.run_dir(canonical_repo, "")
-    # When called with run_id="", state_mod.run_dir returns the parent's
-    # `.ownframework-loop` directory; enumerate its run-* children.
+    rd = canonical_repo / ".ownframework-loop"
+    # Enumerate the state root directly; run_dir intentionally rejects an
+    # empty run id to protect the run namespace.
+    if not rd.is_dir():
+        raise RuntimeError(f"no .ownframework-loop directory under {canonical_repo}")
     runs = sorted(p.name for p in rd.iterdir() if p.is_dir() and p.name.startswith("run-"))
     if not runs:
         raise RuntimeError(

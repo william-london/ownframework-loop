@@ -16,8 +16,15 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-from . import packet as packet_mod, reconcile as reconcile_mod, state as state_mod
-from . import git_checks as git_checks_mod
+from . import (
+    approval as approval_mod,
+    git_checks as git_checks_mod,
+    packet as packet_mod,
+    reconcile as reconcile_mod,
+    state as state_mod,
+    util,
+    worktrees as worktrees_mod,
+)
 from .locking import LockBusyError, flock_exclusive
 
 SCHEMA = "ownframework-loop-dispatch/v1"
@@ -101,19 +108,37 @@ def semantic_result_ready(work_order: dict[str, Any]) -> tuple[bool, str]:
                 return False, "builder_summary_empty"
             if not addressed and not completed:
                 return False, "builder_completion_evidence_empty"
-            # v0.6.1: even with a structurally complete semantic artifact, the
-            # exact prepared builder worktree must already be clean. The
-            # deterministic finalize refuses dirty worktrees
-            # ("refusing BUILD_RECEIPT: builder worktree is dirty; candidate
-            # SHA does not describe validated filesystem"). Replay-finalizing
-            # the same complete semantic artifact cannot repair the
-            # filesystem; we must surface not-ready now so the supervisor
-            # dispatches a fresh semantic builder for the SAME pass instead.
-            builder_wt = work_order.get("worktree")
-            if isinstance(builder_wt, str) and builder_wt:
-                wt_path = Path(builder_wt).resolve(strict=False)
-                if wt_path.exists() and git_checks_mod.is_dirty(wt_path):
-                    return False, "builder_worktree_dirty"
+            repo = Path(str(work_order.get("canonical_repo") or "")).resolve(strict=False)
+            if not repo.is_dir():
+                return False, "canonical_repo_missing"
+            expected_wt = util.builder_worktree(repo, run_id).resolve(strict=False)
+            supplied_wt = str(work_order.get("worktree") or "")
+            if not supplied_wt:
+                return False, "builder_worktree_missing"
+            wt_path = Path(supplied_wt).resolve(strict=False)
+            if wt_path != expected_wt:
+                return False, "builder_worktree_path_mismatch"
+            if not wt_path.is_dir():
+                return False, "builder_worktree_missing"
+            if not worktrees_mod.is_registered_worktree(repo, wt_path):
+                return False, "builder_worktree_not_registered"
+            approval_doc = approval_mod.load_approval(repo, run_id)
+            if not isinstance(approval_doc, dict):
+                return False, "approval_missing"
+            expected_branch = str(approval_doc.get("candidate_branch") or "")
+            actual_branch = git_checks_mod.current_branch(wt_path)
+            if not actual_branch:
+                return False, "builder_branch_unresolved"
+            if actual_branch != expected_branch:
+                return False, "builder_branch_mismatch"
+            head = git_checks_mod.current_head(wt_path)
+            if not head or not git_checks_mod.commit_exists(repo, head):
+                return False, "builder_head_unresolved"
+            cleanliness = git_checks_mod.dirty_status(wt_path)
+            if cleanliness == "unknown":
+                return False, "builder_worktree_cleanliness_unknown"
+            if cleanliness == "dirty":
+                return False, "builder_worktree_dirty"
         elif not summary and not str(data.get("blocker_reason") or "").strip():
             return False, "builder_terminal_reason_empty"
         return True, "ready"
@@ -129,6 +154,30 @@ def semantic_result_ready(work_order: dict[str, Any]) -> tuple[bool, str]:
         return False, "review_findings_invalid"
 
     repo = Path(str(work_order.get("canonical_repo") or "")).resolve(strict=False)
+    if not repo.is_dir():
+        return False, "canonical_repo_missing"
+    expected_wt = util.reviewer_worktree(repo, run_id).resolve(strict=False)
+    supplied_wt = str(work_order.get("worktree") or "")
+    if not supplied_wt:
+        return False, "reviewer_worktree_missing"
+    reviewer_wt = Path(supplied_wt).resolve(strict=False)
+    if reviewer_wt != expected_wt:
+        return False, "reviewer_worktree_path_mismatch"
+    if not reviewer_wt.is_dir():
+        return False, "reviewer_worktree_missing"
+    if not worktrees_mod.is_registered_worktree(repo, reviewer_wt):
+        return False, "reviewer_worktree_not_registered"
+    if not candidate:
+        return False, "review_candidate_missing"
+    reviewer_head = git_checks_mod.current_head(reviewer_wt)
+    if reviewer_head != candidate:
+        return False, "reviewer_head_mismatch"
+    reviewer_cleanliness = git_checks_mod.dirty_status(reviewer_wt)
+    if reviewer_cleanliness == "unknown":
+        return False, "reviewer_worktree_cleanliness_unknown"
+    if reviewer_cleanliness == "dirty":
+        return False, "reviewer_worktree_dirty"
+
     packet_path = state_mod.run_dir(repo, run_id) / "WORK_PACKET.md"
     try:
         meta, _ = packet_mod.parse_packet_file(packet_path)

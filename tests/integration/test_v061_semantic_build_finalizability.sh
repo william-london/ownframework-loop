@@ -378,5 +378,32 @@ echo "build_pass_count after 3 dirty finalize attempts: $FINAL_BUILD_PASS (expec
   || fail "TEST 6: candidate branch changed during dirty retries"
 pass "TEST 6 — repeated dirty failure is bounded; no new pass / branch / pass-counter inflation"
 
+
+# -----------------------------------------------------------------------------
+# TEST 7 — COMPLETE RESULT + MISSING WORKTREE IS NOT READY
+# -----------------------------------------------------------------------------
+echo ""
+echo "=== TEST 7: MISSING BUILDER WORKTREE FAILS CLOSED ==="
+IFS='|' read -r REPO7 RID7 WT7 < <(make_unfinalized_build_pass "clean")
+git -C "$REPO7" worktree remove --force "$WT7"
+T7_OUT=$(PYTHONPATH="$LIB_DIR" python3 - <<PY
+from ownframework_loop import dispatch
+wo = {
+    "schema": "ownframework-loop-dispatch/v1",
+    "decision": "BUILD",
+    "role": "builder",
+    "run_id": "$RID7",
+    "canonical_repo": "$REPO7",
+    "worktree": "$WT7",
+    "semantic_path": "$REPO7/.ownframework-loop/$RID7/scratch/builder/pass-0001/BUILD_AGENT_RESULT.json",
+}
+print(dispatch.semantic_result_ready(wo))
+PY
+)
+echo "$T7_OUT"
+echo "$T7_OUT" | grep -Fq "builder_worktree_missing" \
+  || fail "TEST 7: missing builder worktree was not refused"
+pass "TEST 7 — completed result cannot replay-finalize without exact builder worktree"
+
 echo ""
 echo "V061_SEMANTIC_BUILD_FINALIZABILITY_RECOVERY=PASS"

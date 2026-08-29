@@ -34,6 +34,7 @@ from .util import (
     atomic_write_json, builder_worktree, reviewer_worktree,
     run_subprocess, short_sha, utc_now_iso, worktrees_dir,
 )
+from . import git_checks
 from .git_checks import branch_exists, current_branch, current_head, rev_parse, worktree_list
 
 
@@ -85,7 +86,14 @@ def add_builder_worktree(
     lock = _wt_lock_path(canonical_repo, run_id, "builder")
     with flock_exclusive(lock):
         if wt.exists():
+            if not is_registered_worktree(canonical_repo, wt):
+                raise WorktreeError(
+                    f"builder path {wt} exists but is not a registered worktree "
+                    "of the canonical repository; refusing reuse"
+                )
             head = current_head(wt)
+            if head is None:
+                raise WorktreeError("builder worktree HEAD is not resolvable")
             actual_branch = _require_builder_branch(wt, branch)
             return {
                 "path": str(wt), "branch": branch, "head": head,
@@ -139,25 +147,43 @@ def add_reviewer_worktree(
 
     lock = _wt_lock_path(canonical_repo, run_id, "reviewer")
     with flock_exclusive(lock):
+        reset_reason = ""
         existing_sha = current_head(wt) if wt.exists() else None
-        if existing_sha and existing_sha == candidate_sha:
-            return {
-                "path": str(wt),
-                "head": existing_sha,
-                "existed": True,
-                "setup_candidate_sha": expected_setup_sha,
-            }
-
         if wt.exists():
+            if not is_registered_worktree(canonical_repo, wt):
+                raise WorktreeError(
+                    f"reviewer path {wt} exists but is not a registered worktree "
+                    "of the canonical repository; refusing destructive cleanup"
+                )
+            cleanliness = git_checks.dirty_status(wt)
+            if existing_sha == candidate_sha and cleanliness == "clean":
+                return {
+                    "path": str(wt),
+                    "head": existing_sha,
+                    "existed": True,
+                    "reset": False,
+                    "reset_reason": "",
+                    "setup_candidate_sha": expected_setup_sha,
+                }
+            if cleanliness == "unknown":
+                reset_reason = "cleanliness_unknown"
+            elif existing_sha != candidate_sha:
+                reset_reason = "head_mismatch"
+            else:
+                reset_reason = "dirty"
+
             r = run_subprocess(
                 ["git", "-C", str(canonical_repo), "worktree", "remove", "--force", str(wt)],
                 timeout=30,
             )
-            if wt.exists():
-                import shutil
-                shutil.rmtree(wt, ignore_errors=True)
-            if r.returncode != 0 and wt.exists():
+            if r.returncode != 0:
                 raise WorktreeError(f"git worktree remove failed: {r.stderr.strip()}")
+            if wt.exists():
+                raise WorktreeError(
+                    f"git reported reviewer worktree removal success but path still exists: {wt}"
+                )
+        else:
+            reset_reason = "missing"
 
         cmd = [
             "git", "-C", str(canonical_repo), "worktree", "add",
@@ -185,6 +211,8 @@ def add_reviewer_worktree(
             "path": str(wt),
             "head": head,
             "existed": False,
+            "reset": True,
+            "reset_reason": reset_reason,
             "setup_candidate_sha": expected_setup_sha,
         }
 
@@ -222,6 +250,8 @@ def cleanup_builder_worktree(canonical_repo: Path, run_id: str) -> tuple[bool, s
     wt = builder_worktree(canonical_repo, run_id)
     if not wt.exists():
         return False, "builder worktree not present"
+    if not is_registered_worktree(canonical_repo, wt):
+        return False, "builder worktree path is not a registered worktree of this repo"
     r = run_subprocess(
         ["git", "-C", str(canonical_repo), "worktree", "remove", "--force", str(wt)],
         timeout=30,

@@ -118,6 +118,16 @@ def prepare(*, canonical_repo: Path, run_id: str) -> dict[str, Any]:
         )
 
     assessment_path = assessment.assessment_path(canonical_repo, run_id)
+    assessment_invalidated = False
+    if bool(wt_info.get("reset")) and assessment_path.exists():
+        try:
+            assessment_path.unlink()
+            assessment_invalidated = True
+        except OSError as exc:
+            raise ReviewPrepareRefused(
+                f"reviewer worktree was reset but stale semantic assessment "
+                f"could not be invalidated: {exc}"
+            ) from exc
     return {
         "schema": "ownframework-loop-review-prepare/v1",
         "canonical_repo": str(canonical_repo),
@@ -133,6 +143,9 @@ def prepare(*, canonical_repo: Path, run_id: str) -> dict[str, Any]:
         "reviewer_worktree": str(reviewer_wt),
         "reviewer_head": actual_head,
         "reviewer_worktree_existed": bool(wt_info.get("existed")),
+        "reviewer_worktree_reset": bool(wt_info.get("reset")),
+        "reviewer_worktree_reset_reason": str(wt_info.get("reset_reason") or ""),
+        "assessment_invalidated": assessment_invalidated,
         "assessment_path": str(assessment_path),
         "assessment_exists": assessment_path.exists(),
         "preparation_owner": "ofloop review prepare",
