@@ -157,8 +157,17 @@ def classify_tool_call(*, tool_name: str, tool_input: dict[str, Any], active_run
 
     Returns "ALLOW", "ALLOW_WITH_DIAGNOSTIC", or "BLOCK:<code>\\n<reason>".
     An unidentifiable tool fails closed: external-authority classification must
-    never degrade to an allowance.
+    never degrade to an allowance. Every BLOCK reason carries the exact
+    semantic-context run id when known, so refusal evidence identifies the
+    run it protected.
     """
+    decision = _classify(tool_name=tool_name, tool_input=tool_input)
+    if decision.startswith("BLOCK:") and active_run:
+        decision = decision + f"\n[active run: {active_run}]"
+    return decision
+
+
+def _classify(*, tool_name: str, tool_input: dict[str, Any]) -> str:
     if not tool_name:
         return "BLOCK:OF_LOOP_EXTERNAL_UNKNOWN\nempty tool name during active run"
 
@@ -200,7 +209,10 @@ def _classify_bash(tool_input: dict[str, Any]) -> str:
     cmd_norm = _normalize_variable_assignment(cmd_norm)
     cmd_norm = _normalize_hyphenated_executable(cmd_norm)
     # Decompose chains so each segment is classified individually.
-    for seg in cmd_norm.split(";"):
+    # ONE shared shell-chain parser serves this module and guards.py:
+    # `;` alone misses `cmd && curl ...` / `cmd || curl ...` / piped
+    # forms, which would hide a mutating tail behind a harmless head.
+    for seg in _split_command_chain(cmd_norm):
         seg = seg.strip()
         if not seg:
             continue
@@ -216,11 +228,98 @@ def _classify_bash(tool_input: dict[str, Any]) -> str:
     return "ALLOW"
 
 
+def _split_command_chain(command: str) -> list[str]:
+    """Split a shell command into segments separated by &&, ||, ;, |, newlines.
+
+    The single canonical chain parser for all textual classification in
+    OwnFramework Loop (guards.py imports this exact implementation). Naive
+    but adequate — we are matching dangerous tokens, not parsing shell.
+
+    Multiline commands are split per line and the union of all segments is
+    returned, so a forbidden action hidden on a non-first line is still
+    classified.
+    """
+    if "\n" not in command and "\r" not in command:
+        return _split_single_line(command)
+
+    parts: list[str] = []
+    for raw_line in re.split(r"[\r\n]+", command):
+        line = raw_line.strip()
+        if not line:
+            continue
+        # Comment-only lines are skipped entirely; mid-line #s (e.g. git
+        # refspec) are preserved.
+        if line.startswith("#"):
+            continue
+        parts.extend(_split_single_line(line))
+    return parts
+
+
+def _split_single_line(command: str) -> list[str]:
+    """Split a single-line command on &&, ||, ;, | (quote-aware)."""
+    parts: list[str] = []
+    buf: list[str] = []
+    i = 0
+    n = len(command)
+    in_single = False
+    in_double = False
+    in_backtick = False
+    while i < n:
+        ch = command[i]
+        if ch == "\\" and i + 1 < n:
+            buf.append(ch)
+            buf.append(command[i + 1])
+            i += 2
+            continue
+        if not in_double and not in_backtick and ch == "'":
+            in_single = not in_single
+            buf.append(ch)
+            i += 1
+            continue
+        if not in_single and not in_backtick and ch == '"':
+            in_double = not in_double
+            buf.append(ch)
+            i += 1
+            continue
+        if not in_single and not in_double and ch == "`":
+            in_backtick = not in_backtick
+            buf.append(ch)
+            i += 1
+            continue
+        if not in_single and not in_double and not in_backtick and ch in "&|;":
+            # Look for && or || as a single token; otherwise treat as separator.
+            if ch in "&|" and i + 1 < n and command[i + 1] == ch:
+                parts.append("".join(buf).strip())
+                buf = []
+                i += 2
+                continue
+            # fd redirects are not separators: `2>&1`, `>&2`, `&>`.
+            if ch == "&":
+                prev_ch = command[i - 1] if i > 0 else ""
+                next_ch = command[i + 1] if i + 1 < n else ""
+                if prev_ch == ">" or next_ch == ">":
+                    buf.append(ch)
+                    i += 1
+                    continue
+            parts.append("".join(buf).strip())
+            buf = []
+            i += 1
+            continue
+        buf.append(ch)
+        i += 1
+    last = "".join(buf).strip()
+    if last:
+        parts.append(last)
+    return [p for p in parts if p]
+
+
 # Mutating HTTP request flags for curl/wget. Local development legitimately
-# issues POST/PUT against loopback services (dev servers, local APIs, e2e),
-# so mutation is refused only when a NON-loopback URL is visible in the same
-# segment. Mutating flags with no visible URL are treated as local scripting
-# and allowed — the textual layer cannot prove externality there.
+# issues POST/PUT against loopback services (dev servers, local APIs, e2e).
+# The governed-lane rule is fail-closed on destination:
+#   mutating HTTP + destination provably loopback     -> allowed
+#   mutating HTTP + destination external              -> blocked
+#   mutating HTTP + destination cannot be proven
+#   loopback (no literal URL, unresolved variable)    -> blocked
 _CURL_MUTATING = re.compile(
     r"(?:^|\s)(?:"
     r"-X\s*(?:POST|PUT|DELETE|PATCH)\b"
@@ -256,7 +355,14 @@ def _host_is_loopback(host: str) -> bool:
 
 def _http_mutation_violation(seg: str) -> str:
     """Return a violation description when a segment performs a mutating HTTP
-    request against a non-loopback host; empty string otherwise."""
+    request whose destination is not PROVABLY loopback; empty string only
+    when the segment is non-mutating or every visible destination is
+    loopback.
+
+    Variable-assignment resolution runs before segmentation, so any `$`
+    reference still present here is unresolved; an unresolved or absent
+    destination cannot be proven loopback and fails closed.
+    """
     first = seg.split()[0] if seg.split() else ""
     base = first.rsplit("/", 1)[-1].lower()
     if base == "curl":
@@ -268,13 +374,23 @@ def _http_mutation_violation(seg: str) -> str:
     else:
         return ""
     hosts = _URL_HOST.findall(seg)
-    external = [h for h in hosts if not _host_is_loopback(h)]
-    if external:
+    if hosts:
+        external = [h for h in hosts if not _host_is_loopback(h)]
+        if external:
+            return (
+                f"mutating HTTP request toward non-loopback host(s) "
+                f"{', '.join(sorted(set(external)))}"
+            )
+        return ""
+    if "$" in seg:
         return (
-            f"mutating HTTP request toward non-loopback host(s) "
-            f"{', '.join(sorted(set(external)))}"
+            "mutating HTTP request with unresolved destination "
+            "(shell variable); cannot prove loopback"
         )
-    return ""
+    return (
+        "mutating HTTP request with no visible destination; "
+        "cannot prove loopback"
+    )
 
 
 def _normalize_python_argv(cmd: str) -> str:

@@ -69,3 +69,8 @@ tests/integration/test_v070_autonomy_envelope.sh
 tests/integration/test_v072_authority_negative.sh
 # v0.8.0 final architecture closure — execution-semantics regression
 tests/integration/test_v072_execution_closure.sh
+
+# v0.8.1 closure — runtime-generation contract, install/refresh safety, ledger defaults
+tests/integration/test_v080_runtime_generation.sh
+# v0.8.1 closure — mutating-HTTP fail-closed authority + run-id diagnostics
+tests/integration/test_v080_http_mutation_diagnostics.sh

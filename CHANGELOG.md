@@ -4,6 +4,77 @@ All notable current-release changes to OwnFramework Loop are documented here.
 The complete historical changelog through 0.5.2 is preserved at
 [`docs/history/CHANGELOG-through-0.5.2.md`](docs/history/CHANGELOG-through-0.5.2.md).
 
+## 0.8.1 - Runtime-Generation and Authority Closure (2026-08-29)
+
+v0.8.1 closes the four remaining independent-adjudication findings against
+0.8.0 without redesigning the architecture. Sealed execution, exact-SHA
+review, immediate transitions, final-funded-repair reviewability, and all
+human authority boundaries are unchanged.
+
+### Runtime-generation contract (F1)
+
+- every supervisor job row binds the runtime generation that enrolled it
+  (`ofloop-<version>@<source-head16>` for git-backed installs,
+  `ofloop-<version>@cache-<sha16(root)>` for installed caches);
+- `run_one` fails closed (QUARANTINED, classification
+  `runtime_generation_mismatch`) when asked to execute a job bound to a
+  different generation — a sealed unfinished PROGRAM can never silently
+  ride a runtime-generation change between passes;
+- legacy unbound rows adopt the serving generation once at first contact
+  (initial binding, recorded — never a mid-lifecycle switch);
+- install/refresh refuses replacement while any non-terminal enrolled job
+  (QUEUED, BACKOFF, RUNNING, QUARANTINED-but-resumable) is bound to a
+  generation different from the incoming runtime; terminal (DONE) jobs
+  never block a normal install;
+- migration stays explicit and clearly unsafe:
+  `OFLOOP_ALLOW_RUNTIME_GENERATION_MIGRATION=1` bypasses the generation
+  probe; afterwards bound runs fail closed on serve and
+  `ofloop supervisor resume` is the operator act that rebinds a run
+  (previous binding reported as `runtime_generation_previous`);
+- runtime generation is recorded in runtime-provenance.json and surfaced
+  in supervisor status/enqueue output.
+
+### Mutating-HTTP fail-closed (F2)
+
+- external_action.py and guards.py now share ONE shell-chain parser
+  (`;`, `&&`, `||`, `|`, newline; quote-aware; fd-redirect safe);
+- mutating curl/wget forms are classified per segment, so
+  `echo ok && curl -X POST https://api.example.com/x`,
+  `true || curl ...`, piped and newline-hidden forms are refused;
+- destination rule inside governed lanes: provably loopback -> allowed;
+  external -> blocked; unresolved (`$URL` after normalization) or absent
+  destination -> blocked fail-closed. Explicit localhost development and
+  external GET/read research remain fully usable.
+
+### Ledger migration semantics (F3)
+
+- fresh DDL and all migrations now default budget ceilings to DISABLED
+  (0); the retired `$25` / 8-hour conservation defaults can no longer be
+  injected by schema evolution;
+- a one-time `PRAGMA user_version`-gated data migration normalizes rows
+  carrying the exact legacy-default fingerprint; explicitly configured
+  historical limits do not match the fingerprint and are preserved.
+
+### Run-id observability (F4)
+
+- external-action diagnostics bind the exact semantic-context run id
+  (previously the repo path); every non-allow decision is recorded with
+  run_id + canonical_repo + tool + decision code;
+- block reasons carry `[active run: <run-id>]` for refusal evidence.
+
+### Tests
+
+- `tests/integration/test_v080_runtime_generation.sh`: hermetic
+  installer-guard matrix (RUNNING live worker; QUEUED/BACKOFF/QUARANTINED
+  generation dependencies; dead-worker cross-check; DONE non-blocking;
+  same-generation refresh; explicit migration override), generation
+  binding/mismatch/adoption/resume-rebind behavior, and ledger
+  default/migration semantics;
+- `tests/integration/test_v080_http_mutation_diagnostics.sh`: chained and
+  unresolved mutating-HTTP forms fail closed, loopback and read forms
+  allowed, shared-parser identity/agreement, and run-id diagnostic
+  binding.
+
 ## 0.8.0 - Final End-to-End Architecture Closure (2026-08-29)
 
 v0.8.0 is the surgical closure pass adjudicating an independent source

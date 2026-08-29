@@ -149,6 +149,33 @@ service uses the exact `ofloop` executable path selected at installation and
 runs `ofloop supervisor serve` independently of any terminal working
 directory.
 
+Installation/refresh is guarded by two read-only, fail-closed ledger probes:
+
+1. **live semantic work** — replacement is refused while a semantic worker
+   is live (RUNNING job with an alive/unknown worker pid, or a non-terminal
+   attempt of one);
+2. **runtime-generation dependency** — every job binds the runtime
+   generation that enrolled it (`ofloop-<version>@<source-head or
+   cache-hash>`). Replacement is refused while any non-terminal enrolled
+   job (QUEUED, BACKOFF, RUNNING, QUARANTINED-but-resumable) is bound to a
+   generation different from the incoming runtime. Terminal (DONE) jobs
+   never block a normal install, and legacy unbound rows carry no provable
+   dependency (they adopt the serving generation once at first contact).
+
+A sealed unfinished PROGRAM can therefore never silently switch runtime
+generations between passes. Deliberate migration is explicit and clearly
+unsafe: `OFLOOP_ALLOW_RUNTIME_GENERATION_MIGRATION=1` bypasses the
+generation probe (the live-work probe has its own override,
+`OFLOOP_ALLOW_SUPERVISOR_SWAP_WITH_ACTIVE_WORK=1`). After such a migration,
+bound runs fail closed on the generation mismatch at serve time, and
+`ofloop supervisor resume` is the operator act that rebinds a run to the
+new generation (previous binding reported).
+
+Operational budget ceilings (cost/token/wall) are disabled by default in
+both fresh ledgers and schema migrations; a one-time data migration
+normalizes rows materialized by the retired historical `$25` / 8-hour DDL
+defaults without touching explicitly configured values.
+
 Use `uninstall-supervisor-macos.sh` to remove the launch agent.
 
 ## Semantic-pass context, delegation, and timing

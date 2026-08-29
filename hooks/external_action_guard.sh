@@ -110,7 +110,11 @@ if [[ "$status" != "active" ]]; then
 fi
 
 canonical_repo="$(printf '%s' "$context" | python3 -B -c 'import json,sys; print(json.loads(sys.stdin.read()).get("canonical_repo",""))' 2>/dev/null || true)"
-active_run="$canonical_repo"
+# Evidence/observability integrity: diagnostics and classifier context are
+# bound to the EXACT semantic-context run id, not the repo path. The repo
+# path stays available as canonical_repo for cross-referencing.
+run_id="$(printf '%s' "$context" | python3 -B -c 'import json,sys; print(json.loads(sys.stdin.read()).get("run_id",""))' 2>/dev/null || true)"
+active_run="$run_id"
 
 encoded="$(printf '%s' "$parsed" | base64)"
 
@@ -121,7 +125,7 @@ encoded="$(printf '%s' "$parsed" | base64)"
 # ALLOW, ALLOW_WITH_DIAGNOSTIC, or "BLOCK:<CODE>" + newline + reason;
 # anything else — including empty output from a dead interpreter — is
 # an external-authority failure and is refused.
-decision="$(CLAUDE_PLUGIN_ROOT="$CLAUDE_PLUGIN_ROOT" encoded_payload="$encoded" encoded_tool="$tool_name" python3 -B - <<'PY' 2>/dev/null
+decision="$(CLAUDE_PLUGIN_ROOT="$CLAUDE_PLUGIN_ROOT" encoded_payload="$encoded" encoded_tool="$tool_name" active_run="$active_run" python3 -B - <<'PY' 2>/dev/null
 import sys, os, base64, json
 try:
     sys.path.insert(0, os.path.join(os.environ["CLAUDE_PLUGIN_ROOT"], "lib"))
@@ -149,15 +153,24 @@ if [[ "$decision" == "ALLOW" ]]; then
   exit 0
 fi
 
-if [[ "$decision" == "ALLOW_WITH_DIAGNOSTIC" ]]; then
-  python3 -B - "$tool_name" "$active_run" <<'PY' 2>/dev/null || true
-import sys, os
+# Evidence trail: every non-allow decision in a governed lane records the
+# exact run id, canonical repo, tool, and decision code.
+decision_code="$(printf '%s' "$decision" | head -n1 | tr -d ' ')"
+active_run="$active_run" canonical_repo="$canonical_repo" tool_name="$tool_name" decision_code="$decision_code" python3 -B - <<'PY' 2>/dev/null || true
+import os
 log_dir = os.path.join(os.environ.get("CLAUDE_PLUGIN_ROOT", ""), "logs")
 os.makedirs(log_dir, exist_ok=True)
 log_path = os.path.join(log_dir, "external_action_diagnostics.log")
 with open(log_path, "a", encoding="utf-8") as f:
-    f.write(f"tool={sys.argv[1]} active_run={sys.argv[2]} decision=ALLOW_WITH_DIAGNOSTIC\n")
+    f.write(
+        f"run_id={os.environ.get('active_run', '')} "
+        f"canonical_repo={os.environ.get('canonical_repo', '')} "
+        f"tool={os.environ.get('tool_name', '')} "
+        f"decision={os.environ.get('decision_code', '')}\n"
+    )
 PY
+
+if [[ "$decision" == "ALLOW_WITH_DIAGNOSTIC" ]]; then
   exit 0
 fi
 

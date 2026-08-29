@@ -399,95 +399,14 @@ def classify_bash_command_with_env(
     return result
 
 
-def _split_command_chain(command: str) -> list[str]:
-    """Split a shell command into segments separated by &&, ||, ;, |, and newlines.
-
-    Naive but adequate — we are matching dangerous tokens, not parsing shell.
-
-    v0.3.5 (A3-001): multiline commands are no longer returned as [].
-    Instead, each line is split on shell-chain operators and the union
-    of all segments is returned. This closes the bypass where a
-    forbidden action was hidden on a non-first line of a multiline
-    command (e.g. `echo harmless\\ngit push origin master`).
-    """
-    if "\n" not in command and "\r" not in command:
-        return _split_single_line(command)
-
-    # Multiline: split on newlines, classify each line independently,
-    # union the segments. Skip empty lines and pure-comment lines.
-    parts: list[str] = []
-    for raw_line in re.split(r"[\r\n]+", command):
-        line = raw_line.strip()
-        if not line:
-            continue
-        # Strip leading shell comment markers (a line starting with #)
-        # but keep mid-line #s (used by git refspec). Comment-only lines
-        # are skipped entirely.
-        if line.startswith("#"):
-            continue
-        parts.extend(_split_single_line(line))
-    return parts
-
-
-def _split_single_line(command: str) -> list[str]:
-    """Split a single-line command on &&, ||, ;, |."""
-    parts: list[str] = []
-    buf: list[str] = []
-    i = 0
-    n = len(command)
-    in_single = False
-    in_double = False
-    in_backtick = False
-    while i < n:
-        ch = command[i]
-        if ch == "\\" and i + 1 < n:
-            buf.append(ch)
-            buf.append(command[i + 1])
-            i += 2
-            continue
-        if not in_double and not in_backtick and ch == "'":
-            in_single = not in_single
-            buf.append(ch)
-            i += 1
-            continue
-        if not in_single and not in_backtick and ch == '"':
-            in_double = not in_double
-            buf.append(ch)
-            i += 1
-            continue
-        if not in_single and not in_double and ch == "`":
-            in_backtick = not in_backtick
-            buf.append(ch)
-            i += 1
-            continue
-        if not in_single and not in_double and not in_backtick and ch in "&|;":
-            # Look for && or || as a single token; otherwise treat as separator.
-            if ch in "&|" and i + 1 < n and command[i + 1] == ch:
-                parts.append("".join(buf).strip())
-                buf = []
-                i += 2
-                continue
-            # fd redirects are not chain separators: `2>&1`, `>&2`, `&>`.
-            # Splitting them fragments the command into stray `1`/`2`
-            # segments that fail every reviewer allowlist pattern and
-            # corrupts forbidden-token matching on the real segments.
-            if ch == "&":
-                prev_ch = command[i - 1] if i > 0 else ""
-                next_ch = command[i + 1] if i + 1 < n else ""
-                if prev_ch == ">" or next_ch == ">":
-                    buf.append(ch)
-                    i += 1
-                    continue
-            parts.append("".join(buf).strip())
-            buf = []
-            i += 1
-            continue
-        buf.append(ch)
-        i += 1
-    last = "".join(buf).strip()
-    if last:
-        parts.append(last)
-    return [p for p in parts if p]
+# ONE shared shell-chain parser serves every textual classifier. The
+# implementation lives in external_action.py; guards must not grow its own
+# divergent chain semantics (independent parsers would classify the same
+# command differently).
+from .external_action import (
+    _split_command_chain,
+    _split_single_line,
+)
 
 
 def _first_executable_word(segment: str) -> str | None:

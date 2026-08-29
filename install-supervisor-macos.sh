@@ -101,17 +101,74 @@ STDOUT_LOG="$STATE_ROOT/supervisor.stdout.log"
 STDERR_LOG="$STATE_ROOT/supervisor.stderr.log"
 RUNTIME_PROVENANCE="$STATE_ROOT/runtime-provenance.json"
 
-# 4b. LIVE-EXECUTION GUARD. A commissioned supervisor must never be
-#     replaced while it has an active semantic worker or a run in flight:
-#     bootout would orphan the worker mid-pass and hot-swap the runtime
-#     under a live sealed execution. Durable queue state (QUEUED/BACKOFF
-#     jobs) survives a swap safely — the between-pass moment is exactly
-#     the supported refresh window. The probe is read-only and fails
-#     closed: an unreadable ledger is treated as active work. The only
-#     override is an explicit operator declaration.
+# 4b. RUNTIME-GENERATION + LIVE-EXECUTION GUARD.
+#
+#     (a) A commissioned supervisor must never be replaced while it has an
+#         active semantic worker: bootout would orphan the worker mid-pass
+#         and hot-swap the runtime under a live sealed execution.
+#     (b) RUNTIME-GENERATION CONTRACT: a sealed unfinished PROGRAM must not
+#         silently change runtime generation merely because it is between
+#         passes. Every non-terminal enrolled job (QUEUED, BACKOFF, RUNNING,
+#         QUARANTINED-but-resumable) that is BOUND to a generation different
+#         from the incoming runtime refuses the replacement. Terminal (DONE)
+#         jobs never block a normal install. Legacy rows with no recorded
+#         binding carry no provable dependency and do not block.
+#
+#     The probes are read-only and fail closed (unreadable ledger = refuse).
+#     Overrides are explicit operator declarations, clearly unsafe:
+#       OFLOOP_ALLOW_SUPERVISOR_SWAP_WITH_ACTIVE_WORK=1   (skips a)
+#       OFLOOP_ALLOW_RUNTIME_GENERATION_MIGRATION=1       (skips b)
+#     After a deliberate migration, bound runs fail closed on the generation
+#     mismatch at serve time; `supervisor resume` is the explicit rebind.
+
+# Incoming runtime generation — the exact same rule the supervisor uses:
+#   ofloop-<version>@<source-head16>     (git-backed install root)
+#   ofloop-<version>@cache-<sha16(root)> (installed cache)
+INSTALL_ROOT="$("$PYTHON_BIN" - "$OFLOOP_BIN" <<'PY'
+import sys
+from pathlib import Path
+print(Path(sys.argv[1]).resolve(strict=False).parents[1])
+PY
+)" || INSTALL_ROOT=""
+INSTALL_VERSION=""
+if [[ -n "$INSTALL_ROOT" && -d "$INSTALL_ROOT/lib" ]]; then
+  INSTALL_VERSION="$(PYTHONPATH="$INSTALL_ROOT/lib" "$PYTHON_BIN" -c \
+    "from ownframework_loop import __version__; print(__version__)" 2>/dev/null || true)"
+fi
+if [[ -z "$INSTALL_VERSION" ]]; then
+  echo "SUPERVISOR_INSTALL=REFUSED reason=runtime_version_undetermined install_root=$INSTALL_ROOT" >&2
+  exit 12
+fi
+RUNTIME_GENERATION="$(INSTALL_ROOT="$INSTALL_ROOT" INSTALL_VERSION="$INSTALL_VERSION" "$PYTHON_BIN" - <<'PY'
+import hashlib, os, subprocess
+root = os.environ["INSTALL_ROOT"]
+version = os.environ["INSTALL_VERSION"]
+head = ""
+try:
+    r = subprocess.run(
+        ["git", "-C", root, "rev-parse", "HEAD"],
+        capture_output=True, text=True, timeout=5,
+    )
+    if r.returncode == 0:
+        head = r.stdout.strip()
+except Exception:
+    head = ""
+if head:
+    print(f"ofloop-{version}@{head[:16]}")
+else:
+    digest = hashlib.sha256(root.encode("utf-8")).hexdigest()[:16]
+    print(f"ofloop-{version}@cache-{digest}")
+PY
+)" || RUNTIME_GENERATION=""
+if [[ -z "$RUNTIME_GENERATION" ]]; then
+  echo "SUPERVISOR_INSTALL=REFUSED reason=runtime_generation_undetermined" >&2
+  exit 12
+fi
+
 SUPERVISOR_DB="$STATE_ROOT/supervisor.sqlite3"
-if [[ -f "$SUPERVISOR_DB" && "${OFLOOP_ALLOW_SUPERVISOR_SWAP_WITH_ACTIVE_WORK:-0}" != "1" ]]; then
-  ACTIVE_REPORT="$("$PYTHON_BIN" - "$SUPERVISOR_DB" <<'PY'
+if [[ -f "$SUPERVISOR_DB" ]]; then
+  if [[ "${OFLOOP_ALLOW_SUPERVISOR_SWAP_WITH_ACTIVE_WORK:-0}" != "1" ]]; then
+    ACTIVE_REPORT="$("$PYTHON_BIN" - "$SUPERVISOR_DB" <<'PY'
 import os, sqlite3, sys
 
 db = sys.argv[1]
@@ -162,11 +219,50 @@ except sqlite3.Error:
     problems.append("ledger_probe_failed")
 print(";".join(problems[:4]))
 PY
-  )" || ACTIVE_REPORT="ledger_probe_failed"
-  if [[ -n "$ACTIVE_REPORT" ]]; then
-    echo "SUPERVISOR_INSTALL=REFUSED reason=active_semantic_work detail=$ACTIVE_REPORT" >&2
-    echo "hint: refresh again after the active pass completes, or set OFLOOP_ALLOW_SUPERVISOR_SWAP_WITH_ACTIVE_WORK=1 to force (unsafe: may orphan a live sealed execution)" >&2
-    exit 11
+    )" || ACTIVE_REPORT="ledger_probe_failed"
+    if [[ -n "$ACTIVE_REPORT" ]]; then
+      echo "SUPERVISOR_INSTALL=REFUSED reason=active_semantic_work detail=$ACTIVE_REPORT" >&2
+      echo "hint: refresh again after the active pass completes, or set OFLOOP_ALLOW_SUPERVISOR_SWAP_WITH_ACTIVE_WORK=1 to force (unsafe: may orphan a live sealed execution)" >&2
+      exit 11
+    fi
+  fi
+  if [[ "${OFLOOP_ALLOW_RUNTIME_GENERATION_MIGRATION:-0}" != "1" ]]; then
+    GENERATION_REPORT="$(RUNTIME_GENERATION="$RUNTIME_GENERATION" "$PYTHON_BIN" - "$SUPERVISOR_DB" <<'PY'
+import os, sqlite3, sys
+
+db = sys.argv[1]
+incoming = os.environ.get("RUNTIME_GENERATION", "")
+try:
+    conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+except sqlite3.Error:
+    print("ledger_probe_failed")
+    sys.exit(0)
+conn.row_factory = sqlite3.Row
+problems = []
+try:
+    # Every NON-terminal enrolled job (QUEUED/BACKOFF/RUNNING/QUARANTINED)
+    # bound to a different generation depends on its recorded runtime.
+    # DONE jobs never block; unbound legacy rows carry no provable
+    # dependency (they adopt the serving generation at first contact).
+    for row in conn.execute(
+        "SELECT run_id, status, runtime_generation FROM jobs "
+        "WHERE status != 'DONE'"
+    ):
+        gen = str(row["runtime_generation"] or "")
+        if gen and gen != incoming:
+            problems.append(
+                f"generation_dependency={row['run_id']}:{row['status']}:{gen}"
+            )
+except sqlite3.Error:
+    problems.append("ledger_probe_failed")
+print(";".join(problems[:4]))
+PY
+    )" || GENERATION_REPORT="ledger_probe_failed"
+    if [[ -n "$GENERATION_REPORT" ]]; then
+      echo "SUPERVISOR_INSTALL=REFUSED reason=runtime_generation_dependency incoming=$RUNTIME_GENERATION detail=$GENERATION_REPORT" >&2
+      echo "hint: let enrolled runs reach terminal, or migrate deliberately with OFLOOP_ALLOW_RUNTIME_GENERATION_MIGRATION=1 and then rebind each quarantined run via 'ofloop supervisor resume'" >&2
+      exit 13
+    fi
   fi
 fi
 
@@ -200,6 +296,7 @@ SERVICE_PATH="$SERVICE_PATH" \
 SOURCE_ROOT="$SOURCE_ROOT" \
 SOURCE_HEAD="$SOURCE_HEAD" \
 OFLOOP_VERSION="$OFLOOP_VERSION" \
+RUNTIME_GENERATION="$RUNTIME_GENERATION" \
 LABEL="$LABEL" \
 "$PYTHON_BIN" - <<'PY'
 import json, os, plistlib, sys
@@ -217,6 +314,7 @@ service_path = os.environ["SERVICE_PATH"]
 source_root = os.environ.get("SOURCE_ROOT") or None
 source_head = os.environ.get("SOURCE_HEAD") or None
 ofloop_version = os.environ.get("OFLOOP_VERSION") or None
+runtime_generation = os.environ.get("RUNTIME_GENERATION") or None
 label = os.environ["LABEL"]
 
 env_vars = {
@@ -270,6 +368,7 @@ provenance = {
     "source_root": source_root,
     "source_head": source_head,
     "ofloop_version": ofloop_version,
+    "runtime_generation": runtime_generation,
 }
 provenance_path.parent.mkdir(parents=True, exist_ok=True)
 provenance_path.write_text(json.dumps(provenance, indent=2, sort_keys=True))
@@ -290,3 +389,4 @@ echo "STATE_ROOT=$STATE_ROOT"
 echo "RUNTIME_PROVENANCE=$RUNTIME_PROVENANCE"
 echo "SOURCE_HEAD=${SOURCE_HEAD:-(not-a-git-checkout)}"
 echo "OFLOOP_VERSION=${OFLOOP_VERSION:-(unknown)}"
+echo "RUNTIME_GENERATION=${RUNTIME_GENERATION:-(unknown)}"

@@ -24,7 +24,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import dispatch as dispatch_mod, packet as packet_mod, runtime_env, state as state_mod
+from . import dispatch as dispatch_mod, packet as packet_mod, runtime_env, state as state_mod, util
 
 SCHEMA = "ownframework-loop-supervisor/v1"
 # Per-pass runaway fuse fallback. A semantic worker that neither declared a
@@ -75,6 +75,44 @@ ACTIVE = {"QUEUED", "BACKOFF", "RUNNING"}
 TERMINAL = {"DONE", "QUARANTINED"}
 
 
+def _git_head(root: Path) -> str:
+    """Return the git HEAD of ``root`` or '' when it is not a git checkout."""
+    r = util.run_subprocess(
+        ["git", "-C", str(root), "rev-parse", "HEAD"], timeout=5
+    )
+    if r.returncode != 0:
+        return ""
+    return r.stdout.strip()
+
+
+def runtime_generation() -> str:
+    """Deterministic runtime-generation identity of THIS supervisor process.
+
+    Format: ``ofloop-<version>@<source-head16>`` for git-backed installs
+    (developer checkouts) or ``ofloop-<version>@cache-<sha16(root)>`` for
+    installed caches. The installer computes the incoming label with the
+    exact same rule from the payload it is about to commission.
+
+    Contract: a job row binds the generation that enrolled it. Execution
+    under a DIFFERENT generation fails closed toward quarantine; only an
+    explicit operator act (re-enqueue or resume) migrates a run to a new
+    generation. A sealed unfinished PROGRAM can therefore never silently
+    ride a runtime-generation change between passes.
+    """
+    from . import __version__
+    root = Path(__file__).resolve().parents[2]
+    head = _git_head(root)
+    if head:
+        return f"ofloop-{__version__}@{head[:16]}"
+    digest = util.sha256_text(str(root))[:16]
+    return f"ofloop-{__version__}@cache-{digest}"
+
+
+# Alias so enqueue() can compute the default binding even though its
+# ``runtime_generation`` parameter shadows the function name.
+_current_runtime_generation = runtime_generation
+
+
 def default_db_path() -> Path:
     root = os.environ.get("XDG_STATE_HOME", "").strip()
     base = Path(root).expanduser() if root else Path.home() / ".local" / "state"
@@ -121,6 +159,37 @@ def worker_log_paths(
     )
 
 
+# Ledger data-version. Bumped when a one-time data migration must run.
+#   0/1 (historical): jobs rows may carry retired DDL-default ceilings
+#       ($25 cost / 8h wall) materialized by old schema defaults.
+#   2: retired defaults removed from DDL and migrations; rows carrying the
+#       exact legacy-default fingerprint are normalized to disabled-by-
+#       default. Explicitly configured values do not match the fingerprint
+#       and are preserved.
+SCHEMA_DATA_VERSION = 2
+_LEGACY_BUDGET_DEFAULT_FINGERPRINT = (25.0, 0, 28800)  # cost, tokens, wall
+
+
+def _apply_data_migrations(conn: sqlite3.Connection) -> None:
+    """Versioned one-time data migrations (idempotent via PRAGMA user_version)."""
+    version = int(conn.execute("PRAGMA user_version").fetchone()[0])
+    if version < 2:
+        # Reset only rows that the OLD DDL defaults materialized: the exact
+        # triple ($25 cost ceiling, 0 token ceiling, 8h wall ceiling)
+        # together. Any row whose values differ from that fingerprint was
+        # deliberately configured (packet envelope / operator flag) and is
+        # left untouched.
+        conn.execute(
+            """UPDATE jobs
+               SET max_total_cost_usd=0, max_wall_seconds=0
+               WHERE max_total_cost_usd=? AND max_total_tokens=?
+                 AND max_wall_seconds=?""",
+            _LEGACY_BUDGET_DEFAULT_FINGERPRINT,
+        )
+        conn.execute(f"PRAGMA user_version = {SCHEMA_DATA_VERSION}")
+        conn.commit()
+
+
 def _connect(path: Path) -> sqlite3.Connection:
     path = Path(path).expanduser().resolve(strict=False)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -156,12 +225,13 @@ def _connect(path: Path) -> sqlite3.Connection:
           worker_pid INTEGER,
           worker_started_at REAL,
           worker_role TEXT,
-          max_total_cost_usd REAL NOT NULL DEFAULT 25,
+          max_total_cost_usd REAL NOT NULL DEFAULT 0,
           max_total_tokens INTEGER NOT NULL DEFAULT 0,
-          max_wall_seconds INTEGER NOT NULL DEFAULT 28800,
+          max_wall_seconds INTEGER NOT NULL DEFAULT 0,
           execution_started_at REAL,
           worker_stdout_path TEXT,
           worker_stderr_path TEXT,
+          runtime_generation TEXT NOT NULL DEFAULT '',
           UNIQUE(repo, run_id)
         );
         CREATE TABLE IF NOT EXISTS cost_attempts (
@@ -204,8 +274,13 @@ def _connect(path: Path) -> sqlite3.Connection:
         "worker_pid": "ALTER TABLE jobs ADD COLUMN worker_pid INTEGER",
         "worker_started_at": "ALTER TABLE jobs ADD COLUMN worker_started_at REAL",
         "worker_role": "ALTER TABLE jobs ADD COLUMN worker_role TEXT",
-        "max_total_cost_usd": "ALTER TABLE jobs ADD COLUMN max_total_cost_usd REAL NOT NULL DEFAULT 25",
-        "max_wall_seconds": "ALTER TABLE jobs ADD COLUMN max_wall_seconds INTEGER NOT NULL DEFAULT 28800",
+        # Budget ceilings migrate DISABLED: the retired $25 / 8-hour
+        # resource-conservation defaults must never be injected by schema
+        # evolution. Explicitly configured values on existing rows are
+        # untouched; legacy-default rows are normalized by the user_version
+        # data migration below.
+        "max_total_cost_usd": "ALTER TABLE jobs ADD COLUMN max_total_cost_usd REAL NOT NULL DEFAULT 0",
+        "max_wall_seconds": "ALTER TABLE jobs ADD COLUMN max_wall_seconds INTEGER NOT NULL DEFAULT 0",
         "execution_started_at": "ALTER TABLE jobs ADD COLUMN execution_started_at REAL",
         "worker_stdout_path": "ALTER TABLE jobs ADD COLUMN worker_stdout_path TEXT",
         "worker_stderr_path": "ALTER TABLE jobs ADD COLUMN worker_stderr_path TEXT",
@@ -222,10 +297,12 @@ def _connect(path: Path) -> sqlite3.Connection:
         "max_total_tokens": "ALTER TABLE jobs ADD COLUMN max_total_tokens INTEGER NOT NULL DEFAULT 0",
         "last_failure_class": "ALTER TABLE jobs ADD COLUMN last_failure_class TEXT",
         "last_failure_reason": "ALTER TABLE jobs ADD COLUMN last_failure_reason TEXT",
+        "runtime_generation": "ALTER TABLE jobs ADD COLUMN runtime_generation TEXT NOT NULL DEFAULT ''",
     }
     for name, statement in migrations.items():
         if name not in columns:
             conn.execute(statement)
+    _apply_data_migrations(conn)
 
     attempt_columns = {
         str(row["name"])
@@ -639,8 +716,16 @@ def enqueue(
     max_total_cost_usd: float | None = None,
     max_total_tokens: int | None = None,
     max_wall_seconds: int | None = None,
+    runtime_generation: str | None = None,
 ) -> dict[str, Any]:
     """Create or refresh one enqueued run's operational envelope.
+
+    Runtime-generation binding: every enqueue binds the job to the runtime
+    generation performing the enqueue (``runtime_generation()`` unless an
+    explicit value is supplied). A re-enqueue is an explicit operator
+    re-registration, so it rebinds to the enqueuing generation. Execution
+    later refuses to run a job bound to a different generation (see
+    ``run_one``); only re-enqueue or ``resume`` migrates a run.
 
     Envelope values use ``None`` as the "unspecified" sentinel:
 
@@ -664,6 +749,10 @@ def enqueue(
     repo = str(Path(canonical_repo).resolve(strict=False))
     db = db_path or default_db_path()
     now = time.time()
+    eff_generation = (
+        runtime_generation if runtime_generation is not None
+        else _current_runtime_generation()
+    )
     # Idempotent enqueue: create a new QUEUED row, or update only safe
     # configuration on an existing row. Operational state, backoff and worker
     # ownership are never rewritten by a repeated enqueue.
@@ -700,8 +789,8 @@ def enqueue(
                transient_recovery_cycles, max_transient_recovery_cycles,
                total_cost_usd, next_attempt_at,
                max_total_cost_usd, max_total_tokens, max_wall_seconds,
-               created_at, updated_at)
-            VALUES (?, ?, ?, 'QUEUED', 0, ?, 0, ?, 0, ?, 0, 0, ?, ?, ?, ?, ?)
+               runtime_generation, created_at, updated_at)
+            VALUES (?, ?, ?, 'QUEUED', 0, ?, 0, ?, 0, ?, 0, 0, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(repo, run_id) DO UPDATE SET
               runner=excluded.runner,
               max_infra_failures=excluded.max_infra_failures,
@@ -710,6 +799,7 @@ def enqueue(
               max_total_cost_usd=excluded.max_total_cost_usd,
               max_total_tokens=excluded.max_total_tokens,
               max_wall_seconds=excluded.max_wall_seconds,
+              runtime_generation=excluded.runtime_generation,
               updated_at=excluded.updated_at
             """,
             (
@@ -722,6 +812,7 @@ def enqueue(
                 float(eff_cost),
                 int(eff_tokens),
                 int(eff_wall),
+                str(eff_generation),
                 now,
                 now,
             ),
@@ -1855,6 +1946,47 @@ def run_one(*, db_path: Path | None = None, timeout_seconds: int = 0) -> dict[st
         if job is None:
             return {"schema": SCHEMA, "ok": True, "action": "IDLE", "db_path": str(db)}
 
+        # RUNTIME-GENERATION CONTRACT. A job binds the generation that
+        # enrolled it; executing it under a different generation is a
+        # silent runtime switch of a sealed run and fails closed toward
+        # quarantine. Legacy rows with no recorded binding adopt the
+        # serving generation ONCE at first contact (recorded), which is an
+        # initial binding, never a mid-lifecycle switch. Migration to a
+        # new generation is an explicit operator act: re-enqueue or resume.
+        bound_generation = str(job["runtime_generation"] or "")
+        serving_generation = _current_runtime_generation()
+        if bound_generation and bound_generation != serving_generation:
+            _update_job(
+                conn,
+                job["id"],
+                status_value="QUARANTINED",
+                last_error=(
+                    "runtime generation mismatch: job bound to "
+                    f"{bound_generation}, serving runtime is "
+                    f"{serving_generation}; refusing silent generation "
+                    "switch — operator migration required "
+                    "(supervisor resume rebinds the run)"
+                ),
+                last_failure_class="runtime_generation_mismatch",
+                last_failure_reason="runtime_generation_mismatch",
+                next_attempt_at=0,
+            )
+            return {
+                "schema": SCHEMA,
+                "ok": False,
+                "action": "QUARANTINED",
+                "job_id": job["id"],
+                "reason": "runtime_generation_mismatch",
+                "bound_runtime_generation": bound_generation,
+                "serving_runtime_generation": serving_generation,
+            }
+        if not bound_generation:
+            conn.execute(
+                "UPDATE jobs SET runtime_generation=?, updated_at=? WHERE id=?",
+                (serving_generation, time.time(), int(job["id"])),
+            )
+            conn.commit()
+
         try:
             work_order = dispatch_mod.claim_next(
                 canonical_repo=Path(job["repo"]),
@@ -2319,6 +2451,13 @@ def resume(
     ``--reset-execution-clock``) — normally together with a widened
     ``max_wall_seconds``.
 
+    Runtime-generation migration: resume is an explicit operator act, so
+    it also REBINDS the job to the resuming runtime's generation. This is
+    the clean migration path after a deliberate runtime replacement: the
+    run was quarantined on the generation mismatch, the operator inspects
+    and resumes, and the run continues under the new generation with the
+    rebinding recorded. The previous binding is reported in the result.
+
     Returns the updated job dict (or NOT_ENQUEUED).
     """
     state_mod.validate_run_id(run_id)
@@ -2399,6 +2538,11 @@ def resume(
     if reset_execution_started_at:
         sets.append("execution_started_at=?")
         params.append(now)
+    # Explicit operator migration: rebind the run to the resuming
+    # runtime's generation (recorded; previous binding reported back).
+    previous_generation = str(existing["runtime_generation"] or "")
+    sets.append("runtime_generation=?")
+    params.append(_current_runtime_generation())
     params.extend([repo, run_id])
     with _connect(db) as conn:
         conn.execute(
@@ -2419,4 +2563,5 @@ def resume(
         }
     result = _job_dict(row, db)
     result["resumed"] = True
+    result["runtime_generation_previous"] = previous_generation
     return result
