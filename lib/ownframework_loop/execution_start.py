@@ -84,7 +84,10 @@ def _current_packet_sha(packet_path):
 def _compute_candidate_branch(packet, run_id):
     prefix = (packet.get("target") or {}).get("candidate_branch_prefix")
     if isinstance(prefix, str) and prefix.strip():
-        return prefix
+        branch = prefix.strip()
+        if not git_checks.is_valid_branch_name(branch):
+            raise RuntimeError(f"invalid candidate branch: {branch!r}")
+        return branch
     return branch_resolver.default_candidate_branch(run_id)
 
 

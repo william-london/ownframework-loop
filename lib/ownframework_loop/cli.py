@@ -1783,7 +1783,9 @@ def cmd_build_agent_skeleton(args: argparse.Namespace) -> None:
     repo = _repo_path(args.repo)
     run_id = args.run_id
     if not run_id:
-        rd = state_mod.run_dir(repo, "")
+        rd = repo / ".ownframework-loop"
+        if not rd.is_dir():
+            _emit_error("no .ownframework-loop directory", exit_code=2)
         runs = sorted(p.name for p in rd.iterdir() if p.is_dir() and p.name.startswith("run-"))
         if not runs:
             _emit_error("no run-* directories", exit_code=2)

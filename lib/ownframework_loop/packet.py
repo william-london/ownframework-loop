@@ -18,6 +18,7 @@ from typing import Any
 
 from .util import sha256_text
 from .integrity import canonical_json_dumps
+from . import git_checks
 
 
 SCHEMA_VERSION = "ownframework-work-packet/v2"
@@ -119,6 +120,15 @@ def validate_packet_metadata(meta: dict[str, Any]) -> list[str]:
         for k in ("branch", "classification"):
             if k not in tgt:
                 errors.append(f"target.{k} missing")
+        branch = tgt.get("branch")
+        if isinstance(branch, str) and branch and not git_checks.is_valid_branch_name(branch):
+            errors.append(f"target.branch is not a valid Git branch: {branch!r}")
+        candidate = tgt.get("candidate_branch_prefix")
+        if candidate is not None:
+            if not isinstance(candidate, str) or not git_checks.is_valid_branch_name(candidate):
+                errors.append(
+                    f"target.candidate_branch_prefix is not a valid Git branch: {candidate!r}"
+                )
         cls = tgt.get("classification")
         if cls not in ("local_only", "github_private", "github_public"):
             errors.append(f"invalid target.classification: {cls}")
