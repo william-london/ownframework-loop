@@ -61,7 +61,7 @@ make_unfinalized_build_pass() {
 import json, sys, hashlib, subprocess, re
 from pathlib import Path
 import os
-sys.path.insert(0, os.environ.get("OFLOOP_LIB", "/Users/mr.mrs.london/projects/plugins/ownframework-loop/lib"))
+sys.path.insert(0, "$LIB_DIR")
 from ownframework_loop import approval as approval_mod, packet as packet_mod
 repo = Path(sys.argv[1]); rid = sys.argv[2]
 pp = repo / ".ownframework-loop" / rid / "WORK_PACKET.md"
@@ -300,7 +300,7 @@ PYTHONPATH="$LIB_DIR" python3 - "$REPO4" "$RID4" <<'PY'
 import json, sys, re
 from pathlib import Path
 import os
-sys.path.insert(0, os.environ.get("OFLOOP_LIB", "/Users/mr.mrs.london/projects/plugins/ownframework-loop/lib"))
+sys.path.insert(0, "$LIB_DIR")
 from ownframework_loop.packet import parse_packet_file
 repo = Path(sys.argv[1]); rid = sys.argv[2]
 pp = repo / ".ownframework-loop" / rid / "WORK_PACKET.md"
