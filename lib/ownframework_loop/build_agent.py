@@ -186,19 +186,26 @@ def _resolve_current_work_unit_id(canonical_repo: Path, run_id: str) -> str:
         if current_cps:
             cp_id = current_cps[0]
             cps = (meta.get("checkpoint_graph") or {}).get("checkpoints") or []
+            checkpoint_found = False
             for cp in cps:
-                if cp.get("id") == cp_id:
-                    cp_wus = cp.get("work_units") or []
-                    if cp_wus:
-                        unit_id = cp_wus[0]
-                        if not isinstance(unit_id, str) or not unit_id:
-                            raise RuntimeError(
-                                f"checkpoint {cp_id} has invalid work-unit identity"
-                            )
-                        return unit_id
-            raise RuntimeError(
-                f"current checkpoint {cp_id!r} not found in packet checkpoint_graph"
-            )
+                if cp.get("id") != cp_id:
+                    continue
+                checkpoint_found = True
+                cp_wus = cp.get("work_units") or []
+                if cp_wus:
+                    unit_id = cp_wus[0]
+                    if not isinstance(unit_id, str) or not unit_id:
+                        raise RuntimeError(
+                            f"checkpoint {cp_id} has invalid work-unit identity"
+                        )
+                    return unit_id
+                # A checkpoint without an explicit work_units override inherits
+                # the packet-level work unit, matching build_prepare authority.
+                break
+            if not checkpoint_found:
+                raise RuntimeError(
+                    f"current checkpoint {cp_id!r} not found in packet checkpoint_graph"
+                )
     first = work_units[0]
     if not isinstance(first, dict):
         raise RuntimeError("packet first work_unit is not an object")
