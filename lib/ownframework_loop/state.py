@@ -17,6 +17,38 @@ from .util import (
 from . import integrity
 from . import limits as limits_mod
 
+import re
+
+_RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+
+
+def validate_run_id(run_id: object) -> str:
+    """Validate a run_id is a safe identifier for filesystem and git ref use.
+
+    Rejects:
+      - non-strings
+      - empty strings
+      - path traversal (`.`, `..`, `/`, `\\`)
+      - leading separators or dots
+      - control characters and NUL
+      - names longer than 64 chars
+      - names that begin with `-` (option-injection)
+
+    Returns the validated run_id unchanged on success. Raises ValueError
+    on any failure so callers MUST handle the refusal (fail closed).
+    """
+    if not isinstance(run_id, str):
+        raise ValueError(f"invalid run_id: not a string ({type(run_id).__name__})")
+    if not run_id:
+        raise ValueError("invalid run_id: empty")
+    if any(ch in run_id for ch in ("/", "\\", "\x00")):
+        raise ValueError(f"invalid run_id: path separator or NUL in {run_id!r}")
+    if run_id in (".", "..") or run_id.startswith((".", "-")):
+        raise ValueError(f"invalid run_id: leading dot or dash in {run_id!r}")
+    if not _RUN_ID_RE.match(run_id):
+        raise ValueError(f"invalid run_id: must match ^[A-Za-z0-9][A-Za-z0-9._-]{{0,63}}$ — got {run_id!r}")
+    return run_id
+
 
 SCHEMA_VERSION = "ownframework-loop-state/v1"
 PROGRAM_STATE_SCHEMA_VERSION = "ownframework-loop-state/v2"

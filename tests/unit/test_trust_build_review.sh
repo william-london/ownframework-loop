@@ -624,24 +624,30 @@ echo '{"tampered": true}' > "$T14/.ownframework-loop/$RID14/STATE.json"
 out72="$("$OFLOOP_BIN" build transition "$T14" "$RID14" --to READY_FOR_REVIEW 2>&1 || true)"
 assert_contains "$out72" "transition refused" "direct artifact tampering is detected"
 
-# 73. event-chain machinery runs
+# 73. event-chain machinery runs (strict-mode tampering detection).
+# v0.6.1 hardening: malformed non-empty lines in EVENTS.log MUST now raise
+# TamperingDetected rather than being silently dropped. The historical
+# behavior of swallow-and-continue was a fail-open integrity seam.
 T15="$(make_tmp_repo)"
 RID15="$(make_approved_run "$T15" BUG low "event-tamper")"
 echo "this is not a valid event" >> "$T15/.ownframework-loop/$RID15/EVENTS.log"
 out73="$(python3 -c "
-import sys
-import os as _os_for_path
+import sys, os as _os_for_path
 sys.path.insert(0, _os_for_path.environ.get('OFLOOP_LIB', '/path/to/ownframework-loop/lib'))
 from ownframework_loop import integrity
 from pathlib import Path
-ok, failures = integrity.assert_artifacts_intact(Path('$T15'), '$RID15')
-print('OK' if ok else 'BAD:'+','.join(failures))
+try:
+    ok, failures = integrity.assert_artifacts_intact(Path('$T15'), '$RID15')
+    print('OK' if ok else 'BAD:'+','.join(failures))
+except Exception as exc:
+    print('TAMPERING_DETECTED:' + type(exc).__name__)
 ")"
-if [[ "$out73" == "OK" || "$out73" == BAD* ]]; then
-  pass "event-chain machinery runs"
-else
-  fail "event-chain machinery failed: $out73"
-fi
+case "$out73" in
+  TAMPERING_DETECTED:*)
+    pass "event-chain strict mode: malformed line raises TamperingDetected" ;;
+  *)
+    fail "event-chain machinery expected TamperingDetected on malformed line, got: $out73" ;;
+esac
 
 # 74. POST-HOOK: state.transition() refuses an invalid FSM transition pair.
 # This is the test that fault 4 (FSM bypass in state.transition) must break:

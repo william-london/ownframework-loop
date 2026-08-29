@@ -145,13 +145,27 @@ def load_receipt(canonical_repo: Path, run_id: str) -> dict[str, Any] | None:
 
 
 def compute_diff_stats(worktree: Path, baseline_sha: str, candidate_sha: str) -> dict[str, int]:
-    """Compute files_changed, added_lines, removed_lines for a candidate commit."""
+    """Compute files_changed, added_lines, removed_lines for a candidate commit.
+
+    FAIL-CLOSED: any git-diff failure raises RuntimeError. The historical
+    behavior of returning {0,0,0} on diff failure was fail-open: a corrupt
+    object store or hostile GIT_DIR override would produce zero diff, the
+    budget/scope/protected checks would iterate over an empty change set,
+    and a wildly out-of-scope candidate could pass review.
+    """
+    if not git_checks.commit_exists(worktree, candidate_sha):
+        raise RuntimeError(
+            f"candidate commit does not exist or is not a commit object: {candidate_sha}"
+        )
     r = run_subprocess(
         ["git", "-C", str(worktree), "diff", "--numstat", baseline_sha, candidate_sha],
         timeout=30,
     )
     if r.returncode != 0:
-        return {"files_changed": 0, "added_lines": 0, "removed_lines": 0}
+        raise RuntimeError(
+            f"git diff --numstat failed rc={r.returncode} for "
+            f"{baseline_sha[:12]}..{candidate_sha[:12]}: {r.stderr.strip()}"
+        )
     files = 0
     added = 0
     removed = 0
@@ -168,13 +182,24 @@ def compute_diff_stats(worktree: Path, baseline_sha: str, candidate_sha: str) ->
 
 
 def list_changed_files(worktree: Path, baseline_sha: str, candidate_sha: str) -> list[str]:
-    """Return the list of changed paths in a candidate commit."""
+    """Return the list of changed paths in a candidate commit.
+
+    FAIL-CLOSED: any git-diff failure raises RuntimeError. Empty diff
+    evidence on a diff failure is fail-open and is no longer permitted.
+    """
+    if not git_checks.commit_exists(worktree, candidate_sha):
+        raise RuntimeError(
+            f"candidate commit does not exist or is not a commit object: {candidate_sha}"
+        )
     r = run_subprocess(
         ["git", "-C", str(worktree), "diff", "--name-only", baseline_sha, candidate_sha],
         timeout=30,
     )
     if r.returncode != 0:
-        return []
+        raise RuntimeError(
+            f"git diff --name-only failed rc={r.returncode} for "
+            f"{baseline_sha[:12]}..{candidate_sha[:12]}: {r.stderr.strip()}"
+        )
     return [line.strip() for line in r.stdout.splitlines() if line.strip()]
 
 

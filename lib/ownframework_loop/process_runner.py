@@ -68,10 +68,23 @@ def run_bounded(
 
 
 def process_group_drained(pgid: int) -> bool:
-    """Return true when an exact process group has no live members."""
-    result = subprocess.run(
-        ["ps", "-axo", "pgid="], capture_output=True, text=True, check=False, timeout=5
-    )
+    """Return true when an exact process group has no live members in `ps`.
+
+    FAIL-CLOSED: any probe failure (returncode != 0, empty stdout,
+    subprocess.TimeoutExpired, FileNotFoundError, OSError) returns False.
+    "Unknown process state" is NEVER collapsed to "drained" — the release
+    gate and recovery paths must prove the tree is empty rather than
+    assume it.
+    """
+    try:
+        result = subprocess.run(
+            ["ps", "-axo", "pgid="],
+            capture_output=True, text=True, check=False, timeout=5,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        return False
+    if result.returncode != 0 or not result.stdout.strip():
+        return False
     for value in result.stdout.splitlines():
         try:
             if int(value.strip()) == pgid:

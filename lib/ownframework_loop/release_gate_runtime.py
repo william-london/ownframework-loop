@@ -223,7 +223,17 @@ def main() -> int:
         _emit(output, "REVERSE_ORCHESTRATOR_DEPENDENCIES=0")
         _emit(output, "OWNED_CHILDREN_AFTER_SUCCESS=0")
         _emit(output, "TEMP_DIRS_AFTER_SUCCESS=0")
-        _emit(output, "PROCESS_TREE_DRAIN=PASS")
+        # Real process-tree drain probe via ps (fail-closed). The historical
+        # `PROCESS_TREE_DRAIN=PASS` was unconditional; v0.6.1 hardening closes
+        # the fail-open path where an unknown process state was reported as
+        # drained.
+        from . import process_runner
+        own_pgid = os.getpgrp()
+        if process_runner.process_group_drained(own_pgid):
+            _emit(output, "PROCESS_TREE_DRAIN=PASS")
+        else:
+            _emit(output, "PROCESS_TREE_DRAIN=FAIL")
+            return 1
         payload = {"source_head": head, "source_branch": branch, "source_branch_expected": facts.get("expected_branch", "unknown"), "markers": output, "facts": facts, "completed_at": utc_now_iso()}
         plugin_data.write_receipt("receipts", {"schema": plugin_data.SCHEMA_RELEASE_RECEIPT, "kind": "release_gate", "payload": payload})
         _emit(output, "RELEASE_GATE=PASS")

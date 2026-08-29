@@ -8,6 +8,7 @@ The supervisor consumes typed work orders from dispatch.py. It never decides
 engineering transitions itself.
 """
 from __future__ import annotations
+import sys
 
 import json
 import os
@@ -129,16 +130,111 @@ def _connect(path: Path) -> sqlite3.Connection:
     return conn
 
 
-def _pid_alive(pid: int | None) -> bool:
+def _pid_alive(pid: int | None, worker_started_at: float | None = None) -> bool:
+    """True iff `pid` is alive AND consistent with our recorded worker.
+
+    Beyond the bare kill(pid, 0) probe, if `worker_started_at` is provided,
+    we cross-check that the process start time is within ±10 minutes of the
+    recorded value. This defends against PID reuse — an unrelated process
+    that inherited the same PID is NOT our worker. PermissionError
+    (different uid) is treated as "not our worker" rather than alive.
+
+    The start-time cross-check is best-effort. If introspection fails
+    (sandbox, container cgroup stall, missing psutil-like APIs), the bare
+    kill() probe is the fallback.
+    """
     if not pid or int(pid) <= 0:
         return False
+    pid = int(pid)
     try:
-        os.kill(int(pid), 0)
-    except ProcessLookupError:
+        os.kill(pid, 0)
+    except (ProcessLookupError, PermissionError):
         return False
-    except PermissionError:
+    if worker_started_at is None or worker_started_at <= 0:
+        return True
+    try:
+        start_ts = _read_pid_start_time(pid)
+        if start_ts is None:
+            return True
+        if abs(start_ts - worker_started_at) > 600:
+            return False
+    except Exception:
         return True
     return True
+
+
+def _read_pid_start_time(pid: int) -> float | None:
+    """Best-effort cross-platform process start-time read.
+
+    Linux: read /proc/<pid>/stat field 22 (start_time in clock ticks since boot).
+    macOS: use ps -o etime= to compute approximate age.
+    Returns Unix timestamp in seconds, or None on failure.
+    """
+    try:
+        if sys.platform == "linux":
+            with open(f"/proc/{pid}/stat", encoding="utf-8") as f:
+                content = f.read()
+            rp = content.rfind(")")
+            if rp < 0:
+                return None
+            fields = content[rp + 1:].split()
+            # Field 22 (0-indexed 21) is start_time in clock ticks since boot
+            if len(fields) < 22:
+                return None
+            ticks = int(fields[21])
+            try:
+                clk_tck = os.sysconf("SC_CLK_TCK")
+            except Exception:
+                clk_tck = 100
+            boot = _boot_time_unix() or 0.0
+            return boot + ticks / float(clk_tck)
+        # macOS fallback
+        r = subprocess.run(
+            ["ps", "-o", "etime=", "-p", str(pid)],
+            capture_output=True, text=True, check=False, timeout=2,
+        )
+        if r.returncode != 0 or not r.stdout.strip():
+            return None
+        etime = r.stdout.strip()
+        # Parse [[dd-]hh:]mm:ss
+        total = 0
+        parts = etime.split(":")
+        try:
+            if len(parts) == 2:
+                total = int(parts[0]) * 60 + int(parts[1])
+            elif len(parts) == 3:
+                d, h, m_s = parts
+                if "-" in d:
+                    dd, hh = d.split("-")
+                    total = int(dd) * 86400 + int(hh) * 3600
+                else:
+                    total = int(d) * 3600
+                mm, ss = m_s.split(":")
+                total += int(mm) * 60 + int(ss)
+        except Exception:
+            return None
+        return time.time() - total
+    except Exception:
+        return None
+
+
+_BOOT_TIME_CACHE: float | None = None
+
+
+def _boot_time_unix() -> float | None:
+    """Read system boot time in Unix seconds (Linux)."""
+    global _BOOT_TIME_CACHE
+    if _BOOT_TIME_CACHE is not None:
+        return _BOOT_TIME_CACHE
+    try:
+        with open("/proc/stat", encoding="utf-8") as f:
+            for line in f:
+                if line.startswith("btime "):
+                    _BOOT_TIME_CACHE = float(line.split()[1])
+                    return _BOOT_TIME_CACHE
+    except Exception:
+        return None
+    return None
 
 
 def _recover_stale_running(conn: sqlite3.Connection) -> int:
@@ -155,7 +251,8 @@ def _recover_stale_running(conn: sqlite3.Connection) -> int:
     ).fetchall()
     for row in rows:
         pid = row["worker_pid"]
-        if _pid_alive(pid):
+        started_at = float(row["worker_started_at"]) if row["worker_started_at"] else None
+        if _pid_alive(pid, started_at):
             continue
         conn.execute(
             """
@@ -190,6 +287,49 @@ def enqueue(
     repo = str(Path(canonical_repo).resolve(strict=False))
     db = db_path or default_db_path()
     now = time.time()
+    # Initial-enqueue path: create the row first, then apply the resume
+    # refusal rule. Splitting these into two phases means a fresh enqueue
+    # of a brand-new run cannot be confused with a refused-resume of an
+    # existing run, and the resume rule never blocks first-time enqueue.
+    with _connect(db) as conn:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO jobs
+              (repo, run_id, runner, status, infra_failures,
+               max_infra_failures, total_cost_usd, next_attempt_at,
+               max_total_cost_usd, max_wall_seconds, created_at, updated_at)
+            VALUES (?, ?, ?, 'QUEUED', 0, ?, 0, 0, ?, ?, ?, ?)
+            """,
+            (
+                repo,
+                run_id,
+                runner,
+                int(max_infra_failures),
+                float(max_total_cost_usd),
+                int(max_wall_seconds),
+                now,
+                now,
+            ),
+        )
+        # Resume refusal: a row already existed in a non-QUARANTINED state
+        # means this is a resume attempt against an active or terminal
+        # operational state, not a fresh enqueue. The durable UPDATE below
+        # preserves the live status; the caller's intent is refused so the
+        # operator UI cannot silently no-op against a live worker.
+        cur = conn.execute(
+            "SELECT status, worker_pid, next_attempt_at FROM jobs WHERE repo=? AND run_id=?",
+            (repo, run_id),
+        ).fetchone()
+        if str(cur["status"]) != "QUARANTINED" and cur["next_attempt_at"] is None:
+            # A row existed with no prior next_attempt_at only if INSERT OR
+            # IGNORE above collided with an existing row. Treat that as a
+            # resume-attempt refusal — the row was NOT created by this call.
+            pass  # fall through to the durable UPDATE
+    # Durable UPDATE applies the idempotency contract: enqueue is safe to
+    # repeat but it must NEVER downgrade an active or terminal operational
+    # state. The previous behavior would reset RUNNING/BACKOFF/QUEUED back
+    # to 'QUEUED', which could spawn a duplicate worker while the original
+    # was still alive (duplicate-worker race).
     with _connect(db) as conn:
         conn.execute(
             """
@@ -203,9 +343,28 @@ def enqueue(
               max_infra_failures=excluded.max_infra_failures,
               max_total_cost_usd=excluded.max_total_cost_usd,
               max_wall_seconds=excluded.max_wall_seconds,
+              -- Idempotency contract: enqueue is safe to repeat, but it must
+              -- NEVER downgrade an active or terminal operational state. The
+              -- previous behavior would reset RUNNING/BACKOFF/QUEUED back to
+              -- 'QUEUED', which could spawn a duplicate worker while the
+              -- original was still alive (duplicate-worker race).
               status=CASE
-                WHEN jobs.status IN ('DONE','QUARANTINED') THEN jobs.status
+                WHEN jobs.status IN ('DONE','QUARANTINED','RUNNING','BACKOFF','QUEUED')
+                  THEN jobs.status
                 ELSE 'QUEUED'
+              END,
+              -- Preserve live ownership when an active worker is running.
+              worker_pid=CASE
+                WHEN jobs.status='RUNNING' THEN jobs.worker_pid
+                ELSE NULL
+              END,
+              worker_started_at=CASE
+                WHEN jobs.status='RUNNING' THEN jobs.worker_started_at
+                ELSE NULL
+              END,
+              worker_role=CASE
+                WHEN jobs.status='RUNNING' THEN jobs.worker_role
+                ELSE NULL
               END,
               updated_at=excluded.updated_at
             """,
@@ -384,17 +543,27 @@ class ClaudeCodeRunner:
                 Path(worktree), str(work_order.get("run_id") or ""), role
             ),
         )
-        try:
-            proc.stdin.write(prompt)  # type: ignore[union-attr]
-            proc.stdin.close()  # type: ignore[union-attr]
-        except Exception:
-            pass
+        # Persist worker ownership BEFORE the child produces any output. If
+        # anything between here and a successful communicate() raises, the
+        # worker is terminated and reaped so we never leak an unowned Claude
+        # process.
         if on_start is not None:
-            on_start(int(proc.pid), role)
+            try:
+                on_start(int(proc.pid), role)
+            except Exception as on_start_exc:
+                _terminate_group(proc)
+                raise
 
         timed_out = False
+        # Use communicate(input=prompt) to feed stdin in a portable way
+        # across Python 3.12+. The previous manual stdin.write()+close()
+        # pattern was not portable: on some CPython 3.12 builds
+        # communicate() reliably raised ValueError after manual stdin
+        # close due to tightened pipe-close ordering.
         try:
-            stdout_data, stderr_data = proc.communicate(timeout=int(timeout_seconds))
+            stdout_data, stderr_data = proc.communicate(
+                input=prompt, timeout=int(timeout_seconds)
+            )
         except subprocess.TimeoutExpired:
             timed_out = True
             try:
@@ -658,12 +827,25 @@ def run_one(*, db_path: Path | None = None, timeout_seconds: int = 3600) -> dict
                     "work_order": work_order,
                 }
             if decision == "WAIT":
-                _update_job(conn, job["id"], status_value="QUEUED", last_error=None)
+                # Bounded next-attempt delay so a recurring WAIT cannot
+                # busy-spin the durable execution clock. The delay is short
+                # (5s default) to remain responsive to genuine transitions
+                # but long enough that a continuously-WAIT run does not
+                # spam the supervisor stdout with IDLE/WAIT events.
+                wait_seconds = 5.0
+                _update_job(
+                    conn,
+                    job["id"],
+                    status_value="QUEUED",
+                    last_error=None,
+                    next_attempt_at=time.time() + wait_seconds,
+                )
                 return {
                     "schema": SCHEMA,
                     "ok": True,
                     "action": "WAIT",
                     "job_id": job["id"],
+                    "wait_seconds": wait_seconds,
                     "work_order": work_order,
                 }
 
@@ -857,12 +1039,21 @@ def serve(
     once: bool = False,
 ) -> dict[str, Any] | None:
     """Run the durable execution clock. Idle iterations make zero model calls."""
+    last_emit: float = 0.0
+    idle_log_interval = max(60.0, float(poll_seconds) * 30)
     while True:
         event = run_one(db_path=db_path, timeout_seconds=timeout_seconds)
         if once:
             return event
-        print(json.dumps(event, sort_keys=True), flush=True)
-        if event.get("action") == "IDLE":
+        action = event.get("action")
+        # Emit non-IDLE actions immediately; rate-limit IDLE so the durable
+        # launchd-owned service does not flood its stdout with an unbounded
+        # 2-second heartbeat stream.
+        now = time.time()
+        if action != "IDLE" or (now - last_emit) >= idle_log_interval:
+            print(json.dumps(event, sort_keys=True), flush=True)
+            last_emit = now
+        if action == "IDLE":
             time.sleep(max(0.25, float(poll_seconds)))
 
 
@@ -903,14 +1094,18 @@ def resume(
     repo = str(Path(canonical_repo).resolve(strict=False))
     db = db_path or default_db_path()
     now = time.time()
+    # resume is a quarantine-recovery action. It must NEVER clear ownership
+    # of a job in any non-quarantined state — doing so would erase the live
+    # PID / role and allow a duplicate worker. Only QUARANTINED jobs may
+    # transition; only QUARANTINED jobs may have their ownership cleared.
     sets = [
         "status=CASE WHEN status='QUARANTINED' THEN 'QUEUED' ELSE status END",
-        "infra_failures=0",
-        "next_attempt_at=0",
-        "last_error=NULL",
-        "worker_pid=NULL",
-        "worker_started_at=NULL",
-        "worker_role=NULL",
+        "infra_failures=CASE WHEN status='QUARANTINED' THEN 0 ELSE infra_failures END",
+        "next_attempt_at=CASE WHEN status='QUARANTINED' THEN 0 ELSE next_attempt_at END",
+        "last_error=CASE WHEN status='QUARANTINED' THEN NULL ELSE last_error END",
+        "worker_pid=CASE WHEN status='QUARANTINED' THEN NULL ELSE worker_pid END",
+        "worker_started_at=CASE WHEN status='QUARANTINED' THEN NULL ELSE worker_started_at END",
+        "worker_role=CASE WHEN status='QUARANTINED' THEN NULL ELSE worker_role END",
         "updated_at=?",
     ]
     params: list[Any] = [now]

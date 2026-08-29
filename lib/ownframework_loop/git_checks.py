@@ -35,6 +35,22 @@ def current_branch(path: Path) -> str | None:
     return r.stdout.strip() or None
 
 
+def require_current_branch(path: Path) -> str:
+    """Return the current branch or raise — never fabricate a branch name.
+
+    Replaces the historical `current_branch(wt) or factory/candidate/<run-id>`
+    pattern that silently minted a never-registered branch when the worktree
+    was detached or git was unavailable.
+    """
+    br = current_branch(path)
+    if not br:
+        raise RuntimeError(
+            f"refusing to fabricate branch identity for {path}: no current branch "
+            f"(detached HEAD or git unavailable)"
+        )
+    return br
+
+
 def current_head(path: Path) -> str | None:
     r = run_subprocess(["git", "-C", str(path), "rev-parse", "HEAD"], timeout=10)
     if r.returncode != 0:
@@ -43,9 +59,21 @@ def current_head(path: Path) -> str | None:
 
 
 def remote_count(path: Path) -> int:
-    r = run_subprocess(["git", "-C", str(path), "remote"], timeout=10)
+    """Number of configured Git remotes.
+
+    FAIL-CLOSED: on probe failure, raises RuntimeError. The historical
+    fallback of returning 0 on git failure was fail-open — it allowed the
+    local-only remote-block check to silently pass for a hostile repo
+    whose `.git/config` could not be parsed.
+    """
+    try:
+        r = run_subprocess(["git", "-C", str(path), "remote"], timeout=10)
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
+        raise RuntimeError(f"could not enumerate remotes: {exc}") from exc
     if r.returncode != 0:
-        return 0
+        raise RuntimeError(
+            f"git remote failed rc={r.returncode}: {r.stderr.strip()}"
+        )
     return len([line for line in r.stdout.splitlines() if line.strip()])
 
 
@@ -57,8 +85,35 @@ def remotes(path: Path) -> list[str]:
 
 
 def is_dirty(path: Path) -> bool:
+    """Backwards-compatible boolean API. True iff the worktree is provably dirty.
+
+    If git status fails (returncode != 0), returns False which historically
+    was treated as "clean" — this is the fail-open bug the v0.6.1 hardening
+    closed. Authoritative callers MUST use dirty_status() instead.
+    """
+    return dirty_status(path) == "dirty"
+
+
+def dirty_status(path: Path) -> str:
+    """Strict tri-state git-status probe.
+
+    Returns one of:
+      - "clean"   -> porcelain output is empty AND git-status succeeded
+      - "dirty"   -> porcelain output is non-empty AND git-status succeeded
+      - "unknown" -> git-status failed (returncode != 0) OR path missing
+
+    "Cannot prove clean" is NEVER collapsed to "clean". Authoritative proof
+    paths (semantic readiness, exact-SHA finalizers, worktree validators)
+    must reject "unknown" rather than treat it as clean.
+    """
+    if not path.exists():
+        return "unknown"
     r = run_subprocess(["git", "-C", str(path), "status", "--porcelain"], timeout=10)
-    return r.returncode == 0 and bool(r.stdout.strip())
+    if r.returncode != 0:
+        return "unknown"
+    if not r.stdout.strip():
+        return "clean"
+    return "dirty"
 
 
 def is_bare(path: Path) -> bool:
@@ -166,7 +221,17 @@ def branch_exists(path: Path, branch: str) -> bool:
 
 
 def commit_exists(path: Path, sha: str) -> bool:
-    r = run_subprocess(["git", "-C", str(path), "cat-file", "-e", sha], timeout=10)
+    """True iff `sha` resolves to a COMMIT object in the canonical repo.
+
+    Uses `git rev-parse --verify &lt;sha&gt;^{commit}` which fails with non-zero
+    exit if the object does not exist OR if it is not a commit (e.g. tree,
+    blob, annotated tag). The historical `git cat-file -e` accepted any
+    object type — a tree or blob with the right hex would satisfy the gate.
+    """
+    r = run_subprocess(
+        ["git", "-C", str(path), "rev-parse", "--verify", "--quiet", f"{sha}^{{commit}}"],
+        timeout=10,
+    )
     return r.returncode == 0
 
 

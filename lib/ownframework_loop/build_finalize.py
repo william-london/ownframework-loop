@@ -135,13 +135,23 @@ def _run_validation_command(
 
 
 def _changed_paths_between(worktree: Path, baseline_sha: str, candidate_sha: str) -> list[str]:
-    """Return the list of changed paths between two SHAs."""
+    """Return the list of changed paths between two SHAs.
+
+    FAIL-CLOSED: any git-diff failure raises RuntimeError. The historical
+    []-on-failure pattern was fail-open (zero changed paths = no scope
+    violations = no protected-path hits = no secret findings). Authoritative
+    callers now refuse an unverifiable diff rather than accept empty
+    evidence.
+    """
     r = util.run_subprocess(
         ["git", "-C", str(worktree), "diff", "--name-only", baseline_sha, candidate_sha],
         timeout=30,
     )
     if r.returncode != 0:
-        return []
+        raise RuntimeError(
+            f"git diff --name-only failed rc={r.returncode} for "
+            f"{baseline_sha[:12]}..{candidate_sha[:12]}: {r.stderr.strip()}"
+        )
     return [line.strip() for line in r.stdout.splitlines() if line.strip()]
 
 

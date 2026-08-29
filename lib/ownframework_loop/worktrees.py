@@ -1,11 +1,35 @@
 """Worktree lifecycle — create builder/reviewer worktrees, cleanup, mutation detection."""
-
 from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
 
 from .locking import flock_exclusive
+
+
+def is_registered_worktree(canonical_repo: Path, worktree_path: Path) -> bool:
+    """True iff `worktree_path` appears in `git worktree list` for canonical_repo.
+
+    A bare directory containing a checkout is NOT a registered worktree. This
+    helper is the single source of truth for "is this path a legitimate
+    Loop-owned worktree of this repository?" — every builder/reviewer path
+    must consult it before any operation that assumes worktree identity.
+    """
+    r = run_subprocess(
+        ["git", "-C", str(canonical_repo), "worktree", "list", "--porcelain"],
+        timeout=10,
+    )
+    if r.returncode != 0:
+        return False
+    target = str(worktree_path.resolve(strict=False))
+    for raw in r.stdout.splitlines():
+        # Each entry starts with "worktree <absolute-path>"; subsequent
+        # lines are key/value pairs (HEAD, branch, detached, etc.).
+        if raw.startswith("worktree "):
+            entry_path = raw[len("worktree "):].strip()
+            if entry_path == target:
+                return True
+    return False
 from .util import (
     atomic_write_json, builder_worktree, reviewer_worktree,
     run_subprocess, short_sha, utc_now_iso, worktrees_dir,

@@ -56,6 +56,8 @@ def new_run_id() -> str:
 
 def run_dir(canonical_repo: Path | str, run_id: str) -> Path:
     """Return the per-run state directory path."""
+    from .state import validate_run_id
+    validate_run_id(run_id)
     return Path(canonical_repo) / ".ownframework-loop" / run_id
 
 
@@ -65,10 +67,14 @@ def worktrees_dir(canonical_repo: Path) -> Path:
 
 
 def builder_worktree(canonical_repo: Path, run_id: str) -> Path:
+    from .state import validate_run_id
+    validate_run_id(run_id)
     return worktrees_dir(canonical_repo) / run_id / "builder"
 
 
 def reviewer_worktree(canonical_repo: Path, run_id: str) -> Path:
+    from .state import validate_run_id
+    validate_run_id(run_id)
     return worktrees_dir(canonical_repo) / run_id / "reviewer"
 
 

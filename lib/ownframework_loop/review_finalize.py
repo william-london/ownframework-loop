@@ -289,20 +289,59 @@ def finalize_review(
             f"approval-frozen candidate_branch {approval_frozen_branch!r}"
         )
 
-    # 7. Create or verify reviewer detached worktree.
+    # 7. Ensure an exact-SHA pinned registered reviewer worktree exists.
+    #
+    # The reviewer worktree may have been established by review_prepare
+    # (the full lifecycle path) or may still be absent (the simple
+    # review-claim -> finalize lifecycle path used by tests, adapter-driven
+    # auditors, and ad-hoc CLI users who never call review_prepare). The
+    # worktree must be a registered, exact-SHA-pinned worktree before any
+    # pre/post snapshot can be meaningful, so we ensure it idempotently.
+    #
+    # Historical hazard: a prior version of this finalizer force-removed
+    # and re-added the worktree unconditionally on every call, which
+    # erased any pre-review HEAD evidence and any uncommitted mutations
+    # the reviewer had left behind, turning the dirty-worktree check
+    # into theater. Fix: never recreate a worktree that already exists;
+    # only establish one if it is missing. HEAD must match the receipt
+    # candidate SHA in either case.
     reviewer_wt = util.reviewer_worktree(canonical_repo, run_id)
-    try:
-        wt_setup = worktrees.add_reviewer_worktree(
+    if reviewer_wt.exists():
+        if not worktrees.is_registered_worktree(canonical_repo, reviewer_wt):
+            raise RuntimeError(
+                f"reviewer path {reviewer_wt} is not a registered worktree of "
+                f"the canonical repository; refusing to finalize"
+            )
+        existing_head = git_checks.current_head(reviewer_wt)
+        if existing_head != receipt_candidate_sha:
+            raise RuntimeError(
+                f"existing reviewer worktree HEAD {existing_head!r} != candidate SHA "
+                f"{receipt_candidate_sha!r}; refusing -- review_prepare must freeze "
+                f"the reviewer HEAD at the candidate SHA, or re-anchor via "
+                f"add_reviewer_worktree"
+            )
+    else:
+        wt_info = worktrees.add_reviewer_worktree(
             canonical_repo,
             run_id,
             candidate_sha=receipt_candidate_sha,
             expected_setup_sha=receipt_candidate_sha,
         )
-    except worktrees.WorktreeError as e:
-        raise RuntimeError(f"reviewer worktree setup failed: {e}")
+        reviewer_wt = Path(wt_info["path"]).resolve(strict=False)
+        if not worktrees.is_registered_worktree(canonical_repo, reviewer_wt):
+            raise RuntimeError(
+                f"newly created reviewer worktree {reviewer_wt} is not a "
+                f"registered worktree of the canonical repository; refusing"
+            )
 
     # 8. Record pre-review HEAD.
     pre_review_head = git_checks.current_head(reviewer_wt)
+    if pre_review_head != receipt_candidate_sha:
+        raise RuntimeError(
+            f"reviewer worktree HEAD {pre_review_head!r} != candidate SHA "
+            f"{receipt_candidate_sha!r}; refusing — review_prepare must "
+            f"freeze the reviewer HEAD at the candidate SHA"
+        )
 
     # 9. Validate assessment schema.
     if assessment_path is None:
@@ -442,14 +481,51 @@ def finalize_review(
             })
     hard_secret_blocks = [f for f in secret_findings if f["severity"] == "hard"]
 
-    # 13. Verify reviewer HEAD did not change.
-    post_review_head = git_checks.current_head(reviewer_wt)
+    # 13. Verify reviewer filesystem integrity. The historical HEAD-only
+    # check was a decorative fail-open: a semantic reviewer could modify
+    # tracked files, leave untracked files, or stage edits without ever
+    # moving HEAD, and the gate would silently APPROVE. Use the strict
+    # tri-state git_status probe plus a HEAD-equality check. ANY mutation
+    # detected between pre_review and post_review refuses the verdict.
+    pre_review_porcelain = git_checks.dirty_status(reviewer_wt)
+    if pre_review_porcelain == "unknown":
+        raise RuntimeError(
+            f"reviewer worktree filesystem state could not be probed "
+            f"({reviewer_wt}); refusing — cannot prove clean"
+        )
+    if pre_review_porcelain == "dirty":
+        raise RuntimeError(
+            f"reviewer worktree is dirty BEFORE validation: {reviewer_wt}; "
+            f"refusing — review_prepare must leave a clean filesystem"
+        )
+    pre_review_classification = git_checks.dirty_classification(reviewer_wt)
+    pre_review_porcelain_lines = list(pre_review_classification.get("porcelain") or [])
+
+    # 13b. Snapshot reviewer filesystem AFTER all required_validation runs.
+    # If validation dirtied the worktree (e.g. wrote a temp file outside
+    # hermetic-env guarantees), refuse. The historical gap allowed
+    # validation-time mutations to be invisible to the finalizer.
+    post_review_classification = git_checks.dirty_classification(reviewer_wt)
+    post_review_porcelain_lines = list(post_review_classification.get("porcelain") or [])
+
     tracked_mutation_check = {
-        "detected": pre_review_head != post_review_head,
+        "detected": bool(post_review_classification.get("has_tracked_modified"))
+                    or bool(post_review_classification.get("has_tracked_deleted"))
+                    or bool(post_review_classification.get("has_staged"))
+                    or bool(post_review_classification.get("has_untracked")),
         "before_sha": pre_review_head,
-        "after_sha": post_review_head,
-        "changed_paths": [],
+        "after_sha": pre_review_head,
+        "pre_review_porcelain_count": len(pre_review_porcelain_lines),
+        "post_review_porcelain_count": len(post_review_porcelain_lines),
+        "post_review_changed_paths": post_review_porcelain_lines,
+        "head_drifted": False,
     }
+
+    post_review_head = git_checks.current_head(reviewer_wt)
+    if post_review_head != pre_review_head:
+        tracked_mutation_check["head_drifted"] = True
+        tracked_mutation_check["detected"] = True
+        tracked_mutation_check["after_sha"] = post_review_head
 
     # 14. Verify packet, approval, receipt, candidate unchanged.
     final_packet_sha = util.sha256_text(packet_path.read_text(encoding="utf-8"))

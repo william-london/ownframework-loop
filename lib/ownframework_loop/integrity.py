@@ -68,18 +68,33 @@ def sha256_text(text: str) -> str:
 
 
 def read_event_chain(path: Path) -> list[dict[str, Any]]:
-    """Read the JSON-Lines event chain. Returns [] on missing file."""
+    """Read the JSON-Lines event chain with STRICT parsing.
+
+    Returns [] on missing file.
+
+    Strict semantics:
+      - empty / whitespace-only line  -> skipped silently
+      - non-empty parseable JSON line -> appended
+      - non-empty malformed line      -> raises TamperingDetected
+
+    A non-empty malformed line is treated as an integrity failure. Silent
+    dropping would let an attacker truncate the verifier's view of history
+    without detection, breaking event-chain hash verification.
+    """
     if not path.exists():
         return []
     out: list[dict[str, Any]] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
         if not line:
             continue
         try:
             out.append(json.loads(line))
-        except Exception:
-            continue
+        except json.JSONDecodeError as exc:
+            raise TamperingDetected(
+                f"event chain contains malformed non-empty line at row "
+                f"{len(out) + 1}: {exc}"
+            ) from exc
     return out
 
 
@@ -154,7 +169,20 @@ def canonical_json_dumps(obj: Any) -> str:
 
 
 def verify_state_sha(state_path: Path, events_log: Path) -> tuple[bool, str]:
-    """Verify STATE.json matches the last recorded SHA in EVENTS.log."""
+    """Verify STATE.json matches the last recorded SHA in EVENTS.log.
+
+    Failure modes:
+      - STATE.json missing       -> (True, "no state to verify") — no artifact yet.
+      - EVENTS.log missing       -> (True, "no event chain yet") — first run.
+      - no prior SHA in chain    -> (True, "no prior sha recorded") — first event.
+      - STATE.json OSError       -> (False, "...unreadable...") — fail CLOSED.
+      - SHA mismatch             -> (False, "...mismatch...") — fail CLOSED.
+      - SHA match                -> (True, "ok") — pass.
+
+    An OSError reading STATE.json MUST be treated as an integrity failure
+    (cannot prove clean). It is NOT a benign "ok" — fail-open here would let
+    external tampering silently degrade tamper-detection to "did not run".
+    """
     if not state_path.exists():
         return True, "no state to verify"
     if not events_log.exists():
@@ -164,8 +192,8 @@ def verify_state_sha(state_path: Path, events_log: Path) -> tuple[bool, str]:
         return True, "no prior sha recorded"
     try:
         actual = sha256_file(state_path)
-    except OSError:
-        return True, "cannot read state"
+    except OSError as exc:
+        return False, f"state unreadable: {exc}"
     if actual != expected:
         return False, f"state sha mismatch: recorded={expected[:12]}, actual={actual[:12]}"
     return True, "ok"
@@ -199,8 +227,8 @@ def verify_artifact_sha(artifact_path: Path, events_log: Path, artifact_name: st
         return True, "no prior sha recorded"
     try:
         actual = sha256_file(artifact_path)
-    except OSError:
-        return True, "cannot read artifact"
+    except OSError as exc:
+        return False, f"{artifact_name} unreadable: {exc}"
     if actual != expected:
         return False, f"{artifact_name} sha mismatch: recorded={expected[:12]}, actual={actual[:12]}"
     return True, "ok"
