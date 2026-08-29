@@ -99,12 +99,31 @@ done
 
 # ---------------------------------------------------------------
 # Test C — security behavior is unchanged
+#
+# v0.6.1: this test no longer relies on the historical path-based
+# heuristic ("repo contains .ownframework-loop = active run"). That
+# heuristic over-scoped ordinary interactive Claude sessions and was
+# removed by the execution-context-contract hardening. The test now
+# establishes semantic-worker context via the v0.6.1 marker file
+# at the staging cwd, which is the same provenance the foreground
+# /of-loop:build and /of-loop:review skills use. The security contract
+# under test (forbidden commands emit block JSON) is unchanged.
 # ---------------------------------------------------------------
 echo "Test C: security behavior is unchanged"
 
 STAGING_C="$(stage_plugin "$STAGING_ROOT/C")"
-mkdir -p "$STAGING_C/.ownframework-loop/run-test-stub"
-echo '{"state":"AWAITING_APPROVAL"}' > "$STAGING_C/.ownframework-loop/run-test-stub/STATE.json"
+mkdir -p "$STAGING_C/.ownframework-loop"
+OFLOOP_LIB="$STAGING_C/lib" PYTHONPATH="$STAGING_C/lib" python3 -B - "$STAGING_C" <<PYTHON_END
+import json, sys, os
+sys.path.insert(0, os.environ["PYTHONPATH"])
+from ownframework_loop import role_context
+ctx = role_context.enter_semantic_role(
+    canonical_repo=sys.argv[1],
+    run_id="run-test-stub",
+    role="builder",
+)
+print("MARKER_OK", json.dumps(ctx))
+PYTHON_END
 
 # C1. block_dangerous_bash.sh on a forbidden command emits block JSON.
 INPUT_FORBIDDEN=$(printf '{"tool_name":"Bash","tool_input":{"command":"git reset --hard HEAD~1"},"cwd":"%s"}' "$STAGING_C")

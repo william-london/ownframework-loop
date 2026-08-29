@@ -14,6 +14,7 @@ Design contract (V1, post-audit):
 
 from __future__ import annotations
 
+import os
 import re
 import shlex
 from pathlib import Path
@@ -180,7 +181,12 @@ SECRET_PATTERNS: list[tuple[re.Pattern[str], str]] = [
 ]
 
 
-def classify_bash_command(command: str) -> dict[str, Any]:
+def classify_bash_command(
+    command: str,
+    *,
+    role: str | None = None,
+    env: dict[str, str] | None = None,
+) -> dict[str, Any]:
     """Return a classification dict for a Bash command.
 
     Always returns:
@@ -191,6 +197,21 @@ def classify_bash_command(command: str) -> dict[str, Any]:
 
     Splits the command on common shell-chain operators before classifying each
     segment, so `git status && git push` is detected as forbidden.
+
+    Role semantics (v0.6.1):
+      * role=None (default): structural classification only. External-
+        action patterns in FORBIDDEN_PATTERNS are still detected, so a
+        caller that wants "this command is forbidden" semantics can use
+        the result without further role plumbing. This matches the
+        historical hook behavior.
+      * role="builder": same as role=None, plus the result carries
+        ``role_constraints="builder"`` for callers that want to
+        distinguish builder-context refusals from generic ones.
+      * role="reviewer": everything in role=None is still forbidden,
+        AND any segment that fails ``is_reviewer_allowed()`` is added
+        to ``forbidden`` with a clear "reviewer read-only" reason.
+        Reviewer lanes cannot mutate, install, or call anything outside
+        the read-only allowlist.
 
     Note: textual classification is ONE LAYER of defense. Forms that
     cannot be safely interpreted pre-execution (multiline heredocs, eval
@@ -254,12 +275,65 @@ def classify_bash_command(command: str) -> dict[str, Any]:
                 continue
             break
     severity = "forbidden" if forbidden else "allowed"
+
+    # v0.6.1 role-aware constraints: when role="reviewer", every segment
+    # must additionally match the read-only allowlist. Builder (and None)
+    # lanes get no extra constraint beyond FORBIDDEN_PATTERNS — the
+    # semantic contract is that builders may mutate source but never
+    # invoke external actions.
+    role_constraints = None
+    if role == "reviewer":
+        role_constraints = "reviewer"
+        for seg in segments:
+            if is_reviewer_allowed(seg):
+                continue
+            forbidden.append(f"reviewer read-only lane: {seg.strip()}")
+
+    severity = "forbidden" if forbidden else "allowed"
     return {
         "command": command,
         "segments": segments,
         "forbidden": forbidden,
         "severity": severity,
+        "role": role,
+        "role_constraints": role_constraints,
     }
+
+
+def classify_bash_command_with_env(
+    command: str,
+    env: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """Classify a bash command, deriving role from explicit env markers.
+
+    Reads ``OFLOOP_SEMANTIC_CONTEXT``, ``OFLOOP_RUN_ID``, ``OFLOOP_ROLE``,
+    and ``OFLOOP_CANONICAL_REPO`` from ``env`` (defaults to ``os.environ``).
+    When ``OFLOOP_SEMANTIC_CONTEXT != "1"`` the role is ``None`` and the
+    classifier returns structural findings only — callers that want the
+    "no semantic context, no role enforcement" no-op semantics should
+    check the env first and skip this function entirely.
+
+    A partial env (context flag set without the other required vars) is
+    treated as ``role=None`` and the partial status is surfaced in the
+    result as ``partial_env=True`` so the caller can log the misconfigured
+    supervisor and decide whether to fail closed.
+    """
+    e = env if env is not None else os.environ
+    role: str | None = None
+    partial_env = False
+    if str(e.get("OFLOOP_SEMANTIC_CONTEXT") or "") == "1":
+        env_role = str(e.get("OFLOOP_ROLE") or "")
+        if env_role in ("builder", "reviewer"):
+            role = env_role
+        else:
+            # OFLOOP_SEMANTIC_CONTEXT=1 with no/invalid role: refuse
+            # the role upgrade (still call classify_bash_command with
+            # role=None) but flag the partial state so callers can fail
+            # closed.
+            partial_env = True
+    result = classify_bash_command(command, role=role)
+    result["partial_env"] = partial_env
+    return result
 
 
 def _split_command_chain(command: str) -> list[str]:

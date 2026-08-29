@@ -115,6 +115,28 @@ def hermetic_subprocess_env(
             env["PYTEST_PLUGINS"] = existing_plugins + "," + of_plugin
     else:
         env["PYTEST_PLUGINS"] = of_plugin
+
+    # v0.6.1 execution-context markers. The Loop supervisor is the
+    # PROVENANCE SOURCE for semantic-worker context. Setting these env
+    # vars here means every bash command spawned inside the Claude Code
+    # worker (including incidental git/helper invocations) carries the
+    # explicit role contract so the textual bash guard can enforce it
+    # without falling back to path heuristics. role must be
+    # "builder" or "reviewer"; for non-semantic roles this is skipped.
+    if role in ("builder", "reviewer"):
+        from . import role_context as role_context_mod
+        try:
+            ctx = role_context_mod.build_context(
+                run_id=run_id, role=role, canonical_repo=canonical_repo,
+            )
+            role_context_mod.apply_context_to_env(env, ctx)
+        except role_context_mod.RoleContextError:
+            # A malformed role/run_id/canonical_repo MUST NOT silently
+            # degrade to "no context" because that would lift the
+            # semantic-worker restrictions. Re-raise so the supervisor
+            # fails the work order with a clear refusal.
+            raise
+
     return env
 
 

@@ -1286,6 +1286,57 @@ def _reconcile_crashes(
     }
 
 
+def cmd_role_enter(args: argparse.Namespace) -> None:
+    """Write the v0.6.1 semantic-context marker file.
+
+    Foreground `/of-loop:build` and `/of-loop:review` skills (and any
+    future supported foreground builder/reviewer lane) MUST call this
+    on lane entry so the textual bash guard can establish provenance.
+    The marker is JSON with run_id, role, and canonical_repo. The hook
+    validates the file against `role_context.build_context` on read.
+    """
+    from . import role_context as role_context_mod
+    repo = Path(args.repo).expanduser().resolve(strict=False)
+    if not repo.is_dir():
+        _emit_error(f"repo not found: {repo}", exit_code=2)
+    try:
+        ctx = role_context_mod.enter_semantic_role(
+            canonical_repo=repo,
+            run_id=str(args.run_id),
+            role=str(args.role),
+        )
+    except role_context_mod.RoleContextError as exc:
+        _emit_error(f"role enter refused: {exc}", exit_code=4)
+    _emit({
+        "schema": "ownframework-loop-role-enter/v1",
+        "ok": True,
+        "repo": ctx["canonical_repo"],
+        "run_id": ctx["run_id"],
+        "role": ctx["role"],
+        "marker_path": str(Path(ctx["canonical_repo"]) / ".ownframework-loop" / "_semantic_context"),
+    })
+
+
+def cmd_role_exit(args: argparse.Namespace) -> None:
+    """Remove the v0.6.1 semantic-context marker file.
+
+    Foreground skills MUST call this on lane completion. The marker
+    must not be left behind because it would activate the guard on
+    subsequent interactive sessions in the same repo.
+    """
+    from . import role_context as role_context_mod
+    repo = Path(args.repo).expanduser().resolve(strict=False)
+    if not repo.is_dir():
+        _emit_error(f"repo not found: {repo}", exit_code=2)
+    removed = role_context_mod.exit_semantic_role(canonical_repo=repo)
+    _emit({
+        "schema": "ownframework-loop-role-exit/v1",
+        "ok": True,
+        "repo": str(repo),
+        "removed": bool(removed),
+    })
+
+
 def cmd_new_repo(args: argparse.Namespace) -> None:
     root = Path(args.root).expanduser().resolve(strict=False)
     target = root / args.project_name
@@ -1684,6 +1735,29 @@ def _build_parser() -> argparse.ArgumentParser:
     nr.add_argument("project_name")
     nr.add_argument("--init-baseline", action="store_true")
     nr.set_defaults(func=cmd_new_repo)
+
+    # role — v0.6.1 explicit execution-context contract. Foreground
+    # `/of-loop:build` and `/of-loop:review` skills call `role enter` on
+    # entry and `role exit` on completion so the textual bash guard
+    # has a deterministic provenance source outside the supervisor's
+    # env-marker path.
+    role_p = sub.add_parser(
+        "role",
+        help="enter/exit an explicit semantic role lane (foreground builders/reviewers)",
+    )
+    role_sub = role_p.add_subparsers(dest="role_cmd", required=True)
+    role_enter = role_sub.add_parser(
+        "enter", help="write the semantic-context marker file",
+    )
+    role_enter.add_argument("repo")
+    role_enter.add_argument("--run-id", required=True)
+    role_enter.add_argument("--role", required=True, choices=["builder", "reviewer"])
+    role_enter.set_defaults(func=cmd_role_enter)
+    role_exit = role_sub.add_parser(
+        "exit", help="remove the semantic-context marker file",
+    )
+    role_exit.add_argument("repo")
+    role_exit.set_defaults(func=cmd_role_exit)
 
     return p
 

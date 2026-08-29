@@ -46,10 +46,29 @@ FAKE_EOF
 }
 for t in git docker ssh; do write_fake "$t"; done
 
-# Stage an active-loop cwd so the hook does not bypass as a no-op.
+# Stage an active semantic lane so the hook does not bypass as a no-op.
+# v0.6.1: provenance is the marker file `.ownframework-loop/_semantic_context`
+# at the canonical repo root, NOT the mere presence of an `.ownframework-loop/`
+# directory. The old path-based heuristic was over-scoped — ordinary
+# interactive Claude sessions inside a repo that owns historical run state
+# are not semantic workers.
 ACTIVE_ROOT="$SANDBOX/active-loop"
 mkdir -p "$ACTIVE_ROOT/.ownframework-loop/run-TEST"
 echo '{"state":"BUILDING"}' > "$ACTIVE_ROOT/.ownframework-loop/run-TEST/STATE.json"
+# Write the v0.6.1 marker file establishing semantic-worker context for
+# this test fixture. Without this marker, the hook is a no-op and the
+# FORBIDDEN cases below would all be classified as allowed.
+OFLOOP_LIB="$LIB" python3 -B - "$ACTIVE_ROOT" <<'PY'
+import json, sys, os
+sys.path.insert(0, os.environ["OFLOOP_LIB"])
+from ownframework_loop import role_context
+ctx = role_context.enter_semantic_role(
+    canonical_repo=sys.argv[1],
+    run_id="run-TEST",
+    role="builder",
+)
+print("MARKER_OK", json.dumps(ctx))
+PY
 
 # ----------------------------------------------------------------------
 # Case generator: emits one JSON line per case via Python. Each line is
