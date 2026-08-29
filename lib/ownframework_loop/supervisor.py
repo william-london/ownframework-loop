@@ -28,7 +28,7 @@ from . import dispatch as dispatch_mod, packet as packet_mod, runtime_env, state
 
 SCHEMA = "ownframework-loop-supervisor/v1"
 DEFAULT_SEMANTIC_TIMEOUT_SECONDS = 3600
-DEFAULT_CLAUDE_ALLOWED_TOOLS = "Read,Edit,Write,Bash,Glob,Grep,WebSearch,WebFetch,Agent,Skill"
+DEFAULT_CLAUDE_ALLOWED_TOOLS = "Read,Edit,Write,Bash,Glob,Grep,WebSearch,WebFetch,Agent,Task,TaskOutput,TaskStop,Skill"
 
 
 def resolve_semantic_timeout(

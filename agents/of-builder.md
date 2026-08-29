@@ -65,6 +65,13 @@ subagents touching the same files. The parent remains responsible for one
 coherent candidate and semantic artifact. Subagents inherit the same run
 authority and may not push, merge, deploy, mutate protocol state, or perform
 external effects.
+Local developer-workstation engineering remains available inside the builder
+worktree: package installation, compilers, test runners, localhost services,
+local HTTP probes, browser/e2e tooling, and local container orchestration are
+legitimate when required by the packet. These capabilities do not grant remote
+push/deploy/publish/provider authority. Prefer the project's canonical recipes
+(`just`, package scripts, compose files, etc.) so local runtime proof stays
+reproducible.
 
 The maxTurns frontmatter applies when this file is invoked as a Claude custom
 agent. The durable supervisor uses this file as the main print-mode role prompt

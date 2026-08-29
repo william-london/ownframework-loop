@@ -63,9 +63,10 @@ FORBIDDEN_PATTERNS: list[tuple[re.Pattern[str], str, str]] = [
     # Human approval is intentionally outside the Claude agent tool surface.
     (re.compile(r"\b(?:\S*/)?ofloop\s+spec\s+approve\b"), "agent invocation of human approval is prohibited", "subcommand"),
     (re.compile(r"\bownframework_loop(?:\.cli)?\b.*\bspec\s+approve\b"), "agent invocation of human approval is prohibited", "subcommand"),
-    # system / container mutations on production
+    # system-service mutations remain blocked. Local container orchestration is
+    # ordinary developer-workstation engineering and is intentionally allowed;
+    # external deploy/publish/provider authority is enforced separately.
     (re.compile(r"\bsystemctl\s+(start|stop|restart|reload)\b"), "systemctl is prohibited", "subcommand"),
-    (re.compile(r"\bdocker\s+compose\s+(up|down|restart)\b"), "production docker mutation is prohibited", "subcommand"),
     # remote shell to operator-configured protected production hosts.
     # Targets are loaded from $OFLOOP_BLOCKED_SSH_TARGETS (whitespace- or
     # comma-separated). Empty/unset means no ssh-target blocks (universal
