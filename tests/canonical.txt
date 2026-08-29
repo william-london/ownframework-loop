@@ -30,6 +30,7 @@ tests/integration/test_v054_execution_start.sh
 tests/integration/test_public_contract_truth.sh
 tests/integration/test_v060_supervisor_architecture.sh
 tests/integration/test_v061_supervisor_operator_safety.sh
+tests/integration/test_v061_supervisor_attempt_ledger.sh
 tests/integration/test_v060_reviewer_cache_isolation.sh
 tests/integration/test_v060_dispatch_exception_classification.sh
 tests/integration/test_v061_semantic_build_finalizability.sh

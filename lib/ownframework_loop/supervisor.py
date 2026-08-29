@@ -17,6 +17,7 @@ import signal
 import sqlite3
 import subprocess
 import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -51,6 +52,7 @@ def worker_log_paths(
     run_id: str,
     job_id: int,
     role: str,
+    attempt_id: str | None = None,
 ) -> tuple[Path, Path]:
     """Return durable (stdout, stderr) log paths for one worker attempt.
 
@@ -62,9 +64,13 @@ def worker_log_paths(
     safe_run = "".join(ch for ch in str(run_id) if ch.isalnum() or ch in "-_.")[:64]
     d = default_worker_log_dir() / _slug_repo(canonical_repo) / safe_run
     d.mkdir(parents=True, exist_ok=True)
+    safe_attempt = "".join(
+        ch for ch in str(attempt_id or "") if ch.isalnum() or ch in "-_."
+    )[:80]
+    suffix = f"-attempt-{safe_attempt}" if safe_attempt else ""
     return (
-        d / f"job-{int(job_id)}-{safe_role}.out",
-        d / f"job-{int(job_id)}-{safe_role}.err",
+        d / f"job-{int(job_id)}-{safe_role}{suffix}.out",
+        d / f"job-{int(job_id)}-{safe_role}{suffix}.err",
     )
 
 
@@ -107,6 +113,22 @@ def _connect(path: Path) -> sqlite3.Connection:
           recorded_at REAL NOT NULL,
           PRIMARY KEY (job_id, attempt_digest)
         );
+        CREATE TABLE IF NOT EXISTS semantic_attempts (
+          attempt_id TEXT PRIMARY KEY,
+          job_id INTEGER NOT NULL,
+          role TEXT NOT NULL,
+          status TEXT NOT NULL,
+          started_at REAL NOT NULL,
+          completed_at REAL,
+          worker_pid INTEGER,
+          stdout_path TEXT NOT NULL,
+          stderr_path TEXT NOT NULL,
+          returncode INTEGER,
+          cost_usd REAL NOT NULL DEFAULT 0,
+          cost_accounted INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE INDEX IF NOT EXISTS semantic_attempts_job_idx
+          ON semantic_attempts(job_id, started_at);
         """
     )
     columns = {
@@ -122,6 +144,8 @@ def _connect(path: Path) -> sqlite3.Connection:
         "execution_started_at": "ALTER TABLE jobs ADD COLUMN execution_started_at REAL",
         "worker_stdout_path": "ALTER TABLE jobs ADD COLUMN worker_stdout_path TEXT",
         "worker_stderr_path": "ALTER TABLE jobs ADD COLUMN worker_stderr_path TEXT",
+        "worker_attempt_id": "ALTER TABLE jobs ADD COLUMN worker_attempt_id TEXT",
+        "latest_attempt_id": "ALTER TABLE jobs ADD COLUMN latest_attempt_id TEXT",
     }
     for name, statement in migrations.items():
         if name not in columns:
@@ -237,14 +261,70 @@ def _boot_time_unix() -> float | None:
     return None
 
 
-def _recover_stale_running(conn: sqlite3.Connection) -> int:
-    """Requeue only RUNNING jobs whose recorded worker process is gone.
+def _parse_cost_from_durable_stdout(path: str | None) -> float | None:
+    if not path:
+        return None
+    p = Path(path)
+    if not p.is_file():
+        return None
+    try:
+        payload = json.loads(p.read_text(encoding="utf-8", errors="replace"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict) or "total_cost_usd" not in payload:
+        return None
+    try:
+        value = float(payload.get("total_cost_usd") or 0.0)
+    except (TypeError, ValueError):
+        return None
+    return value if value >= 0 else None
 
-    A live orphan is left RUNNING so another supervisor cannot duplicate it.
-    When that process later exits, the next recovery pass requeues the same
-    core claim. Dispatch replay + semantic_result_ready then either finalizes
-    the completed artifact with zero model calls or resumes the same pass.
-    """
+
+def _account_attempt_cost(
+    conn: sqlite3.Connection,
+    *,
+    job_id: int,
+    attempt_id: str,
+    cost_usd: float,
+    returncode: int | None = None,
+    status_value: str = "COMPLETED",
+) -> float:
+    """Account one durable semantic attempt exactly once by attempt identity."""
+    conn.execute("BEGIN IMMEDIATE")
+    attempt = conn.execute(
+        "SELECT * FROM semantic_attempts WHERE attempt_id=? AND job_id=?",
+        (attempt_id, int(job_id)),
+    ).fetchone()
+    if attempt is None:
+        conn.rollback()
+        raise RuntimeError(f"semantic attempt missing: {attempt_id}")
+    already = bool(int(attempt["cost_accounted"] or 0))
+    if not already:
+        conn.execute(
+            """UPDATE semantic_attempts SET status=?, completed_at=?,
+               returncode=?, cost_usd=?, cost_accounted=1
+               WHERE attempt_id=?""",
+            (status_value, time.time(), returncode, float(cost_usd), attempt_id),
+        )
+        conn.execute(
+            "UPDATE jobs SET total_cost_usd=total_cost_usd+?, updated_at=? WHERE id=?",
+            (float(cost_usd), time.time(), int(job_id)),
+        )
+    else:
+        conn.execute(
+            """UPDATE semantic_attempts SET status=?,
+               completed_at=COALESCE(completed_at, ?),
+               returncode=COALESCE(returncode, ?)
+               WHERE attempt_id=?""",
+            (status_value, time.time(), returncode, attempt_id),
+        )
+    conn.commit()
+    row = conn.execute("SELECT total_cost_usd FROM jobs WHERE id=?", (int(job_id),)).fetchone()
+    return float(row[0] or 0.0)
+
+
+def _recover_stale_running(conn: sqlite3.Connection) -> int:
+    """Recover dead RUNNING ownership without losing model-cost evidence."""
     recovered = 0
     rows = conn.execute(
         "SELECT * FROM jobs WHERE status='RUNNING' ORDER BY id"
@@ -254,6 +334,52 @@ def _recover_stale_running(conn: sqlite3.Connection) -> int:
         started_at = float(row["worker_started_at"]) if row["worker_started_at"] else None
         if _pid_alive(pid, started_at):
             continue
+
+        attempt_id = str(row["worker_attempt_id"] or "")
+        if attempt_id:
+            attempt = conn.execute(
+                "SELECT * FROM semantic_attempts WHERE attempt_id=? AND job_id=?",
+                (attempt_id, int(row["id"])),
+            ).fetchone()
+            if attempt is None:
+                conn.execute(
+                    """UPDATE jobs SET status='QUARANTINED', last_error=?,
+                       worker_pid=NULL, worker_started_at=NULL, worker_role=NULL,
+                       next_attempt_at=0, updated_at=? WHERE id=?""",
+                    ("semantic attempt ownership missing during crash recovery",
+                     time.time(), row["id"]),
+                )
+                conn.commit()
+                continue
+            if not bool(int(attempt["cost_accounted"] or 0)):
+                recovered_cost = _parse_cost_from_durable_stdout(attempt["stdout_path"])
+                if recovered_cost is None:
+                    # We cannot prove how much the provider charged. Continuing
+                    # could exceed the operator's budget, so fail operationally
+                    # closed instead of assuming zero.
+                    conn.execute(
+                        """UPDATE semantic_attempts SET status='COST_UNKNOWN',
+                           completed_at=? WHERE attempt_id=?""",
+                        (time.time(), attempt_id),
+                    )
+                    conn.execute(
+                        """UPDATE jobs SET status='QUARANTINED', last_error=?,
+                           worker_pid=NULL, worker_started_at=NULL, worker_role=NULL,
+                           next_attempt_at=0, updated_at=? WHERE id=?""",
+                        ("semantic worker died and model cost could not be recovered "
+                         "from durable structured output", time.time(), row["id"]),
+                    )
+                    conn.commit()
+                    continue
+                _account_attempt_cost(
+                    conn,
+                    job_id=int(row["id"]),
+                    attempt_id=attempt_id,
+                    cost_usd=recovered_cost,
+                    returncode=None,
+                    status_value="RECOVERED",
+                )
+
         conn.execute(
             """
             UPDATE jobs SET
@@ -261,6 +387,7 @@ def _recover_stale_running(conn: sqlite3.Connection) -> int:
               worker_pid=NULL,
               worker_started_at=NULL,
               worker_role=NULL,
+              worker_attempt_id=NULL,
               last_error=?,
               next_attempt_at=0,
               updated_at=?
@@ -391,6 +518,19 @@ def _core_snapshot(repo: Path, run_id: str) -> dict[str, Any]:
 def _job_dict(row: sqlite3.Row, db: Path) -> dict[str, Any]:
     d = dict(row)
     d.update({"schema": SCHEMA, "ok": True, "db_path": str(db)})
+    latest_id = str(d.get("latest_attempt_id") or "")
+    if latest_id:
+        try:
+            with sqlite3.connect(db, timeout=5) as attempt_conn:
+                attempt_conn.row_factory = sqlite3.Row
+                ar = attempt_conn.execute(
+                    "SELECT * FROM semantic_attempts WHERE attempt_id=?",
+                    (latest_id,),
+                ).fetchone()
+            if ar is not None:
+                d["latest_attempt"] = dict(ar)
+        except sqlite3.Error as exc:
+            d["attempt_snapshot_error"] = type(exc).__name__
     try:
         d.update(_core_snapshot(Path(str(row["repo"])), str(row["run_id"])))
     except Exception as exc:
@@ -667,6 +807,42 @@ def _take_next_job(conn: sqlite3.Connection) -> sqlite3.Row | None:
     return conn.execute("SELECT * FROM jobs WHERE id=?", (row["id"],)).fetchone()
 
 
+def _reserve_semantic_attempt(
+    conn: sqlite3.Connection,
+    *,
+    job: sqlite3.Row,
+    role: str,
+) -> tuple[str, tuple[Path, Path]]:
+    attempt_id = uuid.uuid4().hex
+    durable_files = worker_log_paths(
+        Path(str(job["repo"])),
+        str(job["run_id"]),
+        int(job["id"]),
+        role,
+        attempt_id,
+    )
+    now = time.time()
+    conn.execute(
+        """INSERT INTO semantic_attempts
+           (attempt_id, job_id, role, status, started_at, stdout_path, stderr_path)
+           VALUES (?, ?, ?, 'RESERVED', ?, ?, ?)""",
+        (attempt_id, int(job["id"]), role, now,
+         str(durable_files[0]), str(durable_files[1])),
+    )
+    cur = conn.execute(
+        """UPDATE jobs SET worker_attempt_id=?, latest_attempt_id=?,
+           worker_stdout_path=?, worker_stderr_path=?, updated_at=?
+           WHERE id=? AND status='RUNNING'""",
+        (attempt_id, attempt_id, str(durable_files[0]), str(durable_files[1]),
+         now, int(job["id"])),
+    )
+    if cur.rowcount != 1:
+        conn.rollback()
+        raise RuntimeError("semantic attempt reservation lost RUNNING ownership")
+    conn.commit()
+    return attempt_id, durable_files
+
+
 def _set_worker_pid(
     conn: sqlite3.Connection,
     job_id: int,
@@ -675,49 +851,40 @@ def _set_worker_pid(
     *,
     out_path: Path | None = None,
     err_path: Path | None = None,
+    attempt_id: str | None = None,
 ) -> None:
-    conn.execute(
+    started = time.time()
+    cur = conn.execute(
         """
         UPDATE jobs SET worker_pid=?, worker_started_at=?, worker_role=?,
-          worker_stdout_path=?, worker_stderr_path=?, updated_at=?
+          worker_stdout_path=?, worker_stderr_path=?,
+          worker_attempt_id=COALESCE(?, worker_attempt_id), updated_at=?
         WHERE id=? AND status='RUNNING'
         """,
         (
             int(pid),
-            time.time(),
+            started,
             role,
             str(out_path) if out_path else None,
             str(err_path) if err_path else None,
-            time.time(),
+            attempt_id,
+            started,
             job_id,
         ),
     )
-    conn.commit()
-
-
-def _compute_attempt_digest(stdout_tail: str, returncode: int, job_id: int) -> str:
-    import hashlib
-    h = hashlib.sha256()
-    h.update(f"{int(job_id)}|{int(returncode)}|".encode("utf-8"))
-    h.update((stdout_tail or "")[-8192:].encode("utf-8", errors="replace"))
-    return h.hexdigest()
-
-
-def _record_cost_attempt(
-    conn: sqlite3.Connection, job_id: int, digest: str, cost_usd: float
-) -> float:
-    """Add the cost of one attempt at most once. Returns the amount actually added."""
-    try:
-        conn.execute(
-            "INSERT INTO cost_attempts (job_id, attempt_digest, cost_usd, recorded_at)"
-            " VALUES (?, ?, ?, ?)",
-            (int(job_id), digest, float(cost_usd), time.time()),
+    if cur.rowcount != 1:
+        conn.rollback()
+        raise RuntimeError("worker PID persistence lost RUNNING ownership")
+    if attempt_id:
+        a = conn.execute(
+            """UPDATE semantic_attempts SET status='RUNNING', worker_pid=?,
+               started_at=? WHERE attempt_id=? AND job_id=?""",
+            (int(pid), started, attempt_id, int(job_id)),
         )
-        conn.commit()
-        return float(cost_usd)
-    except sqlite3.IntegrityError:
-        # Duplicate attempt digest — already accounted for.
-        return 0.0
+        if a.rowcount != 1:
+            conn.rollback()
+            raise RuntimeError("semantic attempt row missing during worker start")
+    conn.commit()
 
 
 def _update_job(
@@ -744,6 +911,7 @@ def _update_job(
           worker_pid=NULL,
           worker_started_at=NULL,
           worker_role=NULL,
+          worker_attempt_id=NULL,
           updated_at=?
         WHERE id=?
         """,
@@ -869,45 +1037,33 @@ def run_one(*, db_path: Path | None = None, timeout_seconds: int = 3600) -> dict
                     "max_total_cost_usd": max_cost,
                 }
 
-            durable_files = worker_log_paths(
-                Path(job["repo"]),
-                str(job["run_id"]),
-                int(job["id"]),
-                str(work_order.get("role") or "builder"),
+            role = str(work_order.get("role") or "builder")
+            attempt_id, durable_files = _reserve_semantic_attempt(
+                conn, job=job, role=role
             )
 
             result = _runner(str(job["runner"])).run(
                 work_order,
                 timeout_seconds=timeout_seconds,
-                on_start=lambda pid, role: _set_worker_pid(
+                on_start=lambda pid, started_role: _set_worker_pid(
                     conn,
                     int(job["id"]),
                     pid,
-                    role,
+                    started_role,
                     out_path=durable_files[0],
                     err_path=durable_files[1],
+                    attempt_id=attempt_id,
                 ),
                 durable_files=durable_files,
             )
-            attempt_digest = _compute_attempt_digest(
-                result.stdout, result.returncode, job["id"]
+            new_cost = _account_attempt_cost(
+                conn,
+                job_id=int(job["id"]),
+                attempt_id=attempt_id,
+                cost_usd=float(result.cost_usd),
+                returncode=int(result.returncode),
+                status_value="COMPLETED",
             )
-            added_cost = _record_cost_attempt(
-                conn, job["id"], attempt_digest, result.cost_usd
-            )
-            # Derive cumulative cost from cost_attempts (exact-once) rather
-            # than from in-memory total_cost_usd so the value is always the
-            # sum of recorded attempts.
-            try:
-                new_cost = float(
-                    conn.execute(
-                        "SELECT COALESCE(SUM(cost_usd),0) FROM cost_attempts WHERE job_id=?",
-                        (job["id"],),
-                    ).fetchone()[0]
-                    or 0.0
-                )
-            except Exception:
-                new_cost = float(job["total_cost_usd"] or 0.0) + added_cost
             if not result.ok:
                 failures = int(job["infra_failures"]) + 1
                 max_failures = int(job["max_infra_failures"])
@@ -957,19 +1113,16 @@ def run_one(*, db_path: Path | None = None, timeout_seconds: int = 3600) -> dict
             max_failures = int(job["max_infra_failures"])
             quarantined = failures >= max_failures
             backoff = min(300.0, float(5 * (2 ** max(0, failures - 1))))
-            # Persist any cost the runner already accumulated before the
-            # exception. cost_attempts deduplicates; jobs.total_cost_usd is
-            # the operator-visible cumulative number.
-            try:
-                total_attempted_cost = float(
-                    conn.execute(
-                        "SELECT COALESCE(SUM(cost_usd),0) FROM cost_attempts WHERE job_id=?",
-                        (job["id"],),
-                    ).fetchone()[0]
-                    or 0.0
-                )
-            except Exception:
-                total_attempted_cost = float(job["total_cost_usd"] or 0.0)
+            # Completed semantic attempts are accounted transactionally by
+            # attempt identity. If an exception happened before completion,
+            # stale-worker recovery will inspect the durable attempt/output;
+            # never synthesize cost from output digests here.
+            current_cost_row = conn.execute(
+                "SELECT total_cost_usd FROM jobs WHERE id=?", (job["id"],)
+            ).fetchone()
+            total_attempted_cost = float(
+                (current_cost_row[0] if current_cost_row is not None else 0.0) or 0.0
+            )
             _update_job(
                 conn,
                 job["id"],
