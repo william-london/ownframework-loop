@@ -82,6 +82,19 @@ This changes only operational scheduling/telemetry. BUILD/REVIEW authority,
 checkpoint progression, candidate identity, review verdicts, and promotion
 remain owned by the deterministic core.
 
+### Autonomous runner readiness
+
+A second source sweep removed an unnecessary operator-recovery seam around
+launchd runner availability. Unpinned services now wait automatically when the
+Claude CLI is temporarily absent, without creating semantic attempts, consuming
+retry counters, or starting the operational wall clock. The service rechecks
+and continues automatically when Claude becomes discoverable. Explicitly
+commissioned OFLOOP_CLAUDE_BIN remains fail-closed and never falls back to a
+different executable.
+
+This is operational self-healing only; it does not change packet authority,
+engineering passes, review evidence, or promotion.
+
 ### What did NOT change
 
 - The v0.6.0 release tag and GitHub Release were not modified.

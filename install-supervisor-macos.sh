@@ -11,7 +11,9 @@
 # When Claude is genuinely unavailable the install is intentionally
 # idle-only: claude_bin is recorded as null, OFLOOP_CLAUDE_BIN is
 # omitted from the plist (NOT written with a bogus value), and the
-# service runs without semantic workers until Claude is installed.
+# service waits without semantic attempts until Claude is installed in the
+# persisted service PATH, then continues queued work automatically. No manual
+# supervisor resume is required for this idle-only discovery case.
 #
 # STATE_ROOT is computed once via ${XDG_STATE_HOME:-$HOME/.local/state}
 # and passed consistently to the plist generator for stdout, stderr,

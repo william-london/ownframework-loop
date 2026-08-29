@@ -43,6 +43,17 @@ deterministic dispatch boundary for exactly one BUILD or REVIEW work order,
 launches one fresh runner process, finalizes deterministically, and immediately
 asks core what is next.
 
+If an unpinned/idle-only service cannot currently discover Claude on its
+launchd PATH, the job enters a self-healing RUNNER_WAIT backoff. That wait
+creates no semantic attempt, consumes no retry counter or model budget, and
+does not start the run wall-clock ceiling. The service rechecks automatically
+and continues the same claimed pass when Claude becomes available; no manual
+supervisor resume is required.
+
+An explicitly commissioned OFLOOP_CLAUDE_BIN remains strict runtime authority.
+If that exact pinned executable disappears, Loop quarantines rather than
+silently switching to another Claude binary.
+
 Operational status / morning evidence:
 
 ```bash
