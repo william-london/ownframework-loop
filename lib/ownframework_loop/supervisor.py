@@ -949,8 +949,9 @@ def _job_dict(row: sqlite3.Row, db: Path) -> dict[str, Any]:
     d = dict(row)
     d.update({"schema": SCHEMA, "ok": True, "db_path": str(db)})
     latest_id = str(d.get("latest_attempt_id") or "")
-    if latest_id:
-        try:
+    d["attempt_history"] = []
+    try:
+        if latest_id:
             with sqlite3.connect(db, timeout=5) as attempt_conn:
                 attempt_conn.row_factory = sqlite3.Row
                 ar = attempt_conn.execute(
@@ -959,23 +960,23 @@ def _job_dict(row: sqlite3.Row, db: Path) -> dict[str, Any]:
                 ).fetchone()
             if ar is not None:
                 d["latest_attempt"] = dict(ar)
-            with sqlite3.connect(db, timeout=5) as history_conn:
-                history_conn.row_factory = sqlite3.Row
-                history = history_conn.execute(
-                    """SELECT attempt_id, role, status, started_at, completed_at,
-                              worker_pid, returncode, cost_usd, cost_accounted,
-                              input_tokens, output_tokens, cache_read_tokens,
-                              cache_creation_tokens, tokens_known,
-                              failure_class, failure_reason, stdout_path, stderr_path
-                       FROM semantic_attempts
-                       WHERE job_id=?
-                       ORDER BY started_at DESC
-                       LIMIT 5""",
-                    (int(row["id"]),),
-                ).fetchall()
-            d["attempt_history"] = [dict(item) for item in history]
-        except sqlite3.Error as exc:
-            d["attempt_snapshot_error"] = type(exc).__name__
+        with sqlite3.connect(db, timeout=5) as history_conn:
+            history_conn.row_factory = sqlite3.Row
+            history = history_conn.execute(
+                """SELECT attempt_id, role, status, started_at, completed_at,
+                          worker_pid, returncode, cost_usd, cost_accounted,
+                          input_tokens, output_tokens, cache_read_tokens,
+                          cache_creation_tokens, tokens_known,
+                          failure_class, failure_reason, stdout_path, stderr_path
+                   FROM semantic_attempts
+                   WHERE job_id=?
+                   ORDER BY started_at DESC
+                   LIMIT 5""",
+                (int(row["id"]),),
+            ).fetchall()
+        d["attempt_history"] = [dict(item) for item in history]
+    except sqlite3.Error as exc:
+        d["attempt_snapshot_error"] = type(exc).__name__
     d["observed_total_tokens"] = (
         int(d.get("total_input_tokens") or 0)
         + int(d.get("total_output_tokens") or 0)
