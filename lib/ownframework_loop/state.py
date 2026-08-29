@@ -121,22 +121,31 @@ def save(canonical_repo: Path, run_id: str, payload: dict[str, Any]) -> None:
     chain stays consistent for subsequent `transition()` / `save()` calls.
     """
     actor = str(payload.get("last_actor", "spec"))
+    sp = state_path(canonical_repo, run_id)
+    ep = events_path(canonical_repo, run_id)
     with flock_exclusive(lock_path(canonical_repo, run_id)):
-        atomic_write_json(state_path(canonical_repo, run_id), payload, mode=0o600)
-        ensure_mode(events_path(canonical_repo, run_id), 0o600)
+        # Existing durable history must verify before it can be overwritten.
+        # A brand-new run legitimately has neither STATE nor EVENTS yet.
+        if sp.exists() or ep.exists():
+            ok, msg = integrity.verify_state_sha(sp, ep)
+            if not ok:
+                raise integrity.TamperingDetected(f"state save refused: {msg}")
+        old = read_json(sp, default={}) if sp.exists() else {}
+        atomic_write_json(sp, payload, mode=0o600)
+        ensure_mode(ep, 0o600)
+        _append_event_locked(
+            canonical_repo, run_id,
+            event_type="state_saved",
+            old_state=(old or {}).get("state") or payload.get("state"),
+            new_state=payload.get("state"),
+            actor=actor,
+            commit_sha=payload.get("last_candidate_sha"),
+            reason="non-transition state save",
+        )
     try:
-        fsync_dir(state_path(canonical_repo, run_id).parent)
+        fsync_dir(sp.parent)
     except OSError:
         pass
-    append_event(
-        canonical_repo, run_id,
-        event_type="state_saved",
-        old_state=payload.get("state"),
-        new_state=payload.get("state"),
-        actor=actor,
-        commit_sha=payload.get("last_candidate_sha"),
-        reason="non-transition state save",
-    )
 
 
 def _locked_state(canonical_repo: Path, run_id: str):
@@ -345,15 +354,16 @@ def transition(
     its recorded SHA. If the file was edited externally, we raise
     `integrity.TamperingDetected`.
     """
-    # Verify before reading.
     sp = state_path(canonical_repo, run_id)
     ep = events_path(canonical_repo, run_id)
-    ok, msg = integrity.verify_state_sha(sp, ep)
-    if not ok:
-        raise integrity.TamperingDetected(f"transition refused: {msg}")
 
     with flock_exclusive(lock_path(canonical_repo, run_id)):
-        current = read_json(state_path(canonical_repo, run_id))
+        # Verify and mutate under the same ownership lock; otherwise another
+        # writer can change STATE/EVENTS between verification and the write.
+        ok, msg = integrity.verify_state_sha(sp, ep)
+        if not ok:
+            raise integrity.TamperingDetected(f"transition refused: {msg}")
+        current = read_json(sp)
         if current is None or current == {}:
             raise FileNotFoundError(f"STATE.json missing for run {run_id}")
         from_state = current["state"]
@@ -375,21 +385,20 @@ def transition(
         if extras:
             new.update(extras)
 
-        atomic_write_json(state_path(canonical_repo, run_id), new, mode=0o600)
-    # Directory fsync for the rename, then audit outside the lock.
+        atomic_write_json(sp, new, mode=0o600)
+        _append_event_locked(
+            canonical_repo, run_id,
+            event_type="state_transition",
+            old_state=from_state,
+            new_state=to_state,
+            actor=actor,
+            commit_sha=commit_sha,
+            reason=reason,
+        )
     try:
-        fsync_dir(state_path(canonical_repo, run_id).parent)
+        fsync_dir(sp.parent)
     except OSError:
         pass
-    append_event(
-        canonical_repo, run_id,
-        event_type="state_transition",
-        old_state=from_state,
-        new_state=to_state,
-        actor=actor,
-        commit_sha=commit_sha,
-        reason=reason,
-    )
     return new
 
 
@@ -408,27 +417,30 @@ def increment_counter(
     list, refuse to increment past the effective cap (V1 max or packet
     override). Raises `limits_mod.RepairLimitExceeded`.
     """
-    if hard_cap:
-        limits_mod.enforce(counter, int(current_counter(canonical_repo, run_id, counter) or 0), packet)
-
+    sp = state_path(canonical_repo, run_id)
+    ep = events_path(canonical_repo, run_id)
     with flock_exclusive(lock_path(canonical_repo, run_id)):
-        current = read_json(state_path(canonical_repo, run_id))
+        ok, msg = integrity.verify_state_sha(sp, ep)
+        if not ok:
+            raise integrity.TamperingDetected(f"counter increment refused: {msg}")
+        current = read_json(sp)
         if current is None or current == {}:
             raise FileNotFoundError(f"STATE.json missing for run {run_id}")
+        if hard_cap:
+            limits_mod.enforce(counter, int(current.get(counter, 0) or 0), packet)
         new = dict(current)
         new[counter] = int(current.get(counter, 0)) + 1
         new["updated_at"] = utc_now_iso()
         new["last_actor"] = actor
-        atomic_write_json(state_path(canonical_repo, run_id), new, mode=0o600)
-    # Audit outside the lock.
-    append_event(
-        canonical_repo, run_id,
-        event_type="counter_incremented",
-        old_state=None, new_state=None,
-        actor=actor, commit_sha=None,
-        reason=None, extras={"counter": counter, "new_value": new[counter],
-                            "cap": limits_mod.effective_cap(counter, packet)},
-    )
+        atomic_write_json(sp, new, mode=0o600)
+        _append_event_locked(
+            canonical_repo, run_id,
+            event_type="counter_incremented",
+            old_state=None, new_state=None,
+            actor=actor, commit_sha=None,
+            reason=None, extras={"counter": counter, "new_value": new[counter],
+                                "cap": limits_mod.effective_cap(counter, packet)},
+        )
     return new[counter]
 
 
@@ -500,14 +512,13 @@ def program_transition(
     ep = events_path(canonical_repo, run_id)
     lp = lock_path(canonical_repo, run_id)
 
-    # Verify STATE.json SHA before reading.
-    ok, msg = integrity.verify_state_sha(sp, ep)
-    if not ok:
-        raise integrity.TamperingDetected(
-            f"program_transition refused: {msg}"
-        )
-
     with flock_exclusive(lp):
+        # Verify under the same flock that owns the subsequent read/write.
+        ok, msg = integrity.verify_state_sha(sp, ep)
+        if not ok:
+            raise integrity.TamperingDetected(
+                f"program_transition refused: {msg}"
+            )
         current = read_json(sp)
         if current is None or current == {}:
             raise FileNotFoundError(
@@ -638,20 +649,15 @@ def _compute_chain_hash_for_append(
     """
     # Locate the previous chain hash from the on-disk tail.
     prev_chain = ""
-    try:
-        prev = integrity.get_event_chain_hash(ep)
-        if prev:
-            prev_chain = prev
-    except Exception:
-        prev_chain = ""
+    # STRICT: malformed/tampered prior history must propagate. Resetting to an
+    # empty chain root would bless corrupted history with a fresh valid tail.
+    prev = integrity.get_event_chain_hash(ep)
+    if prev:
+        prev_chain = prev
 
-    # Reconstruct the record from the canonical line so we can strip the
-    # chain hash field. Re-canonicalize via the same serializer the
-    # verifier uses, so writer and verifier produce identical bytes.
-    try:
-        record = json.loads(line)
-    except Exception:
-        record = {}
+    # This line is produced by our own canonical serializer. If it cannot be
+    # decoded, that is an internal invariant violation and must propagate.
+    record = json.loads(line)
     stripped = {k: v for k, v in record.items() if k != "event_chain_sha256"}
     payload = integrity.canonical_json_dumps(stripped).encode("utf-8")
 

@@ -164,6 +164,19 @@ def reconcile_run(
     if not ver_binds and verdict is not None:
         refused.append(f"verdict_{ver_reason}")
 
+    # Verify STATE.json itself before adopting any durable receipt/verdict.
+    # The reconciler's historical documentation promised this, but old code
+    # only verified the event-chain tail. Ambiguous/tampered state must not be
+    # advanced by crash recovery.
+    try:
+        state_ok, state_reason = integrity.verify_state_sha(
+            run_d / "STATE.json", events_path
+        )
+    except Exception as exc:
+        state_ok, state_reason = False, f"state_integrity_error:{exc}"
+    if not state_ok:
+        refused.append(f"state_integrity:{state_reason}")
+
     # Verify event chain. If chain is broken, fail closed (cannot append safely).
     chain_ok = True
     if events_path.exists():

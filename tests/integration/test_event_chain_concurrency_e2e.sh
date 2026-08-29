@@ -195,4 +195,19 @@ fi
 # Restore for cleanliness.
 mv "$EV.bak" "$EV"
 
+
+# v0.6.1 hardening: authoritative single-mode mutation paths must hold one
+# flock across STATE write + event append and chain writer must never reset
+# malformed prior history to an empty root.
+grep -Fq '_append_event_locked(' "$ROOT_DIR/lib/ownframework_loop/state.py" \
+  || { echo "FAIL: state paths do not use locked event append"; exit 1; }
+if grep -Fq 'except Exception:' "$ROOT_DIR/lib/ownframework_loop/state.py" \
+   && grep -A35 'def _compute_chain_hash_for_append' "$ROOT_DIR/lib/ownframework_loop/state.py" | grep -Fq 'prev_chain = ""'; then
+  # The empty initial chain is legitimate; an exception-driven reset is not.
+  if grep -A35 'def _compute_chain_hash_for_append' "$ROOT_DIR/lib/ownframework_loop/state.py" | grep -Fq 'except Exception'; then
+    echo "FAIL: chain append still swallows integrity failure"
+    exit 1
+  fi
+fi
+
 echo "EVENT_CHAIN_CONCURRENCY_E2E=PASS"
