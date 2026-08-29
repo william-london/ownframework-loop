@@ -18,17 +18,23 @@ This skill is a host adapter over the deterministic ofloop core.
 ## New specification (normal flow)
 
 1. Confirm the working directory is the target Git repository.
-2. Inspect only enough repository context to draft an accurate bounded packet.
-3. Use ofloop spec new <repo> "<mission>" to create the run.
-4. Draft WORK_PACKET.md using the repository schema and packet conventions.
-5. For PROGRAM packets with checkpoint-specific outcomes, keep the complete
+2. Resolve repository identity BEFORE creating the run:
+   * inspect configured Git remotes;
+   * decide the packet classification from actual current state, not intended future state;
+   * `local_only` means no configured remote;
+   * when a private GitHub review surface is part of the project, create/configure it, push the intended baseline, prove local/remote parity, and use `github_private` before `ofloop spec new`;
+   * do not mint a local-only run and add a remote afterward.
+3. Inspect only enough repository context to draft an accurate bounded packet.
+4. Use ofloop spec new <repo> "<mission>" to create the run.
+5. Draft WORK_PACKET.md using the repository schema and packet conventions.
+6. For PROGRAM packets with checkpoint-specific outcomes, keep the complete
    mission acceptance contract at top level and assign it deterministically
    with each checkpoint's `acceptance_criterion_ids`. If any checkpoint uses
    scoped AC ids, every checkpoint must declare a non-empty list and the union
    must cover every top-level AC id. Do not use `not_applicable` for future
    checkpoint criteria merely to satisfy coverage.
-6. Validate the packet shape with the supported validator.
-7. Return to the operator:
+7. Validate the packet shape with the supported validator.
+8. Return to the operator:
 
    * repo
    * run_id
@@ -41,7 +47,7 @@ This skill is a host adapter over the deterministic ofloop core.
    * optional FOREGROUND / DEBUG builder: /loop /of-loop:build <run-id>
    * optional FOREGROUND / DEBUG reviewer: /loop /of-loop:review <run-id>
 
-8. STOP. Normal background operation is supervisor-first. Enqueue the run; an
+9. STOP. Normal background operation is supervisor-first. Enqueue the run; an
    already commissioned supervisor service consumes it, or `ofloop supervisor
    serve` may run the execution clock manually. The first actionable BUILD
    creates the immutable execution seal automatically.
@@ -65,3 +71,12 @@ supported amendment surface.
 
 After execution seal: packet is immutable. Changed mission/scope requires a
 NEW RUN.
+
+## Repository identity before execution
+
+`target.classification` is spec-time repository identity, not a future deployment wish.
+A run intended for a private GitHub-reviewed project should be created only after the private remote and baseline branch exist and local HEAD is proven equal to the intended remote baseline.
+
+If remote topology/classification changes after `spec new` but before the first execution seal, prefer stopping the never-started run and creating a fresh run from the final repository state. Do not rely on the first BUILD claim to discover a preventable `local_only` + remote mismatch.
+
+Current core execution already fails closed when a `local_only` packet has configured remotes. The spec workflow should prevent reaching that refusal in normal operation.

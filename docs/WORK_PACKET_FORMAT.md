@@ -79,3 +79,15 @@ Use stable IDs across repair rounds:
 Starting a run or reaching `APPROVED` does not grant push, merge, deploy,
 publish, payment, message-sending, or unrelated external authority. Promotion
 remains outside Loop.
+
+## Repository classification is spec-time identity
+
+`target.classification` describes the repository as it exists when the mission is finalized:
+
+- `local_only` — no configured Git remote is part of the run baseline.
+- `github_private` — the project is intentionally backed by a private GitHub repository before the run is minted.
+- `github_public` — the project is intentionally backed by a public GitHub repository before the run is minted.
+
+When a GitHub review surface is part of the project's operating model, establish that remote, push/prove the intended baseline, and only then create the Loop run. Do not create a `local_only` run and attach a remote afterward.
+
+The executable core already refuses a `local_only` target that has configured remotes. If repository remote topology changes after `spec new` but before first execution, the clean normal path is to stop the never-started run and create a fresh run from the final repository identity/baseline.
