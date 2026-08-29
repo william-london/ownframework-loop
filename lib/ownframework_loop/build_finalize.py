@@ -206,11 +206,9 @@ def _classify_path_against_packet(packet: dict[str, Any], path: str) -> str:
 
 
 def _path_in_list(path: str, prefix: str) -> bool:
-    fp = path.lstrip("./").lstrip("/")
-    p = prefix.rstrip("/").lstrip("./").lstrip("/")
-    if not p:
-        return False
-    return fp == p or fp.startswith(p + "/")
+    # Keep elevated/sensitive matching identical to allowed/protected
+    # packet scope semantics, including the compatibility ``dir/**`` suffix.
+    return packet_mod.path_matches_scope_entry(path, prefix)
 
 
 def _build_agent_result_schema_ok(result: dict[str, Any]) -> tuple[bool, list[str]]:

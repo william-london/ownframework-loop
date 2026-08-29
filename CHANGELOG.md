@@ -4,6 +4,32 @@ All notable current-release changes to OwnFramework Loop are documented here.
 The complete historical changelog through 0.5.2 is preserved at
 [`docs/history/CHANGELOG-through-0.5.2.md`](docs/history/CHANGELOG-through-0.5.2.md).
 
+## 0.6.2 - Scope Suffix Compatibility (2026-08-29)
+
+v0.6.2 closes a pre-execution packet-scope mismatch surfaced by a real
+client-shaped PROGRAM specification.
+
+### What changed
+
+- packet scope remains deterministic prefix matching, not arbitrary globbing;
+- a single trailing `/**` is now accepted as an exact compatibility spelling
+  for the same directory prefix (`apps/**` == `apps`);
+- arbitrary wildcard forms such as `apps/*` or interior glob syntax are
+  rejected by packet metadata validation rather than silently accepted;
+- allowed, protected, elevated, and sensitive path classification now share
+  the same scope-entry semantics;
+- this prevents a packet that visibly authorizes `apps/**` from later
+  classifying `apps/web/...` as out-of-scope at deterministic finalization.
+
+No authority is widened: `dir/**` authorizes exactly the same subtree as
+`dir`. Existing literal file and directory-prefix declarations retain their
+prior behavior.
+
+### Release truth
+
+Canonical source, Claude plugin metadata, marketplace metadata, README,
+SECURITY, and this changelog report 0.6.2.
+
 ## 0.6.1 - Semantic Build Finalizability Recovery (2026-08-28)
 
 v0.6.1 is a behavior-preserving bugfix line that closes a real unattended

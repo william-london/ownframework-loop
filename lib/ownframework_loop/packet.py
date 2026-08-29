@@ -68,7 +68,13 @@ def _extract_metadata_block(text: str) -> dict[str, Any]:
 
 
 def _scope_path_error(value: Any) -> str | None:
-    """Return an error for scope paths that are not canonical repo-relative paths."""
+    """Return an error for scope paths that are not canonical repo-relative paths.
+
+    Scope entries are prefix declarations. For authoring convenience, a single
+    trailing ``/**`` is accepted as an exact synonym for the same directory
+    prefix without the suffix (``apps/**`` == ``apps``). Arbitrary globbing is
+    intentionally not supported by the deterministic scope engine.
+    """
     if not isinstance(value, str) or not value.strip():
         return "must be a non-empty string"
     raw = value.strip()
@@ -79,6 +85,10 @@ def _scope_path_error(value: Any) -> str | None:
     if raw.startswith("./"):
         raw = raw[2:]
     raw = raw.rstrip("/")
+    if "*" in raw:
+        if not raw.endswith("/**") or raw.count("*") != 2:
+            return "only a single trailing /** suffix is supported; arbitrary globs are not"
+        raw = raw[:-3].rstrip("/")
     if not raw:
         return "must identify a repository-relative file or directory"
     parts = raw.split("/")
@@ -355,28 +365,44 @@ def _normalize_path_for_compare(p: str) -> str:
     return s
 
 
+def _normalize_scope_prefix(p: str) -> str:
+    """Normalize one declared scope entry to deterministic prefix form.
+
+    ``dir/**`` is accepted as a compatibility spelling for ``dir`` because
+    packet authors commonly use recursive-glob notation even though Loop scope
+    semantics are prefix-based rather than general glob matching.
+    """
+    s = _normalize_path_for_compare(p).rstrip("/")
+    if s.endswith("/**"):
+        s = s[:-3].rstrip("/")
+    return s
+
+
+def path_matches_scope_entry(file_path: str, scope_entry: str) -> bool:
+    """Return True when ``file_path`` is inside one declared scope prefix."""
+    fp = _normalize_path_for_compare(file_path).rstrip("/")
+    prefix = _normalize_scope_prefix(scope_entry)
+    if not prefix:
+        return False
+    return fp == prefix or fp.startswith(prefix + "/")
+
+
 def is_protected_path(packet: dict[str, Any], file_path: str) -> bool:
     """Return True if file_path is in the packet's protected_paths."""
-    pp = [_normalize_path_for_compare(p).rstrip("/") for p in packet.get("protected_paths", [])]
-    fp = _normalize_path_for_compare(file_path)
-    for p in pp:
-        if p == "":
-            continue
-        if fp == p or fp.startswith(p + "/"):
-            return True
-    return False
+    return any(
+        path_matches_scope_entry(file_path, p)
+        for p in packet.get("protected_paths", [])
+        if isinstance(p, str)
+    )
 
 
 def is_allowed_path(packet: dict[str, Any], file_path: str) -> bool:
     """Return True if file_path is within the packet's allowed_paths."""
-    ap = [_normalize_path_for_compare(p).rstrip("/") for p in packet.get("allowed_paths", [])]
-    fp = _normalize_path_for_compare(file_path)
-    for p in ap:
-        if p == "":
-            continue
-        if fp == p or fp.startswith(p + "/"):
-            return True
-    return False
+    return any(
+        path_matches_scope_entry(file_path, p)
+        for p in packet.get("allowed_paths", [])
+        if isinstance(p, str)
+    )
 
 
 def packet_is_program(meta: dict[str, Any]) -> bool:

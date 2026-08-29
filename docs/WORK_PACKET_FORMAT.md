@@ -91,3 +91,10 @@ remains outside Loop.
 When a GitHub review surface is part of the project's operating model, establish that remote, push/prove the intended baseline, and only then create the Loop run. Do not create a `local_only` run and attach a remote afterward.
 
 The executable core already refuses a `local_only` target that has configured remotes. If repository remote topology changes after `spec new` but before first execution, the clean normal path is to stop the never-started run and create a fresh run from the final repository identity/baseline.
+
+## Scope path notation
+
+Loop scope is deterministic prefix matching, not a general glob engine. A single
+trailing `/**` is accepted as a compatibility spelling for the same directory
+prefix: `apps/**` and `apps` authorize exactly the same subtree. Other wildcard
+forms are rejected at packet validation.
