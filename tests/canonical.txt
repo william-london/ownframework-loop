@@ -36,6 +36,7 @@ tests/integration/test_v060_dispatch_exception_classification.sh
 tests/integration/test_v061_semantic_build_finalizability.sh
 tests/integration/test_v061_evidence_fail_closed.sh
 tests/integration/test_v061_ref_namespace_hardening.sh
+tests/integration/test_v061_runtime_tail_hardening.sh
 tests/integration/test_repair_loop.sh
 tests/integration/test_execution_context_contract.sh
 tests/integration/test_mac_runtime_provenance.sh

@@ -885,16 +885,22 @@ def source_tree_accounting(
     for line in diff.stdout.splitlines():
         parts = line.split("\t")
         if len(parts) < 3:
-            continue
+            raise ProgramStateError(
+                f"malformed git numstat line during source accounting: {line!r}"
+            )
         a, d = parts[0], parts[1]
+        # Binary changes report '-' for line counts, but they are still
+        # changed files and must consume the unique-file source ceiling.
+        files += 1
         if a == "-" or d == "-":
             continue
         try:
             ai = int(a)
             di = int(d)
-        except ValueError:
-            continue
-        files += 1
+        except ValueError as exc:
+            raise ProgramStateError(
+                f"non-numeric git numstat line during source accounting: {line!r}"
+            ) from exc
         diff_lines += ai + di
     return {"files_changed_unique": files, "diff_lines": diff_lines}
 

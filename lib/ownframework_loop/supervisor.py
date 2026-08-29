@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import dispatch as dispatch_mod, runtime_env
+from . import dispatch as dispatch_mod, runtime_env, state as state_mod
 
 SCHEMA = "ownframework-loop-supervisor/v1"
 ACTIVE = {"QUEUED", "BACKOFF", "RUNNING"}
@@ -60,8 +60,9 @@ def worker_log_paths(
     the original parent process died while the child Claude process was still
     alive. Output paths survive both processes by design.
     """
+    state_mod.validate_run_id(run_id)
     safe_role = "builder" if role not in ("builder", "reviewer") else role
-    safe_run = "".join(ch for ch in str(run_id) if ch.isalnum() or ch in "-_.")[:64]
+    safe_run = run_id
     d = default_worker_log_dir() / _slug_repo(canonical_repo) / safe_run
     d.mkdir(parents=True, exist_ok=True)
     safe_attempt = "".join(
@@ -158,7 +159,7 @@ def _pid_alive(pid: int | None, worker_started_at: float | None = None) -> bool:
     """True iff `pid` is alive AND consistent with our recorded worker.
 
     Beyond the bare kill(pid, 0) probe, if `worker_started_at` is provided,
-    we cross-check that the process start time is within ±10 minutes of the
+    we cross-check that the process start time is within ±10 seconds of the
     recorded value. This defends against PID reuse — an unrelated process
     that inherited the same PID is NOT our worker. PermissionError
     (different uid) is treated as "not our worker" rather than alive.
@@ -180,7 +181,7 @@ def _pid_alive(pid: int | None, worker_started_at: float | None = None) -> bool:
         start_ts = _read_pid_start_time(pid)
         if start_ts is None:
             return True
-        if abs(start_ts - worker_started_at) > 600:
+        if abs(start_ts - worker_started_at) > 10:
             return False
     except Exception:
         return True
@@ -202,15 +203,18 @@ def _read_pid_start_time(pid: int) -> float | None:
             if rp < 0:
                 return None
             fields = content[rp + 1:].split()
-            # Field 22 (0-indexed 21) is start_time in clock ticks since boot
-            if len(fields) < 22:
+            # We removed fields 1(pid) and 2(comm), so fields[0] is proc
+            # stat field 3 (state). Linux starttime is field 22 => index 19.
+            if len(fields) < 20:
                 return None
-            ticks = int(fields[21])
+            ticks = int(fields[19])
             try:
                 clk_tck = os.sysconf("SC_CLK_TCK")
             except Exception:
                 clk_tck = 100
-            boot = _boot_time_unix() or 0.0
+            boot = _boot_time_unix()
+            if boot is None:
+                return None
             return boot + ticks / float(clk_tck)
         # macOS fallback
         r = subprocess.run(
@@ -220,22 +224,28 @@ def _read_pid_start_time(pid: int) -> float | None:
         if r.returncode != 0 or not r.stdout.strip():
             return None
         etime = r.stdout.strip()
-        # Parse [[dd-]hh:]mm:ss
-        total = 0
+        # Parse [[dd-]hh:]mm:ss without losing hour/day forms.
         parts = etime.split(":")
         try:
             if len(parts) == 2:
-                total = int(parts[0]) * 60 + int(parts[1])
+                minutes, seconds = (int(parts[0]), int(parts[1]))
+                total = minutes * 60 + seconds
             elif len(parts) == 3:
-                d, h, m_s = parts
-                if "-" in d:
-                    dd, hh = d.split("-")
-                    total = int(dd) * 86400 + int(hh) * 3600
+                first, minutes_s, seconds_s = parts
+                minutes, seconds = int(minutes_s), int(seconds_s)
+                if "-" in first:
+                    days_s, hours_s = first.split("-", 1)
+                    total = (
+                        int(days_s) * 86400
+                        + int(hours_s) * 3600
+                        + minutes * 60
+                        + seconds
+                    )
                 else:
-                    total = int(d) * 3600
-                mm, ss = m_s.split(":")
-                total += int(mm) * 60 + int(ss)
-        except Exception:
+                    total = int(first) * 3600 + minutes * 60 + seconds
+            else:
+                return None
+        except ValueError:
             return None
         return time.time() - total
     except Exception:
@@ -411,6 +421,7 @@ def enqueue(
     max_total_cost_usd: float = 25.0,
     max_wall_seconds: int = 28800,
 ) -> dict[str, Any]:
+    state_mod.validate_run_id(run_id)
     repo = str(Path(canonical_repo).resolve(strict=False))
     db = db_path or default_db_path()
     now = time.time()
@@ -455,6 +466,7 @@ def status(
     run_id: str,
     db_path: Path | None = None,
 ) -> dict[str, Any]:
+    state_mod.validate_run_id(run_id)
     repo = str(Path(canonical_repo).resolve(strict=False))
     db = db_path or default_db_path()
     with _connect(db) as conn:
@@ -1201,6 +1213,7 @@ def resume(
 
     Returns the updated job dict (or NOT_ENQUEUED).
     """
+    state_mod.validate_run_id(run_id)
     repo = str(Path(canonical_repo).resolve(strict=False))
     db = db_path or default_db_path()
     now = time.time()

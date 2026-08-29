@@ -226,19 +226,19 @@ def classify_bash_command(
     # Apply the same layered normalizations as external_action to close
     # the known audit evasion forms (Python subprocess, variable
     # assembly, hyphenated wrapper executable identity).
-    try:
-        from .external_action import (
-            _normalize_hyphenated_executable,
-            _normalize_python_argv,
-            _normalize_variable_assignment,
-        )
-        # Strip backslash escapes (they appear when shell passes nested quotes).
-        cmd_norm = command.replace("\\", "")
-        cmd_norm = _normalize_python_argv(cmd_norm)
-        cmd_norm = _normalize_variable_assignment(cmd_norm)
-        cmd_norm = _normalize_hyphenated_executable(cmd_norm)
-    except Exception:
-        cmd_norm = command
+    from .external_action import (
+        _normalize_hyphenated_executable,
+        _normalize_python_argv,
+        _normalize_variable_assignment,
+    )
+    # Strip backslash escapes (they appear when shell passes nested quotes).
+    # Unexpected normalizer failures propagate. In an active semantic lane
+    # the hook converts classifier failure into a deterministic refusal;
+    # silently falling back to the raw command would weaken the guard.
+    cmd_norm = command.replace("\\", "")
+    cmd_norm = _normalize_python_argv(cmd_norm)
+    cmd_norm = _normalize_variable_assignment(cmd_norm)
+    cmd_norm = _normalize_hyphenated_executable(cmd_norm)
 
     # Use the normalized command for splitting AND matching. This is
     # what closes the variable-assembly and python-subprocess evasion

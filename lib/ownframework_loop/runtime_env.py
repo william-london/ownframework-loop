@@ -16,6 +16,7 @@ continue to work.
 """
 from __future__ import annotations
 
+import hashlib
 import os
 from pathlib import Path
 from typing import Any
@@ -34,6 +35,11 @@ def _slug(s: str) -> str:
     return "".join(ch for ch in str(s) if ch.isalnum() or ch in "-_.")[:64]
 
 
+def _repo_key(canonical_repo: Path) -> str:
+    resolved = str(Path(canonical_repo).expanduser().resolve(strict=False))
+    return hashlib.sha256(resolved.encode("utf-8")).hexdigest()[:24]
+
+
 def runtime_cache_dir(
     canonical_repo: Path,
     run_id: str,
@@ -41,7 +47,7 @@ def runtime_cache_dir(
 ) -> Path:
     """Per (repo, run, role) deterministic directory for externalized cache."""
     safe_role = "builder" if role not in ("builder", "reviewer", "validation") else role
-    d = default_runtime_cache_root() / _slug(str(canonical_repo)) / _slug(run_id) / safe_role
+    d = default_runtime_cache_root() / _repo_key(canonical_repo) / _slug(run_id) / safe_role
     d.mkdir(parents=True, exist_ok=True)
     return d
 
