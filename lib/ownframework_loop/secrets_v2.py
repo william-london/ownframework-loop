@@ -60,6 +60,10 @@ MAX_INPUT_BYTES = 4 * 1024 * 1024  # 4 MiB
 MAX_FINDINGS_PER_SOURCE = 32
 
 
+class SecretScanIncomplete(RuntimeError):
+    """Authoritative secret proof could not inspect the complete file."""
+
+
 def _sha256_of_value(s: str) -> str:
     return hashlib.sha256(s.encode("utf-8", errors="replace")).hexdigest()
 
@@ -171,6 +175,29 @@ def scan_text(text: str, *, source: str = "stdin") -> list[dict[str, Any]]:
             "disposition": "scan_truncated",
             "truncated_bytes": MAX_INPUT_BYTES,
         })
+    return findings
+
+
+def scan_path_for_secrets_strict(path: Path) -> list[dict[str, Any]]:
+    """Fully scan one changed file or fail closed.
+
+    Authoritative build/review finalizers use this helper. A read failure or a
+    file larger than the bounded scan envelope is UNKNOWN evidence, not proof
+    that no secret exists.
+    """
+    try:
+        with open(path, "rb") as f:
+            data = f.read(MAX_INPUT_BYTES + 1)
+    except OSError as exc:
+        raise SecretScanIncomplete(f"secret scan unreadable: {path}") from exc
+    if len(data) > MAX_INPUT_BYTES:
+        raise SecretScanIncomplete(
+            f"secret scan incomplete: {path} exceeds {MAX_INPUT_BYTES} bytes"
+        )
+    text = data.decode("utf-8", errors="replace")
+    findings = scan_text(text, source=str(path))
+    if any(f.get("pattern_id") == "scan_truncated" for f in findings):
+        raise SecretScanIncomplete(f"secret scan incomplete: {path}")
     return findings
 
 

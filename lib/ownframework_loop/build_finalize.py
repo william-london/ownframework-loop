@@ -430,7 +430,7 @@ def finalize_build(
         if not abs_path.exists():
             continue
         # Use redacted scan only — never include literal match.
-        hits = secrets_v2.scan_path_for_secrets_redacted(abs_path)
+        hits = secrets_v2.scan_path_for_secrets_strict(abs_path)
         for hit in hits:
             secret_findings.append({
                 "path": path,
