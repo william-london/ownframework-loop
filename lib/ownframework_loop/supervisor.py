@@ -16,6 +16,7 @@ import os
 import shlex
 import signal
 import sqlite3
+import shutil
 import subprocess
 import time
 import uuid
@@ -1050,6 +1051,35 @@ class ClaudeCodeRunner:
 
     runner_id = "claude-code"
 
+    def preflight(self) -> RunnerReadiness:
+        """Check executable availability without starting a semantic attempt."""
+        pinned = os.environ.get("OFLOOP_CLAUDE_BIN", "").strip()
+        if pinned:
+            p = Path(pinned).expanduser().resolve(strict=False)
+            if p.is_file() and os.access(p, os.X_OK):
+                return RunnerReadiness(True)
+            return RunnerReadiness(
+                False,
+                classification="configuration",
+                reason="pinned_runner_unavailable",
+                detail=f"commissioned Claude binary unavailable: {p}",
+                retry_after_seconds=0.0,
+            )
+
+        discovered = shutil.which("claude")
+        if discovered:
+            p = Path(discovered).expanduser().resolve(strict=False)
+            if p.is_file() and os.access(p, os.X_OK):
+                return RunnerReadiness(True)
+
+        return RunnerReadiness(
+            False,
+            classification="environment_wait",
+            reason="runner_not_discoverable",
+            detail="Claude CLI not currently discoverable on service PATH",
+            retry_after_seconds=30.0,
+        )
+
     def run(
         self,
         work_order: dict[str, Any],
@@ -1273,6 +1303,15 @@ class ClaudeCodeRunner:
         )
 
 
+@dataclass(frozen=True)
+class RunnerReadiness:
+    ready: bool
+    classification: str = "ready"
+    reason: str = "ready"
+    detail: str = ""
+    retry_after_seconds: float = 30.0
+
+
 # Vendor-neutral runner registry. A new provider only needs to register a
 # subclass of SemanticRunner (or duck-typed class with runner_id + run()).
 # Adding a runner MUST NOT require any change to dispatch / supervisor FSM.
@@ -1299,6 +1338,19 @@ def _runner(name: str):
             + ", ".join(sorted(_RUNNER_REGISTRY))
         )
     return _RUNNER_REGISTRY[name]
+
+
+def _runner_preflight(name: str) -> RunnerReadiness:
+    runner = _runner(name)
+    probe = getattr(runner, "preflight", None)
+    if probe is None:
+        return RunnerReadiness(True)
+    result = probe()
+    if isinstance(result, RunnerReadiness):
+        return result
+    raise RuntimeError(
+        f"runner {name!r} returned invalid preflight result: {type(result).__name__}"
+    )
 
 
 def _classify_runner_failure(result: RunnerResult) -> tuple[str, str]:
@@ -1464,11 +1516,10 @@ def _take_next_job(conn: sqlite3.Connection) -> sqlite3.Row | None:
           worker_pid=?,
           worker_started_at=?,
           worker_role='dispatching',
-          execution_started_at=COALESCE(execution_started_at, ?),
           updated_at=?
         WHERE id=?
         """,
-        (os.getpid(), now, now, now, row["id"]),
+        (os.getpid(), now, now, row["id"]),
     )
     conn.commit()
     return conn.execute("SELECT * FROM jobs WHERE id=?", (row["id"],)).fetchone()
@@ -1604,6 +1655,23 @@ def _update_job(
     conn.commit()
 
 
+def _ensure_execution_started(conn: sqlite3.Connection, job_id: int) -> float:
+    """Start the operational wall clock only when semantic execution can run."""
+    now = time.time()
+    conn.execute(
+        """UPDATE jobs SET execution_started_at=COALESCE(execution_started_at, ?),
+           updated_at=? WHERE id=?""",
+        (now, now, int(job_id)),
+    )
+    conn.commit()
+    row = conn.execute(
+        "SELECT execution_started_at FROM jobs WHERE id=?", (int(job_id),)
+    ).fetchone()
+    if row is None or row[0] is None:
+        raise RuntimeError("failed to persist execution_started_at")
+    return float(row[0])
+
+
 def run_one(*, db_path: Path | None = None, timeout_seconds: int = 3600) -> dict[str, Any]:
     """Execute at most one semantic BUILD/REVIEW action."""
     db = db_path or default_db_path()
@@ -1676,7 +1744,49 @@ def run_one(*, db_path: Path | None = None, timeout_seconds: int = 3600) -> dict
                     "finalized": finalized,
                 }
 
-            started_at = float(job["execution_started_at"] or time.time())
+            readiness = _runner_preflight(str(job["runner"]))
+            if not readiness.ready:
+                if readiness.classification == "environment_wait":
+                    retry_after = max(5.0, float(readiness.retry_after_seconds))
+                    _update_job(
+                        conn,
+                        job["id"],
+                        status_value="BACKOFF",
+                        last_error=readiness.detail,
+                        last_failure_class=readiness.classification,
+                        last_failure_reason=readiness.reason,
+                        next_attempt_at=time.time() + retry_after,
+                    )
+                    return {
+                        "schema": SCHEMA,
+                        "ok": True,
+                        "action": "RUNNER_WAIT",
+                        "job_id": job["id"],
+                        "reason": readiness.reason,
+                        "retry_after_seconds": retry_after,
+                        "semantic_attempt_created": False,
+                        "execution_clock_started": False,
+                    }
+                policy = _apply_failure_policy(
+                    conn,
+                    job_id=int(job["id"]),
+                    failure_class=readiness.classification,
+                    failure_reason=readiness.reason,
+                    detail=readiness.detail,
+                    total_cost_usd=float(job["total_cost_usd"] or 0.0),
+                )
+                return {
+                    "schema": SCHEMA,
+                    "ok": False,
+                    "action": policy["status"],
+                    "job_id": job["id"],
+                    "reason": readiness.reason,
+                    "semantic_attempt_created": False,
+                    "execution_clock_started": False,
+                    **policy,
+                }
+
+            started_at = _ensure_execution_started(conn, int(job["id"]))
             elapsed = max(0.0, time.time() - started_at)
             max_wall = int(job["max_wall_seconds"] or 0)
             max_cost = float(job["max_total_cost_usd"] or 0.0)
@@ -1967,6 +2077,7 @@ def serve(
 __all__ = [
     "SCHEMA",
     "ClaudeCodeRunner",
+    "RunnerReadiness",
     "default_db_path",
     "default_worker_log_dir",
     "enqueue",
