@@ -99,7 +99,7 @@ m = approval.ALLOWED_APPROVAL_METHODS
 expected = {'tty_confirmation', 'build_start'}
 assert m == expected, f'approval methods not aligned with v0.5.0: got={m} expected={expected}'
 print('OK')
-" >/dev/null 2>&1 && pass "fault 9: ALLOWED_APPROVAL_METHODS is restricted to tty_confirmation" || fail "fault 9: approval methods not restricted"
+" >/dev/null 2>&1 && pass "fault 9: approval methods restricted to tty_confirmation + build_start" || fail "fault 9: approval methods not restricted"
 
 if [[ "$FAIL" -gt 0 ]]; then
   echo "OF_LOOP_GATE_FAULT_INJECTION=FAIL count=$FAIL"
