@@ -216,8 +216,13 @@ def worktree_list(path: Path) -> list[dict[str, Any]]:
 
 
 def is_valid_branch_name(branch: str) -> bool:
-    """Return True only for a Git-valid local branch name."""
+    """Return True only for an unambiguous Git-valid local branch name."""
     if not isinstance(branch, str) or not branch.strip() or branch != branch.strip():
+        return False
+    # Protocol fields carry short branch names, never fully-qualified ref
+    # namespaces. Accepting refs/heads/x here would later produce ambiguous
+    # double-prefix operations such as refs/heads/refs/heads/x.
+    if branch.startswith("refs/"):
         return False
     r = run_subprocess(
         ["git", "check-ref-format", "--branch", branch],
