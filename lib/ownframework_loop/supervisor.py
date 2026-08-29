@@ -1474,6 +1474,8 @@ def _apply_failure_policy(
             streak = transient_failures
             backoff = min(300.0, float(5 * (2 ** max(0, streak - 1))))
     elif immediate:
+        # A hard non-transient refusal ends any active transient streak.
+        transient_failures = 0
         quarantined = True
         streak = 1
         backoff = 0.0
