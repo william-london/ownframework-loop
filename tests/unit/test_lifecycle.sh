@@ -3,7 +3,7 @@
 #
 # Drives AWAITING_APPROVAL -> READY_TO_BUILD -> BUILDING -> READY_FOR_REVIEW
 # -> REVIEWING -> APPROVED through real $OFLOOP_BIN CLI calls. Uses canonical
-# approvals via the helper (tty_confirmation method) so the lifecycle path
+# current build_start execution seals via the helper so the lifecycle path
 # runs deterministically in CI. PTY-approval semantic equivalence is proven by
 # tests/unit/test_approval_pty_e2e.sh.
 #
@@ -92,9 +92,9 @@ print(packet_file_sha256(Path(sys.argv[1])))
 AP_SHA="$(python3 -c "import json; print(json.load(open('$AP'))['packet_sha256'])")"
 assert_eq "$PKT_SHA" "$AP_SHA" "lifecycle: packet SHA matches APPROVAL.packet_sha256"
 
-# Approval method must be tty_confirmation.
+# Normal lifecycle binding method is build_start.
 METHOD="$(python3 -c "import json; print(json.load(open('$AP'))['approval_method'])")"
-assert_eq "$METHOD" "tty_confirmation" "lifecycle: approval_method is tty_confirmation"
+assert_eq "$METHOD" "build_start" "lifecycle: approval_method is build_start"
 
 # Drive BUILDING -> READY_FOR_REVIEW.
 if "$OFLOOP_BIN" build claim "$T" "$RID" >/dev/null 2>&1; then
