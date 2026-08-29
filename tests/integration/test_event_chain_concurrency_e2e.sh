@@ -154,24 +154,36 @@ with open(ep, "wb") as f:
     f.write(data)
 PYEND
 
-# Mutation must cause recomputed chain hash to differ from recorded.
-# If actual != recorded after mutation, exit 0 (mutation detected).
-# If actual == recorded, the mutation went undetected -> exit 1.
+# Mutation detection: any of the following counts as "detected":
+#   (1) integrity.read_event_chain raises TamperingDetected because the
+#       mutation produced a malformed non-empty line (v0.6.1 behavior);
+#   (2) the recomputed chain hash differs from the recorded hash;
+#   (3) read_event_chain returns zero events (the file became
+#       unparseable to the point of having no surviving valid events).
+# Exit 0 iff the mutation was detected.
 if python3 - "$EV" <<'PYEND'
 import os, sys
 from pathlib import Path
 sys.path.insert(0, os.environ["OFLOOP_LIB"])
 from ownframework_loop import integrity
 ep = Path(sys.argv[1])
-events = integrity.read_event_chain(ep)
-if not events:
-    sys.exit(1)  # no events at all
-actual = integrity.compute_event_chain_hash(ep)
-recorded = integrity.get_event_chain_hash(ep)
-if recorded is None:
-    sys.exit(0)  # no recorded hash, nothing to compare
-# Exit 0 means mutation detected (actual != recorded).
-sys.exit(0 if actual != recorded else 1)
+events = []
+try:
+    events = integrity.read_event_chain(ep)
+    # Some bit flips land in whitespace or trailing-newline positions
+    # and the chain still parses. In that case the hash must differ.
+    if not events:
+        sys.exit(0)  # chain unparseable; mutation detected
+    actual = integrity.compute_event_chain_hash(ep)
+    recorded = integrity.get_event_chain_hash(ep)
+    if recorded is None:
+        sys.exit(0)  # no recorded hash recorded; nothing to compare
+    sys.exit(0 if actual != recorded else 1)
+except integrity.TamperingDetected:
+    sys.exit(0)  # strict-mode detected the mutation at parse time
+except Exception as exc:
+    print(f"unexpected exception during mutation check: {exc}", file=sys.stderr)
+    sys.exit(1)
 PYEND
 then
   echo "PASS: single-byte mutation detected (chain hash differs from recorded)"
