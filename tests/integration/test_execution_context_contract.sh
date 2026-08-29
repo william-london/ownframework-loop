@@ -550,12 +550,12 @@ cat > "$T12D_REPO/.ownframework-loop/_semantic_context" <<EOF
 {"schema":"of-loop/semantic-context/v1","run_id":"run-bad","role":"hacker","canonical_repo":"$T12D_REPO"}
 EOF
 OUT=$(invoke_hook "$T12D_REPO" "git status")
-# A tampered marker with an invalid role must NOT be honored. The hook
-# reads via role_context.read_marker which validates role ∈ {builder,reviewer}.
-if is_block_decision "$OUT"; then
-  fail "T12d: tampered marker with invalid role was honored. out=$OUT"
+# A tampered marker is malformed semantic context. Current v0.6.1
+# authority semantics fail closed rather than silently treating it as no context.
+if is_block_decision "$OUT" && has_forbidden_marker "$OUT"; then
+  pass "T12d: tampered marker with invalid role refused fail-closed"
 else
-  pass "T12d: tampered marker with invalid role rejected; hook no-op"
+  fail "T12d: tampered marker with invalid role was not refused. out=$OUT"
 fi
 
 # T12e: marker file outside canonical_repo (smuggle via path)
