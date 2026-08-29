@@ -107,7 +107,7 @@ def process_group_drained(pgid: int) -> bool:
         pass
     try:
         result = subprocess.run(
-            ["ps", "-axo", "pid=,ppid=,stat="],
+            ["ps", "-axo", "pid=,ppid=,stat=,comm="],
             capture_output=True, text=True, check=False, timeout=5,
         )
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
@@ -120,11 +120,11 @@ def process_group_drained(pgid: int) -> bool:
         line = line.strip()
         if not line:
             continue
-        parts = line.split()
-        if len(parts) < 3:
+        parts = line.split(None, 3)
+        if len(parts) < 4:
             continue
         try:
-            pid_str, ppid_str, stat = parts[0], parts[1], parts[2]
+            pid_str, ppid_str, stat, comm = parts[0], parts[1], parts[2], parts[3]
             ppid = int(ppid_str)
         except ValueError:
             continue
@@ -133,9 +133,11 @@ def process_group_drained(pgid: int) -> bool:
         # Zombies are already-dead children not yet reaped; not a leak.
         if stat.startswith("Z"):
             continue
-        # The probe's own `ps` child briefly appears as live until ps
-        # writes its own row; this is the calling-side race, not a leak.
-        if pid_str == str(os.getpid()):
+        # The probe's own `ps` child appears in ps's own row at the moment
+        # ps walks /proc. That is the calling-side race, not a leak.
+        if pid_str == str(own_pid):
+            continue
+        if comm.startswith("ps"):
             continue
         live_children += 1
     return live_children == 0
