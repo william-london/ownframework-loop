@@ -38,6 +38,11 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/../.." && pwd)"
 INSTALLER="$ROOT/install-supervisor-macos.sh"
 LIB="$ROOT/lib"
+EXPECTED_VERSION="$(PYTHONPATH="$LIB" python3 - <<'PY'
+from ownframework_loop import __version__
+print(__version__)
+PY
+)"
 
 export PYTHONDONTWRITEBYTECODE=1
 export PYTHONPATH="$LIB"
@@ -344,9 +349,9 @@ if [[ -f "$PROV7" ]]; then
     && pass "T7: provenance.source_head = $EXPECTED_HEAD" \
     || fail "T7: provenance.source_head=$PROV_HEAD"
   PROV_VERSION=$(python3 -c "import json; print(json.load(open('$PROV7'))['ofloop_version'])" 2>/dev/null || echo MISSING)
-  [[ "$PROV_VERSION" == "0.6.1" ]] \
-    && pass "T7: provenance.ofloop_version = 0.6.1" \
-    || fail "T7: provenance.ofloop_version=$PROV_VERSION"
+  [[ "$PROV_VERSION" == "$EXPECTED_VERSION" ]] \
+    && pass "T7: provenance.ofloop_version = $EXPECTED_VERSION" \
+    || fail "T7: provenance.ofloop_version=$PROV_VERSION expected=$EXPECTED_VERSION"
 fi
 
 # =====================================================================
