@@ -98,3 +98,32 @@ Loop scope is deterministic prefix matching, not a general glob engine. A single
 trailing `/**` is accepted as a compatibility spelling for the same directory
 prefix: `apps/**` and `apps` authorize exactly the same subtree. Other wildcard
 forms are rejected at packet validation.
+
+## PROGRAM checkpoint acceptance field
+
+Use checkpoint field acceptance_criterion_ids. The stale/misnamed
+acceptance_criteria checkpoint key is not executable and is rejected before
+start.
+
+When one checkpoint scopes acceptance IDs, every checkpoint must do so, and the
+union must cover every top-level AC id.
+
+## PROGRAM budget truth
+
+Risk budgets are checked against executable ceilings before first semantic
+execution. For v3, source-size ceilings are currently 500 changed files and
+30,000 diff lines. Packet-wide cumulative build/review/repair envelopes may be
+up to 128; checkpoint-local pass caps remain at most 32.
+
+Top-level max_build_passes, max_review_passes, and max_repair_rounds are
+cumulative PROGRAM envelopes. They are not per-checkpoint defaults. A declared
+global repair allowance is invalid if the global build/review caps cannot
+execute one initial pass per checkpoint plus those repairs.
+
+For a long unattended PROGRAM, the normal high-autonomy choice is to set the
+global pass/repair envelopes to the sums of the checkpoint-local envelopes
+(subject to the v3 absolute ceiling), unless the operator intentionally wants
+a tighter whole-program throttle.
+
+risk_budget.max_pass_runtime_seconds is enforced for each semantic worker.
+A positive supervisor --timeout-seconds is only a narrowing override.

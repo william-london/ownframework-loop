@@ -138,3 +138,37 @@ runs `ofloop supervisor serve` independently of any terminal working
 directory.
 
 Use `uninstall-supervisor-macos.sh` to remove the launch agent.
+
+## Semantic-pass context, delegation, and timing
+
+Every BUILD and REVIEW semantic pass is a fresh non-interactive Claude Code
+process. Passes do not share a conversation window. Continuity is durable:
+the sealed packet, exact worktree, checkpoint/AC ids, build receipt, review
+verdict, and deterministic repair_context carry forward what the next pass
+needs.
+
+The reference runner exposes Claude Code's Agent and Skill tools alongside the
+normal engineering tool set. Subagent delegation is optional and should be
+used when it improves a complex pass, not as busy work. The same semantic-role
+authority continues to apply to delegated work.
+
+The supervisor main print-mode worker does not receive a --max-turns flag.
+Agent-file maxTurns applies only when that custom agent is invoked through
+Claude's agent mechanism.
+
+For v3 packets, risk_budget.max_pass_runtime_seconds is the semantic worker
+timeout authority. A positive supervisor serve --timeout-seconds value can
+only narrow it. If neither is declared, the historical 3600-second fallback
+applies.
+
+## Live read-only observability
+
+ofloop supervisor status exposes raw progress telemetry without mutating the
+run: worker/execution elapsed seconds, time since the job row changed,
+worker-log byte/mtime activity, recent attempt history, cost/token telemetry,
+current core checkpoint state, worktree identity/cleanliness, and candidate
+diff summary.
+
+There is no deliberate delay between an actionable BUILD finalization and the
+next REVIEW dispatch, or between a review-driven repair and the next BUILD.
+The serve loop sleeps only while IDLE or while explicit backoff policy applies.

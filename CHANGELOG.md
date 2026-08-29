@@ -4,6 +4,45 @@ All notable current-release changes to OwnFramework Loop are documented here.
 The complete historical changelog through 0.5.2 is preserved at
 [`docs/history/CHANGELOG-through-0.5.2.md`](docs/history/CHANGELOG-through-0.5.2.md).
 
+## 0.6.3 - PROGRAM Autonomy Preflight + Worker Headroom (2026-08-29)
+
+v0.6.3 closes integration gaps surfaced by the first real unattended
+client-shaped PROGRAM before another model pass can waste time on them.
+
+### Pre-execution contract hardening
+
+- v3 schema and runtime agree on 500 changed files / 30,000 diff lines;
+- impossible risk budgets are rejected at packet validation, before first model
+  execution;
+- checkpoint acceptance scoping uses acceptance_criterion_ids; the stale
+  acceptance_criteria checkpoint key is rejected;
+- v3 packet-wide cumulative build/review/repair envelopes may be up to 128 so
+  long PROGRAMs can fund checkpoint-local repair budgets;
+- global repair allowances must be realizable by the global build/review
+  envelope.
+
+### Semantic worker capability
+
+- the Claude reference runner now includes Agent and Skill, allowing bounded
+  subagent delegation when it materially improves a pass;
+- builder/reviewer prompts make fresh-context semantics explicit and keep one
+  parent responsible for the coherent artifact;
+- custom-agent maxTurns is raised to 160 for foreground/custom-agent use;
+- the unattended main print-mode runner still has no CLI max-turn cap;
+- v3 max_pass_runtime_seconds is now enforced by the supervisor and may be up
+  to 14,400 seconds; a supervisor CLI timeout can only narrow it.
+
+### Monitoring
+
+- supervisor status adds worker/execution elapsed time, time since last job
+  update, worker-log byte/mtime activity, and packet pass-time policy on top of
+  existing attempt/core/worktree/diff telemetry.
+
+### Release truth
+
+Canonical source, Claude plugin metadata, marketplace metadata, README,
+SECURITY, and this changelog report 0.6.3.
+
 ## 0.6.2 - Scope Suffix Compatibility (2026-08-29)
 
 v0.6.2 closes a pre-execution packet-scope mismatch surfaced by a real

@@ -80,3 +80,21 @@ A run intended for a private GitHub-reviewed project should be created only afte
 If remote topology/classification changes after `spec new` but before the first execution seal, prefer stopping the never-started run and creating a fresh run from the final repository state. Do not rely on the first BUILD claim to discover a preventable `local_only` + remote mismatch.
 
 Current core execution already fails closed when a `local_only` packet has configured remotes. The spec workflow should prevent reaching that refusal in normal operation.
+
+## PROGRAM autonomy preflight
+
+Before a v3 PROGRAM is considered ready:
+
+- use acceptance_criterion_ids on checkpoints; never emit checkpoint
+  acceptance_criteria;
+- validate packet budgets against executable ceilings before first execution;
+- treat top-level build/review/repair values as cumulative PROGRAM envelopes;
+- unless intentionally throttling the whole PROGRAM, fund those global
+  envelopes from the sums of checkpoint-local budgets;
+- ensure a global repair allowance is realizable by the global build/review
+  allowance;
+- choose max_pass_runtime_seconds for the complexity of one semantic pass
+  rather than relying on an accidental supervisor timeout.
+
+A packet that can only discover an impossible deterministic ceiling after a
+model has already done work is a spec defect and must not be startable.
