@@ -2,7 +2,7 @@
   "name": "of-loop",
   "displayName": "OwnFramework Loop",
   "description": "Stable Claude Code reference adapter for deterministic execution-sealed engineering loops with exact-SHA review, bounded repairs, and operator-owned promotion.",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "author": {
     "name": "OwnFramework"
   },

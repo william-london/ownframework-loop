@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from . import packet as packet_mod, reconcile as reconcile_mod, state as state_mod
+from . import git_checks as git_checks_mod
 from .locking import LockBusyError, flock_exclusive
 
 SCHEMA = "ownframework-loop-dispatch/v1"
@@ -60,6 +61,16 @@ def semantic_result_ready(work_order: dict[str, Any]) -> tuple[bool, str]:
     placeholder defaults. This check is used both before deterministic
     finalization and after supervisor restart so a completed semantic artifact
     can be finalized without paying for a duplicate model call.
+
+    v0.6.1 hardening: a BUILD semantic artifact is NOT sufficient to claim
+    readiness. The exact prepared builder worktree must already be structurally
+    finalizable — i.e. clean at `git status --porcelain`. If the worktree is
+    dirty, replay-finalizing the same semantic artifact cannot repair the
+    filesystem, and we must report not-ready so the supervisor dispatches a
+    fresh semantic builder for the SAME claimed pass (same run_id, same pass
+    number, same checkpoint, same candidate branch, same worktree, same
+    semantic artifact path) instead of incurring another dispatch-only
+    retry that would only re-trigger the deterministic dirty-worktree refusal.
     """
     if work_order.get("schema") != SCHEMA:
         return False, "invalid_work_order_schema"
@@ -90,6 +101,19 @@ def semantic_result_ready(work_order: dict[str, Any]) -> tuple[bool, str]:
                 return False, "builder_summary_empty"
             if not addressed and not completed:
                 return False, "builder_completion_evidence_empty"
+            # v0.6.1: even with a structurally complete semantic artifact, the
+            # exact prepared builder worktree must already be clean. The
+            # deterministic finalize refuses dirty worktrees
+            # ("refusing BUILD_RECEIPT: builder worktree is dirty; candidate
+            # SHA does not describe validated filesystem"). Replay-finalizing
+            # the same complete semantic artifact cannot repair the
+            # filesystem; we must surface not-ready now so the supervisor
+            # dispatches a fresh semantic builder for the SAME pass instead.
+            builder_wt = work_order.get("worktree")
+            if isinstance(builder_wt, str) and builder_wt:
+                wt_path = Path(builder_wt).resolve(strict=False)
+                if wt_path.exists() and git_checks_mod.is_dirty(wt_path):
+                    return False, "builder_worktree_dirty"
         elif not summary and not str(data.get("blocker_reason") or "").strip():
             return False, "builder_terminal_reason_empty"
         return True, "ready"

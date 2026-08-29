@@ -4,6 +4,58 @@ All notable current-release changes to OwnFramework Loop are documented here.
 The complete historical changelog through 0.5.2 is preserved at
 [`docs/history/CHANGELOG-through-0.5.2.md`](docs/history/CHANGELOG-through-0.5.2.md).
 
+## 0.6.1 - Semantic Build Finalizability Recovery (2026-08-28)
+
+v0.6.1 is a behavior-preserving bugfix line that closes a real unattended
+commissioning seam surfaced by a live practice run.
+
+### What changed
+
+A `BUILD_AGENT_RESULT.json` that is structurally complete is now REQUIRED to
+be paired with a structurally finalizable builder worktree before the
+dispatch layer will report `semantic_result_ready`. A complete semantic
+artifact over a dirty worktree (e.g. uncommitted modifications, generated
+out-of-scope artifacts left as untracked state) is no longer replay-finalized
+across retries; instead the supervisor dispatches a fresh semantic builder
+for the SAME claimed pass — same run id, same pass number, same checkpoint,
+same candidate branch, same worktree, same semantic artifact path.
+
+The deterministic builder finalize still refuses dirty worktrees by design
+and that refusal is preserved as-is.
+
+The builder role contract (`agents/of-builder.md`) was surgically hardened so
+that `outcome_requested: candidate_ready` cannot legitimately mean
+"semantic work complete but filesystem still dirty." A required
+pre-`candidate_ready` checklist now requires `git status --porcelain` to be
+empty in the exact supplied builder worktree, with a generic invariant that
+applies to arbitrary toolchains (npm/package-lock.json, pip hash files,
+Cargo.lock, poetry.lock, go.sum, gradle caches, `.pytest_cache`, `__pycache__`,
+`dist/`, `build/`, `target/`, etc. are examples, not the rule).
+
+The supervisor recovery contract preserves zero-model crash replay
+(`COMPLETE semantic artifact + clean/finalizable worktree` -> deterministic
+replay finalize, cost $0, no new semantic worker) and changes only the
+dirty-worktree path (`COMPLETE semantic artifact + dirty/non-finalizable
+worktree` -> fresh semantic builder for the SAME pass, no new pass, no
+new candidate branch, no increment to `repair_round`, no fabrication of
+`CHANGES_REQUESTED` or `BLOCKED`).
+
+The deterministic core remains deterministic: it does not auto-stage,
+auto-commit, or silently clean the builder worktree. The semantic builder
+owns engineering filesystem correction; the core owns finalization refusal.
+
+Sealed `WORK_PACKET.md` immutability is preserved: the packet's
+`allowed_paths` cannot be widened after execution seal to repair an
+incident like this one. Changed scope after sealing requires a new run.
+
+### What did NOT change
+
+- The v0.6.0 release tag and GitHub Release were not modified.
+- v0.6.0 commissionining evidence is unaffected.
+- Finalizer dirty-worktree enforcement is unchanged.
+- Repair-round counter, candidate branch, and checkpoint semantics are
+  unchanged for legitimate reviewer feedback flows.
+
 ## 0.6.0 - Durable Supervisor Architecture (2026-08-28)
 
 - Replaced the legacy `ofloop loop run` unattended orchestrator with a

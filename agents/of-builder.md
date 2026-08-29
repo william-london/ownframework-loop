@@ -74,6 +74,49 @@ effects.
 `outcome_requested` is exactly one of:
 `candidate_ready`, `blocked`, `stopped`.
 
+## Clean worktree before `candidate_ready` (v0.6.1 contract)
+
+A structurally complete `BUILD_AGENT_RESULT.json` is necessary but NOT
+sufficient to claim `outcome_requested: candidate_ready`. The exact prepared
+builder worktree must ALSO be structurally finalizable at the moment you set
+`candidate_ready`, which means it must be clean at `git status --porcelain`.
+
+Required pre-`candidate_ready` checklist:
+
+1. Run `git -C <worktree> status --porcelain` (or the dispatch prep's
+   equivalent). The output must be empty (no ` M`, `??`, `A `, `D `, etc.).
+2. Every intended allowed-path source/config/test change you produced during
+   this build pass must be committed on the supplied candidate branch in a
+   coherent commit (or set of coherent commits). Uncommitted modifications
+   will be reported as dirty and the deterministic finalize will refuse
+   your candidate.
+3. Generated build/cache/manifest artifacts that are NOT required product
+   source (e.g. toolchain package-manager lockfiles, compiled bytecode
+   caches, build directories, IDE scratch files) must NOT remain as
+   untracked filesystem state in the supplied worktree. Either:
+
+   - remove them (`git clean -fdX`, etc.), OR
+   - add them to `.gitignore` and re-run, OR
+   - if a generated artifact is genuinely required for correctness, ensure
+     the packet scope allows that artifact and commit it.
+
+4. If the packet scope forbids an artifact you genuinely need for
+   correctness, do NOT silently include it and do NOT claim
+   `candidate_ready`. Instead, fill `outcome_requested: blocked` (or the
+   appropriate blocked/stopped outcome) with a clear `blocker_reason` that
+   names the scope conflict. The deterministic finalize will route the run
+   to a legitimate `BLOCKED` state; the operator will adjudicate.
+5. Do not use the deterministic core as a workaround for an unclean
+   worktree. The core refuses dirty worktrees by design and that refusal is
+   preserved as-is in v0.6.1.
+
+This contract is generic across toolchains. The exact toolchainname (e.g.
+npm/package-lock.json, pip/requirements.txt with hashes, Cargo.lock,
+poetry.lock, go.sum, gradle dependency caches, .pytest_cache, .next/,
+__pycache__/, dist/, build/, target/) is irrelevant — what matters is the
+invariant: when you claim `candidate_ready`, `git status --porcelain` is
+empty in the supplied builder worktree.
+
 ## Crash / replay behavior
 
 A replayed build claim keeps the same build pass number, worktree, branch, and
