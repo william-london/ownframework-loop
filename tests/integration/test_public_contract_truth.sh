@@ -77,12 +77,16 @@ fi
 grep -Fq 'first claim may auto-seal' "$BUILD_SKILL" || fail "build skill does not describe first-start auto-seal"
 pass "active build skill has no approval-era pre-start contradiction"
 
-# Spec: normal flow returns builder/reviewer commands and explicitly has no
-# approval ceremony. Compatibility-only text is allowed outside normal flow.
-grep -Fq '/loop /of-loop:build <run-id>' "$SPEC_SKILL" || fail "spec skill missing builder handoff"
-grep -Fq '/loop /of-loop:review <run-id>' "$SPEC_SKILL" || fail "spec skill missing reviewer handoff"
+# Spec: normal background flow is supervisor-first and explicitly has no
+# approval ceremony. Foreground /loop commands remain available for debug.
+grep -Fq 'ofloop supervisor enqueue <repo> <run-id>' "$SPEC_SKILL" || fail "spec skill missing supervisor enqueue handoff"
+grep -Fq 'ofloop supervisor status <repo> <run-id>' "$SPEC_SKILL" || fail "spec skill missing supervisor status handoff"
+grep -Fq 'ofloop supervisor serve' "$SPEC_SKILL" || fail "spec skill missing supervisor execution-clock handoff"
+grep -Fq '/loop /of-loop:build <run-id>' "$SPEC_SKILL" || fail "spec skill missing foreground builder debug handoff"
+grep -Fq '/loop /of-loop:review <run-id>' "$SPEC_SKILL" || fail "spec skill missing foreground reviewer debug handoff"
+grep -Fq 'FOREGROUND / DEBUG' "$SPEC_SKILL" || fail "spec skill does not label /loop as foreground/debug"
 grep -Fq 'no approval ceremony is required' "$SPEC_SKILL" || fail "spec skill does not state no-ceremony contract"
-pass "active spec skill exposes direct start UX"
+pass "active spec skill exposes supervisor-first no-ceremony UX"
 
 # Review: builder alone owns first start.
 grep -Fq 'AWAITING_APPROVAL / READY_TO_START | WAIT' "$REVIEW_SKILL" || fail "review skill does not WAIT at pre-start"
