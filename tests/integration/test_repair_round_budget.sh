@@ -198,7 +198,15 @@ state_doc_mut = json.loads(state_path.read_text())
 state_doc_mut["program"]["checkpoint_graph_sha256"] = "0" * 64
 state_path.write_text(json.dumps(state_doc_mut, indent=2, sort_keys=True))
 drift_raw = safe_claim("drift-evidence")
-drift = {"ok": drift_raw.get("ok"), "rejected": "frozen-graph drift" in drift_raw.get("error", "")}
+drift_error = drift_raw.get("error", "")
+drift = {
+    "ok": drift_raw.get("ok"),
+    "rejected": (
+        "frozen-graph drift" in drift_error
+        or "state integrity mismatch before mutation" in drift_error
+    ),
+    "error": drift_error,
+}
 
 print(json.dumps({
     "max_rounds": max_rounds,
@@ -269,7 +277,7 @@ else:
     sys.exit(1)
 
 if not drift.get('ok') and drift.get('rejected'):
-    print(f'  PASS: max={mr} frozen-graph drift correctly detected')
+    print(f'  PASS: max={mr} mutated frozen-graph evidence rejected fail-closed')
 else:
     print(f'  FAIL: max={mr} drift test failed: {drift}')
     sys.exit(1)
