@@ -7,13 +7,13 @@ not listed in the allowed map is rejected by `lib/ownframework_loop/transitions.
 
 | State | Meaning |
 |---|---|
-| `AWAITING_APPROVAL` | Initial state. The work packet exists but has not been approved. |
-| `READY_TO_BUILD` | The work packet is approved. Builder may claim the next pass. |
+| `AWAITING_APPROVAL` | Historical internal initial-state name. Operator meaning: `READY_TO_START`. A valid packet exists; no approval ceremony is required. The first legitimate BUILD start creates the immutable execution seal. |
+| `READY_TO_BUILD` | The execution seal exists and the packet/source identity is bound. Builder may claim the next pass. |
 | `BUILDING` | The builder has claimed this pass. Reviewer cannot start. |
 | `READY_FOR_REVIEW` | The builder produced a candidate SHA. Reviewer may claim the next pass. |
 | `REVIEWING` | The reviewer has claimed this pass. Builder cannot claim. |
 | `CHANGES_REQUESTED` | The reviewer returned a verdict with must-fix findings. Builder will repair. |
-| `APPROVED` | Terminal. The human merges. v0.3.7: in program mode, the orchestrator may transition APPROVED back to READY_TO_BUILD when there are more claimable checkpoints. |
+| `APPROVED` | Protocol-approved and eligible for operator promotion outside Loop. In PROGRAM mode, an approved checkpoint may advance the host run back to `READY_TO_BUILD` when more checkpoints are claimable. |
 | `BLOCKED` | Terminal (no outbound edges except to a fresh run via teardown). The human reads the events and decides. v0.3.7: BLOCKED cannot become APPROVED; program mode may resume to READY_TO_BUILD only. |
 | `STOPPED` | Terminal (no outbound edges except to a fresh run via teardown). The human explicitly stopped the loop. v0.3.7: STOPPED is absorbing at the FSM level; no single-mode or program-mode escape. |
 
@@ -55,8 +55,8 @@ auditable event.
 
 Every transition acquires an exclusive `fcntl.flock` on
 `.ownframework-loop/<run-id>/LOCK` before reading or writing `STATE.json`.
-Concurrent state mutations are serialized; the loser of the race retries
-on the next `/loop` tick.
+Concurrent state mutations are serialized; the loser of the race retries on
+the next supervisor dispatch tick or foreground `/loop` tick.
 
 ## Event log
 
@@ -82,7 +82,7 @@ post-pass validation.
 
 - Wrong repository, wrong branch, or unexpected remote.
 - Dirty unattributed baseline.
-- Packet SHA-256 changed after approval.
+- Packet/source identity drifted after the execution seal.
 - Protected-path violation.
 - Prohibited command attempted (`git push`, `git merge`, etc.).
 - Maximum repair rounds reached.
@@ -124,8 +124,9 @@ The orchestrator guarantees invariants on the per-checkpoint lifecycle:
 1. A checkpoint that is `APPROVED` MUST have at least one build pass and
    at least one review pass recorded in `program.checkpoints[CP-N].counters`
    before finalize. Otherwise `nonterminal_cp_approval_refused` is raised.
-2. The checkpoint graph SHA is frozen at `program init` time. Re-running
-   init with a different graph SHA is refused (`program_graph_sha_drift`).
+2. The checkpoint graph materializes and freezes automatically through normal
+   first-start execution. Any later initialization/adoption that presents a
+   different graph SHA is refused (`program_graph_sha_drift`).
 3. The source-tree accounting (unique changed files, diff lines) is computed
    baseline->final per checkpoint AND cumulatively across the program.
    Cumulative caps come from the sum of approved-checkpoint exact caps.

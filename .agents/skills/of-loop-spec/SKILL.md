@@ -29,11 +29,16 @@ This skill is a host adapter over the deterministic ofloop core.
    * packet_sha256
    * spec_baseline_branch / spec_baseline_sha
    * execution_mode / checkpoint_count
-   * builder command: /loop /of-loop:build <run-id>
-   * reviewer command: /loop /of-loop:review <run-id>
+   * canonical unattended enqueue: ofloop supervisor enqueue <repo> <run-id>
+   * canonical status: ofloop supervisor status <repo> <run-id>
+   * execution clock when not already running as a service: ofloop supervisor serve
+   * optional FOREGROUND / DEBUG builder: /loop /of-loop:build <run-id>
+   * optional FOREGROUND / DEBUG reviewer: /loop /of-loop:review <run-id>
 
-7. STOP. The operator launches the two lanes; the first build claim creates
-   the immutable execution seal automatically.
+7. STOP. Normal background operation is supervisor-first. Enqueue the run; an
+   already commissioned supervisor service consumes it, or `ofloop supervisor
+   serve` may run the execution clock manually. The first actionable BUILD
+   creates the immutable execution seal automatically.
 
 ## Internal vs operator-facing state
 

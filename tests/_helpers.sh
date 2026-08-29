@@ -85,7 +85,10 @@ write_packet() {
   echo "$target"
 }
 
-# Make a valid V2 packet and APPROVAL.json in one shot. Returns run id via stdout.
+# Make a valid current V2 packet and execution seal. Returns run id via stdout.
+# Normal test setup follows current production semantics: the packet is mutable
+# until first execution start, then execution_start.ensure_executable() creates
+# the immutable build_start execution seal and transitions to READY_TO_BUILD.
 # Args: repo [work_class=BUG] [risk=low] [title=test] [branch=master]
 make_approved_run() {
   local repo="$1"
@@ -125,6 +128,63 @@ make_approved_run() {
 \`\`\`
 body
 EOF
+  python3 - "$repo" "$rid" <<'PY'
+import sys
+from pathlib import Path
+import os as _os_for_path
+sys.path.insert(0, _os_for_path.environ.get("OFLOOP_LIB", "/path/to/ownframework-loop/lib"))
+from ownframework_loop import execution_start
+execution_start.ensure_executable(
+    canonical_repo=Path(sys.argv[1]),
+    run_id=sys.argv[2],
+    actor="test",
+    binding_method="build_start",
+)
+PY
+  echo "$rid"
+}
+
+# Explicit synthetic historical TTY fixture. Use ONLY in tests whose purpose is
+# compatibility with legacy pre-seal input. Normal tests use make_approved_run()
+# or make_approved_run_unapproved().
+make_legacy_tty_approved_run() {
+  local repo="$1"
+  local wc="${2:-BUG}"
+  local risk="${3:-low}"
+  local title="${4:-test}"
+  local branch="${5:-master}"
+  "$OFLOOP_BIN" spec new "$repo" "$title" >/dev/null
+  local rid
+  rid="$(ls -1t "$repo/.ownframework-loop" | head -n1)"
+  local pp="$repo/.ownframework-loop/$rid/WORK_PACKET.md"
+  cat > "$pp" <<EOF
+\`\`\`json
+{
+  "schema": "ownframework-work-packet/v2",
+  "packet_id": "p-legacy",
+  "created_at": "2026-07-23T00:00:00Z",
+  "work_class": "$wc",
+  "risk_class": "$risk",
+  "title": "$title",
+  "target": {"repo": "$repo", "branch": "$branch", "classification": "local_only"},
+  "acceptance_criteria": [{"id": "AC-1", "text": "ok"}],
+  "non_goals": [],
+  "allowed_paths": ["src/"],
+  "protected_paths": [".ownframework-loop/"],
+  "work_units": [{"id": "UNIT-1", "title": "u", "scope": "s"}],
+  "merge_authority": "human_only",
+  "deploy_authority": "human_only",
+  "push_authority": "human_only",
+  "external_action_authority": "none",
+  "risk_budget": {
+    "max_files_changed": 25,
+    "max_diff_lines": 1000,
+    "max_repair_rounds": 3
+  }
+}
+\`\`\`
+body
+EOF
   local sha
   sha="$(shasum -a 256 "$pp" | awk '{print $1}')"
   python3 - "$repo" "$rid" "$sha" "$branch" <<'PY'
@@ -132,7 +192,7 @@ import sys, json, subprocess
 from pathlib import Path
 import os as _os_for_path
 sys.path.insert(0, _os_for_path.environ.get("OFLOOP_LIB", "/path/to/ownframework-loop/lib"))
-from ownframework_loop import approval
+from ownframework_loop import approval, branch_resolver, state as state_mod
 canonical_repo = Path(sys.argv[1])
 run_id = sys.argv[2]
 packet_sha = sys.argv[3]
@@ -141,49 +201,29 @@ baseline_sha = subprocess.run(
     ["git", "-C", str(canonical_repo), "rev-parse", branch],
     capture_output=True, text=True, check=True,
 ).stdout.strip()
-token = approval.derive_confirmation_token(packet_sha)
-candidate_branch = f"factory/candidate/{run_id}"
-approval_doc = {
+doc = {
     "schema": "ownframework-loop-approval/v1",
     "run_id": run_id,
     "packet_sha256": packet_sha,
     "approved_at": "2026-07-23T00:00:00Z",
-    "approved_actor": "test",
+    "approved_actor": "test-legacy-fixture",
     "canonical_repo": str(canonical_repo.resolve(strict=False)),
     "baseline_branch": branch,
     "baseline_sha": baseline_sha,
-    "candidate_branch": candidate_branch,
     "packet_schema": "ownframework-work-packet/v2",
-    # v0.3.5 (AUD2-P0-1): helper records "tty_confirmation" because
-    # ALLOWED_APPROVAL_METHODS shrunk to {"tty_confirmation"} only.
-    # This helper simulates the POST-approval state for fixture setup;
-    # the actual interactive TTY approval is exercised by
-    # tests/unit/test_approval_pty_e2e.sh which spawns a real PTY and
-    # types the confirmation token. Production paths must NOT call
-    # this helper — they go through `ofloop spec approve` which is
-    # the only authority for writing APPROVAL.json.
     "approval_method": "tty_confirmation",
-    "confirmation_token": token,
+    "confirmation_token": approval.derive_confirmation_token(packet_sha),
+    "candidate_branch": branch_resolver.default_candidate_branch(run_id),
 }
 Path(canonical_repo, ".ownframework-loop", run_id, "APPROVAL.json").write_text(
-    json.dumps(approval_doc, indent=2, sort_keys=True))
-PY
-  # Transition to READY_TO_BUILD so the builder can claim.
-  python3 - "$repo" "$rid" <<'PY'
-import sys
-import os as _os_for_path
-sys.path.insert(0, _os_for_path.environ.get("OFLOOP_LIB", "/path/to/ownframework-loop/lib"))
-from ownframework_loop import state as state_mod
-from pathlib import Path
-canonical_repo = Path(sys.argv[1])
-run_id = sys.argv[2]
+    json.dumps(doc, indent=2, sort_keys=True) + "\n")
 cur = state_mod.load(canonical_repo, run_id)
 if cur.get("state") == "AWAITING_APPROVAL":
     state_mod.transition(
         canonical_repo, run_id,
         to_state="READY_TO_BUILD",
-        actor="test",
-        reason="test helper: synthetic transition",
+        actor="test-legacy-fixture",
+        reason="explicit synthetic legacy TTY compatibility fixture",
     )
 PY
   echo "$rid"

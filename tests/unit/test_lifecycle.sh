@@ -77,9 +77,9 @@ assert_file "$PP" "lifecycle: WORK_PACKET.md present"
 assert_file "$AP" "lifecycle: APPROVAL.json present"
 assert_file "$ST" "lifecycle: STATE.json present"
 
-# State machine: AWAITING_APPROVAL -> READY_TO_BUILD via helper.
+# State machine: AWAITING_APPROVAL -> READY_TO_BUILD via current build_start execution seal.
 INIT_STATE="$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['state'])" "$ST")"
-assert_eq "$INIT_STATE" "READY_TO_BUILD" "lifecycle: state is READY_TO_BUILD after helper"
+assert_eq "$INIT_STATE" "READY_TO_BUILD" "lifecycle: state is READY_TO_BUILD after execution seal"
 
 # Compute packet SHA via canonical API (blocker 1 fix).
 PKT_SHA="$(PYTHONDONTWRITEBYTECODE=1 python3 -B -c "

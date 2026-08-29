@@ -121,7 +121,7 @@ PY
 
 # 7. Historical TTY binding remains valid compatibility input.
 T5="$(make_tmp_repo)"
-RID5="$(make_approved_run "$T5" BUG low "v050-legacy")"
+RID5="$(make_legacy_tty_approved_run "$T5" BUG low "v050-legacy")"
 LEGACY_OUT="$($OFLOOP build claim "$T5" "$RID5" --actor builder)"
 assert_contains "$LEGACY_OUT" '"ok": true' "legacy tty_confirmation binding remains readable"
 

@@ -6,46 +6,9 @@ set -uo pipefail
 TESTS_DIR="$(cd "$(dirname "$0")" && pwd)"
 . "$TESTS_DIR/../_helpers.sh"
 
-# Helper: re-approve a packet after manual packet mutation.
-# Args: repo rid [branch=master]
-reapprove() {
-  local repo="$1" rid="$2" branch="${3:-master}"
-  local pp="$repo/.ownframework-loop/$rid/WORK_PACKET.md"
-  local sha
-  sha="$(shasum -a 256 "$pp" | awk '{print $1}')"
-  python3 - "$repo" "$rid" "$sha" "$branch" <<'PY'
-import sys, json, subprocess
-from pathlib import Path
-import os as _os_for_path
-sys.path.insert(0, _os_for_path.environ.get('OFLOOP_LIB', '/path/to/ownframework-loop/lib'))
-from ownframework_loop import approval
-canonical_repo = Path(sys.argv[1])
-run_id = sys.argv[2]
-packet_sha = sys.argv[3]
-branch = sys.argv[4]
-baseline_sha = subprocess.run(
-    ["git", "-C", str(canonical_repo), "rev-parse", branch],
-    capture_output=True, text=True, check=True,
-).stdout.strip()
-token = approval.derive_confirmation_token(packet_sha)
-doc = {
-    "schema": "ownframework-loop-approval/v1",
-    "run_id": run_id,
-    "packet_sha256": packet_sha,
-    "approved_at": "2026-07-23T00:00:00Z",
-    "approved_actor": "test",
-    "canonical_repo": str(canonical_repo.resolve(strict=False)),
-    "baseline_branch": branch,
-    "baseline_sha": baseline_sha,
-    "packet_schema": "ownframework-work-packet/v2",
-    "approval_method": "tty_confirmation",
-    "confirmation_token": token,
-}
-Path(canonical_repo, ".ownframework-loop", run_id, "APPROVAL.json").write_text(
-    json.dumps(doc, indent=2, sort_keys=True))
-PY
-}
-
+# Packet-mutating trust cases below deliberately use an unsealed run, mutate
+# WORK_PACKET.md, then let the first BUILD claim create the current build_start
+# execution seal. Legacy TTY pre-seal compatibility is tested separately.
 
 # Current finalizers require an explicit semantic builder pass. Legacy trust
 # cases below care about deterministic candidate/scope behavior, so use a
@@ -198,7 +161,7 @@ assert_eq "$NEXT4" "BLOCKED" "unapproved sensitive path is rejected"
 
 # 20. approved elevated path succeeds
 T5="$(make_tmp_repo)"
-RID5="$(make_approved_run "$T5" BUG low "elevated-ok")"
+RID5="$(make_approved_run_unapproved "$T5" BUG low "elevated-ok")"
 PP5="$T5/.ownframework-loop/$RID5/WORK_PACKET.md"
 python3 - "$PP5" <<'PY'
 import sys, json, re
@@ -212,7 +175,6 @@ meta["sensitive_paths"] = ["AGENTS.md"]
 meta["sensitive_path_reason"] = "AGENTS.md change is part of this mission"
 pp.write_text(re.sub(r"```json\n.*?\n```", "```json\n" + json.dumps(meta, indent=2) + "\n```", text, count=1, flags=re.DOTALL))
 PY
-reapprove "$T5" "$RID5"
 "$OFLOOP_BIN" build claim "$T5" "$RID5" >/dev/null 2>&1
 WT5="$T5/.worktrees/ownframework-loop/$RID5/builder"
 git -C "$T5" worktree add -b "factory/candidate/$RID5" "$WT5" master >/dev/null 2>&1
@@ -223,7 +185,7 @@ RECEIPT5="$T5/.ownframework-loop/$RID5/BUILD_RECEIPT.json"
 
 # 21. required validation is actually executed
 T6="$(make_tmp_repo)"
-RID6="$(make_approved_run "$T6" BUG low "validation-exec")"
+RID6="$(make_approved_run_unapproved "$T6" BUG low "validation-exec")"
 PP6="$T6/.ownframework-loop/$RID6/WORK_PACKET.md"
 python3 - "$PP6" <<'PY'
 import sys, json, re
@@ -235,7 +197,6 @@ meta = json.loads(m.group(1))
 meta["required_validation"] = [{"name": "echo-test", "command": "echo hello", "kind": "fast", "expected_exit_code": 0}]
 pp.write_text(re.sub(r"```json\n.*?\n```", "```json\n" + json.dumps(meta, indent=2) + "\n```", text, count=1, flags=re.DOTALL))
 PY
-reapprove "$T6" "$RID6"
 "$OFLOOP_BIN" build claim "$T6" "$RID6" >/dev/null 2>&1
 WT6="$T6/.worktrees/ownframework-loop/$RID6/builder"
 git -C "$T6" worktree add -b "factory/candidate/$RID6" "$WT6" master >/dev/null 2>&1
@@ -249,7 +210,7 @@ pass "false claimed validation is ignored (finalizer always re-executes)"
 
 # 23. failed required validation blocks review readiness
 T7="$(make_tmp_repo)"
-RID7="$(make_approved_run "$T7" BUG low "validation-fail")"
+RID7="$(make_approved_run_unapproved "$T7" BUG low "validation-fail")"
 PP7="$T7/.ownframework-loop/$RID7/WORK_PACKET.md"
 python3 - "$PP7" <<'PY'
 import sys, json, re
@@ -261,7 +222,6 @@ meta = json.loads(m.group(1))
 meta["required_validation"] = [{"name": "must-fail", "command": "false", "kind": "fast", "expected_exit_code": 0}]
 pp.write_text(re.sub(r"```json\n.*?\n```", "```json\n" + json.dumps(meta, indent=2) + "\n```", text, count=1, flags=re.DOTALL))
 PY
-reapprove "$T7" "$RID7"
 "$OFLOOP_BIN" build claim "$T7" "$RID7" >/dev/null 2>&1
 WT7="$T7/.worktrees/ownframework-loop/$RID7/builder"
 git -C "$T7" worktree add -b "factory/candidate/$RID7" "$WT7" master >/dev/null 2>&1
