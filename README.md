@@ -312,7 +312,7 @@ Claude reference adapter:
 
 ## Project status
 
-Current release line: **0.6.3**.
+Current release line: **0.7.0**.
 
 This remains an early public project. Correctness depends on the target
 repository, mission, validation supplied by the packet, agent host, and local

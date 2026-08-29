@@ -123,6 +123,23 @@ def effective_cap(counter: str, packet: dict | None) -> int | None:
     return None
 
 
+def identical_finding_repeat_cap(packet: dict | None) -> int:
+    """Return the fuse for consecutive identical must-fix finding sets.
+
+    The packet may narrow it via risk_budget.max_identical_finding_repeats;
+    otherwise the default emergency fuse applies. This protects against a
+    repair loop that keeps re-listing the same must-fix findings without
+    converging, without waiting for the full repair envelope to burn.
+    """
+    if packet:
+        risk_budget = packet.get("risk_budget") or {}
+        if isinstance(risk_budget, dict):
+            override = risk_budget.get("max_identical_finding_repeats")
+            if isinstance(override, int) and override > 0:
+                return override
+    return MAX_IDENTICAL_FINDING_REPEATS
+
+
 def enforce(counter: str, current_value: int, packet: dict | None) -> int:
     """Refuse to let `current_value` exceed the effective cap.
 

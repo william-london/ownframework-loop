@@ -4,6 +4,84 @@ All notable current-release changes to OwnFramework Loop are documented here.
 The complete historical changelog through 0.5.2 is preserved at
 [`docs/history/CHANGELOG-through-0.5.2.md`](docs/history/CHANGELOG-through-0.5.2.md).
 
+## 0.7.0 - Final Autonomy Architecture Pass (2026-08-29)
+
+v0.7.0 is the final surgical architecture pass before sealed PROGRAMs run
+fully unattended. The deterministic Loop model, execution seal, exact-SHA
+review, and all human authority boundaries are unchanged. What changes is
+everything that accidentally stopped, slowed, or crippled unattended
+engineering progress.
+
+### Budget and limit model (no accidental global stops)
+
+- token ceilings remain disabled by default; cost ceilings are now disabled
+  by default too (`--max-cost-usd <= 0`); unattended runs are bounded by
+  pass/repair caps, no-progress detection, the new identical-finding
+  repetition fuse, and failure-class retry policy, not by resource
+  conservation;
+- `supervisor enqueue` now consumes packet `risk_budget.max_runtime_seconds`
+  as the operational wall-clock envelope (previously validated but never
+  used). Without a declared envelope or explicit flag, no wall-clock ceiling
+  applies. Explicit operator flags always win;
+- v3 programs may declare up to 2,419,200 s whole-run and 28,800 s per-pass
+  runtime envelopes; the v2 single-run pass ceiling is raised to 7,200 s so
+  packets can no longer only narrow below the 3,600 s fallback;
+- the 3,600 s per-pass fallback fuse is preserved for both modes as
+  stuck-worker protection; long PROGRAM passes fund wider budgets through
+  risk_budget.max_pass_runtime_seconds;
+- unknown model cost no longer quarantines a run unless a cost ceiling is
+  active (live completion and crash recovery both record COST_UNKNOWN at
+  zero and continue).
+
+### Repair continuity (no dead-end quarantines)
+
+- repair context now resolves from two deterministic sources: a fresh
+  CHANGES_REQUESTED review verdict, or the BUILD_RECEIPT evidence when the
+  deterministic build finalizer itself routed the run back for failed
+  required validation. A stale verdict after a post-review validation
+  failure no longer raises a dispatch invariant error (which hard-quarantined
+  the run unrecoverably);
+- cap-exhausted build/review claims seal the run BLOCKED (a legitimate
+  engineered terminal) and dispatch converts the sealed state to TERMINAL,
+  so the supervisor completes cleanly instead of looping quarantine/resume.
+
+### No-progress protection
+
+- the previously declared-but-dead identical-finding fuse is now enforced:
+  a verbatim-repeating must-fix set across consecutive reviews BLOCKs at
+  `risk_budget.max_identical_finding_repeats` (default 8). The streak resets
+  on PROGRAM checkpoint advancement.
+
+### Transition immediacy
+
+- foreground lane markers no longer insert 10-minute idle gaps between a
+  completed build and an available review (or vice versa): cross-role ready
+  states reschedule with zero delay; AWAITING_APPROVAL is STARTABLE for the
+  builder lane (never STOP) and WAIT for the reviewer lane.
+
+### Worker capability and authority boundary
+
+- the protected-paths write guard now uses the v0.6.1 explicit
+  execution-context contract; the stale `.ownframework-loop/` ancestor
+  heuristic no longer blocks ordinary operator/maintenance sessions. In-lane
+  allowances add the supervisor runtime-cache root and system scratch dirs;
+- reviewer lanes may now run the project's validation toolchain (pytest,
+  npm/npx/pnpm/yarn/bun/node/deno, make/cmake/ctest, just, cargo/rustc, go,
+  mvn/gradle/java, uv/pip/poetry/pdm, docker, curl/wget, common local DB
+  CLIs, playwright). Source mutation remains impossible: git mutation
+  commands stay outside the allowlist, forbidden patterns still apply, and
+  the finalizer still refuses a verdict from a non-clean reviewer worktree;
+- the allowed tool surface adds NotebookEdit and task-management tools
+  alongside the existing Agent/Skill delegation surface;
+- the external-action guard now intercepts MCP tool calls in semantic lanes:
+  read-only MCP verbs pass, unknown/mutating verbs are refused, so
+  operator-granted MCP access stays inside the external authority boundary;
+- registry publishing joins the forbidden list for all lanes: docker push,
+  docker compose push, npm/pnpm/yarn publish, cargo publish, twine upload.
+  Local container orchestration for dev services remains legitimate;
+- stale documentation claiming local `docker compose up` was forbidden is
+  corrected to match the actual policy.
+
 ## 0.6.3 - PROGRAM Autonomy Preflight + Worker Headroom (2026-08-29)
 
 v0.6.3 closes integration gaps surfaced by the first real unattended

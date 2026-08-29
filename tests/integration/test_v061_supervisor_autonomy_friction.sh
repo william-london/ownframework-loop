@@ -21,6 +21,15 @@ repo.mkdir()
 rd = repo / ".ownframework-loop" / "run-auto"
 rd.mkdir(parents=True)
 (rd / "STATE.json").write_text(json.dumps({"state": "BUILDING"}), encoding="utf-8")
+# run_one resolves the per-pass timeout from the packet; a real run always
+# carries WORK_PACKET.md, so the fixture provides a minimal parseable one.
+(rd / "WORK_PACKET.md").write_text(
+    "```json\n"
+    + json.dumps({"schema": "ownframework-work-packet/v2",
+                  "execution_mode": "single", "risk_budget": {}})
+    + "\n```\n",
+    encoding="utf-8",
+)
 semantic = rd / "BUILD_AGENT_RESULT.json"
 semantic.write_text("{}", encoding="utf-8")
 db = root / "supervisor.sqlite3"

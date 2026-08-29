@@ -104,20 +104,24 @@ echo "Test 3: Repair-round ceiling per packet (2/6/12/25)"
 echo "============================================================"
 PYTHONPATH="$LIB_DIR" python3 - <<'PY'
 import sys
-from ownframework_loop import limits
-# All four values should now be reachable as effective_cap
-for max_rounds in (2, 6, 12, 25):
+from ownframework_loop import limits, util
+# v0.6.3 widened the absolute repair envelope to 128 so long PROGRAMs can fund
+# checkpoint-local repair budgets. Every value up to and including the absolute
+# ceiling is reachable as effective_cap.
+abs_ceiling = util.ABSOLUTE_BUDGET_CEILING["max_repair_rounds"]
+assert abs_ceiling == 128, f"absolute repair ceiling changed unexpectedly: {abs_ceiling}"
+for max_rounds in (2, 6, 12, 25, 50, 128):
     pkt = {"risk_budget": {"max_repair_rounds": max_rounds}}
     cap = limits.effective_cap("repair_round", pkt)
     print(f"  effective_cap(repair_round, max_repair_rounds={max_rounds}) = {cap}")
     assert cap == max_rounds, f"expected {max_rounds}, got {cap}"
-# Over-ceiling (25 is at absolute boundary; 30 must refuse)
+# Over-ceiling: the absolute boundary (128) still refuses anything above it.
 try:
-    limits.effective_cap("repair_round", {"risk_budget": {"max_repair_rounds": 50}})
-    print("  PY-FAIL: 50 was not refused")
+    limits.effective_cap("repair_round", {"risk_budget": {"max_repair_rounds": abs_ceiling + 1}})
+    print(f"  PY-FAIL: {abs_ceiling + 1} was not refused")
     sys.exit(1)
 except limits.RepairLimitExceeded:
-    print("  PY-OK: 50 refused by absolute ceiling")
+    print(f"  PY-OK: {abs_ceiling + 1} refused by absolute ceiling")
 # limits.MAX_REPAIR_ROUNDS is at least 24
 assert limits.MAX_REPAIR_ROUNDS >= 24, "MAX_REPAIR_ROUNDS too small"
 print(f"  MAX_REPAIR_ROUNDS = {limits.MAX_REPAIR_ROUNDS} (emergency fuse)")

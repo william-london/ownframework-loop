@@ -106,14 +106,22 @@ def _validate_risk_budget_envelope(meta: dict[str, Any]) -> list[str]:
     if not isinstance(rb, dict):
         return ["risk_budget must be an object"]
     v3 = meta.get("schema") == PROGRAM_SCHEMA_VERSION
+    # Runtime envelopes: a sealed PROGRAM must be able to fund the work it
+    # describes. max_runtime_seconds is the whole-run wall-clock envelope
+    # (consumed by `supervisor enqueue`); max_pass_runtime_seconds is one
+    # semantic worker's authority. Both remain bounded so a packet cannot
+    # declare nonsense values, but the v3 ceilings are sized for real
+    # multi-checkpoint programs (28 days whole-run, 8h per pass). The v2
+    # single-run pass ceiling stays below the historical 3600s fallback fuse
+    # only insofar as packets narrow; it no longer caps BELOW the fallback.
     maxima = {
         "max_files_changed": 500,
         "max_diff_lines": 30000,
         "max_repair_rounds": 128 if v3 else 32,
         "max_build_passes": 128 if v3 else 32,
         "max_review_passes": 128 if v3 else 32,
-        "max_runtime_seconds": 86400 if v3 else 28800,
-        "max_pass_runtime_seconds": 14400 if v3 else 1800,
+        "max_runtime_seconds": 2419200 if v3 else 28800,
+        "max_pass_runtime_seconds": 28800 if v3 else 7200,
         "max_consecutive_no_progress_passes": 8,
         "max_identical_finding_repeats": 8,
     }

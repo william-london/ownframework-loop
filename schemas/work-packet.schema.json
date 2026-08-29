@@ -116,7 +116,7 @@
         "max_diff_lines": { "type": "integer", "minimum": 1, "maximum": 50000 },
         "max_files_changed": { "type": "integer", "minimum": 1, "maximum": 1000 },
         "max_runtime_seconds": { "type": "integer", "minimum": 60, "maximum": 28800 },
-        "max_pass_runtime_seconds": { "type": "integer", "minimum": 60, "maximum": 1800 },
+        "max_pass_runtime_seconds": { "type": "integer", "minimum": 60, "maximum": 7200 },
         "max_consecutive_no_progress_passes": { "type": "integer", "minimum": 1, "maximum": 8 },
         "max_identical_finding_repeats": { "type": "integer", "minimum": 1, "maximum": 8 }
       }

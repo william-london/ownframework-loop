@@ -190,6 +190,27 @@ def _path_in_list(path: str, prefix: str) -> bool:
     return fp == p or fp.startswith(p + "/")
 
 
+def _must_fix_fingerprint(must_fix: list[dict[str, Any]]) -> str:
+    """Return a stable fingerprint for the must-fix finding set ('' when empty).
+
+    The fingerprint is order-insensitive and covers each finding's full
+    semantic payload. A genuinely changed finding set (fixed, rephrased, or
+    replaced findings) produces a different fingerprint and resets the
+    repetition streak; only verbatim repetition trips the fuse.
+    """
+    if not must_fix:
+        return ""
+    from .integrity import canonical_json_dumps
+    parts = sorted(
+        util.sha256_text(canonical_json_dumps(item))
+        for item in must_fix
+        if isinstance(item, dict)
+    )
+    if not parts:
+        return ""
+    return util.sha256_text(":".join(parts))
+
+
 def _assessment_schema_ok(assessment: dict[str, Any]) -> tuple[bool, list[str]]:
     errors: list[str] = []
     for f in ASSESSMENT_REQUIRED:
@@ -602,6 +623,26 @@ def finalize_review(
         if isinstance(f, dict) and f.get("classification") == "must_fix"
     ]
 
+    # 15b. Identical-finding repetition fuse. A must-fix set that repeats
+    # verbatim across consecutive reviews means the repair loop is not
+    # converging even though the candidate changed. Fail closed toward
+    # BLOCKED at the packet-declared (or default) fuse instead of burning
+    # the entire repair envelope on a loop that produces no engineering
+    # progress. The streak and fingerprint persist in STATE.json and reset
+    # on PROGRAM checkpoint advancement.
+    must_fix_fp = _must_fix_fingerprint(must_fix)
+    prior_fp = str(cur_state.get("last_must_fix_fingerprint") or "")
+    prior_streak = int(cur_state.get("identical_finding_streak") or 0)
+    if must_fix_fp and must_fix_fp == prior_fp:
+        identical_finding_streak = prior_streak + 1
+    elif must_fix_fp:
+        identical_finding_streak = 1
+    else:
+        identical_finding_streak = 0
+    identical_finding_exhausted = bool(must_fix_fp) and (
+        identical_finding_streak >= limits_mod.identical_finding_repeat_cap(meta)
+    )
+
     # 16. Stale-SHA record. Each field is computed from current repo state.
     stale_sha_check = {
         "sha_match": (
@@ -645,6 +686,9 @@ def finalize_review(
     elif not ac_coverage_ok or not ng_coverage_ok:
         verdict = "CHANGES_REQUESTED"
         failure_reason = "semantic_coverage_incomplete"
+    elif identical_finding_exhausted:
+        verdict = "BLOCKED"
+        failure_reason = "identical_finding_repeats"
     elif must_fix:
         verdict = "CHANGES_REQUESTED"
         failure_reason = "must_fix_finding"
@@ -694,6 +738,12 @@ def finalize_review(
         "commands_executed": [v["command"] for v in validations],
         "validation_results": validations,
         "tracked_mutation_check": tracked_mutation_check,
+        "identical_finding_check": {
+            "streak": identical_finding_streak,
+            "cap": limits_mod.identical_finding_repeat_cap(meta),
+            "fingerprint": must_fix_fp,
+            "exhausted": identical_finding_exhausted,
+        },
         "stale_sha_check": stale_sha_check,
         "integrity_check": {
             **integrity_check,
@@ -787,6 +837,10 @@ def finalize_review(
                 actor=actor,
                 reason=f"finalizer verdict={verdict}",
                 commit_sha=receipt_candidate_sha,
+                extras={
+                    "identical_finding_streak": identical_finding_streak,
+                    "last_must_fix_fingerprint": must_fix_fp,
+                },
             )
         if next_state == "CHANGES_REQUESTED":
             # v0.3.2: in program mode, route the repair-round increment
@@ -800,7 +854,7 @@ def finalize_review(
                 # Each repair round produces a fresh candidate SHA so
                 # the replay guard sees distinct evidence.
                 ev_sha = (
-                    new_verdict.get("candidate_sha")
+                    new_verdict.get("candidate_sha_reviewed")
                     or (cur or {}).get("last_candidate_sha")
                     or ""
                 )

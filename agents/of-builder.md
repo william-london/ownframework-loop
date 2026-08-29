@@ -32,9 +32,17 @@ Your prompt must provide:
 - `repair_context` when the current pass repairs a `CHANGES_REQUESTED` verdict
 
 If any required value is missing, stop and tell the parent. Do not invent it.
-For an initial build, `repair_context` may be null. For a repair pass caused
-by `CHANGES_REQUESTED`, it is deterministic transport copied from the
-exact prior authoritative `REVIEW_VERDICT.json`.
+For an initial build, `repair_context` may be null. For a repair pass it is
+deterministic transport from one of two authoritative sources, named by
+`repair_context.source_kind`:
+
+- `review_verdict` — copied from the exact prior authoritative
+  `REVIEW_VERDICT.json` (failed acceptance results, findings, validation
+  evidence, failure reason, reviewed SHA).
+- `build_receipt` — copied from the authoritative `BUILD_RECEIPT.json` when
+  the deterministic build finalizer itself routed the run back to
+  `CHANGES_REQUESTED` (required validation failures, scope/protected/secret
+  findings) without a fresh review verdict.
 
 ## Authority
 
@@ -84,13 +92,15 @@ and does not impose that frontmatter as a CLI turn cap.
    contract for this checkpoint; do not claim future-checkpoint criteria as
    addressed merely because they exist at packet level.
 2. If `repair_context` is present, treat its failed acceptance results,
-   findings, validation evidence, failure reason, and exact reviewed SHA as
-   the primary repair evidence. Reason independently about root cause and
-   choose the best coherent fix; do not mechanically patch wording or merely
-   silence the reviewer. You may read the authoritative verdict at
+   findings, failed validation evidence, failure reason, and exact reviewed
+   SHA as the primary repair evidence. Reason independently about root cause
+   and choose the best coherent fix; do not mechanically patch wording or
+   merely silence the reviewer. You may read the authoritative artifact at
    `repair_context.source` for full context, but never modify it.
-3. If `repair_round > 0` and the latest verdict is `CHANGES_REQUESTED` but
-   `repair_context` is absent, stop rather than inventing reviewer feedback.
+3. If `repair_context` is absent on a repair pass, do not invent feedback.
+   Read the prior authoritative `BUILD_RECEIPT.json` / `REVIEW_VERDICT.json`
+   in the run directory, re-run the packet's required validations to
+   reproduce the failure, and reason from that direct evidence.
 4. Inspect existing worktree state first. A replayed parent claim may mean a
    prior agent already produced part or all of this same pass.
 5. Make the smallest coherent implementation within allowed paths and budgets.

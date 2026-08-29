@@ -177,10 +177,16 @@ HREPO="$(make_tmp_repo)"
 HRID="run-v045-hook"
 mkdir -p "$HREPO/.ownframework-loop/$HRID/scratch/builder/pass-0001" "$HREPO/.ownframework-loop/$HRID/scratch/builder/pass-0002"
 HREPO="$HREPO" HRID="$HRID" python3 -B <<'PY'
-import json, os
+import json, os, sys
 from pathlib import Path
+sys.path.insert(0, os.environ.get("OFLOOP_LIB", ""))
 repo=Path(os.environ["HREPO"]); rid=os.environ["HRID"]
 (repo/".ownframework-loop"/rid/"STATE.json").write_text(json.dumps({"state":"BUILDING","build_pass_count":2,"review_pass_count":0}))
+# v0.7.0: the write guard is scoped by the explicit execution-context
+# contract. Establish a foreground builder lane so the current-pass
+# scoping is active.
+from ownframework_loop import role_context
+role_context.enter_semantic_role(canonical_repo=repo, run_id=rid, role="builder")
 PY
 hook_call() {
   local target="$1"

@@ -183,8 +183,8 @@
         "max_repair_rounds": { "type": "integer", "minimum": 1, "maximum": 128 },
         "max_diff_lines": { "type": "integer", "minimum": 1, "maximum": 30000 },
         "max_files_changed": { "type": "integer", "minimum": 1, "maximum": 500 },
-        "max_runtime_seconds": { "type": "integer", "minimum": 60, "maximum": 86400 },
-        "max_pass_runtime_seconds": { "type": "integer", "minimum": 60, "maximum": 14400 },
+        "max_runtime_seconds": { "type": "integer", "minimum": 60, "maximum": 2419200 },
+        "max_pass_runtime_seconds": { "type": "integer", "minimum": 60, "maximum": 28800 },
         "max_consecutive_no_progress_passes": { "type": "integer", "minimum": 1, "maximum": 8 },
         "max_identical_finding_repeats": { "type": "integer", "minimum": 1, "maximum": 8 }
       }

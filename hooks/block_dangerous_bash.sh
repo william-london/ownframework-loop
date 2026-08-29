@@ -33,10 +33,13 @@
 # is NOT a semantic worker and is NOT scoped by this guard.
 #
 # INSIDE an active semantic lane the guard refuses:
-#   * any role: external-action patterns (git push, git push --no-verify,
-#     git merge, git reset --hard, git clean -fd, git remote add,
-#     docker compose up/down/restart, operator-blocked SSH targets,
-#     operator-blocked executables) — see FORBIDDEN_PATTERNS;
+#   * any role: external-action patterns (git push in all forms, git
+#     merge, git reset --hard, git clean -fd, git remote add/set-url/
+#     remove, registry publishing such as docker push / npm publish,
+#     ofloop spec approve, systemctl mutations, operator-blocked SSH
+#     targets, operator-blocked executables) — see FORBIDDEN_PATTERNS.
+#     Local container orchestration for dev services (docker compose
+#     up/down) and localhost tooling remain permitted;
 #   * reviewer role: ANY command outside the read-only allowlist
 #     (REVIEWER_ALLOWLIST_PATTERNS) — read-only inspection of the
 #     candidate SHA only.

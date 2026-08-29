@@ -24,6 +24,15 @@
         ]
       },
       {
+        "matcher": "mcp__.*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/external_action_guard.sh"
+          }
+        ]
+      },
+      {
         "matcher": "Write|Edit|MultiEdit|NotebookEdit",
         "hooks": [
           {
@@ -45,6 +54,6 @@
       }
     ]
   },
-  "description": "OwnFramework Loop — exact-run, exact-role scoped hooks. Refuse cross-run writes, canonical checkout mutations during build, external effects during an active run, and direct mutations of authoritative artifacts. Broad engineering tools (read, write within authority, shell, web search) remain permitted.",
-  "version": "0.2.1"
+  "description": "OwnFramework Loop — exact-run, exact-role scoped hooks. Refuse cross-run writes, canonical checkout mutations during build, external effects during an active run (including unknown MCP verbs), and direct mutations of authoritative artifacts. Broad engineering tools (read, write within authority, shell, web search, local containers, localhost services) remain permitted.",
+  "version": "0.3.0"
 }

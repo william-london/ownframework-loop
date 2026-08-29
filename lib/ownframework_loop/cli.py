@@ -599,6 +599,33 @@ def _require_valid_approval(repo: Path, run_id: str) -> tuple[dict[str, Any], di
     return meta, approval_doc or {}, packet_path
 
 
+def _seal_blocked_on_cap_exhaustion(
+    repo: Path, run_id: str, *, actor: str, reason: str
+) -> None:
+    """Fail closed toward a legitimate BLOCKED terminal on cap exhaustion.
+
+    Cap exhaustion is an engineered stopping condition, not corruption.
+    Sealing BLOCKED lets the supervisor reach a clean TERMINAL result on its
+    next dispatch instead of looping on quarantine/resume. Idempotent: a run
+    already terminal is left untouched.
+    """
+    cur = state_mod.load(repo, run_id)
+    if not isinstance(cur, dict) or cur.get("state") in (
+        "APPROVED", "BLOCKED", "STOPPED",
+    ):
+        return
+    try:
+        state_mod.transition(
+            repo, run_id,
+            to_state="BLOCKED",
+            actor=actor,
+            reason=reason,
+            commit_sha=cur.get("last_candidate_sha") or None,
+        )
+    except transitions.InvalidTransitionError:
+        return
+
+
 def cmd_build_claim(args: argparse.Namespace) -> None:
     """Claim a build pass. The single durable owner of build_pass_count.
 
@@ -639,6 +666,17 @@ def cmd_build_claim(args: argparse.Namespace) -> None:
                 canonical_repo=repo,
                 run_id=args.run_id,
                 packet=meta,
+            )
+        except program_mod.ClaimCapExhausted as e:
+            _seal_blocked_on_cap_exhaustion(
+                repo, args.run_id,
+                actor="of-loop-cap-gate",
+                reason=f"build claim refused; cap exhausted: {e}",
+            )
+            _emit_error(
+                f"build claim refused (cap exhausted; run sealed BLOCKED): {e}",
+                exit_code=4,
+                classification="OF_LOOP_CLAIM_CAP_EXHAUSTED",
             )
         except program_mod.ClaimRefused as e:
             _emit_error(f"build claim refused: {e}", exit_code=4)
@@ -684,7 +722,16 @@ def cmd_build_claim(args: argparse.Namespace) -> None:
                     hard_cap=True,
                 )
             except limits_mod.RepairLimitExceeded as e:
-                _emit_error(f"repair limit exceeded: {e}", exit_code=4)
+                _seal_blocked_on_cap_exhaustion(
+                    repo, args.run_id,
+                    actor="of-loop-cap-gate",
+                    reason=f"build cap exhausted: {e}",
+                )
+                _emit_error(
+                    f"build claim refused (cap exhausted; run sealed BLOCKED): {e}",
+                    exit_code=4,
+                    classification="OF_LOOP_CLAIM_CAP_EXHAUSTED",
+                )
             state_mod.append_event(
                 repo, args.run_id,
                 event_type="build_claimed",
@@ -722,6 +769,17 @@ def cmd_review_claim(args: argparse.Namespace) -> None:
                 canonical_repo=repo,
                 run_id=args.run_id,
                 packet=meta,
+            )
+        except program_mod.ClaimCapExhausted as e:
+            _seal_blocked_on_cap_exhaustion(
+                repo, args.run_id,
+                actor="of-loop-cap-gate",
+                reason=f"review claim refused; cap exhausted: {e}",
+            )
+            _emit_error(
+                f"review claim refused (cap exhausted; run sealed BLOCKED): {e}",
+                exit_code=4,
+                classification="OF_LOOP_CLAIM_CAP_EXHAUSTED",
             )
         except program_mod.ClaimRefused as e:
             _emit_error(f"review claim refused: {e}", exit_code=4)
@@ -767,7 +825,16 @@ def cmd_review_claim(args: argparse.Namespace) -> None:
                     hard_cap=True,
                 )
             except limits_mod.RepairLimitExceeded as e:
-                _emit_error(f"repair limit exceeded: {e}", exit_code=4)
+                _seal_blocked_on_cap_exhaustion(
+                    repo, args.run_id,
+                    actor="of-loop-cap-gate",
+                    reason=f"review cap exhausted: {e}",
+                )
+                _emit_error(
+                    f"review claim refused (cap exhausted; run sealed BLOCKED): {e}",
+                    exit_code=4,
+                    classification="OF_LOOP_CLAIM_CAP_EXHAUSTED",
+                )
             state_mod.append_event(
                 repo, args.run_id,
                 event_type="review_claimed",
@@ -1630,6 +1697,23 @@ def _build_parser() -> argparse.ArgumentParser:
     # supervisor — durable machine execution clock. Protocol truth remains in core artifacts.
     def cmd_supervisor_enqueue(args: argparse.Namespace) -> None:
         repo = _repo_path(args.repo)
+        # Budget ceilings are off unless deliberately funded. The packet's
+        # risk_budget.max_runtime_seconds is the declared whole-run wall-clock
+        # envelope; it was validated at packet time but historically never
+        # consumed, leaving every unattended run under accidental fixed
+        # ceilings. Explicit operator flags always win over the packet.
+        max_wall_seconds = args.max_wall_seconds
+        if max_wall_seconds is None:
+            max_wall_seconds = 0
+            packet_path = state_mod.run_dir(repo, args.run_id) / "WORK_PACKET.md"
+            if packet_path.exists():
+                try:
+                    pmeta, _ = packet_mod.parse_packet_file(packet_path)
+                    rb = pmeta.get("risk_budget") or {}
+                    if isinstance(rb, dict):
+                        max_wall_seconds = int(rb.get("max_runtime_seconds") or 0)
+                except (OSError, ValueError):
+                    max_wall_seconds = 0
         out = supervisor_mod.enqueue(
             canonical_repo=repo,
             run_id=args.run_id,
@@ -1640,7 +1724,7 @@ def _build_parser() -> argparse.ArgumentParser:
             max_transient_recovery_cycles=args.max_transient_recovery_cycles,
             max_total_cost_usd=args.max_cost_usd,
             max_total_tokens=args.max_total_tokens,
-            max_wall_seconds=args.max_wall_seconds,
+            max_wall_seconds=max_wall_seconds,
         )
         _emit(out)
 
@@ -1704,16 +1788,20 @@ def _build_parser() -> argparse.ArgumentParser:
         help="bounded 10-minute circuit-breaker recoveries before transient quarantine; <=0 disables auto-recovery",
     )
     s_enq.add_argument(
-        "--max-cost-usd", type=float, default=25.0,
-        help="operational model-cost ceiling per enqueued run; <=0 disables",
+        "--max-cost-usd", type=float, default=0.0,
+        help="operational model-cost ceiling per enqueued run; <=0 disables "
+             "(disabled by default: unattended progress is bounded by semantic "
+             "pass/repair caps and no-progress detection, not cost conservation)",
     )
     s_enq.add_argument(
         "--max-total-tokens", type=int, default=0,
         help="optional provider-reported token ceiling; <=0 disables",
     )
     s_enq.add_argument(
-        "--max-wall-seconds", type=int, default=28800,
-        help="operational wall-clock ceiling from first supervisor execution; <=0 disables",
+        "--max-wall-seconds", type=int, default=None,
+        help="operational wall-clock ceiling from first supervisor execution; "
+             "defaults to packet risk_budget.max_runtime_seconds when declared, "
+             "otherwise disabled (<=0 disables)",
     )
     s_enq.set_defaults(func=cmd_supervisor_enqueue)
     s_ss = sup_sub.add_parser("status", help="show supervisor operational state")

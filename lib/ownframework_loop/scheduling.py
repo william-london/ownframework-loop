@@ -80,11 +80,17 @@ def recommend_next_delay_minutes(
 def _builder_decision(state: str) -> tuple[str, int]:
     if state in ("READY_TO_BUILD", "BUILDING", "CHANGES_REQUESTED"):
         return "RESCHEDULE", 0
+    if state == "AWAITING_APPROVAL":
+        # Pre-start is STARTABLE: the builder owns the first claim, which
+        # creates the execution seal. Never STOP a startable run.
+        return "RESCHEDULE", 0
     if state == "READY_FOR_REVIEW":
-        return "RESCHEDULE", 10
+        # The next semantic action (review) is available immediately. The
+        # builder lane hands over with zero idle delay.
+        return "RESCHEDULE", 0
     if state == "REVIEWING":
-        return "RESCHEDULE", 15
-    if state in ("APPROVED", "BLOCKED", "STOPPED", "AWAITING_APPROVAL"):
+        return "RESCHEDULE", 5
+    if state in ("APPROVED", "BLOCKED", "STOPPED"):
         return "STOP", 0
     return "STOP", 0
 
@@ -93,12 +99,17 @@ def _reviewer_decision(state: str) -> tuple[str, int]:
     if state == "READY_FOR_REVIEW":
         return "RESCHEDULE", 0
     if state in ("READY_TO_BUILD", "CHANGES_REQUESTED"):
-        # The builder owns these phases. A long-lived reviewer lane must
-        # remain scheduled so it can review the next candidate/checkpoint.
-        return "RESCHEDULE", 10
+        # The builder owns these phases, but the next candidate may complete
+        # at any moment: keep polling with zero idle delay so the review
+        # starts immediately.
+        return "RESCHEDULE", 0
+    if state == "AWAITING_APPROVAL":
+        # The builder owns first start; the reviewer lane waits briefly
+        # instead of terminating, so it picks up the first candidate.
+        return "RESCHEDULE", 5
     if state in ("BUILDING", "REVIEWING"):
-        return "RESCHEDULE", 15
-    if state in ("APPROVED", "BLOCKED", "STOPPED", "AWAITING_APPROVAL"):
+        return "RESCHEDULE", 5
+    if state in ("APPROVED", "BLOCKED", "STOPPED"):
         return "STOP", 0
     return "STOP", 0
 

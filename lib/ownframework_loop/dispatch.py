@@ -257,83 +257,175 @@ def _terminal(run_id: str, state: str) -> dict[str, Any]:
     }
 
 
-def _repair_context_from_verdict(
+def _truncate_evidence_text(value: Any, limit: int = 4000) -> str:
+    text = str(value or "")
+    return text if len(text) <= limit else text[:limit] + "...[truncated]"
+
+
+def _repair_context_from_receipt(
     *,
     canonical_repo: Path,
     run_id: str,
     state_doc: dict[str, Any],
 ) -> dict[str, Any] | None:
-    """Return deterministic reviewer feedback for a fresh repair builder.
+    """Return deterministic build-validation feedback for a repair builder.
 
-    The context is non-authoritative transport. REVIEW_VERDICT.json remains
-    authoritative. A fresh semantic worker should not have to rediscover the
-    prior review failure from scratch, but it remains free to reason about the
-    best coherent fix.
+    A CHANGES_REQUESTED state can originate from the deterministic build
+    finalizer (required validation failed / scope / protected / secret
+    findings) without any fresh review verdict. The authoritative
+    BUILD_RECEIPT.json then carries the exact failed evidence; transport it
+    so the fresh builder does not have to rediscover the failure blindly.
     """
-    repair_round = int(state_doc.get("repair_round") or 0)
-    if repair_round <= 0:
+    path = state_mod.run_dir(canonical_repo, run_id) / "BUILD_RECEIPT.json"
+    receipt = _load_json_file(path)
+    if receipt is None:
         return None
-
-    path = state_mod.run_dir(canonical_repo, run_id) / "REVIEW_VERDICT.json"
-    verdict = _load_json_file(path)
-    if verdict is None:
-        raise DispatchError(
-            "repair context unavailable: REVIEW_VERDICT.json missing or invalid"
-        )
-    if verdict.get("schema") != "ownframework-loop-review-verdict/v2":
-        raise DispatchError("repair context unavailable: review verdict schema mismatch")
-    if verdict.get("run_id") != run_id:
-        raise DispatchError("repair context unavailable: review verdict run_id mismatch")
-
-    # PROGRAM repair counters are cumulative. A later checkpoint can have a
-    # non-zero top-level repair counter while the latest verdict is APPROVED.
-    # Only an exact latest CHANGES_REQUESTED verdict creates repair context.
-    if verdict.get("verdict") != "CHANGES_REQUESTED":
+    if str(receipt.get("next_state") or "") != "CHANGES_REQUESTED":
         return None
-
-    reviewed_sha = str(verdict.get("candidate_sha_reviewed") or "")
+    receipt_candidate = str(receipt.get("candidate_sha") or "")
     state_candidate = str(state_doc.get("last_candidate_sha") or "")
-    if not reviewed_sha or (state_candidate and reviewed_sha != state_candidate):
-        raise DispatchError(
-            "repair context unavailable: reviewed candidate does not match state"
-        )
+    if not receipt_candidate or (state_candidate and receipt_candidate != state_candidate):
+        return None
 
-    acceptance = verdict.get("acceptance_results") or []
-    non_goals = verdict.get("non_goal_results") or []
-    findings = verdict.get("findings") or []
-    validations = verdict.get("validation_results") or []
-    if not all(
-        isinstance(items, list)
-        for items in (acceptance, non_goals, findings, validations)
-    ):
-        raise DispatchError("repair context unavailable: review evidence shape invalid")
+    validations = receipt.get("validation") or []
+    failed_validations: list[dict[str, Any]] = []
+    for item in validations if isinstance(validations, list) else []:
+        if not isinstance(item, dict) or bool(item.get("passed")):
+            continue
+        failed_validations.append({
+            "name": item.get("name"),
+            "command": item.get("command"),
+            "exit_code": item.get("exit_code"),
+            "expected_exit_code": item.get("expected_exit_code"),
+            "timed_out": bool(item.get("timed_out")),
+            "duration_seconds": item.get("duration_seconds"),
+            "stdout": _truncate_evidence_text(item.get("stdout")),
+            "stderr": _truncate_evidence_text(item.get("stderr")),
+        })
+        if len(failed_validations) >= 10:
+            break
 
-    failed_acceptance = [
-        item for item in acceptance
-        if isinstance(item, dict)
-        and str(item.get("result") or "").lower() != "pass"
-    ]
-    violated_non_goals = [
-        item for item in non_goals
-        if isinstance(item, dict)
-        and str(item.get("result") or "").lower() != "preserved"
-    ]
+    scope_check = receipt.get("scope_check") or {}
+    protected_check = receipt.get("protected_path_check") or {}
+    secret_check = receipt.get("secret_scan_check") or {}
 
     return {
         "schema": "ownframework-loop-repair-context/v1",
         "source": str(path.resolve(strict=False)),
-        "repair_round": repair_round,
-        "review_pass_number": verdict.get("review_pass_number"),
-        "candidate_sha_reviewed": reviewed_sha,
+        "source_kind": "build_receipt",
+        "repair_round": int(state_doc.get("repair_round") or 0),
+        "candidate_sha_reviewed": receipt_candidate,
         "verdict": "CHANGES_REQUESTED",
-        "failure_reason": verdict.get("failure_reason") or "",
-        "failed_acceptance_results": failed_acceptance,
-        "violated_non_goal_results": violated_non_goals,
-        "findings": findings,
-        "validation_results": validations,
-        "escalation_recommended": bool(verdict.get("escalation_recommended")),
-        "escalation_reason": verdict.get("escalation_reason"),
+        "failure_reason": "build_finalizer_validation_failed",
+        "failed_validation_results": failed_validations,
+        "scope_findings": scope_check.get("findings") or [],
+        "protected_path_findings": protected_check.get("offending_paths") or [],
+        "secret_findings": (secret_check.get("findings") or [])[:10],
+        "blocker_reason": receipt.get("blocker_reason"),
+        "escalation_recommended": bool(receipt.get("escalation_recommended")),
+        "escalation_reason": receipt.get("escalation_reason"),
     }
+
+
+def _repair_context_for_build(
+    *,
+    canonical_repo: Path,
+    run_id: str,
+    state_doc: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Return deterministic feedback for a fresh repair builder pass.
+
+    The context is non-authoritative transport. REVIEW_VERDICT.json and
+    BUILD_RECEIPT.json remain authoritative. A fresh semantic worker should
+    not have to rediscover the prior failure from scratch, but it remains
+    free to reason about the best coherent fix.
+
+    Two deterministic sources, in freshness order:
+
+      1. The latest REVIEW_VERDICT.json, when it is CHANGES_REQUESTED and
+         reviewed the exact current candidate.
+      2. The latest BUILD_RECEIPT.json, when the deterministic build
+         finalizer itself routed the run to CHANGES_REQUESTED for the exact
+         current candidate (required validation failed).
+
+    A stale verdict (reviewed an earlier candidate, e.g. the current
+    CHANGES_REQUESTED came from build validation after a repair) is a
+    legitimate state, not corruption: it simply is not fresh repair
+    evidence, so the resolver falls through instead of hard-stopping the
+    run. If no source is fresh, the builder proceeds without transport
+    context — the packet and worktree remain sufficient authority.
+    """
+    state_candidate = str(state_doc.get("last_candidate_sha") or "")
+
+    path = state_mod.run_dir(canonical_repo, run_id) / "REVIEW_VERDICT.json"
+    verdict = _load_json_file(path)
+    if (
+        verdict is not None
+        and verdict.get("schema") == "ownframework-loop-review-verdict/v2"
+        and verdict.get("run_id") == run_id
+        and verdict.get("verdict") == "CHANGES_REQUESTED"
+    ):
+        reviewed_sha = str(verdict.get("candidate_sha_reviewed") or "")
+        if reviewed_sha and (not state_candidate or reviewed_sha == state_candidate):
+            acceptance = verdict.get("acceptance_results") or []
+            non_goals = verdict.get("non_goal_results") or []
+            findings = verdict.get("findings") or []
+            validations = verdict.get("validation_results") or []
+            if all(
+                isinstance(items, list)
+                for items in (acceptance, non_goals, findings, validations)
+            ):
+                failed_acceptance = [
+                    item for item in acceptance
+                    if isinstance(item, dict)
+                    and str(item.get("result") or "").lower() != "pass"
+                ]
+                violated_non_goals = [
+                    item for item in non_goals
+                    if isinstance(item, dict)
+                    and str(item.get("result") or "").lower() != "preserved"
+                ]
+                return {
+                    "schema": "ownframework-loop-repair-context/v1",
+                    "source": str(path.resolve(strict=False)),
+                    "source_kind": "review_verdict",
+                    "repair_round": int(state_doc.get("repair_round") or 0),
+                    "review_pass_number": verdict.get("review_pass_number"),
+                    "candidate_sha_reviewed": reviewed_sha,
+                    "verdict": "CHANGES_REQUESTED",
+                    "failure_reason": verdict.get("failure_reason") or "",
+                    "failed_acceptance_results": failed_acceptance,
+                    "violated_non_goal_results": violated_non_goals,
+                    "findings": findings,
+                    "validation_results": validations,
+                    "escalation_recommended": bool(verdict.get("escalation_recommended")),
+                    "escalation_reason": verdict.get("escalation_reason"),
+                }
+
+    return _repair_context_from_receipt(
+        canonical_repo=canonical_repo, run_id=run_id, state_doc=state_doc,
+    )
+
+
+def _claim_or_terminal(
+    args: list[str], *, repo: Path, run_id: str
+) -> dict[str, Any]:
+    """Run one claim CLI command; convert cap-exhaustion seals to TERMINAL.
+
+    Claim owners fail closed toward BLOCKED when a packet-bound cap is
+    exhausted. When the claim fails but the run is now terminal, dispatch
+    surfaces the terminal result instead of an error, so the supervisor
+    completes the job cleanly without an operator quarantine/resume cycle.
+    """
+    try:
+        return _run_cli(args)
+    except DispatchError:
+        cur = state_mod.load(repo, run_id)
+        if isinstance(cur, dict):
+            new_state = str(cur.get("state") or "")
+            if new_state in TERMINAL_STATES:
+                return _terminal(run_id, new_state)
+        raise
 
 
 def claim_next(*, canonical_repo: Path, run_id: str) -> dict[str, Any]:
@@ -399,14 +491,17 @@ def claim_next(*, canonical_repo: Path, run_id: str) -> dict[str, Any]:
                 return _terminal(run_id, state)
 
             if state in BUILD_STATES:
-                repair_context = _repair_context_from_verdict(
+                repair_context = _repair_context_for_build(
                     canonical_repo=repo,
                     run_id=run_id,
                     state_doc=cur,
                 )
-                claim = _run_cli(
-                    ["build", "claim", str(repo), run_id, "--actor", "ofloop-supervisor"]
+                claim = _claim_or_terminal(
+                    ["build", "claim", str(repo), run_id, "--actor", "ofloop-supervisor"],
+                    repo=repo, run_id=run_id,
                 )
+                if claim.get("decision") == "TERMINAL":
+                    return claim
                 prep = _run_cli(["build", "prepare", str(repo), run_id])
                 skel = _run_cli(["build", "agent-skeleton", str(repo), run_id])
                 semantic_path = (
@@ -432,9 +527,12 @@ def claim_next(*, canonical_repo: Path, run_id: str) -> dict[str, Any]:
                 }
 
             if state in REVIEW_STATES:
-                claim = _run_cli(
-                    ["review", "claim", str(repo), run_id, "--actor", "ofloop-supervisor"]
+                claim = _claim_or_terminal(
+                    ["review", "claim", str(repo), run_id, "--actor", "ofloop-supervisor"],
+                    repo=repo, run_id=run_id,
                 )
+                if claim.get("decision") == "TERMINAL":
+                    return claim
                 prep = _run_cli(["review", "prepare", str(repo), run_id])
                 skel = _run_cli(
                     ["review", "assessment-skeleton", str(repo), run_id]

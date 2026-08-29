@@ -27,8 +27,18 @@ from typing import Any
 from . import dispatch as dispatch_mod, packet as packet_mod, runtime_env, state as state_mod
 
 SCHEMA = "ownframework-loop-supervisor/v1"
+# Per-pass runaway fuse fallback. A semantic worker that neither declared a
+# packet budget nor got an operational narrowing is bounded to one hour so a
+# stuck worker cannot hold the single global execution slot indefinitely.
+# Long PROGRAM passes are funded deliberately through
+# risk_budget.max_pass_runtime_seconds (packet authority; up to 28800 for v3)
+# rather than by widening the default fuse.
 DEFAULT_SEMANTIC_TIMEOUT_SECONDS = 3600
-DEFAULT_CLAUDE_ALLOWED_TOOLS = "Read,Edit,Write,Bash,Glob,Grep,WebSearch,WebFetch,Agent,Task,TaskOutput,TaskStop,Skill"
+DEFAULT_CLAUDE_ALLOWED_TOOLS = (
+    "Read,Edit,Write,NotebookEdit,Bash,Glob,Grep,WebSearch,WebFetch,"
+    "Agent,Task,TaskOutput,TaskStop,TaskCreate,TaskUpdate,TaskList,TaskGet,"
+    "TodoWrite,Skill"
+)
 
 
 def resolve_semantic_timeout(
@@ -39,7 +49,8 @@ def resolve_semantic_timeout(
 
     Packet max_pass_runtime_seconds is authority. A positive supervisor
     timeout may narrow it operationally but cannot widen it. With neither,
-    preserve the historical one-hour fallback.
+    preserve the historical one-hour fallback fuse for both single and
+    PROGRAM runs; a PROGRAM funds wider passes through its packet budget.
     """
     rb = (packet_meta or {}).get("risk_budget") or {}
     packet_limit = 0
@@ -531,23 +542,29 @@ def _recover_stale_running(conn: sqlite3.Connection) -> int:
             if not bool(int(attempt["cost_accounted"] or 0)):
                 recovered_cost = _parse_cost_from_durable_stdout(attempt["stdout_path"])
                 if recovered_cost is None:
-                    # We cannot prove how much the provider charged. Continuing
-                    # could exceed the operator's budget, so fail operationally
-                    # closed instead of assuming zero.
-                    conn.execute(
-                        """UPDATE semantic_attempts SET status='COST_UNKNOWN',
-                           completed_at=? WHERE attempt_id=?""",
-                        (time.time(), attempt_id),
-                    )
-                    conn.execute(
-                        """UPDATE jobs SET status='QUARANTINED', last_error=?,
-                           worker_pid=NULL, worker_started_at=NULL, worker_role=NULL,
-                           next_attempt_at=0, updated_at=? WHERE id=?""",
-                        ("semantic worker died and model cost could not be recovered "
-                         "from durable structured output", time.time(), row["id"]),
-                    )
-                    conn.commit()
-                    continue
+                    # Cost telemetry could not be recovered. With an active
+                    # operator cost ceiling, continuing could exceed the declared
+                    # budget, so fail operationally closed instead of assuming
+                    # zero. Without a ceiling the attempt is accounted at zero
+                    # (marked COST_UNKNOWN) and the run resumes — telemetry loss
+                    # alone must not stop unattended progress.
+                    if float(row["max_total_cost_usd"] or 0) > 0:
+                        conn.execute(
+                            """UPDATE semantic_attempts SET status='COST_UNKNOWN',
+                               completed_at=? WHERE attempt_id=?""",
+                            (time.time(), attempt_id),
+                        )
+                        conn.execute(
+                            """UPDATE jobs SET status='QUARANTINED', last_error=?,
+                               worker_pid=NULL, worker_started_at=NULL, worker_role=NULL,
+                               next_attempt_at=0, updated_at=? WHERE id=?""",
+                            ("semantic worker died and model cost could not be recovered "
+                             "from durable structured output while a cost ceiling is active",
+                             time.time(), row["id"]),
+                        )
+                        conn.commit()
+                        continue
+                    recovered_cost = 0.0
                 recovered_usage = _parse_token_usage_from_durable_stdout(
                     attempt["stdout_path"]
                 )
@@ -619,10 +636,19 @@ def enqueue(
     max_infra_failures: int = 3,
     max_transient_failures: int = 8,
     max_transient_recovery_cycles: int = 2,
-    max_total_cost_usd: float = 25.0,
+    max_total_cost_usd: float = 0.0,
     max_total_tokens: int = 0,
-    max_wall_seconds: int = 28800,
+    max_wall_seconds: int = 0,
 ) -> dict[str, Any]:
+    """Create or refresh one enqueued run's operational envelope.
+
+    Budget ceilings are OFF unless deliberately funded: a value <= 0 disables
+    that ceiling. Long PROGRAMs must not hit accidental global stop lines;
+    protection against stuck execution comes from semantic pass fuses,
+    no-progress detection, pass/repair caps, and failure-class retry policy.
+    The CLI resolves packet-declared envelopes (risk_budget.max_runtime_seconds
+    -> wall clock) before calling this; explicit operator flags win.
+    """
     state_mod.validate_run_id(run_id)
     repo = str(Path(canonical_repo).resolve(strict=False))
     db = db_path or default_db_path()
@@ -1070,8 +1096,12 @@ def _job_dict(row: sqlite3.Row, db: Path) -> dict[str, Any]:
         d["packet_max_pass_runtime_seconds"] = int(
             rb.get("max_pass_runtime_seconds") or 0
         ) if isinstance(rb, dict) else 0
+        d["packet_max_runtime_seconds"] = int(
+            rb.get("max_runtime_seconds") or 0
+        ) if isinstance(rb, dict) else 0
     except Exception:
         d["packet_max_pass_runtime_seconds"] = 0
+        d["packet_max_runtime_seconds"] = 0
     try:
         d.update(_core_snapshot(Path(str(row["repo"])), str(row["run_id"])))
     except Exception as exc:
@@ -1995,40 +2025,47 @@ def run_one(*, db_path: Path | None = None, timeout_seconds: int = 0) -> dict[st
                 durable_files=durable_files,
             )
             if not result.cost_known:
+                # Cost-telemetry fail-closed applies only while an operator
+                # cost ceiling is actually active. Without a ceiling, unknown
+                # cost cannot breach any declared budget; the attempt is
+                # recorded COST_UNKNOWN at zero and execution continues so an
+                # unattended PROGRAM is not stopped by telemetry loss.
                 conn.execute(
                     """UPDATE semantic_attempts SET status='COST_UNKNOWN',
                        completed_at=?, returncode=? WHERE attempt_id=? AND job_id=?""",
                     (time.time(), int(result.returncode), attempt_id, int(job["id"])),
                 )
                 conn.commit()
-                _update_job(
-                    conn,
-                    job["id"],
-                    status_value="QUARANTINED",
-                    last_error=(
-                        "semantic worker completed without a trustworthy finite "
-                        "total_cost_usd; refusing to assume zero cost"
-                    ),
-                    last_failure_class=(
-                        "timeout_usage_unknown"
-                        if int(result.returncode) == 124
-                        else "usage_unknown"
-                    ),
-                    last_failure_reason=(
-                        "runner_timeout_cost_unknown"
-                        if int(result.returncode) == 124
-                        else "model_cost_unknown"
-                    ),
-                    next_attempt_at=0,
-                )
-                return {
-                    "schema": SCHEMA,
-                    "ok": False,
-                    "action": "QUARANTINED",
-                    "job_id": job["id"],
-                    "reason": "model_cost_unknown",
-                    "attempt_id": attempt_id,
-                }
+                if float(job["max_total_cost_usd"] or 0) > 0:
+                    _update_job(
+                        conn,
+                        job["id"],
+                        status_value="QUARANTINED",
+                        last_error=(
+                            "semantic worker completed without a trustworthy finite "
+                            "total_cost_usd while a cost ceiling is active; refusing "
+                            "to assume zero cost"
+                        ),
+                        last_failure_class=(
+                            "timeout_usage_unknown"
+                            if int(result.returncode) == 124
+                            else "usage_unknown"
+                        ),
+                        last_failure_reason=(
+                            "runner_timeout_cost_unknown"
+                            if int(result.returncode) == 124
+                            else "model_cost_unknown"
+                        ),
+                        next_attempt_at=0,
+                    )
+                    return {
+                        "schema": SCHEMA,
+                        "ok": False,
+                        "action": "QUARANTINED",
+                        "job_id": job["id"],
+                        "reason": "model_cost_unknown",
+                        "attempt_id": attempt_id,
+                    }
 
             if int(job["max_total_tokens"] or 0) > 0 and not result.tokens_known:
                 conn.execute(

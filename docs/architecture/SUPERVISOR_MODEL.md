@@ -103,14 +103,26 @@ truth. Enqueue defaults currently provide:
 
 - one global active worker per supervisor database;
 - up to 3 infrastructure failures before quarantine;
-- an 8-hour wall-clock ceiling from first execution;
-- a $25 observed/estimated model-cost ceiling.
+- bounded transient-failure retry/circuit-breaker policy;
+- no wall-clock ceiling by default;
+- no model-cost ceiling by default;
+- no provider-token ceiling by default.
 
-The cost and wall ceilings are configurable at enqueue time. A ceiling
-violation sets supervisor state to QUARANTINED; it does not manufacture
-`BLOCKED` or alter the deterministic engineering verdict. Zero-cost semantic
-replay/finalization is still allowed when a worker already completed its
-artifact before a supervisor restart.
+Wall-clock, cost, and token ceilings are deliberately off unless funded. A
+long sealed PROGRAM must be able to run to completion; unattended progress is
+bounded by meaningful-progress protections (per-checkpoint and cumulative
+pass/repair caps, no-progress detection, the identical-finding repetition
+fuse, and failure-class retry policy), not by resource conservation.
+
+When an operator wants a hard spend line, `--max-wall-seconds`,
+`--max-cost-usd`, and `--max-total-tokens` are configurable at enqueue time.
+`--max-wall-seconds` defaults to the packet's declared
+`risk_budget.max_runtime_seconds` when present, so a human-approved whole-run
+envelope is honored. A ceiling violation sets supervisor state to QUARANTINED;
+it does not manufacture `BLOCKED` or alter the deterministic engineering
+verdict. Zero-cost semantic replay/finalization is still allowed when a worker
+already completed its artifact before a supervisor restart. Unknown model cost
+only quarantines while a cost ceiling is actually active.
 
 ## Restart ownership
 
@@ -147,6 +159,13 @@ the sealed packet, exact worktree, checkpoint/AC ids, build receipt, review
 verdict, and deterministic repair_context carry forward what the next pass
 needs.
 
+repair_context is deterministic transport from one of two authoritative
+sources, named by `source_kind`: `review_verdict` (a fresh CHANGES_REQUESTED
+review of the exact current candidate) or `build_receipt` (the deterministic
+build finalizer's own failed-validation evidence). A stale verdict after a
+post-review validation failure is legitimate and falls through rather than
+hard-stopping the run.
+
 The reference runner exposes Claude Code's Agent and Skill tools alongside the
 normal engineering tool set. Subagent delegation is optional and should be
 used when it improves a complex pass, not as busy work. The same semantic-role
@@ -159,7 +178,9 @@ Claude's agent mechanism.
 For v3 packets, risk_budget.max_pass_runtime_seconds is the semantic worker
 timeout authority. A positive supervisor serve --timeout-seconds value can
 only narrow it. If neither is declared, the historical 3600-second fallback
-applies.
+fuse applies to both single and PROGRAM passes; a long PROGRAM funds wider
+passes through its packet budget (up to 28800 seconds per pass) rather than
+by widening the default fuse.
 
 ## Live read-only observability
 
@@ -172,3 +193,7 @@ diff summary.
 There is no deliberate delay between an actionable BUILD finalization and the
 next REVIEW dispatch, or between a review-driven repair and the next BUILD.
 The serve loop sleeps only while IDLE or while explicit backoff policy applies.
+Foreground `/loop` self-pacing markers follow the same rule: whenever the next
+semantic action is available, the cross-role ready state reschedules with zero
+delay; a pre-start run is STARTABLE for the builder lane and WAIT for the
+reviewer lane, never STOP.

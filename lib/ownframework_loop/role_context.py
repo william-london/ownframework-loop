@@ -36,9 +36,15 @@ and ordinary Claude/native permission policy applies.
 The contract never grants external-action authority. Both builder and
 reviewer lanes are FORBIDDEN from:
 
-  * any external-action pattern (git push, git push --no-verify, git
-    merge, git reset --hard, git clean -fd, git remote add, docker
-    compose up, etc.) — see ``guards.FORBIDDEN_PATTERNS``;
+  * any external-action pattern (git push in all forms, git merge,
+    git reset --hard, git clean -fd, git remote add/set-url/remove,
+    registry publishing such as docker push / npm publish / cargo
+    publish / twine upload, ofloop spec approve, system-service
+    mutations, operator-blocked SSH targets and executables) — see
+    ``guards.FORBIDDEN_PATTERNS``. Local container orchestration for
+    development services (e.g. ``docker compose up``), localhost
+    probing, and ordinary project tooling remain legitimate
+    engineering inside the lane;
 
   * any command outside the reviewer allowlist (reviewer only) — see
     ``guards.REVIEWER_ALLOWLIST_PATTERNS``.

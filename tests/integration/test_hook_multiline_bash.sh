@@ -114,8 +114,8 @@ FORBIDDEN = [
      ["EC","SP","A","NL","GT","SP","MG","SP","FOO"]),
     ("variant 6: remote add on second line",
      ["EC","SP","A","NL","GT","SP","RM","SP","AD","SP","ORI","SP","FOO"]),
-    ("variant 7: compose up on second line",
-     ["EC","SP","A","NL","DC","SP","CP","SP","UP"]),
+    ("variant 7: docker push on second line",
+     ["EC","SP","A","NL","DC","SP","PS"]),
     ("variant 8: push on second line (echo+a)",
      ["EC","SP","A","NL","GT","SP","PS"]),
     ("variant 9: push after &&",
@@ -136,6 +136,8 @@ ALLOWED = [
      ["EC","SP","HI","SP","AND","SP","EC","SP","DONE"]),
     ("control 6: harmless command substitution",
      ["EC","SP","DOLLAR","LPAREN","ECHIHI","RPAREN"]),
+    ("control 7: docker compose up is local engineering",
+     ["DC","SP","CP","SP","UP"]),
 ]
 
 for label, parts in FORBIDDEN + ALLOWED:

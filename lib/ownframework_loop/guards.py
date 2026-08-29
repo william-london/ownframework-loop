@@ -63,10 +63,21 @@ FORBIDDEN_PATTERNS: list[tuple[re.Pattern[str], str, str]] = [
     # Human approval is intentionally outside the Claude agent tool surface.
     (re.compile(r"\b(?:\S*/)?ofloop\s+spec\s+approve\b"), "agent invocation of human approval is prohibited", "subcommand"),
     (re.compile(r"\bownframework_loop(?:\.cli)?\b.*\bspec\s+approve\b"), "agent invocation of human approval is prohibited", "subcommand"),
-    # system-service mutations remain blocked. Local container orchestration is
-    # ordinary developer-workstation engineering and is intentionally allowed;
-    # external deploy/publish/provider authority is enforced separately.
+    # system-service mutations remain blocked. Local container orchestration
+    # (docker compose up/down for local dev services, local builds, local
+    # probes) is ordinary developer-workstation engineering and is
+    # intentionally allowed. REGISTRY PUBLISHING is an external effect and
+    # stays prohibited.
     (re.compile(r"\bsystemctl\s+(start|stop|restart|reload)\b"), "systemctl is prohibited", "subcommand"),
+    # Registry / publish effects (no push, no publish, no deploy).
+    (re.compile(r"\bdocker\s+push\b"), "docker push (registry publish) is prohibited", "subcommand"),
+    (re.compile(r"\bdocker\s+compose\s+push\b"), "docker compose push (registry publish) is prohibited", "subcommand"),
+    (re.compile(r"\bdocker-compose\s+push\b"), "docker-compose push (registry publish) is prohibited", "subcommand"),
+    (re.compile(r"\bnpm\s+publish\b"), "npm publish is prohibited", "subcommand"),
+    (re.compile(r"\bpnpm\s+publish\b"), "pnpm publish is prohibited", "subcommand"),
+    (re.compile(r"\byarn\s+publish\b"), "yarn publish is prohibited", "subcommand"),
+    (re.compile(r"\bcargo\s+publish\b"), "cargo publish is prohibited", "subcommand"),
+    (re.compile(r"\btwine\s+upload\b"), "twine upload is prohibited", "subcommand"),
     # remote shell to operator-configured protected production hosts.
     # Targets are loaded from $OFLOOP_BLOCKED_SSH_TARGETS (whitespace- or
     # comma-separated). Empty/unset means no ssh-target blocks (universal
@@ -141,6 +152,14 @@ FORBIDDEN_PATTERNS.extend(_load_operator_configured_executable_blocks())
 
 # Bash command tokens that are allowed for the reviewer (read-only inspection
 # plus the per-packet validation commands and the deterministic checkers).
+#
+# The reviewer must be able to run the project's own validation toolchain to
+# judge acceptance criteria (test runners, compilers, package managers, local
+# services). Source mutation remains impossible: candidate source is read-only
+# by contract, git mutation commands stay outside this list, FORBIDDEN_PATTERNS
+# still apply to the reviewer lane, and the deterministic review finalizer
+# refuses any verdict from a reviewer worktree that is not provably clean at
+# the exact reviewed SHA.
 REVIEWER_ALLOWLIST_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"^\s*git\s+status\b"),
     re.compile(r"^\s*git\s+log\b"),
@@ -160,6 +179,7 @@ REVIEWER_ALLOWLIST_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"^\s*grep\b"),
     re.compile(r"^\s*rg\b"),
     re.compile(r"^\s*wc\b"),
+    re.compile(r"^\s*diff\b"),
     re.compile(r"^\s*shasum\b"),
     re.compile(r"^\s*sha256sum\b"),
     re.compile(r"^\s*python3?\b"),
@@ -169,6 +189,44 @@ REVIEWER_ALLOWLIST_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"^\s*date\b"),
     re.compile(r"^\s*pwd\b"),
     re.compile(r"^\s*env\b"),
+    # Project validation toolchain (packet-required validation and acceptance
+    # evidence). Publish/push forms remain covered by FORBIDDEN_PATTERNS.
+    re.compile(r"^\s*pytest\b"),
+    re.compile(r"^\s*tox\b"),
+    re.compile(r"^\s*nosetests\b"),
+    re.compile(r"^\s*node\b"),
+    re.compile(r"^\s*npm\b"),
+    re.compile(r"^\s*npx\b"),
+    re.compile(r"^\s*pnpm\b"),
+    re.compile(r"^\s*yarn\b"),
+    re.compile(r"^\s*bun\b"),
+    re.compile(r"^\s*deno\b"),
+    re.compile(r"^\s*make\b"),
+    re.compile(r"^\s*cmake\b"),
+    re.compile(r"^\s*ctest\b"),
+    re.compile(r"^\s*just\b"),
+    re.compile(r"^\s*cargo\b"),
+    re.compile(r"^\s*rustc\b"),
+    re.compile(r"^\s*go\b"),
+    re.compile(r"^\s*mvn\b"),
+    re.compile(r"^\s*gradle\b"),
+    re.compile(r"^\s*java\b"),
+    re.compile(r"^\s*javac\b"),
+    re.compile(r"^\s*dotnet\b"),
+    re.compile(r"^\s*uv\b"),
+    re.compile(r"^\s*pip3?\b"),
+    re.compile(r"^\s*poetry\b"),
+    re.compile(r"^\s*pdm\b"),
+    re.compile(r"^\s*docker\b"),
+    re.compile(r"^\s*docker-compose\b"),
+    re.compile(r"^\s*curl\b"),
+    re.compile(r"^\s*wget\b"),
+    re.compile(r"^\s*sqlite3\b"),
+    re.compile(r"^\s*redis-cli\b"),
+    re.compile(r"^\s*psql\b"),
+    re.compile(r"^\s*mysql\b"),
+    re.compile(r"^\s*mongosh\b"),
+    re.compile(r"^\s*playwright\b"),
 ]
 
 

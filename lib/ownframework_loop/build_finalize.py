@@ -502,9 +502,10 @@ def finalize_build(
     # previous run's candidate SHA EXACTLY. Any difference — even a
     # single character — is real progress and resets the streak to 0.
     # The threshold comes from packet.risk_budget.max_consecutive_no_progress_passes
-    # (default: limits.MAX_CONSECUTIVE_NO_PROGRESS_PASSES=8) and acts as
-    # an emergency fuse, not a normal stop. Productive passes continue
-    # indefinitely; identical-no-progress only stops at the threshold.
+    # (default: limits.MAX_CONSECUTIVE_NO_PROGRESS_PASSES=16; packets may only
+    # narrow it) and acts as an emergency fuse, not a normal stop. Productive
+    # passes continue indefinitely; identical-no-progress only stops at the
+    # threshold.
     last_candidate = state.get("last_candidate_sha")
     no_progress_streak = int(state.get("no_progress_streak") or 0)
     progress_made = (not last_candidate) or (last_candidate != candidate_sha)
@@ -532,11 +533,10 @@ def finalize_build(
     if cap_build is not None and new_build_pass_count > cap_build:
         raise RuntimeError(f"build_pass_count={new_build_pass_count} above cap={cap_build}")
 
-    # 19. Derive next_state.
+    # 19. Derive next_state. (Approval binding was proven at step 1; there is
+    # no path back to AWAITING_APPROVAL from BUILDING.)
     if state_mod.is_stop_requested(canonical_repo, run_id):
         next_state = "STOPPED"
-    elif not ok:
-        next_state = "AWAITING_APPROVAL"
     elif hard_secret_blocks:
         next_state = "BLOCKED"
     elif protected_findings:

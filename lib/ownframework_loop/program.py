@@ -569,6 +569,9 @@ def advance_after_review_approval(
                 if next_top_state == "APPROVED"
                 else ""
             ),
+            # A fresh checkpoint starts with a clean review-repetition fuse.
+            "identical_finding_streak": 0,
+            "last_must_fix_fingerprint": "",
         },
     )
     append_event(
@@ -659,6 +662,15 @@ def _bump_counter_one(
 
 class ClaimRefused(ProgramStateError):
     """A deterministic PROGRAM pass claim was refused."""
+
+
+class ClaimCapExhausted(ClaimRefused):
+    """A claim was refused because a packet-bound cap was reached.
+
+    Cap exhaustion is a legitimate engineered stopping condition, not
+    corruption: the run should fail closed toward BLOCKED so the supervisor
+    can surface a terminal result instead of looping on quarantine.
+    """
 
 
 def _resolve_packet_cp(packet: dict[str, Any], cp_id: str) -> dict[str, Any]:
@@ -790,8 +802,10 @@ def _unified_claim_pass(
                 packet_cp=packet_cp,
             )
         except ProgramStateError as exc:
-            # Cap-related refusals are the canonical "claim refused" case.
-            raise ClaimRefused(str(exc)) from exc
+            # _bump_counter_one refuses only on per-checkpoint or cumulative
+            # cap exhaustion; surface that precise classification so claim
+            # owners can fail closed toward BLOCKED instead of quarantine.
+            raise ClaimCapExhausted(str(exc)) from exc
         new_program_evidence = _deepcopy_program(new_program)
         cp_new = _find_cp(new_program_evidence, cp_id)
         ev_map = dict(cp_new.get("last_evidence_sha_by_counter") or {})
@@ -1052,4 +1066,5 @@ __all__ = [
     "verify_frozen_graph",
     "is_program_terminal", "program_terminal_reason",
     "promotion_allowed", "source_tree_accounting",
+    "ClaimCapExhausted",
 ]

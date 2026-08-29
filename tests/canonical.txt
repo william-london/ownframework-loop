@@ -61,3 +61,6 @@ tests/integration/test_v062_scope_suffix_compat.sh
 
 # v0.6.3 PROGRAM pre-execution contract regression
 tests/integration/test_v063_program_preflight.sh
+
+# v0.7.0 final autonomy architecture regression
+tests/integration/test_v070_autonomy_envelope.sh

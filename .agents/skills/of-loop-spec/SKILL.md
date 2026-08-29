@@ -27,8 +27,14 @@ This skill is a host adapter over the deterministic ofloop core.
 3. Inspect only enough repository context to draft an accurate bounded packet.
 4. Use ofloop spec new <repo> "<mission>" to create the run.
 5. Draft WORK_PACKET.md using the repository schema and packet conventions.
-5. Validate the packet shape with the supported validator.
-6. Return to the operator:
+6. For PROGRAM packets with checkpoint-specific outcomes, keep the complete
+   mission acceptance contract at top level and assign it deterministically
+   with each checkpoint's `acceptance_criterion_ids`. If any checkpoint uses
+   scoped AC ids, every checkpoint must declare a non-empty list and the union
+   must cover every top-level AC id. Do not use `not_applicable` for future
+   checkpoint criteria merely to satisfy coverage.
+7. Validate the packet shape with the supported validator.
+8. Return to the operator:
 
    * repo
    * run_id
@@ -41,7 +47,7 @@ This skill is a host adapter over the deterministic ofloop core.
    * optional FOREGROUND / DEBUG builder: /loop /of-loop:build <run-id>
    * optional FOREGROUND / DEBUG reviewer: /loop /of-loop:review <run-id>
 
-7. STOP. Normal background operation is supervisor-first. Enqueue the run; an
+9. STOP. Normal background operation is supervisor-first. Enqueue the run; an
    already commissioned supervisor service consumes it, or `ofloop supervisor
    serve` may run the execution clock manually. The first actionable BUILD
    creates the immutable execution seal automatically.
@@ -88,7 +94,22 @@ Before a v3 PROGRAM is considered ready:
 - ensure a global repair allowance is realizable by the global build/review
   allowance;
 - choose max_pass_runtime_seconds for the complexity of one semantic pass
-  rather than relying on an accidental supervisor timeout.
+  (up to 28800 per pass; the undeclared fallback fuse is 3600, so any pass
+  that legitimately needs longer than one hour must declare its budget);
+- declare risk_budget.max_runtime_seconds as the whole-run wall-clock
+  envelope when the PROGRAM may legitimately run long (up to 2419200).
+  `supervisor enqueue` consumes it as the operational wall ceiling; without
+  it, no wall-clock ceiling applies and the run is bounded only by its
+  semantic pass/repair/no-progress protections.
 
 A packet that can only discover an impossible deterministic ceiling after a
 model has already done work is a spec defect and must not be startable.
+
+## Unattended budget semantics
+
+Token ceilings are off by default and cost ceilings are off by default.
+Unattended execution is bounded by meaningful-progress protections (pass and
+repair caps, no-progress streak, identical-finding repetition fuse, failure-
+class retry policy), not by token or cost conservation. Operators who want a
+hard spend line may pass `--max-cost-usd` / `--max-total-tokens` /
+`--max-wall-seconds` explicitly at enqueue time.

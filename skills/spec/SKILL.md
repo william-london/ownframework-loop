@@ -94,7 +94,22 @@ Before a v3 PROGRAM is considered ready:
 - ensure a global repair allowance is realizable by the global build/review
   allowance;
 - choose max_pass_runtime_seconds for the complexity of one semantic pass
-  rather than relying on an accidental supervisor timeout.
+  (up to 28800 per pass; the undeclared fallback fuse is 3600, so any pass
+  that legitimately needs longer than one hour must declare its budget);
+- declare risk_budget.max_runtime_seconds as the whole-run wall-clock
+  envelope when the PROGRAM may legitimately run long (up to 2419200).
+  `supervisor enqueue` consumes it as the operational wall ceiling; without
+  it, no wall-clock ceiling applies and the run is bounded only by its
+  semantic pass/repair/no-progress protections.
 
 A packet that can only discover an impossible deterministic ceiling after a
 model has already done work is a spec defect and must not be startable.
+
+## Unattended budget semantics
+
+Token ceilings are off by default and cost ceilings are off by default.
+Unattended execution is bounded by meaningful-progress protections (pass and
+repair caps, no-progress streak, identical-finding repetition fuse, failure-
+class retry policy), not by token or cost conservation. Operators who want a
+hard spend line may pass `--max-cost-usd` / `--max-total-tokens` /
+`--max-wall-seconds` explicitly at enqueue time.
