@@ -25,6 +25,15 @@
 
 set -uo pipefail
 
+# The installer under test is macOS-only by design. On non-Darwin
+# runners (CI Linux matrix) the test exits SKIPPED — the installer's
+# own `uname -s != Darwin` check refuses with reason=macos_required
+# which is correct macOS gate behavior, not a test failure.
+if [[ "$(uname -s)" != "Darwin" ]]; then
+  echo "MAC_RUNTIME_PROVENANCE=SKIPPED reason=installer_is_macos_only"
+  exit 0
+fi
+
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/../.." && pwd)"
 INSTALLER="$ROOT/install-supervisor-macos.sh"
