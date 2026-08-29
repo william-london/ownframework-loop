@@ -159,6 +159,9 @@ if ctx is None and cwd:
         if m_ctx is not None:
             ctx = m_ctx
             provenance = "marker"
+        else:
+            print(json.dumps({"status": "marker_invalid_refused"}))
+            sys.exit(0)
 if ctx is None:
     print(json.dumps({"status": "no_context"}))
     sys.exit(0)
@@ -167,6 +170,23 @@ PY
 )"
 
 if [[ "$context" == "CTX_ERROR" ]]; then
+  if [[ "${OFLOOP_SEMANTIC_CONTEXT:-}" == "1" || -f "$cwd/.ownframework-loop/_semantic_context" ]]; then
+    reason="[OF_LOOP_BASH_FORBIDDEN] OwnFramework Loop: semantic context was declared but context verification failed; refusing rather than disabling the worker guard."
+    reasons_b64="$(printf '%s' "$reason" | base64)"
+    reasons_b64="$reasons_b64" python3 -B - <<'PY'
+import json, base64, os
+print(json.dumps({
+    "decision": "block",
+    "reason": base64.b64decode(os.environ["reasons_b64"]).decode("utf-8"),
+    "hookSpecificOutput": {
+        "hookEventName": "PreToolUse",
+        "permissionDecision": "deny",
+        "permissionDecisionReason": "OF_LOOP_BASH_FORBIDDEN"
+    }
+}))
+PY
+    exit 0
+  fi
   exit 0
 fi
 
@@ -192,7 +212,7 @@ PY
   exit 0
 fi
 
-if [[ "$status" == "partial_env_refused" ]]; then
+if [[ "$status" == "partial_env_refused" || "$status" == "marker_invalid_refused" ]]; then
   reason="[OF_LOOP_BASH_FORBIDDEN] OwnFramework Loop: semantic context declared via OFLOOP_SEMANTIC_CONTEXT=1 but OFLOOP_ROLE/OFLOOP_RUN_ID/OFLOOP_CANONICAL_REPO are missing or invalid. The misconfigured supervisor must be fixed; this hook will not honor a partial role contract."
   reasons_b64="$(printf '%s' "$reason" | base64)"
   reasons_b64="$reasons_b64" python3 -B - <<'PY'
@@ -241,6 +261,20 @@ PY
 )"
 
 if [[ "$result" == "CLASSIFY_ERROR" ]]; then
+  reason="[OF_LOOP_BASH_FORBIDDEN] OwnFramework Loop: active semantic-worker Bash classifier failed; refusing rather than failing open."
+  reasons_b64="$(printf '%s' "$reason" | base64)"
+  reasons_b64="$reasons_b64" python3 -B - <<'PY'
+import json, base64, os
+print(json.dumps({
+    "decision": "block",
+    "reason": base64.b64decode(os.environ["reasons_b64"]).decode("utf-8"),
+    "hookSpecificOutput": {
+        "hookEventName": "PreToolUse",
+        "permissionDecision": "deny",
+        "permissionDecisionReason": "OF_LOOP_BASH_FORBIDDEN"
+    }
+}))
+PY
   exit 0
 fi
 

@@ -540,7 +540,9 @@ class ClaudeCodeRunner:
             text=True,
             start_new_session=True,
             env=runtime_env.hermetic_subprocess_env(
-                Path(worktree), str(work_order.get("run_id") or ""), role
+                Path(str(work_order.get("canonical_repo") or "")).resolve(strict=False),
+                str(work_order.get("run_id") or ""),
+                role,
             ),
         )
         # Persist worker ownership BEFORE the child produces any output. If

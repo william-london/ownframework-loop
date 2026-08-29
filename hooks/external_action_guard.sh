@@ -62,6 +62,9 @@ try:
     env_ctx = role_context.read_env()
 except Exception:
     env_ctx = None
+if role_context.is_env_partial():
+    print(json.dumps({"status": "partial_env_refused"}))
+    sys.exit(0)
 if env_ctx is not None:
     if role_context.context_canonical_repo_matches(env_ctx, cwd or "."):
         ctx = env_ctx
@@ -77,6 +80,9 @@ if ctx is None and cwd:
         if m_ctx is not None:
             ctx = m_ctx
             prov = "marker"
+        else:
+            print(json.dumps({"status": "marker_invalid_refused"}))
+            sys.exit(0)
 if ctx is None:
     print(json.dumps({"status": "no_context"}))
     sys.exit(0)
@@ -85,10 +91,18 @@ PY_END
 )"
 
 if [[ "$context" == "CTX_ERROR" || -z "$context" ]]; then
+  if [[ "${OFLOOP_SEMANTIC_CONTEXT:-}" == "1" || -f "$cwd/.ownframework-loop/_semantic_context" ]]; then
+    printf '%s\n' '{"decision":"block","reason":"[OF_LOOP_EXTERNAL_ACTION] semantic context verification failed; refusing external actions","hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"OF_LOOP_EXTERNAL_UNKNOWN"}}'
+    exit 0
+  fi
   exit 0
 fi
 
 status="$(printf '%s' "$context" | python3 -B -c 'import json,sys; print(json.loads(sys.stdin.read()).get("status",""))' 2>/dev/null || true)"
+if [[ "$status" == "smuggle_refused" || "$status" == "partial_env_refused" || "$status" == "marker_invalid_refused" ]]; then
+  printf '%s\n' '{"decision":"block","reason":"[OF_LOOP_EXTERNAL_ACTION] invalid or cross-repository semantic context; refusing external actions","hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"OF_LOOP_EXTERNAL_UNKNOWN"}}'
+  exit 0
+fi
 if [[ "$status" != "active" ]]; then
   exit 0
 fi
@@ -112,7 +126,7 @@ try:
     )
     print(decision)
 except Exception:
-    print("ALLOW_WITH_DIAGNOSTIC")
+    print("BLOCK:OF_LOOP_EXTERNAL_UNKNOWN\\nactive semantic external-action classifier failed")
 PY
 )"
 

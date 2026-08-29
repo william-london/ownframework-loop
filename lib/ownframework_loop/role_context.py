@@ -228,37 +228,48 @@ def apply_context_to_env(
     return env
 
 
+def _git_common_dir(path: Path) -> Path | None:
+    """Return the canonical Git common-dir for a main or linked worktree."""
+    import subprocess as _sp
+    try:
+        r = _sp.run(
+            ["git", "-C", str(path), "rev-parse", "--git-common-dir"],
+            capture_output=True, text=True, check=False, timeout=5,
+        )
+    except (OSError, _sp.TimeoutExpired):
+        return None
+    if r.returncode != 0 or not r.stdout.strip():
+        return None
+    common = Path(r.stdout.strip())
+    if not common.is_absolute():
+        common = path / common
+    try:
+        return common.resolve(strict=False)
+    except OSError:
+        return None
+
+
 def context_canonical_repo_matches(
     ctx: dict[str, str], cwd: str | Path
 ) -> bool:
-    """True iff the context's canonical_repo matches cwd's git toplevel.
+    """True iff cwd belongs to the exact Git repository declared by context.
 
-    This prevents smuggling a context from one repo into another: an
-    attacker cannot set ``OFLOOP_SEMANTIC_CONTEXT=1`` for repo A and
-    trigger the guard while running commands in repo B. Both sides are
-    resolved via ``Path.resolve()`` to neutralize relative-path games.
+    Main checkouts and linked builder/reviewer worktrees have different
+    toplevel directories. Git common-dir identity is the correct
+    anti-smuggling proof across those worktrees.
     """
     if not ctx.get("canonical_repo"):
         return False
     try:
-        cwd_toplevel = Path(cwd).expanduser().resolve(strict=False)
-        # If cwd is inside a git worktree, walk up to the toplevel so the
-        # match works for worker subprocesses that run with cwd = the
-        # per-pass worktree (which IS under the canonical repo).
-        try:
-            import subprocess as _sp
-            r = _sp.run(
-                ["git", "-C", str(cwd_toplevel), "rev-parse", "--show-toplevel"],
-                capture_output=True, text=True, check=False, timeout=5,
-            )
-            if r.returncode == 0 and r.stdout.strip():
-                cwd_toplevel = Path(r.stdout.strip()).resolve(strict=False)
-        except (OSError, _sp.TimeoutExpired):
-            pass
+        cwd_path = Path(cwd).expanduser().resolve(strict=False)
         ctx_repo = Path(ctx["canonical_repo"]).expanduser().resolve(strict=False)
-        return cwd_toplevel == ctx_repo
     except OSError:
         return False
+    if not ctx_repo.is_dir() or not cwd_path.exists():
+        return False
+    cwd_common = _git_common_dir(cwd_path)
+    repo_common = _git_common_dir(ctx_repo)
+    return cwd_common is not None and repo_common is not None and cwd_common == repo_common
 
 
 __all__ = [

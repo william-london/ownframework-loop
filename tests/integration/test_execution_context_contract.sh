@@ -576,6 +576,43 @@ else
   pass "T12e: marker in another directory not enforced (cwd-only lookup)"
 fi
 
+
+# =====================================================================
+# T13: canonical env context applies inside a linked worker worktree
+# =====================================================================
+echo ""
+echo "=== T13: linked worktree honors canonical semantic context ==="
+T13_REPO="$SANDBOX/T13/repo"
+make_repo "$T13_REPO"
+T13_WT="$SANDBOX/T13/worker"
+git -C "$T13_REPO" worktree add -q -b worker-t13 "$T13_WT" master
+OUT=$(OFLOOP_SEMANTIC_CONTEXT=1 \
+      OFLOOP_RUN_ID="run-T13" \
+      OFLOOP_ROLE="builder" \
+      OFLOOP_CANONICAL_REPO="$T13_REPO" \
+      invoke_hook "$T13_WT" "git push origin master")
+if is_block_decision "$OUT" && has_forbidden_marker "$OUT"; then
+  pass "T13: linked builder worktree honors canonical-repo context"
+else
+  fail "T13: linked worktree semantic context not enforced. out=$OUT"
+fi
+
+# =====================================================================
+# T14: malformed marker fails closed instead of silently disabling guard
+# =====================================================================
+echo ""
+echo "=== T14: malformed marker fails closed ==="
+T14_REPO="$SANDBOX/T14/repo"
+make_repo "$T14_REPO"
+mkdir -p "$T14_REPO/.ownframework-loop"
+printf '%s\n' '{"schema":"of-loop/semantic-context/v1","run_id":"../bad","role":"builder","canonical_repo":"'"$T14_REPO"'"}' > "$T14_REPO/.ownframework-loop/_semantic_context"
+OUT=$(invoke_hook "$T14_REPO" "git push origin master")
+if is_block_decision "$OUT" && has_forbidden_marker "$OUT"; then
+  pass "T14: malformed semantic marker fails closed"
+else
+  fail "T14: malformed semantic marker disabled guard. out=$OUT"
+fi
+
 echo ""
 if [[ $FAIL -eq 0 ]]; then
   echo "EXECUTION_CONTEXT_CONTRACT=PASS"
