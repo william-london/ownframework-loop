@@ -654,8 +654,166 @@ def status(
     return _job_dict(row, db)
 
 
+def _run_git_readonly(repo: Path, args: list[str], *, timeout: int = 10) -> dict[str, Any]:
+    """Run one bounded read-only Git observation for operator visibility."""
+    try:
+        r = subprocess.run(
+            ["git", "-C", str(repo), *args],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=timeout,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return {
+            "ok": False,
+            "returncode": None,
+            "stdout": "",
+            "stderr": f"{type(exc).__name__}: {exc}",
+        }
+    return {
+        "ok": r.returncode == 0,
+        "returncode": int(r.returncode),
+        "stdout": r.stdout,
+        "stderr": r.stderr,
+    }
+
+
+def _registered_worktree_paths(repo: Path) -> tuple[set[str], str | None]:
+    probe = _run_git_readonly(repo, ["worktree", "list", "--porcelain"])
+    if not probe["ok"]:
+        return set(), (
+            f"git_worktree_list_failed:rc={probe['returncode']}:"
+            f"{str(probe['stderr']).strip()[:500]}"
+        )
+    paths: set[str] = set()
+    for raw in str(probe["stdout"]).splitlines():
+        if raw.startswith("worktree "):
+            paths.add(
+                str(Path(raw[len("worktree "):].strip()).resolve(strict=False))
+            )
+    return paths, None
+
+
+def _worktree_visibility(
+    canonical_repo: Path,
+    path: Path,
+    *,
+    registered_paths: set[str],
+    registry_error: str | None,
+) -> dict[str, Any]:
+    """Return read-only identity/cleanliness evidence for one Loop worktree."""
+    resolved = Path(path).resolve(strict=False)
+    out: dict[str, Any] = {
+        "path": str(resolved),
+        "exists": resolved.is_dir(),
+        "registered": False,
+        "head": None,
+        "branch": None,
+        "cleanliness": "missing" if not resolved.is_dir() else "unknown",
+    }
+    if registry_error:
+        out["registry_error"] = registry_error
+    if not resolved.is_dir():
+        return out
+    out["registered"] = str(resolved) in registered_paths
+    if not out["registered"]:
+        return out
+
+    head = _run_git_readonly(resolved, ["rev-parse", "HEAD"])
+    if head["ok"]:
+        out["head"] = str(head["stdout"]).strip() or None
+
+    branch = _run_git_readonly(resolved, ["branch", "--show-current"])
+    if branch["ok"]:
+        out["branch"] = str(branch["stdout"]).strip() or None
+
+    status = _run_git_readonly(resolved, ["status", "--porcelain"])
+    if status["ok"]:
+        out["cleanliness"] = (
+            "dirty" if str(status["stdout"]).strip() else "clean"
+        )
+    return out
+
+
+def _candidate_diff_visibility(
+    canonical_repo: Path,
+    *,
+    baseline_sha: str,
+    candidate_sha: str,
+    max_paths: int = 100,
+) -> dict[str, Any]:
+    """Summarize the exact local candidate diff without publishing or mutating it."""
+    out: dict[str, Any] = {
+        "available": False,
+        "baseline_sha": baseline_sha or None,
+        "candidate_sha": candidate_sha or None,
+        "files_changed": None,
+        "added_lines": None,
+        "removed_lines": None,
+        "binary_files": None,
+        "changed_paths": [],
+        "changed_paths_truncated": False,
+    }
+    if not baseline_sha or not candidate_sha:
+        out["reason"] = "baseline_or_candidate_missing"
+        return out
+
+    paths_probe = _run_git_readonly(
+        canonical_repo,
+        ["diff", "--name-only", "--no-renames", baseline_sha, candidate_sha],
+        timeout=20,
+    )
+    if not paths_probe["ok"]:
+        out["reason"] = "git_diff_name_only_failed"
+        out["error"] = str(paths_probe["stderr"]).strip()[-1000:]
+        return out
+
+    paths = [
+        line.strip()
+        for line in str(paths_probe["stdout"]).splitlines()
+        if line.strip()
+    ]
+    out["files_changed"] = len(paths)
+    out["changed_paths"] = paths[:max_paths]
+    out["changed_paths_truncated"] = len(paths) > max_paths
+
+    numstat = _run_git_readonly(
+        canonical_repo,
+        ["diff", "--numstat", "--no-renames", baseline_sha, candidate_sha],
+        timeout=20,
+    )
+    if not numstat["ok"]:
+        out["reason"] = "git_diff_numstat_failed"
+        out["error"] = str(numstat["stderr"]).strip()[-1000:]
+        return out
+
+    added = 0
+    removed = 0
+    binary_files = 0
+    for line in str(numstat["stdout"]).splitlines():
+        parts = line.split("\t", 2)
+        if len(parts) < 3:
+            continue
+        if parts[0] == "-" or parts[1] == "-":
+            binary_files += 1
+            continue
+        try:
+            added += int(parts[0])
+            removed += int(parts[1])
+        except ValueError:
+            continue
+    out.update({
+        "available": True,
+        "added_lines": added,
+        "removed_lines": removed,
+        "binary_files": binary_files,
+    })
+    return out
+
+
 def _core_snapshot(repo: Path, run_id: str) -> dict[str, Any]:
-    """Read protocol state without disguising malformed evidence as absence."""
+    """Read protocol state plus read-only operator visibility evidence."""
     run_dir = repo / ".ownframework-loop" / run_id
     loaded: dict[str, dict[str, Any]] = {}
     errors: list[str] = []
@@ -677,13 +835,91 @@ def _core_snapshot(repo: Path, run_id: str) -> dict[str, Any]:
             loaded[name] = {}
             continue
         loaded[name] = value
+
+    # Approval metadata is optional for visibility because historical status
+    # reads must not gain a new authority requirement merely to show paths.
+    approval_doc: dict[str, Any] = {}
+    approval_path = run_dir / "APPROVAL.json"
+    visibility_errors: list[str] = []
+    if approval_path.exists():
+        try:
+            raw_approval = json.loads(approval_path.read_text(encoding="utf-8"))
+            if isinstance(raw_approval, dict):
+                approval_doc = raw_approval
+            else:
+                visibility_errors.append("APPROVAL.json:not_object")
+        except (OSError, json.JSONDecodeError) as exc:
+            visibility_errors.append(
+                f"APPROVAL.json:{type(exc).__name__}"
+            )
+
     state = loaded["STATE.json"]
     receipt = loaded["BUILD_RECEIPT.json"]
     verdict = loaded["REVIEW_VERDICT.json"]
     program = state.get("program") or {}
+
+    baseline_sha = str(
+        receipt.get("baseline_sha")
+        or approval_doc.get("baseline_sha")
+        or state.get("spec_baseline_sha")
+        or ""
+    )
+    candidate_sha = str(
+        receipt.get("candidate_sha")
+        or state.get("last_candidate_sha")
+        or ""
+    )
+    candidate_branch = str(
+        receipt.get("candidate_branch")
+        or approval_doc.get("candidate_branch")
+        or ""
+    )
+
+    registered_paths, registry_error = _registered_worktree_paths(repo)
+    builder_path = (
+        repo / ".worktrees" / "ownframework-loop" / run_id / "builder"
+    )
+    reviewer_path = (
+        repo / ".worktrees" / "ownframework-loop" / run_id / "reviewer"
+    )
+    builder = _worktree_visibility(
+        repo,
+        builder_path,
+        registered_paths=registered_paths,
+        registry_error=registry_error,
+    )
+    reviewer = _worktree_visibility(
+        repo,
+        reviewer_path,
+        registered_paths=registered_paths,
+        registry_error=registry_error,
+    )
+
+    canonical_head_probe = _run_git_readonly(repo, ["rev-parse", "HEAD"])
+    canonical_branch_probe = _run_git_readonly(repo, ["branch", "--show-current"])
+    canonical_head = (
+        str(canonical_head_probe["stdout"]).strip()
+        if canonical_head_probe["ok"]
+        else None
+    )
+    canonical_branch = (
+        str(canonical_branch_probe["stdout"]).strip()
+        if canonical_branch_probe["ok"]
+        else None
+    )
+
+    candidate_diff = _candidate_diff_visibility(
+        repo,
+        baseline_sha=baseline_sha,
+        candidate_sha=candidate_sha,
+    )
+    if registry_error:
+        visibility_errors.append(registry_error)
+
     return {
         "core_snapshot_ok": not errors,
         "core_snapshot_errors": errors,
+        "visibility_errors": visibility_errors,
         "core_state": state.get("state"),
         "last_candidate_sha": state.get("last_candidate_sha"),
         "build_pass_count": state.get("build_pass_count"),
@@ -693,8 +929,20 @@ def _core_snapshot(repo: Path, run_id: str) -> dict[str, Any]:
         "last_build_candidate_sha": receipt.get("candidate_sha"),
         "last_review_verdict": verdict.get("verdict"),
         "last_reviewed_candidate_sha": verdict.get("candidate_sha_reviewed"),
+        "baseline_sha": baseline_sha or None,
+        "candidate_branch": candidate_branch or None,
+        "canonical_checkout": {
+            "path": str(repo.resolve(strict=False)),
+            "head": canonical_head,
+            "branch": canonical_branch,
+        },
+        "candidate_is_canonical_head": bool(
+            candidate_sha and canonical_head and candidate_sha == canonical_head
+        ),
+        "builder_worktree": builder,
+        "reviewer_worktree": reviewer,
+        "candidate_diff": candidate_diff,
     }
-
 
 def _job_dict(row: sqlite3.Row, db: Path) -> dict[str, Any]:
     d = dict(row)

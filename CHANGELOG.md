@@ -64,6 +64,10 @@ clock more informative and less brittle:
   retry ceiling;
 - status exposes the latest five semantic attempts, durable log paths, failure
   class/reason, and a direct quarantine reason;
+- status now makes isolated candidate work visible without changing promotion:
+  canonical checkout identity, exact builder/reviewer worktree identity and
+  cleanliness, candidate branch, and a bounded local diff summary are returned
+  as read-only evidence;
 - provider-reported input/output/cache token telemetry is accounted exactly
   once under the same semantic-attempt identity fence as model cost;
 - an optional per-run token ceiling is available without making token telemetry

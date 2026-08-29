@@ -145,5 +145,83 @@ s = supervisor.status(canonical_repo=repo, run_id="run-policy", db_path=db)
 assert s["last_failure_class"] == "configuration", s
 assert s["quarantine_reason"] == "runner_configuration_failure", s
 
+# Operator visibility must show the isolated candidate instead of implying the
+# canonical checkout should contain its diff.
+import subprocess
+
+vrepo = root / "visibility-repo"
+vrepo.mkdir()
+subprocess.run(["git", "-C", str(vrepo), "init", "-b", "master"], check=True, capture_output=True)
+subprocess.run(["git", "-C", str(vrepo), "config", "user.email", "test@example.com"], check=True)
+subprocess.run(["git", "-C", str(vrepo), "config", "user.name", "Loop Test"], check=True)
+(vrepo / "baseline.txt").write_text("baseline\n", encoding="utf-8")
+subprocess.run(["git", "-C", str(vrepo), "add", "baseline.txt"], check=True)
+subprocess.run(["git", "-C", str(vrepo), "commit", "-m", "baseline"], check=True, capture_output=True)
+baseline = subprocess.run(
+    ["git", "-C", str(vrepo), "rev-parse", "HEAD"],
+    check=True, capture_output=True, text=True,
+).stdout.strip()
+
+vrun = "run-visibility"
+vbranch = f"factory/candidate/{vrun}"
+vrd = vrepo / ".ownframework-loop" / vrun
+vrd.mkdir(parents=True)
+builder = vrepo / ".worktrees" / "ownframework-loop" / vrun / "builder"
+builder.parent.mkdir(parents=True)
+subprocess.run(
+    ["git", "-C", str(vrepo), "worktree", "add", "-b", vbranch, str(builder), baseline],
+    check=True, capture_output=True,
+)
+(builder / "feature.txt").write_text("candidate\n", encoding="utf-8")
+subprocess.run(["git", "-C", str(builder), "add", "feature.txt"], check=True)
+subprocess.run(["git", "-C", str(builder), "commit", "-m", "candidate"], check=True, capture_output=True)
+candidate = subprocess.run(
+    ["git", "-C", str(builder), "rev-parse", "HEAD"],
+    check=True, capture_output=True, text=True,
+).stdout.strip()
+(vrd / "STATE.json").write_text(
+    json.dumps({
+        "state": "READY_FOR_REVIEW",
+        "last_candidate_sha": candidate,
+        "build_pass_count": 1,
+        "review_pass_count": 0,
+        "repair_round": 0,
+        "spec_baseline_sha": baseline,
+    }),
+    encoding="utf-8",
+)
+(vrd / "BUILD_RECEIPT.json").write_text(
+    json.dumps({
+        "candidate_sha": candidate,
+        "baseline_sha": baseline,
+        "candidate_branch": vbranch,
+    }),
+    encoding="utf-8",
+)
+(vrd / "APPROVAL.json").write_text(
+    json.dumps({
+        "baseline_sha": baseline,
+        "candidate_branch": vbranch,
+    }),
+    encoding="utf-8",
+)
+vdb = root / "visibility.sqlite3"
+supervisor.enqueue(canonical_repo=vrepo, run_id=vrun, db_path=vdb)
+visible = supervisor.status(canonical_repo=vrepo, run_id=vrun, db_path=vdb)
+assert visible["canonical_checkout"]["head"] == baseline, visible
+assert visible["candidate_is_canonical_head"] is False, visible
+assert visible["candidate_branch"] == vbranch, visible
+assert visible["builder_worktree"]["exists"] is True, visible
+assert visible["builder_worktree"]["registered"] is True, visible
+assert visible["builder_worktree"]["head"] == candidate, visible
+assert visible["builder_worktree"]["branch"] == vbranch, visible
+assert visible["builder_worktree"]["cleanliness"] == "clean", visible
+assert visible["reviewer_worktree"]["exists"] is False, visible
+assert visible["candidate_diff"]["available"] is True, visible
+assert visible["candidate_diff"]["files_changed"] == 1, visible
+assert visible["candidate_diff"]["changed_paths"] == ["feature.txt"], visible
+assert visible["candidate_diff"]["added_lines"] == 1, visible
+assert visible["visibility_errors"] == [], visible
+
 print("V061_SUPERVISOR_RETRY_USAGE_POLICY=PASS")
 PY

@@ -55,6 +55,22 @@ latest review verdict. It also returns the five most recent semantic attempts,
 durable stdout/stderr paths, classified failure evidence, and a derived
 quarantine reason.
 
+Candidate work is intentionally isolated from the canonical checkout. Status
+therefore also exposes:
+
+- canonical checkout path/branch/HEAD;
+- exact builder and reviewer worktree paths, registration, HEAD, branch, and
+  cleanliness;
+- frozen baseline SHA and candidate branch;
+- whether the candidate is already the canonical checkout HEAD;
+- an exact local candidate-diff summary (changed paths plus line/file counts)
+  when baseline and candidate SHAs are both available.
+
+These observations are read-only. Status never publishes a branch, advances
+the canonical checkout, promotes a candidate, or deletes a worktree. This is
+why an operator can see useful candidate evidence even while the normal VS Code
+checkout remains on the untouched baseline.
+
 Operational failures are not all treated alike:
 
 - deterministic dispatch/invariant and obvious runner-configuration failures
