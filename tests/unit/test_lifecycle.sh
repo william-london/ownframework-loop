@@ -138,6 +138,16 @@ if "$OFLOOP_BIN" review claim "$T" "$RID" >/dev/null 2>&1; then
 else
   do_fail "lifecycle: review claim returned nonzero"
 fi
+
+# Review finalization is verification-only. Materialize the exact detached
+# candidate worktree before semantic assessment; the finalizer must never
+# create/reset the reviewer filesystem after the reviewer has run.
+if "$OFLOOP_BIN" review prepare "$T" "$RID" >/dev/null 2>&1; then
+  do_pass "lifecycle: review prepare succeeded"
+else
+  do_fail "lifecycle: review prepare returned nonzero"
+fi
+
 # Build the review agent assessment file (canonical schema).
 ASSESSMENT="$(mktemp)"
 cat > "$ASSESSMENT" <<JSON
