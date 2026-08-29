@@ -18,7 +18,8 @@ The parent `/of-loop:review` coordinator has already called deterministic
 Your prompt must provide `canonical_repo`, `run_id`, `candidate_sha`,
 `baseline_sha`, `candidate_branch`, `reviewer_worktree`,
 `packet_sha256`, `approval_sha256`, `build_receipt_sha256`,
-`review_pass_number`, and `assessment_path`.
+`review_pass_number`, and `assessment_path`. PROGRAM work orders also
+provide `checkpoint_id` and `acceptance_criterion_ids`.
 
 If any required value is missing, stop and tell the parent. Do not invent it.
 
@@ -39,7 +40,10 @@ publish; create remotes; or perform external effects.
 
 1. Confirm the observable reviewer HEAD equals supplied `candidate_sha`.
 2. Review the exact `baseline_sha..candidate_sha` diff against the packet.
-3. Produce exactly one result for every packet acceptance-criterion id.
+3. In PROGRAM mode, produce exactly one result for every supplied
+   `acceptance_criterion_ids` entry and do not emit results for future
+   checkpoint criteria. In SINGLE/legacy PROGRAM mode without scoped ids,
+   produce exactly one result for every packet acceptance-criterion id.
 4. Produce exactly one result for every packet non-goal id when non-goals exist.
 5. Record stable, specific must-fix findings.
 6. Run required validations where permitted; never fabricate results.

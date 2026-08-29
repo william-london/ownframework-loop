@@ -17,6 +17,7 @@ from . import (
     assessment,
     git_checks,
     packet as packet_mod,
+    program as program_mod,
     receipts,
     state as state_mod,
     util,
@@ -117,6 +118,21 @@ def prepare(*, canonical_repo: Path, run_id: str) -> dict[str, Any]:
             f"reviewer worktree HEAD {actual_head!r} != candidate {candidate_sha}"
         )
 
+    checkpoint_id = ""
+    if state_mod.is_program_state(state):
+        program_state = (state or {}).get("program") or {}
+        current = list(program_state.get("current_checkpoints") or [])
+        if not current:
+            raise ReviewPrepareRefused("PROGRAM review has no current checkpoint")
+        checkpoint_id = str(current[0])
+        acceptance_criterion_ids = (
+            program_mod.current_checkpoint_acceptance_criterion_ids(
+                meta, program_state
+            )
+        )
+    else:
+        acceptance_criterion_ids = program_mod.packet_acceptance_criterion_ids(meta)
+
     assessment_path = assessment.assessment_path(canonical_repo, run_id)
     assessment_invalidated = False
     if bool(wt_info.get("reset")) and assessment_path.exists():
@@ -140,6 +156,8 @@ def prepare(*, canonical_repo: Path, run_id: str) -> dict[str, Any]:
         "approval_sha256": expected_approval_sha,
         "build_receipt_sha256": util.sha256_file(receipts.receipt_path(canonical_repo, run_id)),
         "review_pass_number": int(state.get("review_pass_count") or 0),
+        "checkpoint_id": checkpoint_id,
+        "acceptance_criterion_ids": acceptance_criterion_ids,
         "reviewer_worktree": str(reviewer_wt),
         "reviewer_head": actual_head,
         "reviewer_worktree_existed": bool(wt_info.get("existed")),

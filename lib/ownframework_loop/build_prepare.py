@@ -34,6 +34,7 @@ from . import (
     branch_resolver,
     git_checks,
     packet as packet_mod,
+    program as program_mod,
     state as state_mod,
     util,
     worktrees as worktrees_mod,
@@ -169,9 +170,18 @@ def prepare(
     if not candidate_branch or not isinstance(candidate_branch, str):
         raise PrepareRefused("could not resolve candidate_branch")
 
-    # Current checkpoint / work-unit identity.
+    # Current checkpoint / work-unit / acceptance identity.
+    state_doc = state_mod.load(canonical_repo, run_id)
     cp_id = _resolve_current_checkpoint(canonical_repo, run_id)
     work_unit_id = _resolve_current_work_unit(canonical_repo, run_id)
+    if state_mod.is_program_state(state_doc):
+        acceptance_criterion_ids = (
+            program_mod.current_checkpoint_acceptance_criterion_ids(
+                meta, (state_doc or {}).get("program") or {}
+            )
+        )
+    else:
+        acceptance_criterion_ids = program_mod.packet_acceptance_criterion_ids(meta)
 
     # Builder worktree: create or reuse, deterministic.
     wt = worktrees_mod.add_builder_worktree(
@@ -210,6 +220,7 @@ def prepare(
         ) else "single",
         "cp_id": cp_id,
         "work_unit_id": work_unit_id,
+        "acceptance_criterion_ids": acceptance_criterion_ids,
         "repair_round": int(repair_round or 0),
         "baseline_sha": baseline_sha,
         "baseline_branch": baseline_branch,

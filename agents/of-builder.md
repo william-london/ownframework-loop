@@ -28,6 +28,7 @@ Your prompt must provide:
 - `packet_sha256`
 - `approval_sha256`
 - `agent_result_path`
+- `checkpoint_id` and `acceptance_criterion_ids` when supplied
 - `repair_context` when the current pass repairs a `CHANGES_REQUESTED` verdict
 
 If any required value is missing, stop and tell the parent. Do not invent it.
@@ -52,7 +53,10 @@ effects.
 
 ## Build procedure
 
-1. Read the exact approved packet and current work unit/checkpoint.
+1. Read the exact approved packet and current work unit/checkpoint. In PROGRAM
+   mode, treat supplied `acceptance_criterion_ids` as the exact acceptance
+   contract for this checkpoint; do not claim future-checkpoint criteria as
+   addressed merely because they exist at packet level.
 2. If `repair_context` is present, treat its failed acceptance results,
    findings, validation evidence, failure reason, and exact reviewed SHA as
    the primary repair evidence. Reason independently about root cause and
