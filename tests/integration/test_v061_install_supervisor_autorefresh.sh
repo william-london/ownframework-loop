@@ -16,6 +16,11 @@ git clone -q "$ROOT_DIR" "$SRC"
 mkdir -p "$CACHE"
 cp -R "$SRC"/. "$CACHE"/
 HEAD_EXPECTED="$(git -C "$SRC" rev-parse HEAD)"
+VERSION_EXPECTED="$(PYTHONPATH="$SRC/lib" python3 - <<'PY'
+from ownframework_loop import __version__
+print(__version__)
+PY
+)"
 
 cat > "$FAKEBIN/uname" <<'EOF'
 #!/usr/bin/env bash
@@ -46,10 +51,10 @@ PLIST="$HOME_EXISTING/Library/LaunchAgents/com.ownframework.loop-supervisor.plis
 PROV="$HOME_EXISTING/.local/state/ownframework-loop/runtime-provenance.json"
 [[ -f "$PROV" ]] || fail "runtime provenance missing after refresh"
 
-python3 - "$PLIST" "$PROV" "$CACHE/bin/ofloop" "$SRC" "$HEAD_EXPECTED" <<'PY'
+python3 - "$PLIST" "$PROV" "$CACHE/bin/ofloop" "$SRC" "$HEAD_EXPECTED" "$VERSION_EXPECTED" <<'PY'
 import json, plistlib, sys
 from pathlib import Path
-plist_path, prov_path, ofloop, source, head = sys.argv[1:]
+plist_path, prov_path, ofloop, source, head, version = sys.argv[1:]
 with open(plist_path, 'rb') as f:
     plist = plistlib.load(f)
 with open(prov_path) as f:
@@ -60,7 +65,7 @@ assert plist['ProgramArguments'] == [expected_ofloop, 'supervisor', 'serve'], pl
 assert prov['ofloop_bin'] == expected_ofloop, prov
 assert prov['source_root'] == expected_source, prov
 assert prov['source_head'] == head, prov
-assert prov['ofloop_version'] == '0.6.1', prov
+assert prov['ofloop_version'] == version, prov
 PY
 
 # Fresh host has no commissioning signal: helper must be a true no-op.
