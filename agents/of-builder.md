@@ -28,8 +28,12 @@ Your prompt must provide:
 - `packet_sha256`
 - `approval_sha256`
 - `agent_result_path`
+- `repair_context` when the current pass repairs a `CHANGES_REQUESTED` verdict
 
 If any required value is missing, stop and tell the parent. Do not invent it.
+For an initial build, `repair_context` may be null. For a repair pass caused
+by `CHANGES_REQUESTED`, it is deterministic transport copied from the
+exact prior authoritative `REVIEW_VERDICT.json`.
 
 ## Authority
 
@@ -49,27 +53,33 @@ effects.
 ## Build procedure
 
 1. Read the exact approved packet and current work unit/checkpoint.
-2. If `repair_round > 0`, address the current must-fix findings before adding
-   unrelated functionality.
-3. Inspect existing worktree state first. A replayed parent claim may mean a
+2. If `repair_context` is present, treat its failed acceptance results,
+   findings, validation evidence, failure reason, and exact reviewed SHA as
+   the primary repair evidence. Reason independently about root cause and
+   choose the best coherent fix; do not mechanically patch wording or merely
+   silence the reviewer. You may read the authoritative verdict at
+   `repair_context.source` for full context, but never modify it.
+3. If `repair_round > 0` and the latest verdict is `CHANGES_REQUESTED` but
+   `repair_context` is absent, stop rather than inventing reviewer feedback.
+4. Inspect existing worktree state first. A replayed parent claim may mean a
    prior agent already produced part or all of this same pass.
-4. Make the smallest coherent implementation within allowed paths and budgets.
+5. Make the smallest coherent implementation within allowed paths and budgets.
    (F-5-01 v0.3.7: when the must-fix surface spans multiple files or
    requires a coordinated cross-cut, a substantial pass is permitted —
    expand the change set coherently rather than fragmenting across many
    tiny passes that each race the budget ceiling.)
-5. Run required validation.
-6. Inspect the baseline-to-candidate diff and ensure no protected/out-of-scope
+6. Run required validation.
+7. Inspect the baseline-to-candidate diff and ensure no protected/out-of-scope
    path is present.
-7. Commit the coherent candidate on the supplied candidate branch with the
+8. Commit the coherent candidate on the supplied candidate branch with the
    current run/work-unit identity in the message.
-8. Read the existing `agent_result_path` skeleton. Fill only runtime/semantic
+9. Read the existing `agent_result_path` skeleton. Fill only runtime/semantic
    fields: `summary`, `evidence`, `blocker_reason`,
    `escalation_recommended`, `escalation_reason`, `outcome_requested`,
    `unit_ids_completed`, `acceptance_addressed`, `notes`, `timestamp`.
-9. Do not rename/add fixed identity keys. Do not supply `candidate_sha`; Git is
+10. Do not rename/add fixed identity keys. Do not supply `candidate_sha`; Git is
    authoritative.
-10. Stop. The parent calls the deterministic finalizer.
+11. Stop. The parent calls the deterministic finalizer.
 
 `outcome_requested` is exactly one of:
 `candidate_ready`, `blocked`, `stopped`.

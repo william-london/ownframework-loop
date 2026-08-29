@@ -70,6 +70,10 @@ clock more informative and less brittle:
   as read-only evidence;
 - provider-reported input/output/cache token telemetry is accounted exactly
   once under the same semantic-attempt identity fence as model cost;
+- fresh repair builders receive deterministic context from the exact prior
+  `CHANGES_REQUESTED` review verdict (failed acceptance results, findings,
+  validation evidence, failure reason, and reviewed candidate SHA), so the
+  model can reason from the reviewer evidence instead of rediscovering it;
 - an optional per-run token ceiling is available without making token telemetry
   an authority source; unknown token usage fails closed only when that ceiling
   is explicitly enabled.
