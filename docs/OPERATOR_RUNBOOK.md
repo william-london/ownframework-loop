@@ -82,6 +82,14 @@ the canonical checkout, promotes a candidate, or deletes a worktree. This is
 why an operator can see useful candidate evidence even while the normal VS Code
 checkout remains on the untouched baseline.
 
+PROGRAM acceptance is checkpoint-aware. Top-level `acceptance_criteria`
+remain the complete frozen mission contract. A checkpoint may declare
+`acceptance_criterion_ids` to identify exactly which of those criteria are
+reviewed at that checkpoint. If any checkpoint uses the mapping, every
+checkpoint must declare a non-empty mapping and the union must cover the full
+top-level AC set. Older PROGRAM packets with no mapping retain the legacy
+all-criteria-per-checkpoint behavior.
+
 Operational failures are not all treated alike:
 
 - deterministic dispatch/invariant and obvious runner-configuration failures

@@ -107,6 +107,27 @@ background service implicitly, and the supervisor installer accepts a separate
 source-provenance root so installed runtime identity and Git source SHA remain
 both explicit.
 
+### PROGRAM checkpoint acceptance scoping
+
+The final unattended rehearsal exposed a PROGRAM friction point: every
+checkpoint historically had to semantically cover every top-level acceptance
+criterion, including criteria belonging to future checkpoints.
+
+v0.6.1 now supports optional checkpoint `acceptance_criterion_ids`:
+
+- top-level acceptance criteria remain the frozen mission contract;
+- once checkpoint scoping is used, every checkpoint declares a non-empty
+  AC-id list and their union covers the full packet AC set;
+- BUILD/REVIEW work orders surface the current checkpoint and exact AC ids;
+- semantic readiness and deterministic review finalization enforce that same
+  scoped set;
+- REVIEW_VERDICT records the checkpoint and exact expected AC ids;
+- legacy PROGRAM packets without mappings preserve historical behavior.
+
+This removes the need for fake `not_applicable` results or one giant shared
+criterion without changing checkpoint ordering, exact-SHA review, budgets,
+authority, or promotion.
+
 ### What did NOT change
 
 - The v0.6.0 release tag and GitHub Release were not modified.
