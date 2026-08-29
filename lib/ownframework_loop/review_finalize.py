@@ -563,7 +563,18 @@ def finalize_review(
                 out.append(f"{prefix}-{idx}")
         return out
 
-    expected_ac_ids = _expected_ids(meta.get("acceptance_criteria") or [], "AC")
+    checkpoint_id = ""
+    if state_mod.is_program_state(active_state):
+        program_state = (active_state or {}).get("program") or {}
+        current = list(program_state.get("current_checkpoints") or [])
+        if not current:
+            raise RuntimeError("PROGRAM review has no current checkpoint")
+        checkpoint_id = str(current[0])
+        expected_ac_ids = program_mod.current_checkpoint_acceptance_criterion_ids(
+            meta, program_state
+        )
+    else:
+        expected_ac_ids = _expected_ids(meta.get("acceptance_criteria") or [], "AC")
     expected_ng_ids = _expected_ids(meta.get("non_goals") or [], "NG")
     provided_ac_ids = [str(a.get("id") or "") for a in ac_results if isinstance(a, dict)]
     provided_ng_ids = [str(g.get("id") or "") for g in ng_results if isinstance(g, dict)]
@@ -674,6 +685,8 @@ def finalize_review(
         "candidate_sha_reviewed": receipt_candidate_sha,
         "baseline_sha": baseline_sha,
         "review_pass_number": int(new_review_pass_count),
+        "checkpoint_id": checkpoint_id,
+        "expected_acceptance_criterion_ids": expected_ac_ids,
         "verdict": verdict,
         "acceptance_results": ac_results,
         "non_goal_results": ng_results,
@@ -685,6 +698,7 @@ def finalize_review(
         "integrity_check": {
             **integrity_check,
             "acceptance_coverage_complete": ac_coverage_ok,
+            "expected_acceptance_criterion_ids": expected_ac_ids,
             "non_goal_coverage_complete": ng_coverage_ok,
             "semantic_identity_errors": semantic_identity_errors,
         },

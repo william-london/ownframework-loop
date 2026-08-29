@@ -70,6 +70,46 @@ def resolve_execution_mode(meta: dict[str, Any]) -> str:
     return v
 
 
+def packet_acceptance_criterion_ids(packet: dict[str, Any]) -> list[str]:
+    """Return deterministic top-level acceptance-criterion identities."""
+    out: list[str] = []
+    for idx, item in enumerate(packet.get("acceptance_criteria") or [], start=1):
+        if isinstance(item, dict) and isinstance(item.get("id"), str) and item["id"]:
+            out.append(item["id"])
+        else:
+            out.append(f"AC-{idx}")
+    return out
+
+
+def current_checkpoint_acceptance_criterion_ids(
+    packet: dict[str, Any],
+    program_state: dict[str, Any],
+) -> list[str]:
+    """Resolve the exact AC set owned by the current PROGRAM checkpoint.
+
+    Backward compatibility: a graph with no acceptance_criterion_ids mapping
+    preserves the historical behavior where every checkpoint is reviewed
+    against every packet-level AC.
+    """
+    all_ids = packet_acceptance_criterion_ids(packet)
+    current = list(program_state.get("current_checkpoints") or [])
+    if not current:
+        return all_ids
+    cp_id = current[0]
+    for cp in (packet.get("checkpoint_graph") or {}).get("checkpoints") or []:
+        if not isinstance(cp, dict) or cp.get("id") != cp_id:
+            continue
+        scoped = cp.get("acceptance_criterion_ids")
+        if scoped is None:
+            return all_ids
+        if not isinstance(scoped, list) or not scoped:
+            raise ProgramStateError(
+                f"checkpoint {cp_id} acceptance_criterion_ids missing/invalid"
+            )
+        return [str(x) for x in scoped]
+    raise ProgramStateError(f"current checkpoint {cp_id!r} missing from packet graph")
+
+
 def validate_checkpoint_graph(packet: dict[str, Any]) -> list[str]:
     errors: list[str] = []
     cg = packet.get("checkpoint_graph")
@@ -126,6 +166,66 @@ def validate_checkpoint_graph(packet: dict[str, Any]) -> list[str]:
                 errors.append(f"{cid}: cannot depend on itself")
             elif d not in by_id:
                 errors.append(f"{cid}: depends on unknown checkpoint {d}")
+
+    scoped_cps = [
+        cp for cp in by_id.values()
+        if "acceptance_criterion_ids" in cp
+    ]
+    if scoped_cps:
+        top_items = packet.get("acceptance_criteria") or []
+        explicit_top_ids: list[str] = []
+        missing_explicit = False
+        for item in top_items:
+            if (
+                isinstance(item, dict)
+                and isinstance(item.get("id"), str)
+                and item.get("id")
+            ):
+                explicit_top_ids.append(item["id"])
+            else:
+                missing_explicit = True
+        if missing_explicit:
+            errors.append(
+                "checkpoint acceptance scoping requires every top-level "
+                "acceptance_criteria item to carry an explicit id"
+            )
+        if len(set(explicit_top_ids)) != len(explicit_top_ids):
+            errors.append("top-level acceptance_criteria ids must be unique")
+        if len(scoped_cps) != len(by_id):
+            errors.append(
+                "when any checkpoint declares acceptance_criterion_ids, "
+                "every checkpoint must declare it"
+            )
+        top_id_set = set(explicit_top_ids)
+        covered: set[str] = set()
+        for cid, cp in by_id.items():
+            ids = cp.get("acceptance_criterion_ids")
+            if not isinstance(ids, list) or not ids:
+                errors.append(
+                    f"{cid}: acceptance_criterion_ids must be a non-empty list"
+                )
+                continue
+            if any(not isinstance(x, str) or not x for x in ids):
+                errors.append(
+                    f"{cid}: acceptance_criterion_ids entries must be non-empty strings"
+                )
+                continue
+            if len(set(ids)) != len(ids):
+                errors.append(
+                    f"{cid}: acceptance_criterion_ids must not contain duplicates"
+                )
+            unknown = sorted(set(ids) - top_id_set)
+            if unknown:
+                errors.append(
+                    f"{cid}: acceptance_criterion_ids reference unknown ids {unknown}"
+                )
+            covered.update(x for x in ids if x in top_id_set)
+        missing_coverage = sorted(top_id_set - covered)
+        if missing_coverage:
+            errors.append(
+                "checkpoint acceptance_criterion_ids do not cover packet AC ids: "
+                f"{missing_coverage}"
+            )
 
     seen = set()
     for cid in order:

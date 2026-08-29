@@ -20,6 +20,7 @@ from . import (
     approval as approval_mod,
     git_checks as git_checks_mod,
     packet as packet_mod,
+    program as program_mod,
     reconcile as reconcile_mod,
     state as state_mod,
     util,
@@ -193,7 +194,15 @@ def semantic_result_ready(work_order: dict[str, Any]) -> tuple[bool, str]:
                 out.add(f"{prefix}-{idx}")
         return out
 
-    expected_ac = expected_ids(meta.get("acceptance_criteria") or [], "AC")
+    state_doc = state_mod.load(repo, run_id)
+    if state_mod.is_program_state(state_doc):
+        expected_ac = set(
+            program_mod.current_checkpoint_acceptance_criterion_ids(
+                meta, (state_doc or {}).get("program") or {}
+            )
+        )
+    else:
+        expected_ac = expected_ids(meta.get("acceptance_criteria") or [], "AC")
     expected_ng = expected_ids(meta.get("non_goals") or [], "NG")
     ac = data.get("acceptance_results")
     ng = data.get("non_goal_results")
@@ -415,6 +424,8 @@ def claim_next(*, canonical_repo: Path, run_id: str) -> dict[str, Any]:
                     "canonical_repo": str(repo),
                     "worktree": prep.get("builder_worktree"),
                     "semantic_path": semantic_path,
+                    "checkpoint_id": prep.get("cp_id"),
+                    "acceptance_criterion_ids": prep.get("acceptance_criterion_ids"),
                     "repair_context": repair_context,
                     "claim": claim,
                     "prepare": prep,
@@ -444,6 +455,8 @@ def claim_next(*, canonical_repo: Path, run_id: str) -> dict[str, Any]:
                     "worktree": prep.get("reviewer_worktree"),
                     "semantic_path": semantic_path,
                     "candidate_sha": prep.get("candidate_sha"),
+                    "checkpoint_id": prep.get("checkpoint_id"),
+                    "acceptance_criterion_ids": prep.get("acceptance_criterion_ids"),
                     "claim": claim,
                     "prepare": prep,
                 }
