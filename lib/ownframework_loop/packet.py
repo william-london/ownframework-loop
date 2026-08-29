@@ -97,6 +97,40 @@ def _scope_path_error(value: Any) -> str | None:
     return None
 
 
+def _validate_risk_budget_envelope(meta: dict[str, Any]) -> list[str]:
+    """Reject packet budgets the executable runtime can never honor."""
+    errors: list[str] = []
+    rb = meta.get("risk_budget")
+    if rb is None:
+        return errors
+    if not isinstance(rb, dict):
+        return ["risk_budget must be an object"]
+    v3 = meta.get("schema") == PROGRAM_SCHEMA_VERSION
+    maxima = {
+        "max_files_changed": 500,
+        "max_diff_lines": 30000,
+        "max_repair_rounds": 128 if v3 else 32,
+        "max_build_passes": 128 if v3 else 32,
+        "max_review_passes": 128 if v3 else 32,
+        "max_runtime_seconds": 86400 if v3 else 28800,
+        "max_pass_runtime_seconds": 14400 if v3 else 1800,
+        "max_consecutive_no_progress_passes": 8,
+        "max_identical_finding_repeats": 8,
+    }
+    for key, ceiling in maxima.items():
+        value = rb.get(key)
+        if value is None:
+            continue
+        if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+            errors.append(f"risk_budget.{key} must be a positive integer")
+            continue
+        if value > ceiling:
+            errors.append(
+                f"risk_budget.{key}={value} exceeds executable ceiling {ceiling}"
+            )
+    return errors
+
+
 def validate_packet_metadata(meta: dict[str, Any]) -> list[str]:
     """Return list of validation errors (empty if valid).
 
@@ -121,6 +155,8 @@ def validate_packet_metadata(meta: dict[str, Any]) -> list[str]:
     # schema and rejected schema-valid packets.
     if schema == PROGRAM_SCHEMA_VERSION and "execution_mode" in meta and meta["execution_mode"] not in ("single", "program"):
         errors.append(f"execution_mode must be single|program, got {meta['execution_mode']!r}")
+    errors.extend(_validate_risk_budget_envelope(meta))
+
     if schema == PROGRAM_SCHEMA_VERSION:
         em = meta.get("execution_mode")
         # Schema default is "single"; only validate when present.

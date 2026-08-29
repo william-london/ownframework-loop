@@ -83,9 +83,11 @@
                 "type": "array",
                 "items": { "type": "string", "pattern": "^CP-[0-9]+$" }
               },
-              "acceptance_criteria": {
+              "acceptance_criterion_ids": {
                 "type": "array",
-                "items": { "type": "string" }
+                "minItems": 1,
+                "items": { "type": "string", "minLength": 1 },
+                "description": "Exact top-level acceptance-criterion IDs owned by this checkpoint. When present on one checkpoint it must be present on every checkpoint."
               },
               "risk_budget": {
                 "type": "object",
@@ -176,13 +178,13 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "max_build_passes": { "type": "integer", "minimum": 1, "maximum": 32 },
-        "max_review_passes": { "type": "integer", "minimum": 1, "maximum": 32 },
-        "max_repair_rounds": { "type": "integer", "minimum": 1, "maximum": 32 },
-        "max_diff_lines": { "type": "integer", "minimum": 1, "maximum": 50000 },
-        "max_files_changed": { "type": "integer", "minimum": 1, "maximum": 1000 },
-        "max_runtime_seconds": { "type": "integer", "minimum": 60, "maximum": 28800 },
-        "max_pass_runtime_seconds": { "type": "integer", "minimum": 60, "maximum": 1800 },
+        "max_build_passes": { "type": "integer", "minimum": 1, "maximum": 128 },
+        "max_review_passes": { "type": "integer", "minimum": 1, "maximum": 128 },
+        "max_repair_rounds": { "type": "integer", "minimum": 1, "maximum": 128 },
+        "max_diff_lines": { "type": "integer", "minimum": 1, "maximum": 30000 },
+        "max_files_changed": { "type": "integer", "minimum": 1, "maximum": 500 },
+        "max_runtime_seconds": { "type": "integer", "minimum": 60, "maximum": 86400 },
+        "max_pass_runtime_seconds": { "type": "integer", "minimum": 60, "maximum": 14400 },
         "max_consecutive_no_progress_passes": { "type": "integer", "minimum": 1, "maximum": 8 },
         "max_identical_finding_repeats": { "type": "integer", "minimum": 1, "maximum": 8 }
       }

@@ -58,3 +58,6 @@ tests/integration/test_v061_runner_cost_proof.sh
 
 # v0.6.2 scope-suffix compatibility regression
 tests/integration/test_v062_scope_suffix_compat.sh
+
+# v0.6.3 PROGRAM pre-execution contract regression
+tests/integration/test_v063_program_preflight.sh

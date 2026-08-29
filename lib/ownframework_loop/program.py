@@ -142,6 +142,11 @@ def validate_checkpoint_graph(packet: dict[str, Any]) -> list[str]:
             errors.append(f"{cid}: title missing/empty")
         if not isinstance(cp.get("scope"), str) or not cp["scope"]:
             errors.append(f"{cid}: scope missing/empty")
+        if "acceptance_criteria" in cp:
+            errors.append(
+                f"{cid}: checkpoint field 'acceptance_criteria' is not executable; "
+                "use 'acceptance_criterion_ids' to scope top-level AC ids"
+            )
         if not isinstance(cp.get("risk_budget"), dict):
             errors.append(f"{cid}: risk_budget missing")
 
@@ -265,6 +270,32 @@ def validate_checkpoint_graph(packet: dict[str, Any]) -> list[str]:
             if not isinstance(v, int) or v < 1 or v > mx:
                 errors.append(
                     f"global_source_ceilings.{k} must be int in [1..{mx}], got {v!r}"
+                )
+    rb_global = packet.get("risk_budget") or {}
+    if isinstance(rb_global, dict):
+        n_cps = len(by_id)
+        gb = rb_global.get("max_build_passes")
+        gr = rb_global.get("max_review_passes")
+        gp = rb_global.get("max_repair_rounds")
+        if isinstance(gb, int) and gb < n_cps:
+            errors.append(
+                f"packet-level max_build_passes={gb} cannot accommodate {n_cps} checkpoints"
+            )
+        if isinstance(gr, int) and gr < n_cps:
+            errors.append(
+                f"packet-level max_review_passes={gr} cannot accommodate {n_cps} checkpoints"
+            )
+        if isinstance(gp, int) and gp > 0:
+            needed = n_cps + gp
+            if isinstance(gb, int) and gb < needed:
+                errors.append(
+                    f"packet-level max_build_passes={gb} cannot realize "
+                    f"max_repair_rounds={gp} across {n_cps} checkpoints; need >= {needed}"
+                )
+            if isinstance(gr, int) and gr < needed:
+                errors.append(
+                    f"packet-level max_review_passes={gr} cannot realize "
+                    f"max_repair_rounds={gp} across {n_cps} checkpoints; need >= {needed}"
                 )
     return errors
 
