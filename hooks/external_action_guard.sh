@@ -1,29 +1,16 @@
 #!/usr/bin/env bash
 # OwnFramework Loop — External Action Guard.
 #
-# During an active OwnFramework Loop run, this hook blocks tool calls
-# that would have external side effects: emails, SMS, DMs, calendar
-# events, payments, GitHub PR/merge/push, deploys, destructive cloud
-# changes, customer-system mutations.
+# v0.6.1 execution-context contract: this hook is a NO-OP outside an
+# active OwnFramework Loop semantic lane. Provenance is established by
+# env markers (OFLOOP_SEMANTIC_CONTEXT=1 + OFLOOP_RUN_ID/ROLE/CANONICAL_REPO)
+# OR by a marker file .ownframework-loop/_semantic_context at the cwd
+# repo root — same contract as block_dangerous_bash.sh.
 #
-# It permits:
-#   - Bash (validated by block_dangerous_bash.sh)
-#   - WebSearch / WebFetch (read-only)
-#   - Read / Glob / Grep (always)
-#   - read-only MCP integrations (search/list/get/status/inspect)
-#   - local repository tools
-#   - local test tools
-#   - local compilers / package managers
-#   - the dedicated ofloop CLI
-#
-# Policy is implemented in lib/ownframework_loop/external_action.py
-# so the same classification can be unit-tested and reused by the
-# orchestrator.
-#
-# v0.3.4 hook bytecode suppression: export PYTHONDONTWRITEBYTECODE=1
-# BEFORE every Python invocation so this hook does NOT write .pyc files
-# into the active managed plugin cache tree. Every `python3` here is
-# also invoked with `-B`.
+# The historical path-based heuristic (cwd has .ownframework-loop
+# ancestor implies active run) over-scoped ordinary interactive Claude
+# sessions inside a repository that happened to own historical run
+# state. That heuristic has been removed.
 
 set -eo pipefail
 export PYTHONDONTWRITEBYTECODE=1
@@ -53,38 +40,62 @@ if [[ -z "$tool_name" ]]; then
   exit 0
 fi
 
-# Active run detection.
 cwd="$(printf '%s' "$parsed" | python3 -B -c 'import sys, json; print(json.loads(sys.stdin.read()).get("cwd", ""))' 2>/dev/null || true)"
 if [[ -z "$cwd" ]]; then
   cwd="$(pwd 2>/dev/null || true)"
 fi
 
-active_run=""
-if [[ -n "$cwd" ]]; then
-  d="$cwd"
-  while [[ -n "$d" && "$d" != "/" ]]; do
-    if [[ -d "$d/.ownframework-loop" ]]; then
-      active_run="$d"
-      break
-    fi
-    parent="$(dirname "$d" 2>/dev/null)"
-    if [[ -z "$parent" || "$parent" == "$d" ]]; then break; fi
-    d="$parent"
-  done
-fi
-
-# Outside an active run: no-op.
-if [[ -z "$active_run" ]]; then
-  exit 0
-fi
-
-# Resolve plugin root.
 if [[ -z "${CLAUDE_PLUGIN_ROOT:-}" ]]; then
   echo "  [of-loop hook] CLAUDE_PLUGIN_ROOT not provided; refusing for safety" 1>&2
   exit 2
 fi
 
-# Encode arguments safely via base64 to avoid shell quoting.
+context="$(CLAUDE_PLUGIN_ROOT="$CLAUDE_PLUGIN_ROOT" python3 -B - "$cwd" 2>/dev/null <<'PY_END' || echo "CTX_ERROR"
+import json, sys, os
+from pathlib import Path
+sys.path.insert(0, os.path.join(os.environ.get("CLAUDE_PLUGIN_ROOT", ""), "lib"))
+from ownframework_loop import role_context
+cwd = sys.argv[1] if len(sys.argv) > 1 else ""
+ctx = None
+prov = None
+try:
+    env_ctx = role_context.read_env()
+except Exception:
+    env_ctx = None
+if env_ctx is not None:
+    if role_context.context_canonical_repo_matches(env_ctx, cwd or "."):
+        ctx = env_ctx
+        prov = "env"
+    else:
+        print(json.dumps({"status": "smuggle_refused", "expected": env_ctx.get("canonical_repo"), "cwd": cwd}))
+        sys.exit(0)
+if ctx is None and cwd:
+    d = Path(cwd).expanduser().resolve(strict=False)
+    marker = d / ".ownframework-loop" / "_semantic_context"
+    if marker.is_file():
+        m_ctx = role_context.read_marker(d)
+        if m_ctx is not None:
+            ctx = m_ctx
+            prov = "marker"
+if ctx is None:
+    print(json.dumps({"status": "no_context"}))
+    sys.exit(0)
+print(json.dumps({"status": "active", "provenance": prov, **ctx}))
+PY_END
+)"
+
+if [[ "$context" == "CTX_ERROR" || -z "$context" ]]; then
+  exit 0
+fi
+
+status="$(printf '%s' "$context" | python3 -B -c 'import json,sys; print(json.loads(sys.stdin.read()).get("status",""))' 2>/dev/null || true)"
+if [[ "$status" != "active" ]]; then
+  exit 0
+fi
+
+canonical_repo="$(printf '%s' "$context" | python3 -B -c 'import json,sys; print(json.loads(sys.stdin.read()).get("canonical_repo",""))' 2>/dev/null || true)"
+active_run="$canonical_repo"
+
 encoded="$(printf '%s' "$parsed" | base64)"
 
 decision="$(CLAUDE_PLUGIN_ROOT="$CLAUDE_PLUGIN_ROOT" encoded_payload="$encoded" encoded_tool="$tool_name" python3 -B - <<'PY' 2>/dev/null || echo "ALLOW"
@@ -110,7 +121,6 @@ if [[ "$decision" == "ALLOW" ]]; then
 fi
 
 if [[ "$decision" == "ALLOW_WITH_DIAGNOSTIC" ]]; then
-  # Redacted diagnostic to a log file; do not block.
   python3 -B - "$tool_name" "$active_run" <<'PY' 2>/dev/null || true
 import sys, os
 log_dir = os.path.join(os.environ.get("CLAUDE_PLUGIN_ROOT", ""), "logs")
@@ -122,10 +132,8 @@ PY
   exit 0
 fi
 
-# Otherwise: emit a block decision.
 code="$(printf '%s' "$decision" | head -n1 | tr -d ' ')"
 reason="$(printf '%s' "$decision" | tail -n +2)"
-# Pass reason via base64 to avoid shell quote injection.
 reason_b64="$(printf '%s' "$reason" | base64)"
 reason_b64="$reason_b64" code="$code" python3 -B - <<'PY'
 import json, os, base64
