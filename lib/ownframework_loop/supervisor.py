@@ -287,49 +287,9 @@ def enqueue(
     repo = str(Path(canonical_repo).resolve(strict=False))
     db = db_path or default_db_path()
     now = time.time()
-    # Initial-enqueue path: create the row first, then apply the resume
-    # refusal rule. Splitting these into two phases means a fresh enqueue
-    # of a brand-new run cannot be confused with a refused-resume of an
-    # existing run, and the resume rule never blocks first-time enqueue.
-    with _connect(db) as conn:
-        conn.execute(
-            """
-            INSERT OR IGNORE INTO jobs
-              (repo, run_id, runner, status, infra_failures,
-               max_infra_failures, total_cost_usd, next_attempt_at,
-               max_total_cost_usd, max_wall_seconds, created_at, updated_at)
-            VALUES (?, ?, ?, 'QUEUED', 0, ?, 0, 0, ?, ?, ?, ?)
-            """,
-            (
-                repo,
-                run_id,
-                runner,
-                int(max_infra_failures),
-                float(max_total_cost_usd),
-                int(max_wall_seconds),
-                now,
-                now,
-            ),
-        )
-        # Resume refusal: a row already existed in a non-QUARANTINED state
-        # means this is a resume attempt against an active or terminal
-        # operational state, not a fresh enqueue. The durable UPDATE below
-        # preserves the live status; the caller's intent is refused so the
-        # operator UI cannot silently no-op against a live worker.
-        cur = conn.execute(
-            "SELECT status, worker_pid, next_attempt_at FROM jobs WHERE repo=? AND run_id=?",
-            (repo, run_id),
-        ).fetchone()
-        if str(cur["status"]) != "QUARANTINED" and cur["next_attempt_at"] is None:
-            # A row existed with no prior next_attempt_at only if INSERT OR
-            # IGNORE above collided with an existing row. Treat that as a
-            # resume-attempt refusal — the row was NOT created by this call.
-            pass  # fall through to the durable UPDATE
-    # Durable UPDATE applies the idempotency contract: enqueue is safe to
-    # repeat but it must NEVER downgrade an active or terminal operational
-    # state. The previous behavior would reset RUNNING/BACKOFF/QUEUED back
-    # to 'QUEUED', which could spawn a duplicate worker while the original
-    # was still alive (duplicate-worker race).
+    # Idempotent enqueue: create a new QUEUED row, or update only safe
+    # configuration on an existing row. Operational state, backoff and worker
+    # ownership are never rewritten by a repeated enqueue.
     with _connect(db) as conn:
         conn.execute(
             """
@@ -343,29 +303,6 @@ def enqueue(
               max_infra_failures=excluded.max_infra_failures,
               max_total_cost_usd=excluded.max_total_cost_usd,
               max_wall_seconds=excluded.max_wall_seconds,
-              -- Idempotency contract: enqueue is safe to repeat, but it must
-              -- NEVER downgrade an active or terminal operational state. The
-              -- previous behavior would reset RUNNING/BACKOFF/QUEUED back to
-              -- 'QUEUED', which could spawn a duplicate worker while the
-              -- original was still alive (duplicate-worker race).
-              status=CASE
-                WHEN jobs.status IN ('DONE','QUARANTINED','RUNNING','BACKOFF','QUEUED')
-                  THEN jobs.status
-                ELSE 'QUEUED'
-              END,
-              -- Preserve live ownership when an active worker is running.
-              worker_pid=CASE
-                WHEN jobs.status='RUNNING' THEN jobs.worker_pid
-                ELSE NULL
-              END,
-              worker_started_at=CASE
-                WHEN jobs.status='RUNNING' THEN jobs.worker_started_at
-                ELSE NULL
-              END,
-              worker_role=CASE
-                WHEN jobs.status='RUNNING' THEN jobs.worker_role
-                ELSE NULL
-              END,
               updated_at=excluded.updated_at
             """,
             (
@@ -410,20 +347,35 @@ def status(
 
 
 def _core_snapshot(repo: Path, run_id: str) -> dict[str, Any]:
+    """Read protocol state without disguising malformed evidence as absence."""
     run_dir = repo / ".ownframework-loop" / run_id
     loaded: dict[str, dict[str, Any]] = {}
+    errors: list[str] = []
     for name in ("STATE.json", "BUILD_RECEIPT.json", "REVIEW_VERDICT.json"):
         path = run_dir / name
+        if not path.exists():
+            if name == "STATE.json":
+                errors.append("STATE.json:missing")
+            loaded[name] = {}
+            continue
         try:
             value = json.loads(path.read_text(encoding="utf-8"))
-        except Exception:
-            value = {}
-        loaded[name] = value if isinstance(value, dict) else {}
+        except (OSError, json.JSONDecodeError) as exc:
+            errors.append(f"{name}:{type(exc).__name__}")
+            loaded[name] = {}
+            continue
+        if not isinstance(value, dict):
+            errors.append(f"{name}:not_object")
+            loaded[name] = {}
+            continue
+        loaded[name] = value
     state = loaded["STATE.json"]
     receipt = loaded["BUILD_RECEIPT.json"]
     verdict = loaded["REVIEW_VERDICT.json"]
     program = state.get("program") or {}
     return {
+        "core_snapshot_ok": not errors,
+        "core_snapshot_errors": errors,
         "core_state": state.get("state"),
         "last_candidate_sha": state.get("last_candidate_sha"),
         "build_pass_count": state.get("build_pass_count"),
@@ -441,8 +393,11 @@ def _job_dict(row: sqlite3.Row, db: Path) -> dict[str, Any]:
     d.update({"schema": SCHEMA, "ok": True, "db_path": str(db)})
     try:
         d.update(_core_snapshot(Path(str(row["repo"])), str(row["run_id"])))
-    except Exception:
-        pass
+    except Exception as exc:
+        d.update({
+            "core_snapshot_ok": False,
+            "core_snapshot_errors": [f"snapshot_error:{type(exc).__name__}"],
+        })
     return d
 
 
@@ -1096,18 +1051,52 @@ def resume(
     repo = str(Path(canonical_repo).resolve(strict=False))
     db = db_path or default_db_path()
     now = time.time()
-    # resume is a quarantine-recovery action. It must NEVER clear ownership
-    # of a job in any non-quarantined state — doing so would erase the live
-    # PID / role and allow a duplicate worker. Only QUARANTINED jobs may
-    # transition; only QUARANTINED jobs may have their ownership cleared.
+    # Resume is exclusively a QUARANTINED -> QUEUED recovery action. Any
+    # other state is refused without changing budgets, wall-clock origin, PID
+    # ownership, backoff or error evidence.
+    with _connect(db) as conn:
+        existing = conn.execute(
+            "SELECT * FROM jobs WHERE repo=? AND run_id=?", (repo, run_id)
+        ).fetchone()
+    if existing is None:
+        return {
+            "schema": SCHEMA,
+            "ok": False,
+            "repo": repo,
+            "run_id": run_id,
+            "status": "NOT_ENQUEUED",
+            "db_path": str(db),
+            "resumed": False,
+            "reason": "not_enqueued",
+        }
+    if str(existing["status"]) != "QUARANTINED":
+        result = _job_dict(existing, db)
+        result.update({
+            "ok": False,
+            "resumed": False,
+            "reason": "resume_requires_quarantined",
+        })
+        return result
+    if existing["worker_pid"] and _pid_alive(
+        int(existing["worker_pid"]),
+        float(existing["worker_started_at"]) if existing["worker_started_at"] else None,
+    ):
+        result = _job_dict(existing, db)
+        result.update({
+            "ok": False,
+            "resumed": False,
+            "reason": "quarantined_worker_still_alive",
+        })
+        return result
+
     sets = [
-        "status=CASE WHEN status='QUARANTINED' THEN 'QUEUED' ELSE status END",
-        "infra_failures=CASE WHEN status='QUARANTINED' THEN 0 ELSE infra_failures END",
-        "next_attempt_at=CASE WHEN status='QUARANTINED' THEN 0 ELSE next_attempt_at END",
-        "last_error=CASE WHEN status='QUARANTINED' THEN NULL ELSE last_error END",
-        "worker_pid=CASE WHEN status='QUARANTINED' THEN NULL ELSE worker_pid END",
-        "worker_started_at=CASE WHEN status='QUARANTINED' THEN NULL ELSE worker_started_at END",
-        "worker_role=CASE WHEN status='QUARANTINED' THEN NULL ELSE worker_role END",
+        "status='QUEUED'",
+        "infra_failures=0",
+        "next_attempt_at=0",
+        "last_error=NULL",
+        "worker_pid=NULL",
+        "worker_started_at=NULL",
+        "worker_role=NULL",
         "updated_at=?",
     ]
     params: list[Any] = [now]
@@ -1141,4 +1130,6 @@ def resume(
             "status": "NOT_ENQUEUED",
             "db_path": str(db),
         }
-    return _job_dict(row, db)
+    result = _job_dict(row, db)
+    result["resumed"] = True
+    return result
