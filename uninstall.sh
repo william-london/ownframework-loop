@@ -37,7 +37,7 @@ if [[ "$(uname -s)" == "Darwin" ]]; then
 import sqlite3,sys
 try:
     c=sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True)
-    rows=c.execute("SELECT run_id,status FROM jobs WHERE status != 'DONE' ORDER BY id").fetchall()
+    rows=c.execute("SELECT run_id,status FROM jobs WHERE status NOT IN ('DONE','RETIRED') ORDER BY id").fetchall()
 except sqlite3.Error:
     print("ledger_probe_failed")
     raise SystemExit(0)

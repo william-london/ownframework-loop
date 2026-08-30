@@ -12,6 +12,7 @@ import sys
 
 import json
 import math
+import re
 import os
 import shlex
 import signal
@@ -39,6 +40,107 @@ DEFAULT_CLAUDE_ALLOWED_TOOLS = (
     "Agent,Task,TaskOutput,TaskStop,TaskCreate,TaskUpdate,TaskList,TaskGet,"
     "TodoWrite,Skill"
 )
+
+# Claude Code v2.1.246 is the first documented release where excluding a
+# filesystem setting source also excludes that source's sandbox filesystem
+# entries. The unattended worker depends on that property so an untrusted
+# target repository cannot widen its own Bash sandbox via .claude settings.
+MIN_SECURE_CLAUDE_CODE_VERSION = (2, 1, 246)
+
+# Extra arguments are operator convenience only. They must never be able to
+# replace the unattended worker's tool boundary, sandbox, project-root, or
+# settings-source authority.
+_CLAUDE_EXTRA_ARG_AUTHORITY_FLAGS = {
+    "--settings",
+    "--setting-sources",
+    "--tools",
+    "--allowedTools",
+    "--allowed-tools",
+    "--disallowedTools",
+    "--disallowed-tools",
+    "--permission-mode",
+    "--dangerously-skip-permissions",
+    "--allow-dangerously-skip-permissions",
+    "--add-dir",
+    "--cwd",
+    "--plugin-dir",
+    "--mcp-config",
+    "--strict-mcp-config",
+}
+
+
+def _claude_cli_version(executable: str) -> tuple[int, int, int] | None:
+    """Return Claude Code semantic version, or None when it cannot be proven."""
+    try:
+        proc = subprocess.run(
+            [executable, "--version"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if proc.returncode != 0:
+        return None
+    match = re.search(r"(?<!\\d)(\\d+)\\.(\\d+)\\.(\\d+)(?!\\d)", proc.stdout or "")
+    if not match:
+        return None
+    return tuple(int(part) for part in match.groups())
+
+
+def _validate_claude_extra_args(extra: list[str]) -> None:
+    """Refuse operator extra args that could weaken semantic-worker authority."""
+    for arg in extra:
+        flag = str(arg).split("=", 1)[0]
+        if flag in _CLAUDE_EXTRA_ARG_AUTHORITY_FLAGS:
+            raise RuntimeError(
+                f"OFLOOP_CLAUDE_EXTRA_ARGS may not override semantic-worker authority: {flag}"
+            )
+
+
+def _semantic_worker_settings(
+    *,
+    canonical_repo: Path,
+    run_id: str,
+    role: str,
+    worktree: Path,
+    semantic_path: Path,
+) -> dict[str, Any]:
+    """Fail-closed Claude settings for one unattended semantic worker.
+
+    The Bash sandbox is intentionally narrower than the Edit/Write hook
+    boundary: builder commands may write the builder worktree; reviewer
+    commands may not mutate the exact-SHA reviewer worktree; both roles may
+    write only their pass-scoped semantic-result directory and Loop's
+    externalized runtime cache outside the worktree.
+
+    Project/local Claude settings are excluded at process launch, so a target
+    repository cannot widen these sandbox arrays or add project-local hooks.
+    User/managed settings remain an explicit trusted-operator boundary.
+    """
+    cache_root = runtime_env.runtime_cache_path(canonical_repo, run_id, role)
+    allow_write = sorted({
+        str(cache_root.resolve(strict=False)),
+        str(semantic_path.parent.resolve(strict=False)),
+    })
+    filesystem: dict[str, Any] = {"allowWrite": allow_write}
+    if role == "reviewer":
+        filesystem["denyWrite"] = [str(worktree.resolve(strict=False))]
+    return {
+        "autoMemoryEnabled": False,
+        "sandbox": {
+            "enabled": True,
+            "failIfUnavailable": True,
+            "allowUnsandboxedCommands": False,
+            "excludedCommands": [],
+            "filesystem": filesystem,
+            "network": {
+                "allowedDomains": [],
+                "strictAllowlist": True,
+            },
+        },
+    }
 
 
 def resolve_semantic_timeout(
@@ -1344,20 +1446,64 @@ class ClaudeCodeRunner:
         pinned = os.environ.get("OFLOOP_CLAUDE_BIN", "").strip()
         if pinned:
             p = Path(pinned).expanduser().resolve(strict=False)
-            if p.is_file() and os.access(p, os.X_OK):
-                return RunnerReadiness(True)
-            return RunnerReadiness(
-                False,
-                classification="configuration",
-                reason="pinned_runner_unavailable",
-                detail=f"commissioned Claude binary unavailable: {p}",
-                retry_after_seconds=0.0,
-            )
+            if not (p.is_file() and os.access(p, os.X_OK)):
+                return RunnerReadiness(
+                    False,
+                    classification="configuration",
+                    reason="pinned_runner_unavailable",
+                    detail=f"commissioned Claude binary unavailable: {p}",
+                    retry_after_seconds=0.0,
+                )
+            version = _claude_cli_version(str(p))
+            if version is None:
+                return RunnerReadiness(
+                    False,
+                    classification="configuration",
+                    reason="runner_version_unproven",
+                    detail="commissioned Claude Code version could not be proven",
+                    retry_after_seconds=0.0,
+                )
+            if version < MIN_SECURE_CLAUDE_CODE_VERSION:
+                return RunnerReadiness(
+                    False,
+                    classification="configuration",
+                    reason="runner_secure_sandbox_version_too_old",
+                    detail=(
+                        "Claude Code "
+                        + ".".join(str(x) for x in version)
+                        + " is older than the required secure unattended-worker baseline "
+                        + ".".join(str(x) for x in MIN_SECURE_CLAUDE_CODE_VERSION)
+                    ),
+                    retry_after_seconds=0.0,
+                )
+            return RunnerReadiness(True)
 
         discovered = shutil.which("claude")
         if discovered:
             p = Path(discovered).expanduser().resolve(strict=False)
             if p.is_file() and os.access(p, os.X_OK):
+                version = _claude_cli_version(str(p))
+                if version is None:
+                    return RunnerReadiness(
+                        False,
+                        classification="configuration",
+                        reason="runner_version_unproven",
+                        detail="discovered Claude Code version could not be proven",
+                        retry_after_seconds=0.0,
+                    )
+                if version < MIN_SECURE_CLAUDE_CODE_VERSION:
+                    return RunnerReadiness(
+                        False,
+                        classification="configuration",
+                        reason="runner_secure_sandbox_version_too_old",
+                        detail=(
+                            "Claude Code "
+                            + ".".join(str(x) for x in version)
+                            + " is older than the required secure unattended-worker baseline "
+                            + ".".join(str(x) for x in MIN_SECURE_CLAUDE_CODE_VERSION)
+                        ),
+                        retry_after_seconds=0.0,
+                    )
                 return RunnerReadiness(True)
 
         return RunnerReadiness(
@@ -1399,10 +1545,30 @@ class ClaudeCodeRunner:
 
         claude_bin = os.environ.get("OFLOOP_CLAUDE_BIN", "claude")
         extra = shlex.split(os.environ.get("OFLOOP_CLAUDE_EXTRA_ARGS", ""))
+        _validate_claude_extra_args(extra)
         allowed_tools = os.environ.get(
             "OFLOOP_CLAUDE_ALLOWED_TOOLS",
             DEFAULT_CLAUDE_ALLOWED_TOOLS,
         )
+        canonical_repo = Path(
+            str(work_order.get("canonical_repo") or "")
+        ).resolve(strict=False)
+        semantic_path = Path(
+            str(work_order.get("semantic_path") or "")
+        ).resolve(strict=False)
+        secure_settings = _semantic_worker_settings(
+            canonical_repo=canonical_repo,
+            run_id=str(work_order.get("run_id") or ""),
+            role=role,
+            worktree=worktree,
+            semantic_path=semantic_path,
+        )
+        # Only trusted user settings are loaded. Project/local settings belong
+        # to the target repository and may not widen an unattended worker's
+        # filesystem/network sandbox. --tools is the actual availability
+        # boundary; --allowedTools only removes permission friction inside that
+        # already restricted surface.
+        #
         # Pipe the prompt via stdin. Passing it as an argv string lets Claude
         # CLI mis-parse leading `---` (YAML frontmatter in the role file) as
         # an unknown option. stdin is the supported, robust path.
@@ -1413,9 +1579,15 @@ class ClaudeCodeRunner:
             "json",
             "--plugin-dir",
             str(_source_root()),
+            *extra,
+            "--setting-sources",
+            "user",
+            "--settings",
+            json.dumps(secure_settings, separators=(",", ":"), sort_keys=True),
+            "--tools",
+            allowed_tools,
             "--allowedTools",
             allowed_tools,
-            *extra,
         ]
         if durable_files is not None:
             out_path, err_path = durable_files
