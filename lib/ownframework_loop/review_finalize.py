@@ -61,6 +61,7 @@ from typing import Any
 from . import (
     approval, git_checks, guards, integrity, limits as limits_mod,
     packet as packet_mod, program as program_mod, receipts, secrets_v2,
+    validation_policy,
     state as state_mod, transitions, util, verdicts, worktrees,
     assessment as assessment_mod,
 )

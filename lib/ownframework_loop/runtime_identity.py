@@ -14,7 +14,10 @@ import subprocess
 from pathlib import Path
 
 IGNORED_DIR_NAMES = {".git", "logs", ".ownframework-loop", "__pycache__"}
-IGNORED_FILE_NAMES = {\n    ".payload.manifest", ".payload.manifest.tmp", ".install.provenance",\n    ".install.log", ".uninstall.log", ".supervisor-refresh.log", ".DS_Store",\n}
+IGNORED_FILE_NAMES = {
+    ".payload.manifest", ".payload.manifest.tmp", ".install.provenance",
+    ".install.log", ".uninstall.log", ".supervisor-refresh.log", ".DS_Store",
+}
 IGNORED_FILE_SUFFIXES = (".pyc", ".pyo", ".pyd")
 
 
