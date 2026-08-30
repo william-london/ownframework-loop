@@ -140,16 +140,25 @@ if dups:
 print(f"PASS: no duplicate event chain hashes ({len(seen)} unique)")
 PYEND
 
-# Assert single-byte mutation is detected.
+# Assert single-byte mutation is detected. Flip a byte that is GUARANTEED
+# to be inside a parsed JSON event (not in a newline between events or in
+# trailing whitespace) so the chain hash MUST change. Flipping the
+# geometric middle of the file can land in a newline and silently leave
+# the chain hash unchanged — the test must not depend on that luck.
 cp "$EV" "$EV.bak"
 python3 - "$EV" <<'PYEND'
 import sys
 ep = sys.argv[1]
 with open(ep, "rb") as f:
     data = bytearray(f.read())
-# Flip one bit in the middle of the file.
-mid = len(data) // 2
-data[mid] ^= 0x01
+# Pick the first '{' (start of the first event's JSON object) and flip
+# a byte a few positions in — guaranteed to be inside the parsed payload.
+start = bytes(data).find(b"{")
+if start < 0:
+    print("FAIL: no event payload found to mutate", file=sys.stderr)
+    sys.exit(2)
+target = start + 8  # well inside the parsed JSON object
+data[target] ^= 0x01
 with open(ep, "wb") as f:
     f.write(data)
 PYEND
