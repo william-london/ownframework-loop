@@ -34,11 +34,23 @@ SCHEMA = "ownframework-loop-supervisor/v1"
 # risk_budget.max_pass_runtime_seconds (packet authority; up to 28800 for v3)
 # rather than by widening the default fuse.
 DEFAULT_SEMANTIC_TIMEOUT_SECONDS = 3600
-DEFAULT_CLAUDE_ALLOWED_TOOLS = (
-    "Read,Edit,Write,NotebookEdit,Bash,Glob,Grep,WebSearch,WebFetch,"
-    "Agent,Task,TaskOutput,TaskStop,TaskCreate,TaskUpdate,TaskList,TaskGet,"
-    "TodoWrite,Skill"
-)
+# A semantic pass is a sealed local engineering worker, not a general Claude
+# session. Restrict built-ins to the local source/test surface. Research,
+# browsers, MCPs, nested task orchestration and external integrations stay
+# outside the execution envelope and happen before the PROGRAM is minted.
+DEFAULT_CLAUDE_TOOLS = "Read,Edit,Write,NotebookEdit,Bash,Glob,Grep"
+DEFAULT_CLAUDE_ALLOWED_TOOLS = DEFAULT_CLAUDE_TOOLS
+TERMINAL_ATTEMPT_STATUSES = frozenset({
+    "COMPLETED", "COST_UNKNOWN", "TOKENS_UNKNOWN",
+    "FAILED", "RECOVERED", "SUPERSEDED",
+})
+_CLAUDE_AUTHORITY_SENSITIVE_EXTRA_FLAGS = frozenset({
+    "--allowedTools", "--tools", "--settings", "--setting-sources",
+    "--mcp-config", "--strict-mcp-config", "--plugin-dir", "--plugin-url",
+    "--permission-mode", "--dangerously-skip-permissions",
+    "--allow-dangerously-skip-permissions", "--remote", "--teleport",
+    "--chrome", "--no-chrome",
+})
 
 
 def resolve_semantic_timeout(
@@ -72,7 +84,7 @@ def resolve_semantic_timeout(
     return DEFAULT_SEMANTIC_TIMEOUT_SECONDS
 
 ACTIVE = {"QUEUED", "BACKOFF", "RUNNING"}
-TERMINAL = {"DONE", "QUARANTINED"}
+TERMINAL = {"DONE", "QUARANTINED", "RETIRED"}
 
 
 def runtime_generation() -> str:
@@ -1399,10 +1411,37 @@ class ClaudeCodeRunner:
 
         claude_bin = os.environ.get("OFLOOP_CLAUDE_BIN", "claude")
         extra = shlex.split(os.environ.get("OFLOOP_CLAUDE_EXTRA_ARGS", ""))
-        allowed_tools = os.environ.get(
-            "OFLOOP_CLAUDE_ALLOWED_TOOLS",
-            DEFAULT_CLAUDE_ALLOWED_TOOLS,
+        for token in extra:
+            flag = token.split("=", 1)[0]
+            if flag in _CLAUDE_AUTHORITY_SENSITIVE_EXTRA_FLAGS:
+                raise RuntimeError(
+                    "OFLOOP_CLAUDE_EXTRA_ARGS may not override semantic-worker "
+                    f"authority flag {flag!r}"
+                )
+
+        # The supervisor owns the unattended security envelope.  Do not rely on
+        # whatever project/local Claude settings happen to be present in a
+        # client repository.  User settings remain available for trusted
+        # operator/auth configuration, while command-line settings override the
+        # sandbox scalars for this invocation.
+        sandbox_settings = json.dumps(
+            {
+                "sandbox": {
+                    "enabled": True,
+                    "failIfUnavailable": True,
+                    "autoAllowBashIfSandboxed": True,
+                    "allowUnsandboxedCommands": False,
+                },
+                "permissions": {
+                    "deny": ["WebFetch", "WebSearch"],
+                },
+                "disableBypassPermissionsMode": "disable",
+                "autoMemoryEnabled": False,
+            },
+            separators=(",", ":"),
+            sort_keys=True,
         )
+
         # Pipe the prompt via stdin. Passing it as an argv string lets Claude
         # CLI mis-parse leading `---` (YAML frontmatter in the role file) as
         # an unknown option. stdin is the supported, robust path.
@@ -1411,10 +1450,21 @@ class ClaudeCodeRunner:
             "-p",
             "--output-format",
             "json",
+            "--no-chrome",
+            "--no-session-persistence",
+            "--setting-sources",
+            "user",
+            "--settings",
+            sandbox_settings,
+            "--strict-mcp-config",
+            "--mcp-config",
+            "{}",
             "--plugin-dir",
             str(_source_root()),
+            "--tools",
+            DEFAULT_CLAUDE_TOOLS,
             "--allowedTools",
-            allowed_tools,
+            DEFAULT_CLAUDE_ALLOWED_TOOLS,
             *extra,
         ]
         if durable_files is not None:
@@ -2541,6 +2591,7 @@ __all__ = [
     "enqueue",
     "register_runner",
     "resume",
+    "retire",
     "run_one",
     "serve",
     "status",
@@ -2774,10 +2825,40 @@ def retire(
             ),
         })
         return result
-    # Live / ambiguous semantic worker refuses retirement. The operator must
-    # wait for the worker to drain through the normal supervisor lifecycle
-    # (or kill it) before retiring the enrollment. A retired row must never
-    # be tied to a process that could still write evidence.
+    # Refuse any unresolved semantic-attempt evidence, even when the job-level
+    # PID is empty or dead. RESERVED/RUNNING/unknown attempt states mean crash
+    # reconciliation has not yet proven the pass terminal; retiring here would
+    # hide an ambiguous paid/model execution behind a historical label.
+    with _connect_readonly(db) as attempt_conn:
+        attempt_rows = attempt_conn.execute(
+            "SELECT attempt_id, status, worker_pid FROM semantic_attempts "
+            "WHERE job_id=? ORDER BY started_at DESC",
+            (int(existing["id"]),),
+        ).fetchall()
+    unresolved_attempts = [
+        row for row in attempt_rows
+        if str(row["status"] or "") not in TERMINAL_ATTEMPT_STATUSES
+    ]
+    if unresolved_attempts:
+        result = _job_dict(existing, db)
+        result.update({
+            "ok": False,
+            "retired": False,
+            "reason": "retire_refuses_unresolved_semantic_attempt",
+            "unresolved_attempts": [
+                {
+                    "attempt_id": str(row["attempt_id"] or ""),
+                    "status": str(row["status"] or ""),
+                    "worker_pid": row["worker_pid"],
+                }
+                for row in unresolved_attempts[:8]
+            ],
+        })
+        return result
+
+    # Live job ownership also refuses retirement. The operator must wait for
+    # the worker to drain through the normal supervisor lifecycle before
+    # retiring the enrollment.
     if existing["worker_pid"] and _pid_alive(
         int(existing["worker_pid"]),
         float(existing["worker_started_at"]) if existing["worker_started_at"] else None,

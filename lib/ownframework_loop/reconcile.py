@@ -14,12 +14,13 @@ Crash boundaries explicitly handled (recovery via state-machine transition):
   5/6. program-mode frozen-graph integrity
        -> verify_frozen_graph(packet, state.program) refuses on post-approval drift
 
-Crash boundaries covered indirectly (via shared verification paths):
-  2/4. artifact SHA chaintail verification
-       -> integrity.verify_state_sha + verify_artifact_sha refuse if the recorded
-          SHA in EVENTS.log does not match the on-disk bytes; this catches any
-          transition that wrote STATE.json without writing the matching receipt/
-          verdict (or vice versa).
+Crash boundaries covered by the state write-ahead transaction + shared
+verification paths:
+  2/4. STATE.json / EVENTS.log torn commit
+       -> STATE_TXN.json binds the exact old/new state digests, prior event
+          chain/size, and exact expected event line. Reconciliation finishes
+          only that Loop-owned intent; unrelated mismatches remain tampering.
+       -> artifact SHA verification still refuses receipt/verdict drift.
   7. no separate "final integrated verdict" file exists in v0.3.1 architecture;
      program-mode terminal transition is emitted via state.transition inside
      the orchestrator's finalize, so any partial commit is caught by the same
@@ -147,8 +148,36 @@ def reconcile_run(
     actions: list[str] = []
     refused: list[str] = []
 
-    # Read artifacts.
-    state_obj = state_mod.load(canonical_repo, run_id) or {}
+    # First recover the only state/event mismatch we are allowed to mutate:
+    # an exact Loop-owned write-ahead transaction.  This happens after the live
+    # LOCK check above, so reconciliation never races a current writer.
+    if state_mod.state_txn_path(canonical_repo, run_id).exists():
+        try:
+            if state_mod.recover_pending_state_transaction(canonical_repo, run_id):
+                actions.append("recover_state_event_transaction")
+        except Exception as exc:
+            return {
+                "ok": False,
+                "actions": actions,
+                "refused": [f"state_transaction_recovery_failed:{exc}"],
+                "artifact_adopted": False,
+                "packet_sha_preserved": False,
+                "event_chain_valid": False,
+            }
+
+    # Read authoritative state only through the verified loader. A mismatch
+    # without a valid pending transaction is tampering, not a recovery hint.
+    try:
+        state_obj = state_mod.load(canonical_repo, run_id) or {}
+    except Exception as exc:
+        return {
+            "ok": False,
+            "actions": actions,
+            "refused": [f"state_integrity:{exc}"],
+            "artifact_adopted": False,
+            "packet_sha_preserved": False,
+            "event_chain_valid": False,
+        }
     cur_state = state_obj.get("state")
     approval_doc = approval_mod.load_approval(canonical_repo, run_id)
     packet_path = run_d / "WORK_PACKET.md"

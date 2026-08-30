@@ -8,7 +8,7 @@ or OS-level containment of arbitrary same-user code.
 
 ## Supported release posture
 
-- The currently supported release line is **0.8.3**.
+- The currently supported release line is **0.8.4**.
 - Earlier 0.2.x/0.3.x/0.4.x/0.5.0-0.5.4 behavior remains in Git history for
   compatibility/audit context but is not the current product contract.
 
@@ -40,22 +40,28 @@ A run start authorizes bounded local engineering only. It does not grant push,
 merge, deploy, publish, payment, message sending, remote mutation, or unrelated
 external-action authority.
 
-## Tool-surface hardening versus OS containment
+## Tool-surface hardening and supervised worker isolation
 
-The Claude Code reference adapter uses mechanical hooks to block direct and
-several normalized dangerous-command forms during active runs. Those hooks are
-meaningful guardrails, but they do **not** turn a same-user coding agent into an
-untrusted OS principal.
+The project does not claim that an arbitrary same-user program becomes an
+untrusted OS principal. The narrower commissioned-supervisor contract is
+stronger: each unattended Claude BUILD/REVIEW pass is launched with Claude
+Code's Bash sandbox enabled with `failIfUnavailable=true` and
+`allowUnsandboxedCommands=false`. Project/local Claude settings and inherited
+MCP servers are excluded; browser/web/task orchestration tools are not exposed
+to the semantic worker.
 
-The project does not claim arbitrary semantic containment of Turing-complete
-local programs without a real OS/runtime isolation boundary.
+This OS/runtime boundary is layered with the adapter hooks. The hooks continue
+to block direct and normalized external-effect forms, while the deterministic
+core re-proves exact source/candidate identity and refuses unauthorized effects
+before accepting evidence.
 
-A coding agent must never intentionally route around a guard refusal using
-indirection such as hidden subprocess construction, aliases, encoded commands,
-or dynamic shell assembly. A guard refusal is a policy boundary, not a puzzle.
+Interactive/foreground Claude sessions do not automatically inherit the exact
+commissioned-supervisor envelope. A coding agent must never intentionally route
+around a guard refusal using indirection such as hidden subprocess construction,
+aliases, encoded commands, or dynamic shell assembly.
 
-`hardened=true` means a named adapter has additional deterministic host rails for
-its declared workflow. It does not mean sandboxed arbitrary-code containment.
+`hardened=true` describes these deterministic host/runtime rails for the
+declared workflow; it is not a claim of universal arbitrary-code containment.
 
 ## Core security-relevant invariants
 

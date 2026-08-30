@@ -82,3 +82,7 @@ tests/integration/test_v082_production_hardening.sh
 # retired rows excluded from install generation probe, retirement refuses
 # QUEUED/BACKOFF/RUNNING, resume refuses RETIRED, artifacts preserved.
 tests/integration/test_v083_supervisor_retire.sh
+
+# v0.8.4 night-shift hardening — crash-atomic state/evidence, verified reads,
+# lifecycle parity, unresolved-attempt retirement, sandboxed sealed workers.
+tests/integration/test_v084_night_shift_hardening.sh

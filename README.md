@@ -254,13 +254,18 @@ checkpoint identity, or pass-scoped result path.
 
 ## Security boundary
 
-OwnFramework Loop provides deterministic workflow/integrity controls, not an OS
-sandbox for arbitrary same-user code.
+OwnFramework Loop does not claim universal OS containment for arbitrary
+same-user code. The unattended Claude reference supervisor does, however, own a
+narrower runtime boundary for each semantic BUILD/REVIEW pass: it launches a
+fresh Claude process with Claude Code's Bash sandbox enabled fail-closed,
+unsandboxed Bash escape disabled, project/local settings excluded, MCP
+inheritance disabled, browser/web tools removed, and only the local
+read/edit/write/Bash/glob/grep tool surface exposed.
 
-The Claude reference adapter has mechanical tool-surface guards for direct and
-several normalized command forms. Those guards are valuable but do not prove
-semantic containment of arbitrary local programs. A coding agent must never
-intentionally route around a guard refusal.
+Mechanical hooks remain defense in depth for direct and normalized command
+forms; deterministic exact-SHA/source/effect checks remain the authority after
+the worker exits. Interactive/foreground Claude sessions are not automatically
+equivalent to the commissioned supervisor envelope.
 
 The strongest practical safety properties come from layered boundaries:
 
@@ -312,7 +317,7 @@ Claude reference adapter:
 
 ## Project status
 
-Current release line: **0.8.3**.
+Current release line: **0.8.4**.
 
 This remains an early public project. Correctness depends on the target
 repository, mission, validation supplied by the packet, agent host, and local

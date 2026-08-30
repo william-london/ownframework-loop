@@ -4,6 +4,58 @@ All notable current-release changes to OwnFramework Loop are documented here.
 The complete historical changelog through 0.5.2 is preserved at
 [`docs/history/CHANGELOG-through-0.5.2.md`](docs/history/CHANGELOG-through-0.5.2.md).
 
+## 0.8.4 - Night-Shift Durability and Containment (2026-08-29)
+
+A post-closure adversarial sweep found concrete defects in failure paths that
+the successful 0.8.3 live PROGRAM canary did not exercise.
+
+### Crash-atomic protocol state
+
+- STATE.json + EVENTS.log mutations now use a per-run write-ahead
+  STATE_TXN.json intent containing the exact old/new state digests, prior
+  event-chain identity/size, and exact expected event line;
+- recovery completes only that exact Loop-owned torn commit. Bytes not explained
+  by the intent remain tampering and fail closed;
+- EVENTS.log appends use atomic old-or-new file replacement under the existing
+  per-run flock, removing malformed partial-line crash states;
+- event extras may no longer overwrite run_id, state/event hashes, or other
+  reserved authoritative fields;
+- authoritative state.load() is now SHA-verified by default, closing raw-state
+  terminal/read paths that could otherwise trust bytes not bound to EVENTS.log.
+
+### Supervisor/runtime lifecycle parity
+
+- canonical managed install.sh and uninstall.sh now treat DONE + RETIRED as the
+  only non-dependent historical enrollment states, matching the dedicated macOS
+  supervisor installer;
+- RETIRED no longer reintroduces the migration-override trap through a different
+  entry point;
+- retirement now refuses unresolved semantic_attempts evidence (for example
+  RESERVED/RUNNING/unknown attempt states) even when the job-level PID is absent
+  or dead.
+
+### Sealed unattended Claude worker envelope
+
+- supervisor-spawned BUILD/REVIEW passes now enable Claude Code's Bash sandbox
+  fail-closed and disable unsandboxed-command escape;
+- the semantic worker excludes project/local settings, inherited MCP servers,
+  browser/web research, nested Agent/Task orchestration, and session persistence;
+- only the local Read/Edit/Write/NotebookEdit/Bash/Glob/Grep surface is exposed;
+- OFLOOP_CLAUDE_EXTRA_ARGS may no longer override authority-sensitive runner
+  settings, MCP, tool, plugin, browser, remote, or permission flags.
+
+Research/browsing and operator integrations remain outside the sealed semantic
+pass and can happen before a PROGRAM is minted. Promotion and external effects
+remain human-owned outside Loop.
+
+### Regression proof
+
+`tests/integration/test_v084_night_shift_hardening.sh` fault-injects the
+state/event boundary, proves unexplained drift remains tampering, exercises
+verified terminal fallback, unresolved-attempt retirement refusal, canonical
+RETIRED install/uninstall parity, QUEUED fail-closed behavior, and the exact
+sandbox/no-MCP/no-web Claude runner invocation.
+
 ## 0.8.3 - Supervisor Enrollment Retirement (2026-08-29)
 
 ### Operator lifecycle for durable historical evidence

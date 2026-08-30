@@ -209,7 +209,7 @@ if [[ "$abs_path" == *"/.git/"* || "$abs_path" == *"/.git" ]]; then
   exit 0
 fi
 case "$(basename "$abs_path")" in
-  WORK_PACKET.md|APPROVAL.json|STATE.json|BUILD_RECEIPT.json|REVIEW_VERDICT.json|EVENTS.log|LOCK|STOP)
+  WORK_PACKET.md|APPROVAL.json|STATE.json|STATE_TXN.json|BUILD_RECEIPT.json|REVIEW_VERDICT.json|EVENTS.log|LOCK|STOP)
     if [[ "$abs_path" == "$run_root"/* ]]; then
       emit_block "AUTHORITATIVE_ARTIFACT_VIA_WRITE" "Authoritative artifact $(basename "$abs_path") must be written through the ofloop CLI, not via Write/Edit."
       exit 0

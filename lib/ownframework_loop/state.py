@@ -53,6 +53,11 @@ def validate_run_id(run_id: object) -> str:
 SCHEMA_VERSION = "ownframework-loop-state/v1"
 PROGRAM_STATE_SCHEMA_VERSION = "ownframework-loop-state/v2"
 SUPPORTED_STATE_SCHEMA_VERSIONS = (SCHEMA_VERSION, PROGRAM_STATE_SCHEMA_VERSION)
+STATE_TXN_SCHEMA_VERSION = "ownframework-loop-state-txn/v1"
+_EVENT_RESERVED_FIELDS = frozenset({
+    "ts", "run_id", "event_type", "old_state", "new_state", "actor",
+    "commit_sha", "reason", "state_sha256", "event_chain_sha256",
+})
 
 
 def state_path(canonical_repo: Path, run_id: str) -> Path:
@@ -69,6 +74,11 @@ def lock_path(canonical_repo: Path, run_id: str) -> Path:
 
 def stop_path(canonical_repo: Path, run_id: str) -> Path:
     return run_dir(canonical_repo, run_id) / "STOP"
+
+
+def state_txn_path(canonical_repo: Path, run_id: str) -> Path:
+    """Transient write-ahead intent for one STATE/EVENTS atomic commit."""
+    return run_dir(canonical_repo, run_id) / "STATE_TXN.json"
 
 
 def initial_state(run_id: str) -> dict[str, Any]:
@@ -95,21 +105,311 @@ def initial_state(run_id: str) -> dict[str, Any]:
 
 
 def load(canonical_repo: Path, run_id: str) -> dict[str, Any] | None:
-    return read_json(state_path(canonical_repo, run_id))
+    """Load authoritative state with crash recovery and SHA verification.
 
-
-def load_verified(canonical_repo: Path, run_id: str) -> dict[str, Any]:
-    """Load STATE.json AND verify its SHA matches the last recorded event.
-
-    Raises `integrity.TamperingDetected` on mismatch. Returns {} for missing
-    (lets the caller decide what to do — usually create a fresh state).
+    Raw, unverified STATE.json reads are not a public authority surface.  If a
+    prior Loop-owned state/event commit was interrupted, the write-ahead intent
+    is recovered first under the run flock.  Any mismatch not explained by that
+    exact intent remains a tampering failure.
     """
     sp = state_path(canonical_repo, run_id)
+    if state_txn_path(canonical_repo, run_id).exists():
+        recover_pending_state_transaction(canonical_repo, run_id)
+    if not sp.exists():
+        return None
     ep = events_path(canonical_repo, run_id)
     ok, msg = integrity.verify_state_sha(sp, ep)
     if not ok:
         raise integrity.TamperingDetected(msg)
-    return read_json(sp, default={}) or {}
+    payload = read_json(sp, default=None)
+    if not isinstance(payload, dict):
+        raise integrity.TamperingDetected(f"STATE.json unreadable or non-object for run {run_id}")
+    return payload
+
+
+def load_verified(canonical_repo: Path, run_id: str) -> dict[str, Any]:
+    """Compatibility alias for the verified authoritative state loader."""
+    return load(canonical_repo, run_id) or {}
+
+
+def _state_payload_bytes(payload: dict[str, Any]) -> bytes:
+    # Must match util.atomic_write_json byte-for-byte.
+    return json.dumps(payload, indent=2, sort_keys=True).encode("utf-8")
+
+
+def _state_payload_sha256(payload: dict[str, Any]) -> str:
+    return hashlib.sha256(_state_payload_bytes(payload)).hexdigest()
+
+
+def _validate_event_extras(extras: dict[str, Any] | None) -> None:
+    if not extras:
+        return
+    overlap = _EVENT_RESERVED_FIELDS.intersection(extras)
+    if overlap:
+        raise ValueError(
+            "event extras may not override authoritative fields: "
+            + ", ".join(sorted(overlap))
+        )
+
+
+def _build_event_line(
+    *,
+    previous_chain: str,
+    state_sha_now: str | None,
+    run_id: str,
+    event_type: str,
+    old_state: str | None,
+    new_state: str | None,
+    actor: str,
+    commit_sha: str | None = None,
+    reason: str | None = None,
+    extras: dict[str, Any] | None = None,
+    ts: str | None = None,
+) -> str:
+    """Build the exact canonical event line before any authoritative write."""
+    _validate_event_extras(extras)
+    record: dict[str, Any] = {
+        "ts": ts or utc_now_iso(),
+        "run_id": run_id,
+        "event_type": event_type,
+        "old_state": old_state,
+        "new_state": new_state,
+        "actor": actor,
+        "commit_sha": commit_sha,
+        "reason": reason,
+        "state_sha256": state_sha_now,
+        "event_chain_sha256": "0" * 64,
+    }
+    if extras:
+        record.update(extras)
+    stripped = {k: v for k, v in record.items() if k != "event_chain_sha256"}
+    h = hashlib.sha256()
+    h.update((previous_chain or "").encode("utf-8"))
+    h.update(integrity.canonical_json_dumps(stripped).encode("utf-8"))
+    record["event_chain_sha256"] = h.hexdigest()
+    return _json_dumps(record)
+
+
+def _atomic_append_exact_event_locked(ep: Path, line: str) -> None:
+    """Atomically replace EVENTS.log with prior bytes plus exactly one line.
+
+    Caller MUST hold the run flock.  Rewriting the modest per-run log through a
+    fsynced temp + replace makes a crash observe either the old complete log or
+    the new complete log, never a malformed partial JSON line.
+    """
+    ep.parent.mkdir(parents=True, exist_ok=True)
+    prior = ep.read_bytes() if ep.exists() else b""
+    suffix = (line + "\n").encode("utf-8")
+    tmp = ep.parent / f".{ep.name}.tmp.{os.getpid()}"
+    with open(tmp, "wb") as fh:
+        fh.write(prior)
+        fh.write(suffix)
+        fh.flush()
+        try:
+            os.fsync(fh.fileno())
+        except OSError:
+            pass
+    os.replace(tmp, ep)
+    ensure_mode(ep, 0o600)
+    try:
+        fsync_dir(ep.parent)
+    except OSError:
+        pass
+
+
+def _state_txn_payload_locked(
+    canonical_repo: Path,
+    run_id: str,
+    *,
+    new_state_payload: dict[str, Any],
+    event_type: str,
+    old_state: str | None,
+    new_state: str | None,
+    actor: str,
+    commit_sha: str | None = None,
+    reason: str | None = None,
+    extras: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    sp = state_path(canonical_repo, run_id)
+    ep = events_path(canonical_repo, run_id)
+    old_state_sha = integrity.sha256_file(sp) if sp.exists() else ""
+    old_event_chain = integrity.get_event_chain_hash(ep) or ""
+    old_event_size = ep.stat().st_size if ep.exists() else 0
+    new_state_sha = _state_payload_sha256(new_state_payload)
+    event_line = _build_event_line(
+        previous_chain=old_event_chain,
+        state_sha_now=new_state_sha,
+        run_id=run_id,
+        event_type=event_type,
+        old_state=old_state,
+        new_state=new_state,
+        actor=actor,
+        commit_sha=commit_sha,
+        reason=reason,
+        extras=extras,
+    )
+    return {
+        "schema": STATE_TXN_SCHEMA_VERSION,
+        "run_id": run_id,
+        "old_state_sha256": old_state_sha,
+        "new_state_sha256": new_state_sha,
+        "old_event_chain_sha256": old_event_chain,
+        "old_event_size": int(old_event_size),
+        "new_state": new_state_payload,
+        "event_line": event_line,
+        "created_at": utc_now_iso(),
+    }
+
+
+def _recover_pending_state_transaction_locked(
+    canonical_repo: Path,
+    run_id: str,
+) -> bool:
+    """Finish one exact Loop-owned torn STATE/EVENTS commit, or fail closed."""
+    tp = state_txn_path(canonical_repo, run_id)
+    if not tp.exists():
+        return False
+    try:
+        txn = json.loads(tp.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise integrity.TamperingDetected(
+            f"pending state transaction unreadable for {run_id}: {exc}"
+        ) from exc
+    if not isinstance(txn, dict) or txn.get("schema") != STATE_TXN_SCHEMA_VERSION:
+        raise integrity.TamperingDetected("pending state transaction schema mismatch")
+    if txn.get("run_id") != run_id:
+        raise integrity.TamperingDetected("pending state transaction run_id mismatch")
+    new_payload = txn.get("new_state")
+    event_line = txn.get("event_line")
+    if not isinstance(new_payload, dict) or not isinstance(event_line, str):
+        raise integrity.TamperingDetected("pending state transaction payload malformed")
+
+    old_state_sha = str(txn.get("old_state_sha256") or "")
+    new_state_sha = str(txn.get("new_state_sha256") or "")
+    if _state_payload_sha256(new_payload) != new_state_sha:
+        raise integrity.TamperingDetected("pending state transaction new-state digest mismatch")
+
+    sp = state_path(canonical_repo, run_id)
+    ep = events_path(canonical_repo, run_id)
+    current_state_sha = integrity.sha256_file(sp) if sp.exists() else ""
+    if current_state_sha not in {old_state_sha, new_state_sha}:
+        raise integrity.TamperingDetected(
+            "STATE.json is neither the pre-commit nor intended post-commit bytes"
+        )
+
+    try:
+        old_event_size = int(txn.get("old_event_size"))
+    except (TypeError, ValueError) as exc:
+        raise integrity.TamperingDetected("pending state transaction event size malformed") from exc
+    old_chain = str(txn.get("old_event_chain_sha256") or "")
+    event_bytes = (event_line + "\n").encode("utf-8")
+    data = ep.read_bytes() if ep.exists() else b""
+
+    event_committed = False
+    if len(data) == old_event_size:
+        actual_old_chain = integrity.compute_event_chain_hash(ep) if data else ""
+        if actual_old_chain != old_chain:
+            raise integrity.TamperingDetected(
+                "EVENTS.log pre-transaction chain/size does not match pending intent"
+            )
+    elif (
+        len(data) == old_event_size + len(event_bytes)
+        and data[old_event_size:] == event_bytes
+    ):
+        expected_chain = str(json.loads(event_line).get("event_chain_sha256") or "")
+        actual_chain = integrity.compute_event_chain_hash(ep)
+        if not expected_chain or actual_chain != expected_chain:
+            raise integrity.TamperingDetected(
+                "EVENTS.log committed transaction line has invalid chain"
+            )
+        event_committed = True
+    else:
+        raise integrity.TamperingDetected(
+            "EVENTS.log bytes are not explained by the pending state transaction"
+        )
+
+    if event_committed:
+        if current_state_sha != new_state_sha:
+            raise integrity.TamperingDetected(
+                "transaction event committed without intended STATE.json bytes"
+            )
+    else:
+        if current_state_sha != new_state_sha:
+            atomic_write_json(sp, new_payload, mode=0o600)
+        _atomic_append_exact_event_locked(ep, event_line)
+
+    ok, msg = integrity.verify_state_sha(sp, ep)
+    if not ok:
+        raise integrity.TamperingDetected(
+            f"recovered state transaction failed final state binding: {msg}"
+        )
+    recorded = integrity.get_event_chain_hash(ep)
+    actual = integrity.compute_event_chain_hash(ep)
+    if not recorded or recorded != actual:
+        raise integrity.TamperingDetected(
+            "recovered state transaction failed final event-chain verification"
+        )
+
+    try:
+        tp.unlink()
+        fsync_dir(tp.parent)
+    except FileNotFoundError:
+        pass
+    except OSError:
+        # The authoritative commit is already complete.  A stale intent is
+        # harmless and will be re-proven/cleaned on the next read.
+        pass
+    return True
+
+
+def recover_pending_state_transaction(
+    canonical_repo: Path,
+    run_id: str,
+) -> bool:
+    """Recover a pending state transaction under the authoritative run flock."""
+    with flock_exclusive(lock_path(canonical_repo, run_id)):
+        return _recover_pending_state_transaction_locked(canonical_repo, run_id)
+
+
+def _commit_state_event_locked(
+    canonical_repo: Path,
+    run_id: str,
+    *,
+    new_state_payload: dict[str, Any],
+    event_type: str,
+    old_state: str | None,
+    new_state: str | None,
+    actor: str,
+    commit_sha: str | None = None,
+    reason: str | None = None,
+    extras: dict[str, Any] | None = None,
+) -> None:
+    """Write-ahead, then commit STATE.json + matching event under one flock."""
+    tp = state_txn_path(canonical_repo, run_id)
+    txn = _state_txn_payload_locked(
+        canonical_repo,
+        run_id,
+        new_state_payload=new_state_payload,
+        event_type=event_type,
+        old_state=old_state,
+        new_state=new_state,
+        actor=actor,
+        commit_sha=commit_sha,
+        reason=reason,
+        extras=extras,
+    )
+    atomic_write_json(tp, txn, mode=0o600)
+    atomic_write_json(state_path(canonical_repo, run_id), new_state_payload, mode=0o600)
+    _atomic_append_exact_event_locked(events_path(canonical_repo, run_id), txn["event_line"])
+    try:
+        tp.unlink()
+        fsync_dir(tp.parent)
+    except FileNotFoundError:
+        pass
+    except OSError:
+        # Leave the fully described intent behind; verified load will prove the
+        # completed commit and clean it later.
+        pass
 
 
 def _verify_mutation_integrity_locked(canonical_repo: Path, run_id: str) -> None:
@@ -122,6 +422,10 @@ def _verify_mutation_integrity_locked(canonical_repo: Path, run_id: str) -> None
     """
     sp = state_path(canonical_repo, run_id)
     ep = events_path(canonical_repo, run_id)
+
+    # A previous Loop-owned commit may have died after durable intent but
+    # before both authoritative files converged. Recover only that exact intent.
+    _recover_pending_state_transaction_locked(canonical_repo, run_id)
 
     if ep.exists():
         events = integrity.read_event_chain(ep)
@@ -142,25 +446,16 @@ def _verify_mutation_integrity_locked(canonical_repo: Path, run_id: str) -> None
 
 
 def save(canonical_repo: Path, run_id: str, payload: dict[str, Any]) -> None:
-    """Persist state under flock and record an integrity event.
-
-    `save()` is reserved for cases where the caller has computed a full new
-    state object (e.g. updating counters, patching a field). It writes
-    STATE.json atomically and appends a `state_saved` event so the SHA
-    chain stays consistent for subsequent `transition()` / `save()` calls.
-    """
+    """Persist state under flock with a recoverable matching state_saved event."""
     actor = str(payload.get("last_actor", "spec"))
     sp = state_path(canonical_repo, run_id)
-    ep = events_path(canonical_repo, run_id)
     with flock_exclusive(lock_path(canonical_repo, run_id)):
-        # Existing durable history must verify before it can be overwritten.
-        # A brand-new run legitimately has neither STATE nor EVENTS yet.
         _verify_mutation_integrity_locked(canonical_repo, run_id)
         old = read_json(sp, default={}) if sp.exists() else {}
-        atomic_write_json(sp, payload, mode=0o600)
-        ensure_mode(ep, 0o600)
-        _append_event_locked(
-            canonical_repo, run_id,
+        _commit_state_event_locked(
+            canonical_repo,
+            run_id,
+            new_state_payload=payload,
             event_type="state_saved",
             old_state=(old or {}).get("state") or payload.get("state"),
             new_state=payload.get("state"),
@@ -198,22 +493,12 @@ def _write_state_locked(
     run_id: str,
     payload: dict[str, Any],
 ) -> None:
-    """Persist STATE.json and append a state_saved event under flock.
-
-    Caller MUST already hold the flock (e.g. via `_locked_state`).
-    Uses `_append_event_locked` to avoid re-entrant flock acquisition
-    on the same LOCK file. The combined write keeps STATE.json and
-    EVENTS.log consistent for downstream SHA chain verification.
-    """
+    """Persist STATE.json + state_saved event transactionally under an existing flock."""
     actor = str(payload.get("last_actor", "spec"))
-    atomic_write_json(state_path(canonical_repo, run_id), payload, mode=0o600)
-    ensure_mode(events_path(canonical_repo, run_id), 0o600)
-    try:
-        fsync_dir(state_path(canonical_repo, run_id).parent)
-    except OSError:
-        pass
-    _append_event_locked(
-        canonical_repo, run_id,
+    _commit_state_event_locked(
+        canonical_repo,
+        run_id,
+        new_state_payload=payload,
         event_type="state_saved",
         old_state=payload.get("state"),
         new_state=payload.get("state"),
@@ -235,49 +520,24 @@ def _append_event_locked(
     reason: str | None = None,
     extras: dict[str, Any] | None = None,
 ) -> None:
-    """Append a JSON Lines event WITHOUT acquiring the flock.
-
-    Caller MUST already hold the flock (e.g. via `_locked_state`).
-    Re-entrant flock acquisition is not guaranteed safe across all POSIX
-    kernels, so the unified claim path holds one flock and uses this
-    helper for both STATE.json write and EVENTS.log append.
-    """
+    """Append one canonical event atomically WITHOUT acquiring the flock."""
     sp = state_path(canonical_repo, run_id)
     ep = events_path(canonical_repo, run_id)
+    previous_chain = integrity.get_event_chain_hash(ep) or ""
     state_sha_now = integrity.sha256_file(sp) if sp.exists() else None
-
-    record: dict[str, Any] = {
-        "ts": utc_now_iso(),
-        "run_id": run_id,
-        "event_type": event_type,
-        "old_state": old_state,
-        "new_state": new_state,
-        "actor": actor,
-        "commit_sha": commit_sha,
-        "reason": reason,
-        "state_sha256": state_sha_now,
-        "event_chain_sha256": "0" * 64,
-    }
-    if extras:
-        record.update(extras)
-    line = _json_dumps(record)
-    chain_hash = _compute_chain_hash_for_append(ep, line, state_sha_now)
-    record["event_chain_sha256"] = chain_hash
-    line = _json_dumps(record)
-
-    ep.parent.mkdir(parents=True, exist_ok=True)
-    with open(ep, "a", encoding="utf-8") as f:
-        f.write(line + "\n")
-        f.flush()
-        try:
-            os.fsync(f.fileno())
-        except OSError:
-            pass
-    ensure_mode(ep, 0o600)
-    try:
-        fsync_dir(ep.parent)
-    except OSError:
-        pass
+    line = _build_event_line(
+        previous_chain=previous_chain,
+        state_sha_now=state_sha_now,
+        run_id=run_id,
+        event_type=event_type,
+        old_state=old_state,
+        new_state=new_state,
+        actor=actor,
+        commit_sha=commit_sha,
+        reason=reason,
+        extras=extras,
+    )
+    _atomic_append_exact_event_locked(ep, line)
 
 
 def append_event(
@@ -292,74 +552,21 @@ def append_event(
     reason: str | None = None,
     extras: dict[str, Any] | None = None,
 ) -> None:
-    """Append a JSON Lines event under flock.
-
-    The new event carries an `event_chain_sha256` field: SHA-256 over the
-    full EVENTS.log as it will exist once this line lands. Subsequent
-    reads can verify the event chain by recomputing (see
-    `integrity.compute_event_chain_hash`) and comparing it to the most
-    recent recorded value.
-
-    v0.3.5 (A1-002): the previous-hash read and the chain-hash
-    computation now happen INSIDE the flock. Two concurrent appenders
-    can no longer interleave: one acquires the flock, reads the prior
-    chain hash, computes the new one, and appends; the other waits.
-
-    v0.3.5 (limitation): if the LAST event is removed, the chain still
-    validates because the chain hash of N-1 lines equals the recorded
-    chain hash of N-1 lines. Truncation detection requires an
-    external terminal anchor (out of scope for this patch).
-    """
-    sp = state_path(canonical_repo, run_id)
-    ep = events_path(canonical_repo, run_id)
-
-    # Read the prior chain hash, current state SHA, and compute the
-    # new chain hash ALL under the flock. This closes the TOCTOU
-    # window where two concurrent appenders could both compute their
-    # chain hash from the same prior hash.
+    """Atomically append a verified event under the per-run flock."""
     with flock_exclusive(lock_path(canonical_repo, run_id)):
         _verify_mutation_integrity_locked(canonical_repo, run_id)
-        state_sha_now = integrity.sha256_file(sp) if sp.exists() else None
-        record: dict[str, Any] = {
-            "ts": utc_now_iso(),
-            "run_id": run_id,
-            "event_type": event_type,
-            "old_state": old_state,
-            "new_state": new_state,
-            "actor": actor,
-            "commit_sha": commit_sha,
-            "reason": reason,
-            "state_sha256": state_sha_now,
-            "event_chain_sha256": "0" * 64,  # 64-zero placeholder (same length as SHA-256 hex)
-        }
-        if extras:
-            record.update(extras)
-        # Compute the chain hash over the line as it will exist AFTER
-        # substitution. Since the placeholder has the same byte length as the
-        # SHA-256 hex, the only bytes that change in the canonical serialization
-        # are within the chain_hash field itself — the rest of the line is
-        # byte-identical. We substitute the computed hash into the field, then
-        # re-serialize. Recomputation via compute_event_chain_hash yields the
-        # same hash because both writes go through the same canonical serializer
-        # and the chain hash is itself a function of the (length-stable) line.
-        line = _json_dumps(record)
-        chain_hash = _compute_chain_hash_for_append(ep, line, state_sha_now)
-        record["event_chain_sha256"] = chain_hash
-        line = _json_dumps(record)
+        _append_event_locked(
+            canonical_repo,
+            run_id,
+            event_type=event_type,
+            old_state=old_state,
+            new_state=new_state,
+            actor=actor,
+            commit_sha=commit_sha,
+            reason=reason,
+            extras=extras,
+        )
 
-        ep.parent.mkdir(parents=True, exist_ok=True)
-        with open(ep, "a", encoding="utf-8") as f:
-            f.write(line + "\n")
-            f.flush()
-            try:
-                os.fsync(f.fileno())
-            except OSError:
-                pass
-        ensure_mode(ep, 0o600)
-        try:
-            fsync_dir(ep.parent)
-        except OSError:
-            pass
 
 def transition(
     canonical_repo: Path,
@@ -371,23 +578,9 @@ def transition(
     commit_sha: str | None = None,
     extras: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Atomically transition state under flock, appending an event.
-
-    The flock is held only for the read-modify-write of STATE.json. The
-    audit event is appended after the lock is released to avoid re-entrant
-    flock acquisition on the same file (which is not guaranteed to be
-    re-entrant across open file descriptions on all POSIX kernels).
-
-    Before transitioning, this function loads STATE.json *and* verifies
-    its recorded SHA. If the file was edited externally, we raise
-    `integrity.TamperingDetected`.
-    """
+    """Transition authoritative state with a crash-recoverable matching event."""
     sp = state_path(canonical_repo, run_id)
-    ep = events_path(canonical_repo, run_id)
-
     with flock_exclusive(lock_path(canonical_repo, run_id)):
-        # Verify and mutate under the same ownership lock; otherwise another
-        # writer can change STATE/EVENTS between verification and the write.
         _verify_mutation_integrity_locked(canonical_repo, run_id)
         current = read_json(sp)
         if current is None or current == {}:
@@ -411,9 +604,10 @@ def transition(
         if extras:
             new.update(extras)
 
-        atomic_write_json(sp, new, mode=0o600)
-        _append_event_locked(
-            canonical_repo, run_id,
+        _commit_state_event_locked(
+            canonical_repo,
+            run_id,
+            new_state_payload=new,
             event_type="state_transition",
             old_state=from_state,
             new_state=to_state,
@@ -437,14 +631,8 @@ def increment_counter(
     packet: dict[str, Any] | None = None,
     hard_cap: bool = True,
 ) -> int:
-    """Increment a top-level integer counter under flock and return the new value.
-
-    If `hard_cap` is True (default) and the counter is one of the V1-caps
-    list, refuse to increment past the effective cap (V1 max or packet
-    override). Raises `limits_mod.RepairLimitExceeded`.
-    """
+    """Increment a top-level integer counter with a recoverable matching event."""
     sp = state_path(canonical_repo, run_id)
-    ep = events_path(canonical_repo, run_id)
     with flock_exclusive(lock_path(canonical_repo, run_id)):
         _verify_mutation_integrity_locked(canonical_repo, run_id)
         current = read_json(sp)
@@ -456,20 +644,27 @@ def increment_counter(
         new[counter] = int(current.get(counter, 0)) + 1
         new["updated_at"] = utc_now_iso()
         new["last_actor"] = actor
-        atomic_write_json(sp, new, mode=0o600)
-        _append_event_locked(
-            canonical_repo, run_id,
+        _commit_state_event_locked(
+            canonical_repo,
+            run_id,
+            new_state_payload=new,
             event_type="counter_incremented",
-            old_state=None, new_state=None,
-            actor=actor, commit_sha=None,
-            reason=None, extras={"counter": counter, "new_value": new[counter],
-                                "cap": limits_mod.effective_cap(counter, packet)},
+            old_state=None,
+            new_state=None,
+            actor=actor,
+            commit_sha=None,
+            reason=None,
+            extras={
+                "counter": counter,
+                "new_value": new[counter],
+                "cap": limits_mod.effective_cap(counter, packet),
+            },
         )
     return new[counter]
 
 
 def current_counter(canonical_repo: Path, run_id: str, counter: str) -> int | None:
-    s = read_json(state_path(canonical_repo, run_id), default=None)
+    s = load(canonical_repo, run_id)
     if not s:
         return None
     return int(s.get(counter, 0))
@@ -620,14 +815,10 @@ def program_transition(
         if extras:
             new.update(extras)
 
-        atomic_write_json(sp, new, mode=0o600)
-        ensure_mode(ep, 0o600)
-
-        # Append the event under the SAME flock using the locked
-        # helper. This closes the A1-002 window where the previous-
-        # hash read was outside the flock.
-        _append_event_locked(
-            canonical_repo, run_id,
+        _commit_state_event_locked(
+            canonical_repo,
+            run_id,
+            new_state_payload=new,
             event_type="state_transition",
             old_state=from_state,
             new_state=to_state,

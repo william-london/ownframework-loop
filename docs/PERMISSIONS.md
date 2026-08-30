@@ -1,92 +1,72 @@
-# Native Claude Permission Profile
+# Claude Semantic-Worker Permission Contract
 
-> The OwnFramework Loop supervised-local-only pilot REQUIRES Claude
-> permission rules to be active in any session that runs an active loop.
-> The plugin hooks are a contextual guard; native Claude permissions are a
-> structural one. Both must be present.
+OwnFramework Loop 0.8.4 does not require the operator to export a special
+permission-profile environment variable before an unattended run. The
+commissioned supervisor owns the semantic worker's invocation contract.
 
-## How to enable (per session, no global write)
+## Tool surface
 
-The OwnFramework Loop **does NOT** modify `~/.claude/settings.json`
-silently. The first supervised pilot requires:
+A supervisor-spawned BUILD/REVIEW pass receives exactly:
 
-```bash
-# In your shell, before launching Claude:
-export OFLOOP_PERMISSIONS_PROFILE=enforce
-
-# Optional: enable Claude Bash sandbox in this session only:
-# (per official Claude Code docs, set via permission-rule settings or --sandbox flag)
-claude --plugin-dir $HOME/.claude/skills/of-loop \
-      --permission-profile enforce
+```text
+Read
+Edit
+Write
+NotebookEdit
+Bash
+Glob
+Grep
 ```
 
-## The `enforce` profile
+It does not receive web/browser research tools, MCP servers, nested Agent/Task
+orchestration, or promotion/deployment tools.
 
-In an active OwnFramework Loop run, the `enforce` profile must deny or
-require refusal for every operation that the post-pass verification layer
-also checks. The exact rules, in documented Claude permission syntax:
+`--tools` is the structural built-in tool allow-list. `--allowedTools`
+pre-approves the same narrow list so the non-interactive worker does not stop
+for routine local engineering permissions.
 
-```json
-{
-  "permissions": {
-    "deny": [
-      "Bash(git push:*)",
-      "Bash(git push --force:*)",
-      "Bash(git push --force-with-lease:*)",
-      "Bash(git push --no-verify:*)",
-      "Bash(git merge:*)",
-      "Bash(git merge --no-ff:*)",
-      "Bash(git reset --hard:*)",
-      "Bash(git clean -fd:*)",
-      "Bash(git clean -fdx:*)",
-      "Bash(git clean:*)",
-      "Bash(git branch -D:*)",
-      "Bash(git branch -d:*)",
-      "Bash(git worktree prune:*)",
-      "Bash(git remote add:*)",
-      "Bash(git remote set-url:*)",
-      "Bash(git remote remove:*)",
-      "Bash(systemctl *:*)",
-      "Bash(docker compose up:*)",
-      "Bash(docker compose down:*)",
-      "Bash(docker compose restart:*)",
-      "Bash(ssh production-host-1:*)",
-      "Bash(ssh production-host-2:*)",
-      "Bash(/usr/bin/<operator-blocked-executable>:*)",
-      "Bash(/usr/local/bin/<operator-blocked-executable>:*)",
-      "Bash(<operator-blocked-executable>:*)",
-      "Edit(/path/to/repository/production-host-1/**)",
-      "Edit(/path/to/repository/production-host-2/**)",
-      "Edit(/path/to/repository/production-project-tree/**)",
-      "Edit(/path/to/repository/production-project-tree/**)"
-    ],
-    "ask": [
-      "Bash(ofloop *)"
-    ]
-  }
-}
+## Settings sources
+
+The worker reads the trusted user settings source for operator/authentication
+configuration. Project and local settings from the client repository are not
+loaded into the semantic worker. The Loop plugin is supplied explicitly.
+
+MCP discovery is fail-closed through strict MCP configuration with an empty
+explicit MCP config, so user/project/plugin MCP servers cannot silently expand
+the sealed pass.
+
+## Sandbox and bypass prevention
+
+The supervisor overlays per-invocation settings that:
+
+- enable Claude's Bash sandbox;
+- fail if the sandbox is unavailable;
+- permit automatic Bash approval only while sandboxed;
+- disable unsandboxed-command escape;
+- disable bypass-permissions mode;
+- disable automatic memory;
+- deny WebSearch and WebFetch as defense in depth.
+
+Authority-sensitive command-line overrides are rejected before Claude starts.
+
+## External effects
+
+The packet authority for executable runs remains:
+
+```text
+merge_authority=human_only
+push_authority=human_only
+deploy_authority=human_only
+external_action_authority=none
+promotion_policy=human_gate
 ```
 
-These rules are model-independent — they sit in the Claude session's
-permission system, not in any plugin instruction file.
+Tool restrictions and sandboxing are defense in depth. Deterministic finalizers
+and exact-SHA review remain protocol authority, and promotion happens outside
+Loop.
 
-## What the profile does NOT cover
+## Interactive sessions
 
-- Python subprocess (`python3 -c "import subprocess; subprocess.run(['git','push'])"`),
-  `eval`, variable-indirection, multiline/heredoc commands — these are
-  intentionally not blocked by name. They are caught by the **post-pass
-  verification layer** (the audit compares the actual `git` remote count
-  and HEAD against the expected baseline after every build/review pass)
-  and by the **sandbox boundary** (writes outside the approved worktree
-  + loop state directory are refused by the OS-level sandbox).
-- `OWNFRAMEWORK_ALLOW=1` — there is no such variable. Removing it would be
-  a no-op; the variable is never read.
-
-## Why two layers
-
-The textual classifier does not parse shell. Determined forms (multiline,
-eval, Python) evade it. The sandbox boundary is OS-level and enforces
-write scope. The post-pass verification is the audit-authoritative
-"what actually happened" layer — it inspects git history, remote count,
-file diffs, and writes the receipt/verdict only after the artifacts
-agree. Both must be present for a supervised pilot to launch.
+These constraints describe the commissioned supervisor runner. An operator's
+ordinary foreground Claude session may intentionally have a broader tool or MCP
+surface and must not be represented as equivalent evidence.
