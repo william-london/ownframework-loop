@@ -881,7 +881,7 @@ def claim_repair_round(
         )
     except ClaimRefused as refusal:
         from . import state as state_mod
-        cur = state_mod.load(canonical_repo, run_id)
+        cur = state_mod.load_verified(canonical_repo, run_id)
         if isinstance(cur, dict) and cur.get("state") == "CHANGES_REQUESTED":
             try:
                 state_mod.transition(

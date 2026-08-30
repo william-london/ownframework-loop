@@ -65,7 +65,7 @@ def _resolve_run_id(canonical_repo: Path, run_id: str | None) -> str:
 
 def _resolve_current_checkpoint(canonical_repo: Path, run_id: str) -> str:
     """Resolve the current CP id from the program state, or None for single mode."""
-    state = state_mod.load(canonical_repo, run_id)
+    state = state_mod.load_verified(canonical_repo, run_id)
     if not state_mod.is_program_state(state):
         return ""
     program = state.get("program") or {}
@@ -82,7 +82,7 @@ def _resolve_current_work_unit(canonical_repo: Path, run_id: str) -> str:
     work_units = meta.get("work_units") or []
     if not work_units:
         return ""
-    state = state_mod.load(canonical_repo, run_id)
+    state = state_mod.load_verified(canonical_repo, run_id)
     if state_mod.is_program_state(state):
         cp_id = _resolve_current_checkpoint(canonical_repo, run_id)
         cps = (meta.get("checkpoint_graph") or {}).get("checkpoints") or []
@@ -171,7 +171,7 @@ def prepare(
         raise PrepareRefused("could not resolve candidate_branch")
 
     # Current checkpoint / work-unit / acceptance identity.
-    state_doc = state_mod.load(canonical_repo, run_id)
+    state_doc = state_mod.load_verified(canonical_repo, run_id)
     cp_id = _resolve_current_checkpoint(canonical_repo, run_id)
     work_unit_id = _resolve_current_work_unit(canonical_repo, run_id)
     if state_mod.is_program_state(state_doc):
@@ -216,7 +216,7 @@ def prepare(
         "run_id": run_id,
         "schema": "ownframework-loop-build-prepare/v1",
         "execution_mode": "program" if state_mod.is_program_state(
-            state_mod.load(canonical_repo, run_id)
+            state_mod.load_verified(canonical_repo, run_id)
         ) else "single",
         "cp_id": cp_id,
         "work_unit_id": work_unit_id,

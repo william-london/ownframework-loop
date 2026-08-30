@@ -558,7 +558,7 @@ def finalize_review(
     # 14b. review_pass_count is owned by the claim path (cmd_review_claim).
     # The finalizer reads the already-claimed count from state and uses it
     # as review_pass_number. The finalizer never increments.
-    cur_state = state_mod.load(canonical_repo, run_id)
+    cur_state = state_mod.load_verified(canonical_repo, run_id)
     new_review_pass_count = int(cur_state.get("review_pass_count") or 0)
     if new_review_pass_count < 1:
         raise RuntimeError(
@@ -784,7 +784,7 @@ def finalize_review(
     state_mod.append_event(
         canonical_repo, run_id,
         event_type="review_finalized",
-        old_state=state_mod.load(canonical_repo, run_id).get("state"),
+        old_state=state_mod.load_verified(canonical_repo, run_id).get("state"),
         new_state=next_state,
         actor=actor,
         commit_sha=receipt_candidate_sha,
@@ -801,7 +801,7 @@ def finalize_review(
     )
 
     # 22. Transition if appropriate.
-    cur = state_mod.load(canonical_repo, run_id)
+    cur = state_mod.load_verified(canonical_repo, run_id)
     if cur.get("state") != next_state and transitions.is_valid(cur.get("state"), next_state):
         # Defect 3 (v0.4.4): in PROGRAM mode, an APPROVED review must
         # route through the single deterministic helper that finalizes
@@ -848,7 +848,7 @@ def finalize_review(
             # through the unified claim owner so per-cp and cumulative
             # caps are enforced and top-level mirror stays in sync.
             # Single mode keeps the legacy direct mutation.
-            cur = state_mod.load(canonical_repo, run_id)
+            cur = state_mod.load_verified(canonical_repo, run_id)
             if state_mod.is_program_state(cur):
                 # v0.3.5 (F-4-01): use the candidate SHA from the
                 # verdict (or the current state) as the source evidence.
@@ -883,7 +883,7 @@ def finalize_review(
                             commit_sha=receipt_candidate_sha,
                         )
                     except transitions.InvalidTransitionError:
-                        now = state_mod.load(canonical_repo, run_id)
+                        now = state_mod.load_verified(canonical_repo, run_id)
                         if (now or {}).get("state") not in ("BLOCKED", "STOPPED"):
                             raise
             else:
@@ -907,7 +907,7 @@ def finalize_review(
                         commit_sha=receipt_candidate_sha,
                     )
                 else:
-                    cur = state_mod.load(canonical_repo, run_id)
+                    cur = state_mod.load_verified(canonical_repo, run_id)
                     cur["no_progress_streak"] = 0
                     state_mod.save(canonical_repo, run_id, cur)
 
@@ -917,7 +917,7 @@ def finalize_review(
             # failed transition is tolerated only when the run is already
             # READY_TO_BUILD (idempotent replay); any other failure is a
             # real state desync and must surface rather than be swallowed.
-            cur_after = state_mod.load(canonical_repo, run_id)
+            cur_after = state_mod.load_verified(canonical_repo, run_id)
             if (
                 not state_mod.is_program_state(cur_after)
                 and cur_after.get("state") == "CHANGES_REQUESTED"
@@ -930,7 +930,7 @@ def finalize_review(
                         reason="repair_round claimed; ready for next build",
                     )
                 except transitions.InvalidTransitionError:
-                    now = state_mod.load(canonical_repo, run_id)
+                    now = state_mod.load_verified(canonical_repo, run_id)
                     if (now or {}).get("state") != "READY_TO_BUILD":
                         raise
 

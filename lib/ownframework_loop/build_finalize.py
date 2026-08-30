@@ -728,7 +728,7 @@ def finalize_build(
     )
 
     # 23. Update state counters.
-    cur = state_mod.load(canonical_repo, run_id)
+    cur = state_mod.load_verified(canonical_repo, run_id)
     cur["no_progress_streak"] = no_progress_streak
     cur["last_candidate_sha"] = candidate_sha
     cur["build_pass_count"] = int(new_build_pass_count)

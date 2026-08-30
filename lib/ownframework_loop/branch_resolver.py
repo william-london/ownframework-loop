@@ -54,7 +54,7 @@ def resolve_candidate_branch(
     if isinstance(approval_doc, dict) and approval_doc.get("candidate_branch"):
         return _validated(str(approval_doc["candidate_branch"]))
 
-    state = state_mod.load(canonical_repo, run_id)
+    state = state_mod.load_verified(canonical_repo, run_id)
     if isinstance(state, dict):
         program = state.get("program") or {}
         if isinstance(program, dict):

@@ -75,7 +75,7 @@ def assessment_path(canonical_repo: Path, run_id: str) -> Path:
     v0.4.5: pass-scoped scratch prevents a later checkpoint from reusing a
     prior review's filled assessment while preserving same-pass crash resume.
     """
-    state = state_mod.load(canonical_repo, run_id)
+    state = state_mod.load_verified(canonical_repo, run_id)
     pass_number = int((state or {}).get("review_pass_count") or 0)
     if pass_number < 1:
         raise RuntimeError(

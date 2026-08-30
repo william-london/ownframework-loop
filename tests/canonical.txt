@@ -88,3 +88,6 @@ tests/integration/test_v084_nightshift_worker_boundary.sh
 
 # v0.8.4 write-ahead STATE/EVENTS crash recovery + verified dispatch reads
 tests/integration/test_v084_state_transaction_recovery.sh
+
+# v0.8.4 authority-bearing semantic/execution state reads are integrity verified
+tests/integration/test_v084_authoritative_state_reads.sh

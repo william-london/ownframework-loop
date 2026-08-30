@@ -69,7 +69,7 @@ def prepare(*, canonical_repo: Path, run_id: str) -> dict[str, Any]:
     if not ok:
         raise ReviewPrepareRefused(f"approval invalid: {msg}")
 
-    state = state_mod.load(canonical_repo, run_id)
+    state = state_mod.load_verified(canonical_repo, run_id)
     if not state or state.get("state") != "REVIEWING":
         raise ReviewPrepareRefused(
             f"review preparation requires REVIEWING state, got {(state or {}).get('state')!r}"

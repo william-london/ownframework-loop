@@ -94,7 +94,7 @@ def agent_result_path(canonical_repo: Path, run_id: str) -> Path:
     same pass number/path for crash recovery; a fresh claim gets a fresh path,
     so CP-N can never inherit CP-(N-1)'s filled result.
     """
-    state = state_mod.load(canonical_repo, run_id)
+    state = state_mod.load_verified(canonical_repo, run_id)
     pass_number = int((state or {}).get("build_pass_count") or 0)
     if pass_number < 1:
         raise RuntimeError(
@@ -173,7 +173,7 @@ def _resolve_current_work_unit_id(canonical_repo: Path, run_id: str) -> str:
     Missing or malformed work-unit identity is an authority error. The
     skeleton must never fabricate UNIT-1 merely to satisfy schema shape.
     """
-    state = state_mod.load(canonical_repo, run_id)
+    state = state_mod.load_verified(canonical_repo, run_id)
     packet_p = state_mod.run_dir(canonical_repo, run_id) / "WORK_PACKET.md"
     meta, _ = _safe_parse_packet(packet_p)
     work_units = meta.get("work_units") or []

@@ -228,7 +228,7 @@ def _activate_sealed_run(canonical_repo, run_id, actor, reason):
     swallowed. Durable seal/PROGRAM evidence may remain after a crash/fault; a
     later call validates and reuses those artifacts, then retries activation.
     """
-    cur = state_mod.load(canonical_repo, run_id)
+    cur = state_mod.load_verified(canonical_repo, run_id)
     if cur is None:
         raise RuntimeError(f"STATE.json missing for run {run_id}")
 
@@ -242,7 +242,7 @@ def _activate_sealed_run(canonical_repo, run_id, actor, reason):
             reason=reason,
         )
 
-    cur = state_mod.load(canonical_repo, run_id)
+    cur = state_mod.load_verified(canonical_repo, run_id)
     final_state = (cur or {}).get("state") or ""
     executable_or_later = {
         "READY_TO_BUILD",
@@ -330,7 +330,7 @@ def ensure_executable(
                     if not ok:
                         raise RuntimeError(f"existing execution seal invalid: {msg}")
 
-                    cur = state_mod.load(canonical_repo, run_id)
+                    cur = state_mod.load_verified(canonical_repo, run_id)
                     if cur is None:
                         raise RuntimeError(f"STATE.json missing for run {run_id}")
                     if cur.get("state") in ("AWAITING_APPROVAL", "READY_TO_START"):
@@ -354,7 +354,7 @@ def ensure_executable(
                         "to seal execution start against dirty source"
                     )
 
-                prior_state = state_mod.load(canonical_repo, run_id)
+                prior_state = state_mod.load_verified(canonical_repo, run_id)
                 if prior_state is None:
                     raise RuntimeError(f"STATE.json missing for run {run_id}")
                 prior_baseline_sha = prior_state.get("spec_baseline_sha") or ""
