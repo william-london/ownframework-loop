@@ -426,11 +426,13 @@ def finalize_review(
         name = v["name"]
         kind = v.get("kind") or "fast"
         timeout = int(meta.get("required_runtime_proof", {}).get("max_runtime_seconds") or 600)
-        command_policy = guards.classify_bash_command(cmd)
-        if command_policy.get("severity") == "forbidden":
+        command_policy = validation_policy.classify_required_validation(
+            cmd, run_id=run_id
+        )
+        if not command_policy.get("allowed"):
             raise RuntimeError(
-                "required_validation command refused by deterministic guard: "
-                + "; ".join(command_policy.get("forbidden") or ["forbidden command"])
+                "required_validation command refused by deterministic authority policy: "
+                + str(command_policy.get("reason") or "forbidden command")
             )
         result = _run_validation_command(
             reviewer_wt,

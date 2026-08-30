@@ -47,6 +47,9 @@ the 0.8.1 runtime-generation closure.
   repo/run/role cache;
 - hermetic validation preserves project-supplied PYTEST_ADDOPTS while appending
   Loop cache-isolation controls.
+- deterministic build/review validation now applies the external-action authority
+  classifier before executing packet-declared shell, closing a core-path bypass
+  for mutating remote HTTP outside Claude hooks.
 
 ### Proof
 

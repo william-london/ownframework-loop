@@ -95,11 +95,21 @@ def _git(root: Path, *args: str, text: bool = True) -> subprocess.CompletedProce
 
 
 def _git_head(root: Path) -> str:
+    """Return HEAD only when root itself is the Git worktree top-level."""
     try:
+        top = _git(root, "rev-parse", "--show-toplevel")
         r = _git(root, "rev-parse", "HEAD")
     except (OSError, subprocess.TimeoutExpired):
         return ""
-    return r.stdout.strip() if r.returncode == 0 else ""
+    if top.returncode != 0 or r.returncode != 0:
+        return ""
+    try:
+        resolved_top = Path(top.stdout.strip()).expanduser().resolve(strict=False)
+    except (OSError, RuntimeError):
+        return ""
+    if resolved_top != root:
+        return ""
+    return r.stdout.strip()
 
 
 def _dirty_git_digest(root: Path, head: str) -> str:

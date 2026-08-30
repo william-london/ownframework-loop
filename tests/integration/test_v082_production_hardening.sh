@@ -45,6 +45,13 @@ assert clean == f"ofloop-9.9.9@git-{head}", clean
 (g/"runtime.py").write_text("A=2\n")
 dirty=runtime_generation_for_root(g,"9.9.9")
 assert "@dirty-" in dirty and dirty != clean
+
+# A payload nested under some unrelated parent Git checkout is still a payload,
+# not that parent's runtime generation.
+nested=g/"nested-payload"; nested.mkdir()
+(nested/"runtime.txt").write_text("payload\n")
+nested_gen=runtime_generation_for_root(nested,"9.9.9")
+assert "@payload-" in nested_gen, nested_gen
 print("RUNTIME_BYTE_IDENTITY=OK")
 PY
 pass "T1 runtime generation binds actual payload and dirty-source bytes"
@@ -217,5 +224,22 @@ pass "T9 managed uninstall preserves runtime bytes for unfinished jobs"
 grep -Fq -- '-not -name ".payload.manifest"' "$ROOT_DIR/install.sh" || fail "T10 install manifest must exclude itself"
 grep -Fq -- '-not -name ".payload.manifest.tmp"' "$ROOT_DIR/install.sh" || fail "T10 install manifest must exclude temp manifest"
 pass "T10 payload manifest generation excludes self artifacts"
+
+python3 -B <<'PY'
+from ownframework_loop.validation_policy import classify_required_validation
+assert not classify_required_validation(
+    "echo ok && curl -X POST https://api.example.com/x", run_id="run-v"
+)["allowed"]
+assert not classify_required_validation(
+    'curl -X POST "$UNRESOLVED"', run_id="run-v"
+)["allowed"]
+assert classify_required_validation(
+    "curl -X POST http://127.0.0.1:9999/test -d x=1", run_id="run-v"
+)["allowed"]
+assert classify_required_validation(
+    "curl -fsS https://example.com/status", run_id="run-v"
+)["allowed"]
+PY
+pass "T11 deterministic finalizers enforce external-action policy on required validation"
 
 echo "V082_PRODUCTION_HARDENING=PASS"

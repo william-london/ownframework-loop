@@ -240,11 +240,9 @@ def _connect(path: Path) -> sqlite3.Connection:
         "worker_pid": "ALTER TABLE jobs ADD COLUMN worker_pid INTEGER",
         "worker_started_at": "ALTER TABLE jobs ADD COLUMN worker_started_at REAL",
         "worker_role": "ALTER TABLE jobs ADD COLUMN worker_role TEXT",
-        # Budget ceilings migrate DISABLED: the retired $25 / 8-hour
-        # resource-conservation defaults must never be injected by schema
-        # evolution. Explicitly configured values on existing rows are
-        # untouched; legacy-default rows are normalized by the user_version
-        # data migration below.
+        # New columns migrate DISABLED. Existing values are preserved;
+        # the ambiguous historical $25 / unlimited-token / 8-hour tuple is
+        # flagged, never silently rewritten.
         "max_total_cost_usd": "ALTER TABLE jobs ADD COLUMN max_total_cost_usd REAL NOT NULL DEFAULT 0",
         "max_wall_seconds": "ALTER TABLE jobs ADD COLUMN max_wall_seconds INTEGER NOT NULL DEFAULT 0",
         "execution_started_at": "ALTER TABLE jobs ADD COLUMN execution_started_at REAL",
