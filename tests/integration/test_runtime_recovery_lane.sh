@@ -273,6 +273,47 @@ assert unknown_out["action"] == "QUARANTINED", unknown_out
 assert unknown_out["reason"] == "historical_cost_unknown", unknown_out
 print("A06_LATER_FINITE_CEILING_REFUSES_KNOWN_ZERO_LIE=yes")
 
+# Active finite-ceiling crash recovery must persist cost uncertainty too.
+db6c = tmp / "unknown-active-cap.sqlite3"
+repo6c = new_repo("unknown-active-cap")
+supervisor.enqueue(
+    canonical_repo=repo6c, run_id="run-unknown-cap", db_path=db6c,
+    max_total_cost_usd=5,
+)
+with supervisor._connect(db6c) as conn:
+    conn.execute(
+        "UPDATE jobs SET status='RUNNING', worker_pid=99999999, "
+        "worker_started_at=1, worker_pgid=99999999, worker_deadline_at=1 "
+        "WHERE run_id='run-unknown-cap'"
+    )
+    conn.commit()
+    job6c = conn.execute(
+        "SELECT * FROM jobs WHERE run_id='run-unknown-cap'"
+    ).fetchone()
+    attempt6c, _ = supervisor._reserve_semantic_attempt(
+        conn, job=job6c, role="builder"
+    )
+    conn.execute(
+        "UPDATE semantic_attempts SET status='RUNNING', worker_pid=99999999, "
+        "worker_pgid=99999999, deadline_at=1 WHERE attempt_id=?",
+        (attempt6c,),
+    )
+    conn.commit()
+    assert supervisor._recover_stale_running(conn) == 0
+with supervisor._connect_readonly(db6c) as conn:
+    j6c = conn.execute(
+        "SELECT * FROM jobs WHERE run_id='run-unknown-cap'"
+    ).fetchone()
+    a6c = conn.execute(
+        "SELECT * FROM semantic_attempts WHERE attempt_id=?", (attempt6c,)
+    ).fetchone()
+    unknown6c = supervisor._unknown_cost_attempt_count(conn, int(j6c["id"]))
+assert j6c["status"] == "QUARANTINED", dict(j6c)
+assert a6c["status"] == "COST_UNKNOWN", dict(a6c)
+assert int(a6c["cost_known"]) == 0 and int(a6c["cost_accounted"]) == 1, dict(a6c)
+assert unknown6c == 1
+print("A06_ACTIVE_CAP_CRASH_RECOVERY_PRESERVES_UNKNOWN=yes")
+
 # ------------------------------------------------------------------
 # A-08: a real Popen failure after durable reservation is terminalized.
 # ------------------------------------------------------------------
@@ -317,6 +358,39 @@ assert attempts[0]["status"] == "FAILED", dict(attempts[0])
 assert attempts[0]["failure_reason"] == "worker_launch_failed", dict(attempts[0])
 assert int(attempts[0]["cost_accounted"]) == 1
 print("A08_RESERVED_ATTEMPT_TERMINAL=yes")
+
+# PID publication may succeed while the release write itself fails. The gated
+# child still cannot have executed the provider, so the RUNNING attempt must
+# terminalize as a known-zero launch failure.
+db8b = tmp / "release-fail.sqlite3"
+repo8b = new_repo("release-fail")
+supervisor.enqueue(
+    canonical_repo=repo8b, run_id="run-release-fail", db_path=db8b,
+)
+with supervisor._connect(db8b) as conn:
+    conn.execute("UPDATE jobs SET status='RUNNING' WHERE run_id='run-release-fail'")
+    conn.commit()
+    j8b = conn.execute(
+        "SELECT * FROM jobs WHERE run_id='run-release-fail'"
+    ).fetchone()
+    a8b, _ = supervisor._reserve_semantic_attempt(conn, job=j8b, role="builder")
+    conn.execute(
+        "UPDATE semantic_attempts SET status='RUNNING', worker_pid=12345 "
+        "WHERE attempt_id=?", (a8b,)
+    )
+    conn.commit()
+    supervisor._mark_attempt_launch_failed(
+        conn, job_id=int(j8b["id"]), attempt_id=a8b,
+        detail="synthetic gate release failure",
+    )
+with supervisor._connect_readonly(db8b) as conn:
+    a8b_after = conn.execute(
+        "SELECT * FROM semantic_attempts WHERE attempt_id=?", (a8b,)
+    ).fetchone()
+assert a8b_after["status"] == "FAILED", dict(a8b_after)
+assert a8b_after["worker_pid"] is None, dict(a8b_after)
+assert int(a8b_after["cost_known"]) == 1 and int(a8b_after["cost_accounted"]) == 1
+print("A08_POST_PUBLICATION_PRE_RELEASE_TERMINAL=yes")
 
 # ------------------------------------------------------------------
 # A-04: stale resume snapshot loses to retire and cannot resurrect.

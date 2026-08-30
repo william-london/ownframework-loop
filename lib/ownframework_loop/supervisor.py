@@ -667,6 +667,12 @@ def _connect(path: Path) -> sqlite3.Connection:
     for name, statement in attempt_migrations.items():
         if name not in attempt_columns:
             conn.execute(statement)
+    # Rows written before cost_known existed used COST_UNKNOWN itself as the
+    # uncertainty marker. Preserve that truth when upgrading the ledger rather
+    # than accepting the new column's default-true value.
+    conn.execute(
+        "UPDATE semantic_attempts SET cost_known=0 WHERE status='COST_UNKNOWN'"
+    )
     conn.commit()
     return conn
 
@@ -1087,22 +1093,29 @@ def _mark_attempt_launch_failed(
     attempt_id: str,
     detail: str,
 ) -> None:
-    """Terminalize a RESERVED attempt only when no OS child was created."""
+    """Terminalize only a semantic attempt proven not to have reached provider exec."""
     conn.execute("BEGIN IMMEDIATE")
     cur = conn.execute(
         """UPDATE semantic_attempts SET
              status='FAILED', completed_at=?, returncode=NULL,
+             worker_pid=NULL, worker_pgid=NULL, deadline_at=NULL,
+             worker_start_identity=NULL,
              cost_usd=0, cost_accounted=1, cost_known=1,
              input_tokens=0, output_tokens=0, cache_read_tokens=0,
              cache_creation_tokens=0, tokens_known=1,
              failure_class='configuration', failure_reason='worker_launch_failed'
-           WHERE attempt_id=? AND job_id=? AND status='RESERVED'""",
+           WHERE attempt_id=? AND job_id=?
+             AND (
+               status='RESERVED'
+               OR (status='RUNNING' AND launch_gate_version>=1)
+             )""",
         (time.time(), attempt_id, int(job_id)),
     )
     if cur.rowcount != 1:
         conn.rollback()
         raise RuntimeError(
-            f"launch-failed attempt was not RESERVED: {attempt_id}: {detail[-500:]}"
+            f"launch-failed attempt was not provably pre-provider: "
+            f"{attempt_id}: {detail[-500:]}"
         )
     conn.commit()
 
@@ -1190,7 +1203,8 @@ def _recover_stale_running(conn: sqlite3.Connection) -> int:
                     if float(row["max_total_cost_usd"] or 0) > 0:
                         conn.execute(
                             """UPDATE semantic_attempts SET status='COST_UNKNOWN',
-                               completed_at=? WHERE attempt_id=?""",
+                               completed_at=?, cost_usd=0, cost_accounted=1,
+                               cost_known=0 WHERE attempt_id=?""",
                             (time.time(), attempt_id),
                         )
                         conn.execute(
@@ -2172,12 +2186,14 @@ class ClaudeCodeRunner:
                 pass
 
         # The child is alive but cannot exec the semantic provider until exact
-        # ownership is durably published by on_start.
+        # ownership is durably published by on_start. Any ordinary exception
+        # before the release byte is written is therefore provably pre-provider,
+        # even if PID publication already committed.
         try:
             if on_start is not None:
                 on_start(int(proc.pid), role)
             os.write(release_w, b"1")
-        except BaseException:
+        except BaseException as exc:
             try:
                 os.close(release_w)
             except OSError:
@@ -2186,7 +2202,14 @@ class ClaudeCodeRunner:
             if durable_files is not None:
                 stdout_fh.close()  # type: ignore[union-attr]
                 stderr_fh.close()  # type: ignore[union-attr]
-            raise
+            if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+                raise
+            if isinstance(exc, WorkerLaunchError):
+                raise
+            raise WorkerLaunchError(
+                "semantic worker failed before provider release: "
+                f"{type(exc).__name__}: {exc}"
+            ) from exc
         finally:
             try:
                 os.close(release_w)
