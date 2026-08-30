@@ -126,8 +126,9 @@ try:
 finally:
     os.environ.pop("OFLOOP_CLAUDE_EXTRA_ARGS", None)
 
-# Readiness proves the Claude version that implements setting-source sandbox
-# exclusion. Old or unparseable versions fail closed before a semantic attempt.
+# Readiness proves the documented strictAllowlist feature baseline used by
+# the commissioned sandbox. Old or unparseable versions fail closed before a
+# semantic attempt.
 fake = root / "claude"
 fake.write_text("#!/bin/sh\necho '2.1.218 (Claude Code)'\n", encoding="utf-8")
 fake.chmod(fake.stat().st_mode | stat.S_IXUSR)

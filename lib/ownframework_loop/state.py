@@ -552,7 +552,7 @@ def append_event(
         )
 
 
-def transitiondef transition(
+def transition(
     canonical_repo: Path,
     run_id: str,
     *,
