@@ -85,3 +85,6 @@ tests/integration/test_v083_supervisor_retire.sh
 
 # v0.8.4 night-shift worker boundary + RETIRED managed lifecycle consistency
 tests/integration/test_v084_nightshift_worker_boundary.sh
+
+# v0.8.4 write-ahead STATE/EVENTS crash recovery + verified dispatch reads
+tests/integration/test_v084_state_transaction_recovery.sh

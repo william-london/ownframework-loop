@@ -147,8 +147,37 @@ def reconcile_run(
     actions: list[str] = []
     refused: list[str] = []
 
-    # Read artifacts.
-    state_obj = state_mod.load(canonical_repo, run_id) or {}
+    # Finish only an exact, journal-bound torn STATE/EVENTS transaction before
+    # considering finalizer artifacts. This is automatic crash recovery, not a
+    # generic integrity bypass.
+    try:
+        recovered_txn = state_mod.recover_pending_state_transaction(
+            canonical_repo, run_id
+        )
+        if recovered_txn:
+            actions.append(recovered_txn)
+    except Exception as exc:
+        return {
+            "ok": False,
+            "actions": actions,
+            "refused": [f"state_transaction_recovery_failed:{exc}"],
+            "artifact_adopted": False,
+            "packet_sha_preserved": False,
+            "event_chain_valid": False,
+        }
+
+    # Read an integrity-verified authoritative snapshot.
+    try:
+        state_obj = state_mod.load_verified(canonical_repo, run_id) or {}
+    except Exception as exc:
+        return {
+            "ok": False,
+            "actions": actions,
+            "refused": [f"state_integrity:{exc}"],
+            "artifact_adopted": False,
+            "packet_sha_preserved": False,
+            "event_chain_valid": False,
+        }
     cur_state = state_obj.get("state")
     approval_doc = approval_mod.load_approval(canonical_repo, run_id)
     packet_path = run_d / "WORK_PACKET.md"

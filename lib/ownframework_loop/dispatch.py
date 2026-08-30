@@ -194,7 +194,7 @@ def semantic_result_ready(work_order: dict[str, Any]) -> tuple[bool, str]:
                 out.add(f"{prefix}-{idx}")
         return out
 
-    state_doc = state_mod.load(repo, run_id)
+    state_doc = state_mod.load_verified(repo, run_id)
     if state_mod.is_program_state(state_doc):
         expected_ac = set(
             program_mod.current_checkpoint_acceptance_criterion_ids(
@@ -431,7 +431,7 @@ def _claim_or_terminal(
     try:
         return _run_cli(args)
     except DispatchError:
-        cur = state_mod.load(repo, run_id)
+        cur = state_mod.load_verified(repo, run_id)
         if isinstance(cur, dict):
             new_state = str(cur.get("state") or "")
             if new_state in TERMINAL_STATES:
@@ -460,7 +460,7 @@ def claim_next(*, canonical_repo: Path, run_id: str) -> dict[str, Any]:
                     "reconciliation refused: " + "; ".join(rr.get("refused") or [])
                 )
 
-            cur = state_mod.load(repo, run_id)
+            cur = state_mod.load_verified(repo, run_id)
             if not isinstance(cur, dict):
                 raise DispatchError(f"STATE.json missing or invalid for {run_id}")
             state = str(cur.get("state") or "")
