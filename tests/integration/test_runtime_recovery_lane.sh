@@ -220,6 +220,28 @@ assert not supervisor._pid_alive(orphan_pid, None), "expired orphan still alive"
 print("A02_TIMEOUT_SURVIVES_RESTART=yes")
 print("A06_UNKNOWN_COST_REMAINS_UNKNOWN=yes")
 
+# PID reuse safety: a matching PID/PGID with the wrong durable start identity
+# must never be signalled by replacement recovery.
+identity_probe = subprocess.Popen(["/bin/sleep", "30"], start_new_session=True)
+try:
+    actual_identity = supervisor._read_pid_start_identity(identity_probe.pid)
+    assert actual_identity, "supported platform failed to expose process start identity"
+    refused = supervisor._terminate_owned_process_group(
+        identity_probe.pid,
+        identity_probe.pid,
+        str(actual_identity) + "-wrong",
+        time.time(),
+    )
+    assert refused is False
+    assert supervisor._pid_alive(identity_probe.pid, None), "identity mismatch killed unrelated process"
+finally:
+    try:
+        os.killpg(identity_probe.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    identity_probe.wait(timeout=10)
+print("A02_PID_REUSE_SAFE_KILL_PROOF=yes")
+
 # A later finite ceiling must fail closed on the historical uncertainty.
 with supervisor._connect(db) as conn:
     conn.execute(
