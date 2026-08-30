@@ -95,7 +95,11 @@ order = {
 
 supervisor.dispatch_mod.claim_next = lambda **kwargs: dict(order)
 supervisor.dispatch_mod.semantic_result_ready = lambda work_order: (False, "builder_summary_empty")
-supervisor.dispatch_mod.finalize_work_order = lambda work_order: {"ok": True, "finalized": True}
+finalize_calls = []
+def fake_finalize(work_order, **kwargs):
+    finalize_calls.append(dict(kwargs))
+    return {"ok": True, "finalized": True}
+supervisor.dispatch_mod.finalize_work_order = fake_finalize
 
 supervisor.enqueue(
     canonical_repo=repo,
@@ -126,6 +130,8 @@ with supervisor._connect(db) as conn:
 second = supervisor.run_one(db_path=db)
 assert second["action"] == "BUILD", second
 assert WaitThenReadyRunner.calls == 1
+assert len(finalize_calls) == 1, finalize_calls
+assert int(finalize_calls[0].get("timeout_seconds") or 0) > 0, finalize_calls
 status2 = supervisor.status(canonical_repo=repo, run_id="run-auto", db_path=db)
 assert status2["execution_started_at"] is not None, status2
 assert len(status2["attempt_history"]) == 1, status2
