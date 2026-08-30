@@ -192,7 +192,7 @@ with supervisor._connect(db) as conn:
 orphan_pid = int(subprocess.check_output(
     [
         sys.executable, "-B", "-c",
-        "import subprocess; p=subprocess.Popen(['/bin/sleep','30'], start_new_session=True); print(p.pid, flush=True)",
+        "import subprocess; p=subprocess.Popen(['/bin/sleep','30'], start_new_session=True, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL); print(p.pid, flush=True)",
     ],
     text=True,
 ).strip())
