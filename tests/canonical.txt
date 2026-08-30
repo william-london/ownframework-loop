@@ -103,6 +103,32 @@ tests/integration/test_v084_linux_supervisor_service.sh
 # v0.8.4 adversarial runtime/concurrency/crash-consistency repair lane
 tests/integration/test_runtime_recovery_lane.sh
 
+# v0.8.5 final integration — actual PROGRAM review-finalizer repair crash atomicity
+tests/integration/test_v085_program_repair_crash_atomicity.sh
+# v0.8.5 final integration — actual build-finalizer same-pass crash/replay atomicity
+tests/integration/test_v085_build_finalize_replay_atomicity.sh
+
 # v0.8.4 static-call-graph correction — install.sh is not a release orchestrator;
 # validate.sh --installed --skip-tests is non-recursive structural validation.
 tests/integration/test_v084_static_call_graph_correction.sh
+
+# v0.8.5 platform lifecycle repair — fail-closed ledger truth + destructive uninstall safety
+tests/integration/test_v085_ledger_lifecycle_contract.sh
+
+# v0.8.5 platform lifecycle repair — exact Python, rollback, service publication recovery
+tests/integration/test_v085_platform_commissioning_repair.sh
+
+# v0.8.5 source/install distribution parity
+tests/integration/test_v085_distribution_parity.sh
+
+# v0.8.5 artifact schema contract truth
+tests/integration/test_v084_schema_contract_truth.sh
+
+# v0.8.5 exact immutable hosted-CI SHA contract
+tests/integration/test_v085_ci_exact_sha.sh
+
+# v0.8.5 allowlisted-host direct mutation defense matrix
+tests/integration/test_v085_network_mutation_defense.sh
+
+# v0.8.5 commissioned PROGRAM canary model-free contract
+tests/integration/test_v085_commissioned_canary_contract.sh
