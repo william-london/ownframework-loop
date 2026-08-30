@@ -130,8 +130,9 @@ Builder and reviewer receive different built-in tool sets, with reviewers
 structurally lacking Edit/Write/NotebookEdit.
 
 Bash runs inside Claude's OS sandbox with fail-if-unavailable, no unsandboxed
-escape, strict frozen packet network read allowlist (empty by default), operator-home read denial with narrow
-current-pass/runtime re-opens, and credential scrubbing/deny rules.
+escape, strict frozen packet network read allowlist (empty by default), operator-home plus supervisor-state-root read denial with narrow
+current-pass/runtime re-opens plus an exact private credential-file exception
+where a host requires it, and credential scrubbing/deny rules.
 `--permission-mode dontAsk` plus explicit pre-approved sealed tools means
 authorized work runs without routine human prompts while out-of-contract calls
 are denied.
@@ -233,3 +234,22 @@ available. Promotion remains after terminal APPROVED and human-owned.
 Authority still comes from deterministic packet/source/worktree/SHA/state/
 finalizer boundaries; the native sandbox limits what a compromised semantic
 worker can reach while those deterministic checks decide what evidence counts.
+
+## Local operational privacy
+
+The supervisor operational plane is private by construction rather than by
+ambient umask:
+
+- state root and runtime-cache directories: 0700;
+- supervisor database, worker stdout/stderr, runtime provenance, service-env,
+  launchd plist, systemd user unit, and replacement backups: 0600 where POSIX
+  modes apply;
+- provider bearer tokens are not written into launchd/systemd definitions or
+  runtime provenance;
+- the service secret loader accepts only an explicit auth/model whitelist and
+  refuses loose permissions, foreign ownership, symlinks, malformed JSON, and
+  unknown keys.
+
+This is a same-user process boundary, not protection from a fully compromised
+operator account. It prevents other local users and prompt-injected semantic
+Bash from gaining broad access through ordinary filesystem permissions.

@@ -25,6 +25,18 @@ from typing import Any
 SCHEMA = "ownframework-loop-runtime-env/v1"
 
 
+def _ensure_private_dir(path: Path) -> Path:
+    """Create/repair runtime cache directories as 0700 on POSIX."""
+    p = Path(path).expanduser().resolve(strict=False)
+    p.mkdir(parents=True, exist_ok=True, mode=0o700)
+    try:
+        os.chmod(p, 0o700)
+    except OSError:
+        pass
+    return p
+
+
+
 def default_runtime_cache_root() -> Path:
     root = os.environ.get("XDG_STATE_HOME", "").strip()
     base = Path(root).expanduser() if root else Path.home() / ".local" / "state"
@@ -55,10 +67,11 @@ def runtime_cache_dir(
     run_id: str,
     role: str,
 ) -> Path:
-    """Per (repo, run, role) deterministic directory for externalized cache."""
-    d = runtime_cache_path(canonical_repo, run_id, role)
-    d.mkdir(parents=True, exist_ok=True)
-    return d
+    """Per (repo, run, role) deterministic private externalized cache."""
+    cache_root = default_runtime_cache_root()
+    _ensure_private_dir(cache_root.parent)
+    _ensure_private_dir(cache_root)
+    return _ensure_private_dir(runtime_cache_path(canonical_repo, run_id, role))
 
 
 def hermetic_subprocess_env(
@@ -91,7 +104,7 @@ def hermetic_subprocess_env(
     xdg = cache_dir / "xdg-cache"
     pytest_cache = cache_dir / "pytest-cache"
     for d in (pycache, tmp, xdg, pytest_cache):
-        d.mkdir(parents=True, exist_ok=True)
+        _ensure_private_dir(d)
 
     env = dict(base_env) if base_env is not None else dict(os.environ)
     # Ensure the OwnFramework Loop library dir is on PYTHONPATH so our

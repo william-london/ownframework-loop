@@ -41,7 +41,7 @@ Reviewer source immutability is therefore structural. Sandboxed Bash may write o
 
 ## Bash read and credential boundary
 
-Bash denies reads of the operator home directory and re-opens only the current worktree, current semantic-result directory, runtime cache, required Git metadata, and the trusted Loop runtime payload.
+Bash denies reads of the operator home directory and the Loop supervisor state root (including custom XDG_STATE_HOME outside HOME), then re-opens only the current worktree, current semantic-result directory, per-run runtime cache, required Git metadata, the trusted Loop runtime payload, and (only when the commissioned host needs file-backed authentication) an exact private credential file. Whole adapter configuration directories are not eligible for this exception.
 
 The supervisor sets `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1`, and sandbox credential rules deny common GitHub/npm/PyPI/container tokens. Model authentication remains available to the Claude process itself, not to its Bash children.
 
@@ -62,3 +62,21 @@ This is the commissioned unattended worker contract. Interactive Claude sessions
 
 A missing Linux sandbox prerequisite is an installation/configuration defect,
 not a reason to fall back to unsandboxed unattended execution.
+
+## Commissioned service secrets
+
+launchd/systemd definitions do not embed provider bearer tokens. Installers
+persist the small whitelisted provider/auth/model environment required by the
+durable runner in:
+
+`<state-root>/service-env.json`
+
+The state root is forced to mode 0700 and the service-env file to 0600. The
+service definition exports only `OFLOOP_SERVICE_ENV_FILE`; supervisor startup
+refuses a missing, symlinked, non-owned, group/other-readable, malformed, or
+unknown-key service-env file.
+
+macOS Claude credentials are Keychain-backed, so no `~/.claude` filesystem
+exception is commissioned. Linux may expose only the exact private
+`.credentials.json` file (including the `CLAUDE_CONFIG_DIR` location when
+used), never the full Claude configuration/session directory.

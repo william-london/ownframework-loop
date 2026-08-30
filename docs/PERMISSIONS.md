@@ -28,7 +28,7 @@ No WebSearch/WebFetch, Agent/Task, Skill, browser, promotion, deployment, or rem
 
 `--restricted` excludes user/project/local settings. Pass settings and role instructions are supplied explicitly by the installed core. Optional interactive host adapters do not widen the commissioned runner.
 
-MCP discovery uses `--strict-mcp-config --mcp-config {}`, because `--tools` does not govern MCP tools.
+MCP discovery uses `--strict-mcp-config` with an explicit empty `{"mcpServers":{}}` config, because `--tools` does not govern MCP tools.
 
 ## Sandbox
 
@@ -39,8 +39,10 @@ Per-pass CLI settings enforce:
 - automatic approval for sandboxed Bash;
 - no unsandboxed-command escape;
 - strict packet-bound network read allowlist (empty by default);
-- operator-home read deny with narrow current-pass/runtime re-opens;
+- operator-home and supervisor-state-root read deny with narrow current-pass/runtime re-opens plus, when required, one exact private adapter credential file;
+- directory-wide adapter auth re-opens are rejected;
 - reviewer worktree deny-write;
+- commissioned provider/auth/model values live in a private 0600 service-env file rather than launchd/systemd definitions;
 - credential environment-variable denies.
 
 The worker environment also sets `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1`.

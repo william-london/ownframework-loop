@@ -8,6 +8,7 @@ PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 STATE_ROOT="${XDG_STATE_HOME:-$HOME/.local/state}/ownframework-loop"
 SUPERVISOR_DB="$STATE_ROOT/supervisor.sqlite3"
 RUNTIME_PROVENANCE="$STATE_ROOT/runtime-provenance.json"
+SERVICE_ENV="$STATE_ROOT/service-env.json"
 
 if [[ "$(uname -s)" != "Darwin" ]]; then
   echo "SUPERVISOR_UNINSTALL=REFUSED reason=macos_required" >&2
@@ -31,7 +32,7 @@ if [[ -f "$SUPERVISOR_DB" && "${OFLOOP_ALLOW_SUPERVISOR_SWAP_WITH_ACTIVE_WORK:-0
 fi
 DOMAIN="gui/$UID"
 launchctl bootout "$DOMAIN" "$PLIST" >/dev/null 2>&1 || true
-rm -f "$PLIST" "$RUNTIME_PROVENANCE"
+rm -f "$PLIST" "$RUNTIME_PROVENANCE" "$SERVICE_ENV"
 
 echo "SUPERVISOR_UNINSTALL=PASS"
 echo "SERVICE_MANAGER=launchd"

@@ -92,6 +92,7 @@ UNIT_DIR="${OFLOOP_SYSTEMD_USER_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/systemd/u
 UNIT_NAME="ownframework-loop-supervisor.service"
 UNIT="$UNIT_DIR/$UNIT_NAME"
 PROVENANCE="$STATE_ROOT/runtime-provenance.json"
+SERVICE_ENV="$STATE_ROOT/service-env.json"
 
 if [[ ( -f "$UNIT" || -f "$PROVENANCE" ) && ! -f "$DB" && "${OFLOOP_ALLOW_RUNTIME_GENERATION_MIGRATION:-0}" != "1" ]]; then
   echo "SUPERVISOR_INSTALL=REFUSED reason=runtime_dependency_ledger_missing" >&2
@@ -113,15 +114,19 @@ if [[ -f "$DB" ]]; then
 fi
 SERVICE_PATH="/usr/local/bin:/usr/bin:/bin:$HOME/.local/bin"
 mkdir -p "$STATE_ROOT" "$UNIT_DIR"
+chmod 0700 "$STATE_ROOT"
 TMP_UNIT="$UNIT.tmp.$$"
 TMP_PROV="$PROVENANCE.tmp.$$"
+TMP_SERVICE_ENV="$SERVICE_ENV.tmp.$$"
 OLD_UNIT="$STATE_ROOT/.systemd-unit.preinstall.$$"
 OLD_PROV="$STATE_ROOT/.runtime-provenance.preinstall.$$"
-HAD_UNIT=0; HAD_PROV=0
-[[ -f "$UNIT" ]] && { cp "$UNIT" "$OLD_UNIT"; HAD_UNIT=1; }
-[[ -f "$PROVENANCE" ]] && { cp "$PROVENANCE" "$OLD_PROV"; HAD_PROV=1; }
+OLD_SERVICE_ENV="$STATE_ROOT/.service-env.preinstall.$$"
+HAD_UNIT=0; HAD_PROV=0; HAD_SERVICE_ENV=0
+[[ -f "$UNIT" ]] && { cp "$UNIT" "$OLD_UNIT"; chmod 0600 "$OLD_UNIT"; HAD_UNIT=1; }
+[[ -f "$PROVENANCE" ]] && { cp "$PROVENANCE" "$OLD_PROV"; chmod 0600 "$OLD_PROV"; HAD_PROV=1; }
+[[ -f "$SERVICE_ENV" ]] && { cp "$SERVICE_ENV" "$OLD_SERVICE_ENV"; chmod 0600 "$OLD_SERVICE_ENV"; HAD_SERVICE_ENV=1; }
 
-UNIT="$TMP_UNIT" PROVENANCE="$TMP_PROV" STATE_ROOT="$STATE_ROOT" STATE_BASE="$STATE_BASE" \
+UNIT="$TMP_UNIT" PROVENANCE="$TMP_PROV" SERVICE_ENV="$TMP_SERVICE_ENV" STATE_ROOT="$STATE_ROOT" STATE_BASE="$STATE_BASE" \
 UNIT_NAME="$UNIT_NAME" PYTHON_BIN="$PYTHON_BIN" OFLOOP_BIN="$OFLOOP_BIN" CLAUDE_BIN="$CLAUDE_BIN" \
 SERVICE_PATH="$SERVICE_PATH" INSTALL_ROOT="$INSTALL_ROOT" SOURCE_ROOT="$SOURCE_ROOT" SOURCE_HEAD="$SOURCE_HEAD" \
 INSTALL_VERSION="$INSTALL_VERSION" RUNTIME_GENERATION="$RUNTIME_GENERATION" "$PYTHON_BIN" -B - <<'PY'
@@ -133,6 +138,7 @@ def q(value:str)->str:
 
 unit=Path(os.environ["UNIT"])
 prov=Path(os.environ["PROVENANCE"])
+service_env_path=Path(os.environ["SERVICE_ENV"])
 env={
     "PATH":os.environ["SERVICE_PATH"],
     "PYTHONUNBUFFERED":"1",
@@ -145,36 +151,33 @@ state_base=os.environ.get("STATE_BASE","")
 if state_base:
     env["XDG_STATE_HOME"]=state_base
 claude=os.environ.get("CLAUDE_BIN") or None
+service_env={}
 if claude:
     env["OFLOOP_CLAUDE_BIN"]=claude
-    # The Claude adapter keeps OAuth/session state under $HOME/.claude.
-    # The core sandbox denies $HOME by default; the operator-supplied
-    # auth-read list re-opens exactly the adapter's own auth home so a
-    # worker can authenticate while the broad home deny stands.
-    adapter_auth = str(Path.home() / ".claude")
-    if Path(adapter_auth).is_dir():
-        env["OFLOOP_ADAPTER_AUTH_READ_PATHS"] = adapter_auth
-    # systemd-user does not inherit the operator's interactive shell
-    # env by default, so ANTHROPIC_* / CLAUDE_CODE_* auth + endpoint +
-    # model aliases never reach the supervisor — and therefore never
-    # reach the worker. The CLI authenticates against
-    # ANTHROPIC_BASE_URL with ANTHROPIC_AUTH_TOKEN; without those it
-    # returns "Not logged in" from inside the sandbox even though
-    # `claude auth status` works in the operator's shell. Capture the
-    # operator-supplied auth env at install time and re-emit it in
-    # the unit file so the durable service can drive semantic passes
-    # against the same model the operator already trusts.
+    env["OFLOOP_SERVICE_ENV_FILE"]=str(Path(os.environ["STATE_ROOT"]) / "service-env.json")
+    # Linux Claude OAuth credentials are stored in one private credentials file
+    # (or beneath CLAUDE_CONFIG_DIR). Re-open that exact file only; never the
+    # entire ~/.claude configuration/session tree.
+    config_dir = Path(os.environ.get("CLAUDE_CONFIG_DIR") or (Path.home() / ".claude"))
+    credential_file = config_dir / ".credentials.json"
+    if credential_file.is_file():
+        env["OFLOOP_ADAPTER_AUTH_READ_PATHS"] = str(credential_file.resolve())
     for auth_var in (
+        "ANTHROPIC_API_KEY",
         "ANTHROPIC_AUTH_TOKEN",
         "ANTHROPIC_BASE_URL",
         "ANTHROPIC_MODEL",
         "ANTHROPIC_DEFAULT_OPUS_MODEL",
         "ANTHROPIC_DEFAULT_SONNET_MODEL",
         "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+        "CLAUDE_CODE_OAUTH_TOKEN",
+        "CLAUDE_CODE_OAUTH_REFRESH_TOKEN",
+        "CLAUDE_CODE_OAUTH_SCOPES",
+        "CLAUDE_CONFIG_DIR",
     ):
         value = os.environ.get(auth_var)
         if value:
-            env[auth_var]=value
+            service_env[auth_var]=value
 lines=[
     "[Unit]",
     "Description=OwnFramework Loop durable supervisor",
@@ -190,8 +193,21 @@ lines=[
 for k,v in sorted(env.items()):
     lines.append(f"Environment={q(k+'='+v)}")
 lines += ["StandardOutput=journal","StandardError=journal","","[Install]","WantedBy=default.target",""]
-unit.write_text("\n".join(lines),encoding="utf-8")
-prov.write_text(json.dumps({
+
+def write_private_text(path: Path, text: str) -> None:
+    fd=os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8", closefd=False) as fh:
+            fh.write(text)
+            fh.flush()
+            os.fsync(fh.fileno())
+    finally:
+        os.close(fd)
+
+write_private_text(unit, "\n".join(lines))
+write_private_text(service_env_path, json.dumps(service_env, indent=2, sort_keys=True)+"\n")
+write_private_text(prov, json.dumps({
     "schema":"ownframework-loop-supervisor-runtime-provenance/v1",
     "service_manager":"systemd-user",
     "service_label":os.environ["UNIT_NAME"],
@@ -205,27 +221,30 @@ prov.write_text(json.dumps({
     "ofloop_version":os.environ["INSTALL_VERSION"],
     "runtime_generation":os.environ["RUNTIME_GENERATION"],
     "journal_unit":os.environ["UNIT_NAME"],
-},indent=2,sort_keys=True)+"\n",encoding="utf-8")
+    "service_env_file":str(Path(os.environ["STATE_ROOT"]) / "service-env.json") if claude else None,
+},indent=2,sort_keys=True)+"\n")
 PY
 
 mv "$TMP_UNIT" "$UNIT"
 mv "$TMP_PROV" "$PROVENANCE"
-chmod 0600 "$PROVENANCE"
+mv "$TMP_SERVICE_ENV" "$SERVICE_ENV"
+chmod 0600 "$UNIT" "$PROVENANCE" "$SERVICE_ENV"
 
 rollback(){
   "$SYSTEMCTL_BIN" --user disable --now "$UNIT_NAME" >/dev/null 2>&1 || true
-  if [[ "$HAD_UNIT" == "1" ]]; then mv "$OLD_UNIT" "$UNIT"; else rm -f "$UNIT"; fi
-  if [[ "$HAD_PROV" == "1" ]]; then mv "$OLD_PROV" "$PROVENANCE"; else rm -f "$PROVENANCE"; fi
+  if [[ "$HAD_UNIT" == "1" ]]; then mv "$OLD_UNIT" "$UNIT"; chmod 0600 "$UNIT"; else rm -f "$UNIT"; fi
+  if [[ "$HAD_PROV" == "1" ]]; then mv "$OLD_PROV" "$PROVENANCE"; chmod 0600 "$PROVENANCE"; else rm -f "$PROVENANCE"; fi
+  if [[ "$HAD_SERVICE_ENV" == "1" ]]; then mv "$OLD_SERVICE_ENV" "$SERVICE_ENV"; chmod 0600 "$SERVICE_ENV"; else rm -f "$SERVICE_ENV"; fi
   "$SYSTEMCTL_BIN" --user daemon-reload >/dev/null 2>&1 || true
 }
 if ! "$SYSTEMCTL_BIN" --user daemon-reload ||
    ! "$SYSTEMCTL_BIN" --user enable --now "$UNIT_NAME"; then
   rollback
-  rm -f "$OLD_UNIT" "$OLD_PROV" "$TMP_UNIT" "$TMP_PROV"
+  rm -f "$OLD_UNIT" "$OLD_PROV" "$OLD_SERVICE_ENV" "$TMP_UNIT" "$TMP_PROV" "$TMP_SERVICE_ENV"
   echo "SUPERVISOR_INSTALL=REFUSED reason=systemd_start_failed" >&2
   exit 14
 fi
-rm -f "$OLD_UNIT" "$OLD_PROV"
+rm -f "$OLD_UNIT" "$OLD_PROV" "$OLD_SERVICE_ENV"
 
 cat <<EOF
 SUPERVISOR_INSTALL=PASS
@@ -236,6 +255,7 @@ OFLOOP_BIN=$OFLOOP_BIN
 CLAUDE_BIN=${CLAUDE_BIN:-(none-idle-only)}
 STATE_ROOT=$STATE_ROOT
 RUNTIME_PROVENANCE=$PROVENANCE
+SERVICE_ENV=$SERVICE_ENV
 SOURCE_HEAD=${SOURCE_HEAD:-(not-a-git-checkout)}
 OFLOOP_VERSION=$INSTALL_VERSION
 RUNTIME_GENERATION=$RUNTIME_GENERATION

@@ -151,6 +151,7 @@ echo ""
 echo "=== T1: CLAUDE_BIN → plist/provenance agree on canonical path ==="
 CLAUDE_BIN="$CLAUDE_FAKE" XDG_STATE_HOME="$SANDBOX/xdg1" run_installer > /tmp/t1.out 2>&1 || true
 PROV="$SANDBOX/xdg1/ownframework-loop/runtime-provenance.json"
+SERVICE_ENV="$SANDBOX/xdg1/ownframework-loop/service-env.json"
 PLIST="$HOME/Library/LaunchAgents/com.ownframework.loop-supervisor.plist"
 [[ -f "$PROV" ]] || { fail "T1: provenance file not written at $PROV. out=$(cat /tmp/t1.out)"; }
 [[ -f "$PLIST" ]] || { fail "T1: plist not written at $PLIST. out=$(cat /tmp/t1.out)"; }
@@ -167,6 +168,23 @@ if [[ -f "$PROV" && -f "$PLIST" ]]; then
   [[ "$PROV_CLAUDE" == "$PLIST_CLAUDE" ]] \
     && pass "T1: parity — provenance claude_bin == plist OFLOOP_CLAUDE_BIN" \
     || fail "T1: parity mismatch: $PROV_CLAUDE vs $PLIST_CLAUDE"
+
+  PROV_SERVICE_ENV=$(python3 -c "import json; print(json.load(open('$PROV'))['service_env_file'])" 2>/dev/null || echo MISSING)
+  PLIST_SERVICE_ENV=$(read_plist_key "$PLIST" "EnvironmentVariables.OFLOOP_SERVICE_ENV_FILE" 2>/dev/null || echo MISSING)
+  [[ "$PROV_SERVICE_ENV" == "$SERVICE_ENV" && "$PLIST_SERVICE_ENV" == "$SERVICE_ENV" ]] \
+    && pass "T1: plist/provenance agree on private service-env path" \
+    || fail "T1: service-env parity mismatch prov=$PROV_SERVICE_ENV plist=$PLIST_SERVICE_ENV expected=$SERVICE_ENV"
+  PLIST_AUTH_READ=$(read_plist_key "$PLIST" "EnvironmentVariables.OFLOOP_ADAPTER_AUTH_READ_PATHS" 2>/dev/null || echo "")
+  [[ -z "$PLIST_AUTH_READ" ]] \
+    && pass "T1: macOS does not reopen ~/.claude for commissioned worker" \
+    || fail "T1: macOS unexpectedly set auth read path=$PLIST_AUTH_READ"
+  python3 -B - "$PROV" "$SERVICE_ENV" "$PLIST" "$SANDBOX/xdg1/ownframework-loop" <<'PY'
+import pathlib, stat, sys
+prov, service_env, plist, state_root = map(pathlib.Path, sys.argv[1:])
+assert stat.S_IMODE(state_root.stat().st_mode) == 0o700
+for p in (prov, service_env, plist):
+    assert stat.S_IMODE(p.stat().st_mode) == 0o600, (p, oct(stat.S_IMODE(p.stat().st_mode)))
+PY
 fi
 
 # =====================================================================
@@ -271,6 +289,7 @@ ln -sf "$REAL_OFLOOP" "$IDLE_FAKEBIN_DIR/ofloop"
   XDG_STATE_HOME="$IDLE_XDG" \
   bash "$INSTALLER" > /tmp/t4.out 2>&1 || true)
 IDLE_PROV="$IDLE_XDG/ownframework-loop/runtime-provenance.json"
+IDLE_SERVICE_ENV="$IDLE_XDG/ownframework-loop/service-env.json"
 IDLE_PLIST="$IDLE_HOME/Library/LaunchAgents/com.ownframework.loop-supervisor.plist"
 [[ -f "$IDLE_PROV" ]] || { fail "T4: provenance not written for idle install. out=$(cat /tmp/t4.out)"; }
 if [[ -f "$IDLE_PROV" ]]; then
@@ -278,6 +297,12 @@ if [[ -f "$IDLE_PROV" ]]; then
   [[ "$IDLE_PROV_CLAUDE" == "None" ]] \
     && pass "T4: provenance claude_bin = null in idle-only install" \
     || fail "T4: provenance claude_bin=$IDLE_PROV_CLAUDE (expected None)"
+
+  IDLE_PROV_SERVICE_ENV=$(python3 -c "import json; v=json.load(open('$IDLE_PROV'))['service_env_file']; print('None' if v is None else v)" 2>/dev/null || echo MISSING)
+  [[ "$IDLE_PROV_SERVICE_ENV" == "None" ]] \
+    && pass "T4: idle-only provenance does not commission service-env" \
+    || fail "T4: idle-only service_env_file=$IDLE_PROV_SERVICE_ENV"
+  [[ -f "$IDLE_SERVICE_ENV" ]] || fail "T4: private empty service-env file missing"
 fi
 if [[ -f "$IDLE_PLIST" ]]; then
   IDLE_PLIST_CLAUDE=$(read_plist_key "$IDLE_PLIST" "EnvironmentVariables.OFLOOP_CLAUDE_BIN" 2>/dev/null || echo MISSING)
@@ -318,6 +343,15 @@ if [[ -f "$PROV5" && -f "$PLIST5" ]]; then
   [[ "$PLIST_STDERR" == "$EXPECTED_STATE/supervisor.stderr.log" ]] \
     && pass "T5: plist StandardErrorPath = state_root/supervisor.stderr.log" \
     || fail "T5: plist StandardErrorPath=$PLIST_STDERR"
+
+  python3 -B - "$EXPECTED_STATE" <<'PY'
+import pathlib, stat, sys
+root=pathlib.Path(sys.argv[1])
+assert stat.S_IMODE(root.stat().st_mode)==0o700
+for name in ("supervisor.stdout.log","supervisor.stderr.log","runtime-provenance.json","service-env.json"):
+    p=root/name
+    assert stat.S_IMODE(p.stat().st_mode)==0o600, (p, oct(stat.S_IMODE(p.stat().st_mode)))
+PY
 fi
 
 # =====================================================================

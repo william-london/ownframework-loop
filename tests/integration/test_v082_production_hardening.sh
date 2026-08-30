@@ -218,15 +218,11 @@ assert_contains "$IOUT" "rollback=restored_previous_service" "T8 previous superv
 [[ "$(cat "$IPROV")" == "OLD-PROVENANCE" ]] || fail "T8 provenance rollback failed"
 pass "T8 supervisor replacement rolls back on bootstrap failure"
 
-# T8b proves the macOS installer plist captures the operator's auth
-# env when Claude is commissioned, AND captures the adapter auth-read
-# home, so a launchd-managed supervisor can drive a sandboxed worker
-# against the same model the operator already trusts.
-# install-supervisor-macos.sh is macOS-only by design (launchd plist,
-# /Library/LaunchAgents layout, macOS plistlib contract). The test
-# gates on a Darwin host and skips on Linux so the matrix stays green.
+# T8b proves commissioned macOS auth/model material is NOT embedded in the
+# launchd plist/provenance and instead lives in one private service-env file.
+# macOS OAuth credentials are Keychain-backed, so ~/.claude is not reopened.
 if [[ "$(uname -s)" != "Darwin" ]]; then
-  pass "T8b commissioned installer captures adapter auth env (skipped on non-Darwin)"
+  pass "T8b private service auth material (skipped on non-Darwin)"
   exit 0
 fi
 S2SHIMS="$TMP/s2-shims"; mkdir -p "$S2SHIMS"
@@ -243,6 +239,8 @@ S2HOME="$TMP/s2-home"; S2XDG="$TMP/s2-xdg"
 rm -rf "$S2HOME" "$S2XDG"
 mkdir -p "$S2HOME/Library/LaunchAgents" "$S2XDG/ownframework-loop"
 S2PLIST="$S2HOME/Library/LaunchAgents/com.ownframework.loop-supervisor.plist"
+S2PROV="$S2XDG/ownframework-loop/runtime-provenance.json"
+S2SERVICE_ENV="$S2XDG/ownframework-loop/service-env.json"
 S2FAKECLAUDE="$TMP/fake-claude-2.1.251"
 cat > "$S2FAKECLAUDE" <<'SH'
 #!/bin/sh
@@ -259,14 +257,35 @@ HOME="$S2HOME" XDG_STATE_HOME="$S2XDG" PATH="$S2SHIMS:$PATH" \
   bash "$ROOT_DIR/install-supervisor-macos.sh" >/dev/null 2>&1 \
   || fail "T8b macOS supervisor install failed"
 [[ -f "$S2PLIST" ]] || fail "T8b plist not written"
+[[ -f "$S2PROV" ]] || fail "T8b provenance not written"
+[[ -f "$S2SERVICE_ENV" ]] || fail "T8b private service-env not written"
+
 PLIST_ENV="$(python3 -c "import plistlib,sys; d=plistlib.load(open(sys.argv[1],'rb')); print('\n'.join(f'{k}={v}' for k,v in d.get('EnvironmentVariables',{}).items()))" "$S2PLIST" 2>/dev/null || true)"
-assert_contains "$PLIST_ENV" "OFLOOP_ADAPTER_AUTH_READ_PATHS" "T8b plist captures adapter auth-read home"
-assert_contains "$PLIST_ENV" "$S2HOME/.claude" "T8b plist adapter auth-read points at adapter home"
-assert_contains "$PLIST_ENV" "ANTHROPIC_AUTH_TOKEN" "T8b plist captures ANTHROPIC_AUTH_TOKEN"
-assert_contains "$PLIST_ENV" "sk-test-auth-token-capture" "T8b plist preserves auth token value"
-assert_contains "$PLIST_ENV" "ANTHROPIC_BASE_URL" "T8b plist captures ANTHROPIC_BASE_URL"
-assert_contains "$PLIST_ENV" "ANTHROPIC_MODEL" "T8b plist captures ANTHROPIC_MODEL"
-# Negative control: a NON-Claude install must NOT capture auth vars.
+assert_contains "$PLIST_ENV" "OFLOOP_SERVICE_ENV_FILE=$S2SERVICE_ENV" "T8b plist points at private service env"
+if printf '%s' "$PLIST_ENV" | grep -Eq 'ANTHROPIC_(AUTH_TOKEN|API_KEY|BASE_URL|MODEL)'; then
+  fail "T8b plist leaked provider auth/model material: $PLIST_ENV"
+fi
+if printf '%s' "$PLIST_ENV" | grep -Fq "OFLOOP_ADAPTER_AUTH_READ_PATHS"; then
+  fail "T8b macOS plist reopened adapter auth filesystem path"
+fi
+
+python3 -B - "$S2SERVICE_ENV" "$S2PROV" "$S2PLIST" "$S2XDG/ownframework-loop" <<'PY'
+import json, pathlib, stat, sys
+service_env, prov, plist, state_root = map(pathlib.Path, sys.argv[1:])
+secret=json.loads(service_env.read_text(encoding="utf-8"))
+assert secret["ANTHROPIC_AUTH_TOKEN"]=="sk-test-auth-token-capture", secret
+assert secret["ANTHROPIC_BASE_URL"]=="https://api.example.invalid/anthropic", secret
+assert secret["ANTHROPIC_MODEL"]=="claude-test-model", secret
+provenance=json.loads(prov.read_text(encoding="utf-8"))
+assert provenance["service_env_file"]==str(service_env), provenance
+assert "sk-test-auth-token-capture" not in prov.read_text(encoding="utf-8")
+assert stat.S_IMODE(state_root.stat().st_mode)==0o700
+for path in (service_env, prov, plist, state_root/"supervisor.stdout.log", state_root/"supervisor.stderr.log"):
+    assert stat.S_IMODE(path.stat().st_mode)==0o600, (path, oct(stat.S_IMODE(path.stat().st_mode)))
+PY
+
+# Negative control: an idle-only install must not capture shell auth material or
+# advertise a service-env path to the service.
 NCSHIMS="$TMP/nc-shims"; mkdir -p "$NCSHIMS"
 cat > "$NCSHIMS/uname" <<'SH'
 #!/bin/sh
@@ -277,16 +296,12 @@ cat > "$NCSHIMS/launchctl" <<'SH'
 exit 0
 SH
 chmod +x "$NCSHIMS/uname" "$NCSHIMS/launchctl"
-# Idle-only install path: use a minimal PATH that has no `claude` binary
-# at all, so the installer's `command -v claude` returns empty and the
-# run stays idle-only (no OFLOOP_CLAUDE_BIN, no OFLOOP_ADAPTER_AUTH_*,
-# no ANTHROPIC_* capture — even though the test process happens to
-# inherit the operator's shell env that contains ANTHROPIC_AUTH_TOKEN).
 MINIMAL_PATH="/usr/bin:/bin"
 NCHOME="$TMP/nc-home"; NCXDG="$TMP/nc-xdg"
 rm -rf "$NCHOME" "$NCXDG"
 mkdir -p "$NCHOME/Library/LaunchAgents" "$NCXDG/ownframework-loop"
 NCPLIST="$NCHOME/Library/LaunchAgents/com.ownframework.loop-supervisor.plist"
+NCSERVICE_ENV="$NCXDG/ownframework-loop/service-env.json"
 HOME="$NCHOME" XDG_STATE_HOME="$NCXDG" PATH="$MINIMAL_PATH:$NCSHIMS" \
   OFLOOP_BIN="$ROOT_DIR/bin/ofloop" \
   ANTHROPIC_AUTH_TOKEN="sk-leaked" \
@@ -295,16 +310,16 @@ HOME="$NCHOME" XDG_STATE_HOME="$NCXDG" PATH="$MINIMAL_PATH:$NCSHIMS" \
 [[ -f "$NCPLIST" ]] || fail "T8b idle-only plist not written"
 NCPLIST_ENV="$(python3 -c "import plistlib,sys; d=plistlib.load(open(sys.argv[1],'rb')); print('\n'.join(f'{k}={v}' for k,v in d.get('EnvironmentVariables',{}).items()))" "$NCPLIST" 2>/dev/null || true)"
 assert_contains "$NCPLIST_ENV" "OFLOOP_BIN" "T8b idle-only plist still has OFLOOP_BIN"
-if printf '%s' "$NCPLIST_ENV" | grep -Fq "ANTHROPIC_AUTH_TOKEN"; then
-  fail "T8b idle-only plist leaked ANTHROPIC_AUTH_TOKEN: $NCPLIST_ENV"
+if printf '%s' "$NCPLIST_ENV" | grep -Eq 'ANTHROPIC_|OFLOOP_SERVICE_ENV_FILE|OFLOOP_ADAPTER_AUTH_READ_PATHS|OFLOOP_CLAUDE_BIN'; then
+  fail "T8b idle-only plist leaked commissioned auth/runner state: $NCPLIST_ENV"
 fi
-if printf '%s' "$NCPLIST_ENV" | grep -Fq "OFLOOP_CLAUDE_BIN"; then
-  fail "T8b idle-only plist leaked OFLOOP_CLAUDE_BIN: $NCPLIST_ENV"
-fi
-if printf '%s' "$NCPLIST_ENV" | grep -Fq "OFLOOP_ADAPTER_AUTH_READ_PATHS"; then
-  fail "T8b idle-only plist leaked OFLOOP_ADAPTER_AUTH_READ_PATHS: $NCPLIST_ENV"
-fi
-pass "T8b commissioned installer captures adapter auth env; idle-only does not"
+python3 -B - "$NCSERVICE_ENV" <<'PY'
+import json, pathlib, stat, sys
+p=pathlib.Path(sys.argv[1])
+assert json.loads(p.read_text(encoding="utf-8")) == {}
+assert stat.S_IMODE(p.stat().st_mode)==0o600
+PY
+pass "T8b commissioned auth is private-at-rest; idle-only service captures none"
 
 USHIMS="$TMP/uninstall-shims"; mkdir -p "$USHIMS"
 cat > "$USHIMS/uname" <<'SH'

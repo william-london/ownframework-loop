@@ -75,6 +75,22 @@ successful 0.8.3 live PROGRAM canary did not.
 Research/integrations remain outside sealed BUILD/REVIEW passes. Promotion and
 external mutation remain operator-owned outside Loop.
 
+### Adapter auth and local-state privacy
+
+- durable service provider/auth/model environment moved out of launchd/systemd
+  definitions into a Loop-owned `service-env.json` file;
+- supervisor startup loads only an explicit auth/model whitelist and refuses
+  loose permissions, foreign ownership, symlinks, malformed JSON, and unknown
+  keys;
+- macOS no longer reopens all of `~/.claude`; OAuth remains Keychain-backed;
+- Linux may reopen only the exact private `.credentials.json` file (including
+  `CLAUDE_CONFIG_DIR` when used), never the full Claude configuration tree;
+- state/runtime-cache directories are explicitly 0700; supervisor DB, worker
+  logs, service definitions, provenance, secret files, and replacement backups
+  are explicitly 0600 where POSIX modes apply;
+- provider bearer-token values are absent from service definitions and runtime
+  provenance.
+
 ### Regression proof
 
 The canonical v0.8.4 tests fault-inject state/event crash windows, prove

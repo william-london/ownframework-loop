@@ -107,7 +107,9 @@ assert sb["network"]["allowedDomains"] == []
 fs = sb["filesystem"]
 allow_write = set(fs["allowWrite"])
 allow_read = set(fs["allowRead"])
-assert fs["denyRead"] == [str(pathlib.Path.home().resolve())], fs
+deny_read = set(fs["denyRead"])
+assert str(pathlib.Path.home().resolve()) in deny_read, deny_read
+assert str(supervisor.default_db_path().parent.resolve()) in deny_read, deny_read
 assert str(worktree.resolve()) in allow_read, allow_read
 assert str(semantic.parent.resolve()) in allow_read, allow_read
 assert str((repo / ".ownframework-loop" / "run-secure").resolve()) in allow_read, allow_read
@@ -118,14 +120,15 @@ expected_cache = str(
 )
 assert expected_cache in allow_read, allow_read
 assert expected_cache in allow_write, allow_write
-# Operator-supplied adapter auth-read paths bypass denyRead: [home]
-# so a commissioned adapter (Claude) can reach its own auth state.
-# Empty / unset env var = no extra paths; non-empty + existing absolute
-# path = added; non-existent / relative paths silently dropped (the
-# core never invents adapter-specific paths).
+assert stat.S_IMODE(pathlib.Path(expected_cache).stat().st_mode) == 0o700
+# Adapter auth re-opens exact private credential files only. Directories,
+# relative/missing paths, symlinks, and group/other-readable files are dropped.
 fake_claude_home = root / "claude-home"
 fake_claude_home.mkdir()
-os.environ["OFLOOP_ADAPTER_AUTH_READ_PATHS"] = str(fake_claude_home)
+credential_file = fake_claude_home / ".credentials.json"
+credential_file.write_text("{}", encoding="utf-8")
+credential_file.chmod(0o600)
+os.environ["OFLOOP_ADAPTER_AUTH_READ_PATHS"] = str(credential_file)
 auth_settings = supervisor._semantic_worker_settings(
     canonical_repo=repo,
     run_id="run-secure",
@@ -134,11 +137,17 @@ auth_settings = supervisor._semantic_worker_settings(
     semantic_path=semantic,
 )
 auth_allow_read = set(auth_settings["sandbox"]["filesystem"]["allowRead"])
-assert str(fake_claude_home.resolve()) in auth_allow_read, auth_allow_read
-# Non-existent and relative paths are silently dropped.
-missing = root / "missing-claude-home"
+assert str(credential_file.resolve()) in auth_allow_read, auth_allow_read
+assert str(fake_claude_home.resolve()) not in auth_allow_read, auth_allow_read
+
+loose_file = fake_claude_home / "loose.json"
+loose_file.write_text("{}", encoding="utf-8")
+loose_file.chmod(0o644)
+missing = root / "missing-credentials.json"
+symlink = fake_claude_home / "credential-link"
+symlink.symlink_to(credential_file)
 os.environ["OFLOOP_ADAPTER_AUTH_READ_PATHS"] = (
-    f"{missing},relative/path,{fake_claude_home}"
+    f"{missing},relative/path,{fake_claude_home},{loose_file},{symlink},{credential_file}"
 )
 mixed_settings = supervisor._semantic_worker_settings(
     canonical_repo=repo,
@@ -148,10 +157,13 @@ mixed_settings = supervisor._semantic_worker_settings(
     semantic_path=semantic,
 )
 mixed_allow_read = set(mixed_settings["sandbox"]["filesystem"]["allowRead"])
-assert str(fake_claude_home.resolve()) in mixed_allow_read, mixed_allow_read
+assert str(credential_file.resolve()) in mixed_allow_read, mixed_allow_read
+assert str(fake_claude_home.resolve()) not in mixed_allow_read, mixed_allow_read
+assert str(loose_file.resolve()) not in mixed_allow_read, mixed_allow_read
 assert str(missing.resolve()) not in mixed_allow_read, mixed_allow_read
 assert "relative/path" not in mixed_allow_read, mixed_allow_read
 del os.environ["OFLOOP_ADAPTER_AUTH_READ_PATHS"]
+
 empty_settings = supervisor._semantic_worker_settings(
     canonical_repo=repo,
     run_id="run-secure",
@@ -160,7 +172,59 @@ empty_settings = supervisor._semantic_worker_settings(
     semantic_path=semantic,
 )
 empty_allow_read = set(empty_settings["sandbox"]["filesystem"]["allowRead"])
-assert str(fake_claude_home.resolve()) not in empty_allow_read, empty_allow_read
+assert str(credential_file.resolve()) not in empty_allow_read, empty_allow_read
+
+# Commissioned service secrets are loaded only from a private 0600 JSON file
+# beneath a private 0700 directory, and only whitelisted keys are accepted.
+service_dir = root / "service-state"
+service_dir.mkdir()
+service_dir.chmod(0o700)
+service_env = service_dir / "service-env.json"
+service_env.write_text(
+    json.dumps({
+        "ANTHROPIC_AUTH_TOKEN": "test-token",
+        "ANTHROPIC_BASE_URL": "https://example.invalid",
+        "ANTHROPIC_MODEL": "test-model",
+    }),
+    encoding="utf-8",
+)
+service_env.chmod(0o600)
+old_auth = os.environ.get("ANTHROPIC_AUTH_TOKEN")
+old_base = os.environ.get("ANTHROPIC_BASE_URL")
+old_model = os.environ.get("ANTHROPIC_MODEL")
+os.environ["OFLOOP_SERVICE_ENV_FILE"] = str(service_env)
+loaded = supervisor._load_service_env_file()
+assert loaded == ["ANTHROPIC_AUTH_TOKEN","ANTHROPIC_BASE_URL","ANTHROPIC_MODEL"], loaded
+assert os.environ["ANTHROPIC_AUTH_TOKEN"] == "test-token"
+assert os.environ["ANTHROPIC_BASE_URL"] == "https://example.invalid"
+assert os.environ["ANTHROPIC_MODEL"] == "test-model"
+
+service_env.chmod(0o644)
+try:
+    supervisor._load_service_env_file()
+except RuntimeError as exc:
+    assert "must be mode 0600 or stricter" in str(exc), exc
+else:
+    raise AssertionError("loose service env mode was accepted")
+service_env.chmod(0o600)
+service_env.write_text(json.dumps({"UNSUPPORTED_SECRET": "x"}), encoding="utf-8")
+service_env.chmod(0o600)
+try:
+    supervisor._load_service_env_file()
+except RuntimeError as exc:
+    assert "unsupported keys" in str(exc), exc
+else:
+    raise AssertionError("unknown service env key was accepted")
+os.environ.pop("OFLOOP_SERVICE_ENV_FILE", None)
+for key, old in (
+    ("ANTHROPIC_AUTH_TOKEN", old_auth),
+    ("ANTHROPIC_BASE_URL", old_base),
+    ("ANTHROPIC_MODEL", old_model),
+):
+    if old is None:
+        os.environ.pop(key, None)
+    else:
+        os.environ[key] = old
 cred_names = {item["name"] for item in sb["credentials"]["envVars"]}
 assert {"GITHUB_TOKEN","GH_TOKEN","NPM_TOKEN","NODE_AUTH_TOKEN","PYPI_TOKEN","TWINE_PASSWORD","DOCKER_AUTH_CONFIG"} <= cred_names
 assert captured["env"]["CLAUDE_CODE_SUBPROCESS_ENV_SCRUB"] == "1"
@@ -242,6 +306,20 @@ ready = supervisor.ClaudeCodeRunner().preflight()
 assert ready.ready is True, ready
 os.environ.pop("OFLOOP_CLAUDE_BIN", None)
 
+# Default supervisor state root is private regardless of ambient umask.
+old_xdg_state = os.environ.get("XDG_STATE_HOME")
+private_xdg = root / "xdg-state"
+os.environ["XDG_STATE_HOME"] = str(private_xdg)
+default_db = supervisor.default_db_path()
+with supervisor._connect(default_db):
+    pass
+assert stat.S_IMODE(default_db.parent.stat().st_mode) == 0o700
+assert stat.S_IMODE(default_db.stat().st_mode) == 0o600
+if old_xdg_state is None:
+    os.environ.pop("XDG_STATE_HOME", None)
+else:
+    os.environ["XDG_STATE_HOME"] = old_xdg_state
+
 # A QUARANTINED enrollment with unresolved semantic-attempt evidence is not
 # historical yet, even when the job-level PID is empty/dead.
 retire_repo = root / "retire-repo"
@@ -255,6 +333,7 @@ enrolled = supervisor.enqueue(
 )
 assert enrolled["status"] == "QUEUED", enrolled
 with supervisor._connect(retire_db) as conn:
+    assert stat.S_IMODE(retire_db.stat().st_mode) == 0o600
     job_id = int(conn.execute(
         "SELECT id FROM jobs WHERE run_id='run-retire-attempt'"
     ).fetchone()["id"])

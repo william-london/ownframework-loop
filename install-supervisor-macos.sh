@@ -4,7 +4,8 @@
 # The supervisor is commissioned from the vendor-neutral installed core
 # runtime. Claude Code is currently the first production semantic runner, not
 # the owner of the core installation. Runtime executables are canonicalized and
-# persisted in runtime-provenance.json and the generated launchd plist.
+# persisted in runtime-provenance.json and the generated launchd plist; provider
+# auth/model secrets live separately in a private Loop service-env file.
 #
 # When Claude is genuinely unavailable the install is intentionally
 # idle-only: claude_bin is recorded as null, OFLOOP_CLAUDE_BIN is
@@ -15,7 +16,7 @@
 #
 # STATE_ROOT is computed once via ${XDG_STATE_HOME:-$HOME/.local/state}
 # and passed consistently to the plist generator for stdout, stderr,
-# and runtime-provenance.json paths. The plist generator never
+# runtime-provenance.json, and service-env paths. The plist generator never
 # silently recomputes a different root.
 
 set -euo pipefail
@@ -115,6 +116,7 @@ STATE_ROOT="${XDG_STATE_HOME:-$HOME/.local/state}/ownframework-loop"
 STDOUT_LOG="$STATE_ROOT/supervisor.stdout.log"
 STDERR_LOG="$STATE_ROOT/supervisor.stderr.log"
 RUNTIME_PROVENANCE="$STATE_ROOT/runtime-provenance.json"
+SERVICE_ENV="$STATE_ROOT/service-env.json"
 
 # 4b. RUNTIME-GENERATION + LIVE-EXECUTION GUARD.
 #
@@ -197,14 +199,20 @@ if [[ "$(uname -s)" != "Darwin" ]]; then
 fi
 
 mkdir -p "$HOME/Library/LaunchAgents" "$STATE_ROOT"
+chmod 0700 "$STATE_ROOT"
+touch "$STDOUT_LOG" "$STDERR_LOG"
+chmod 0600 "$STDOUT_LOG" "$STDERR_LOG"
 
-INSTALLER_PID="${BASHPID:-$}"
+INSTALLER_PID="$$"
 OLD_PLIST_BACKUP="$STATE_ROOT/.supervisor.plist.preinstall.${INSTALLER_PID}"
 OLD_PROVENANCE_BACKUP="$STATE_ROOT/.runtime-provenance.preinstall.${INSTALLER_PID}"
+OLD_SERVICE_ENV_BACKUP="$STATE_ROOT/.service-env.preinstall.${INSTALLER_PID}"
 HAD_OLD_PLIST=0
 HAD_OLD_PROVENANCE=0
-if [[ -f "$PLIST" ]]; then cp "$PLIST" "$OLD_PLIST_BACKUP"; HAD_OLD_PLIST=1; fi
-if [[ -f "$RUNTIME_PROVENANCE" ]]; then cp "$RUNTIME_PROVENANCE" "$OLD_PROVENANCE_BACKUP"; HAD_OLD_PROVENANCE=1; fi
+HAD_OLD_SERVICE_ENV=0
+if [[ -f "$PLIST" ]]; then cp "$PLIST" "$OLD_PLIST_BACKUP"; chmod 0600 "$OLD_PLIST_BACKUP"; HAD_OLD_PLIST=1; fi
+if [[ -f "$RUNTIME_PROVENANCE" ]]; then cp "$RUNTIME_PROVENANCE" "$OLD_PROVENANCE_BACKUP"; chmod 0600 "$OLD_PROVENANCE_BACKUP"; HAD_OLD_PROVENANCE=1; fi
+if [[ -f "$SERVICE_ENV" ]]; then cp "$SERVICE_ENV" "$OLD_SERVICE_ENV_BACKUP"; chmod 0600 "$OLD_SERVICE_ENV_BACKUP"; HAD_OLD_SERVICE_ENV=1; fi
 
 # 6. Generate plist + provenance atomically. The python block is the
 #    sole owner of both artifacts; STATE_ROOT, CLAUDE_BIN, OFLOOP_BIN,
@@ -212,6 +220,7 @@ if [[ -f "$RUNTIME_PROVENANCE" ]]; then cp "$RUNTIME_PROVENANCE" "$OLD_PROVENANC
 #    generator cannot drift from the bash-side computation.
 PLIST="$PLIST" \
 RUNTIME_PROVENANCE="$RUNTIME_PROVENANCE" \
+SERVICE_ENV="$SERVICE_ENV" \
 STATE_ROOT="$STATE_ROOT" \
 STDOUT_LOG="$STDOUT_LOG" \
 STDERR_LOG="$STDERR_LOG" \
@@ -231,6 +240,7 @@ from pathlib import Path
 
 plist = Path(os.environ["PLIST"])
 provenance_path = Path(os.environ["RUNTIME_PROVENANCE"])
+service_env_path = Path(os.environ["SERVICE_ENV"])
 state_root = os.environ["STATE_ROOT"]
 stdout_log = os.environ["STDOUT_LOG"]
 stderr_log = os.environ["STDERR_LOG"]
@@ -259,36 +269,30 @@ env_vars = {
 # semantic workers). Omitting it preserves the supported idle-only
 # installation behavior — the service waits without semantic attempts
 # and automatically continues if Claude later appears on the persisted service PATH.
+service_env = {}
 if claude_bin:
     env_vars["OFLOOP_CLAUDE_BIN"] = claude_bin
-    # The Claude adapter keeps OAuth/session state under $HOME/.claude.
-    # The core sandbox denies $HOME by default; the operator-supplied
-    # auth-read list re-opens exactly the adapter's own auth home so a
-    # worker can authenticate while the broad home deny stands.
-    adapter_auth = str(Path.home() / ".claude")
-    if Path(adapter_auth).is_dir():
-        env_vars["OFLOOP_ADAPTER_AUTH_READ_PATHS"] = adapter_auth
-    # Launchd does not inherit the operator's interactive shell env, so
-    # ANTHROPIC_* / CLAUDE_CODE_* auth + endpoint + model aliases never
-    # reach the supervisor — and therefore never reach the worker. The
-    # CLI authenticates against ANTHROPIC_BASE_URL with
-    # ANTHROPIC_AUTH_TOKEN; without those it returns "Not logged in"
-    # from inside the sandbox even though `claude auth status` works
-    # in the operator's shell. Capture the operator-supplied auth env
-    # at install time and re-emit it in the plist so the durable
-    # service can drive semantic passes against the same model the
-    # operator already trusts.
+    env_vars["OFLOOP_SERVICE_ENV_FILE"] = str(service_env_path)
+    # macOS Claude credentials are held in Keychain. Do not reopen ~/.claude
+    # merely for authentication. Environment-based provider/auth/model aliases
+    # needed by a durable launchd service are persisted in one private Loop
+    # service-env file instead of the plist.
     for auth_var in (
+        "ANTHROPIC_API_KEY",
         "ANTHROPIC_AUTH_TOKEN",
         "ANTHROPIC_BASE_URL",
         "ANTHROPIC_MODEL",
         "ANTHROPIC_DEFAULT_OPUS_MODEL",
         "ANTHROPIC_DEFAULT_SONNET_MODEL",
         "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+        "CLAUDE_CODE_OAUTH_TOKEN",
+        "CLAUDE_CODE_OAUTH_REFRESH_TOKEN",
+        "CLAUDE_CODE_OAUTH_SCOPES",
+        "CLAUDE_CONFIG_DIR",
     ):
         value = os.environ.get(auth_var)
         if value:
-            env_vars[auth_var] = value
+            service_env[auth_var] = value
 
 payload = {
     "Label": label,
@@ -303,8 +307,32 @@ payload = {
     "WorkingDirectory": str(Path.home()),
 }
 plist.parent.mkdir(parents=True, exist_ok=True)
-with plist.open("wb") as f:
-    plistlib.dump(payload, f, sort_keys=True)
+service_env_path.parent.mkdir(parents=True, exist_ok=True)
+os.chmod(service_env_path.parent, 0o700)
+
+def write_private_json(path: Path, value: object) -> None:
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8", closefd=False) as fh:
+            json.dump(value, fh, indent=2, sort_keys=True)
+            fh.write("\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+    finally:
+        os.close(fd)
+
+fd = os.open(plist, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+try:
+    os.fchmod(fd, 0o600)
+    with os.fdopen(fd, "wb", closefd=False) as f:
+        plistlib.dump(payload, f, sort_keys=True)
+        f.flush()
+        os.fsync(f.fileno())
+finally:
+    os.close(fd)
+
+write_private_json(service_env_path, service_env)
 
 provenance = {
     "schema": "ownframework-loop-supervisor-runtime-provenance/v1",
@@ -328,9 +356,10 @@ provenance = {
     "source_version": source_version,
     "ofloop_version": ofloop_version,
     "runtime_generation": runtime_generation,
+    "service_env_file": str(service_env_path) if claude_bin else None,
 }
 provenance_path.parent.mkdir(parents=True, exist_ok=True)
-provenance_path.write_text(json.dumps(provenance, indent=2, sort_keys=True))
+write_private_json(provenance_path, provenance)
 PY
 
 DOMAIN="gui/$UID"
@@ -339,10 +368,18 @@ if ! launchctl bootstrap "$DOMAIN" "$PLIST"; then
   rollback="none"
   if [[ "$HAD_OLD_PLIST" == "1" ]]; then
     cp "$OLD_PLIST_BACKUP" "$PLIST"
+    chmod 0600 "$PLIST"
     if [[ "$HAD_OLD_PROVENANCE" == "1" ]]; then
       cp "$OLD_PROVENANCE_BACKUP" "$RUNTIME_PROVENANCE"
+      chmod 0600 "$RUNTIME_PROVENANCE"
     else
       rm -f "$RUNTIME_PROVENANCE"
+    fi
+    if [[ "$HAD_OLD_SERVICE_ENV" == "1" ]]; then
+      cp "$OLD_SERVICE_ENV_BACKUP" "$SERVICE_ENV"
+      chmod 0600 "$SERVICE_ENV"
+    else
+      rm -f "$SERVICE_ENV"
     fi
     if launchctl bootstrap "$DOMAIN" "$PLIST" >/dev/null 2>&1; then
       rollback="restored_previous_service"
@@ -350,15 +387,15 @@ if ! launchctl bootstrap "$DOMAIN" "$PLIST"; then
       rollback="previous_service_restore_failed"
     fi
   else
-    rm -f "$PLIST" "$RUNTIME_PROVENANCE"
+    rm -f "$PLIST" "$RUNTIME_PROVENANCE" "$SERVICE_ENV"
     rollback="removed_failed_new_service"
   fi
-  rm -f "$OLD_PLIST_BACKUP" "$OLD_PROVENANCE_BACKUP"
+  rm -f "$OLD_PLIST_BACKUP" "$OLD_PROVENANCE_BACKUP" "$OLD_SERVICE_ENV_BACKUP"
   echo "SUPERVISOR_INSTALL=REFUSED reason=bootstrap_failed rollback=$rollback" >&2
   exit 14
 fi
 launchctl enable "$DOMAIN/$LABEL" >/dev/null 2>&1 || true
-rm -f "$OLD_PLIST_BACKUP" "$OLD_PROVENANCE_BACKUP"
+rm -f "$OLD_PLIST_BACKUP" "$OLD_PROVENANCE_BACKUP" "$OLD_SERVICE_ENV_BACKUP"
 
 echo "SUPERVISOR_INSTALL=PASS"
 echo "LABEL=$LABEL"
@@ -368,6 +405,7 @@ echo "OFLOOP_BIN=$OFLOOP_BIN"
 echo "CLAUDE_BIN=${CLAUDE_BIN:-(none-idle-only)}"
 echo "STATE_ROOT=$STATE_ROOT"
 echo "RUNTIME_PROVENANCE=$RUNTIME_PROVENANCE"
+echo "SERVICE_ENV=$SERVICE_ENV"
 echo "SOURCE_HEAD=${SOURCE_HEAD:-(not-a-git-checkout)}"
 echo "OFLOOP_VERSION=${OFLOOP_VERSION:-(unknown)}"
 echo "SOURCE_VERSION=${SOURCE_VERSION:-(unknown)}"

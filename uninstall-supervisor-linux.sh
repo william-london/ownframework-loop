@@ -13,6 +13,7 @@ UNIT_DIR="${OFLOOP_SYSTEMD_USER_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/systemd/u
 UNIT_NAME="ownframework-loop-supervisor.service"
 UNIT="$UNIT_DIR/$UNIT_NAME"
 PROVENANCE="$STATE_ROOT/runtime-provenance.json"
+SERVICE_ENV="$STATE_ROOT/service-env.json"
 
 if [[ ! -e "$UNIT" && ! -e "$PROVENANCE" ]]; then
   echo "SUPERVISOR_UNINSTALL=NOOP reason=not_commissioned"
@@ -36,7 +37,7 @@ fi
 "$SYSTEMCTL_BIN" --user disable --now "$UNIT_NAME" >/dev/null 2>&1 || true
 rm -f "$UNIT"
 "$SYSTEMCTL_BIN" --user daemon-reload >/dev/null 2>&1 || true
-rm -f "$PROVENANCE"
+rm -f "$PROVENANCE" "$SERVICE_ENV"
 
 cat <<EOF
 SUPERVISOR_UNINSTALL=PASS

@@ -18,7 +18,9 @@ export XDG_CONFIG_HOME="$TMP/config"
 export OFLOOP_BIN_DIR="$TMP/bin"
 export OFLOOP_SYSTEMD_USER_DIR="$TMP/systemd-user"
 FAKE="$TMP/fakebin"
-mkdir -p "$HOME" "$FAKE" "$OFLOOP_SYSTEMD_USER_DIR"
+mkdir -p "$HOME/.claude" "$FAKE" "$OFLOOP_SYSTEMD_USER_DIR"
+printf '{"oauth":"fixture"}\n' > "$HOME/.claude/.credentials.json"
+chmod 0600 "$HOME/.claude/.credentials.json"
 
 # Install vendor-neutral core first.
 bash "$ROOT_DIR/install.sh" >"$TMP/core.out"
@@ -51,6 +53,9 @@ PATH="$OFLOOP_BIN_DIR:$FAKE:/usr/bin:/bin"
 export PATH
 export SYSTEMCTL_BIN="$FAKE/systemctl"
 export CLAUDE_BIN="$FAKE/claude"
+export ANTHROPIC_AUTH_TOKEN="linux-test-token"
+export ANTHROPIC_BASE_URL="https://api.example.invalid/anthropic"
+export ANTHROPIC_MODEL="linux-test-model"
 
 # Old Claude fails at commissioning, before a service is written.
 if "$CORE_ROOT/install-supervisor.sh" >"$TMP/old.out" 2>&1; then
@@ -73,9 +78,12 @@ grep -F 'SERVICE_MANAGER=systemd-user' "$TMP/install.out" >/dev/null
 
 UNIT="$OFLOOP_SYSTEMD_USER_DIR/ownframework-loop-supervisor.service"
 PROV="$XDG_STATE_HOME/ownframework-loop/runtime-provenance.json"
-DB="$XDG_STATE_HOME/ownframework-loop/supervisor.sqlite3"
+SERVICE_ENV="$XDG_STATE_HOME/ownframework-loop/service-env.json"
+STATE_ROOT="$XDG_STATE_HOME/ownframework-loop"
+DB="$STATE_ROOT/supervisor.sqlite3"
 test -f "$UNIT"
 test -f "$PROV"
+test -f "$SERVICE_ENV"
 grep -F "supervisor serve" "$UNIT" >/dev/null
 grep -F "OFLOOP_RUNTIME_ROOT=$CORE_ROOT" "$UNIT" >/dev/null
 grep -F "OFLOOP_CLAUDE_BIN=$(python3 -B - "$FAKE/claude" <<'PY'
@@ -84,6 +92,28 @@ from pathlib import Path
 print(Path(sys.argv[1]).resolve(strict=False))
 PY
 )" "$UNIT" >/dev/null
+
+grep -F "OFLOOP_SERVICE_ENV_FILE=$SERVICE_ENV" "$UNIT" >/dev/null
+grep -F "OFLOOP_ADAPTER_AUTH_READ_PATHS=$HOME/.claude/.credentials.json" "$UNIT" >/dev/null
+if grep -Eq 'ANTHROPIC_(AUTH_TOKEN|API_KEY|BASE_URL|MODEL)=' "$UNIT"; then
+  echo "FAIL: systemd unit leaked provider auth/model material" >&2
+  exit 1
+fi
+
+python3 -B - "$UNIT" "$PROV" "$SERVICE_ENV" "$STATE_ROOT" "$HOME/.claude/.credentials.json" <<'PY'
+import json, pathlib, stat, sys
+unit, prov, service_env, state_root, credential = map(pathlib.Path, sys.argv[1:])
+secret=json.loads(service_env.read_text(encoding="utf-8"))
+assert secret["ANTHROPIC_AUTH_TOKEN"]=="linux-test-token", secret
+assert secret["ANTHROPIC_BASE_URL"]=="https://api.example.invalid/anthropic", secret
+assert secret["ANTHROPIC_MODEL"]=="linux-test-model", secret
+provenance=json.loads(prov.read_text(encoding="utf-8"))
+assert provenance["service_env_file"]==str(service_env), provenance
+assert "linux-test-token" not in prov.read_text(encoding="utf-8")
+assert stat.S_IMODE(state_root.stat().st_mode)==0o700
+for path in (unit, prov, service_env, credential):
+    assert stat.S_IMODE(path.stat().st_mode)==0o600, (path, oct(stat.S_IMODE(path.stat().st_mode)))
+PY
 
 PYTHONPATH="$CORE_ROOT/lib" python3 -B - "$PROV" "$CORE_ROOT" "$EXPECTED_VERSION" <<'PY'
 import json,sys
@@ -96,6 +126,7 @@ assert p["runtime_root"]==root,p
 assert p["ofloop_bin"]==str(Path(root,"bin","ofloop")),p
 assert p["ofloop_version"]==version,p
 assert p["runtime_generation"].startswith(f"ofloop-{version}@payload-"),p
+assert p["service_env_file"].endswith("/ownframework-loop/service-env.json"),p
 PY
 
 # Model the ledger the real launched supervisor creates, then prove an ordinary
@@ -115,6 +146,7 @@ grep -F 'SUPERVISOR_REFRESH=PASS' "$TMP/refresh.out" >/dev/null
 grep -F 'SUPERVISOR_UNINSTALL=PASS' "$TMP/uninstall.out" >/dev/null
 test ! -e "$UNIT"
 test ! -e "$PROV"
+test ! -e "$SERVICE_ENV"
 test -f "$DB"
 grep -F -- '--user daemon-reload' "$TMP/systemctl.calls" >/dev/null
 grep -F -- '--user enable --now ownframework-loop-supervisor.service' "$TMP/systemctl.calls" >/dev/null

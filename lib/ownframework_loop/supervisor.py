@@ -18,6 +18,7 @@ import shlex
 import signal
 import sqlite3
 import shutil
+import stat
 import subprocess
 import time
 import uuid
@@ -40,6 +41,100 @@ DEFAULT_SEMANTIC_TIMEOUT_SECONDS = 3600
 # source immutability is structural, not merely a prompt/hook convention.
 CLAUDE_BUILDER_TOOLS = "Read,Edit,Write,NotebookEdit,Bash,Glob,Grep"
 CLAUDE_REVIEWER_TOOLS = "Read,Bash,Glob,Grep"
+
+
+# A commissioned service may need provider authentication/model aliases that a
+# launchd/systemd user manager does not inherit from the operator shell. Those
+# values live in one private Loop-owned JSON file, never in the service
+# definition or runtime provenance. Only this explicit whitelist may be loaded.
+_SERVICE_ENV_FILE_VAR = "OFLOOP_SERVICE_ENV_FILE"
+_SERVICE_ENV_ALLOWED_KEYS = frozenset({
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_BASE_URL",
+    "ANTHROPIC_MODEL",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+    "CLAUDE_CODE_OAUTH_TOKEN",
+    "CLAUDE_CODE_OAUTH_REFRESH_TOKEN",
+    "CLAUDE_CODE_OAUTH_SCOPES",
+    "CLAUDE_CONFIG_DIR",
+})
+
+
+def _private_mode(path: Path) -> int:
+    return stat.S_IMODE(path.stat().st_mode)
+
+
+def _ensure_private_dir(path: Path) -> Path:
+    """Create/repair a supervisor-owned private directory (0700 on POSIX)."""
+    p = Path(path).expanduser().resolve(strict=False)
+    p.mkdir(parents=True, exist_ok=True, mode=0o700)
+    try:
+        os.chmod(p, 0o700)
+    except OSError:
+        pass
+    return p
+
+
+def _ensure_private_file_mode(path: Path) -> None:
+    """Force a supervisor-owned file to 0600 where POSIX modes are available."""
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+
+
+def _load_service_env_file() -> list[str]:
+    """Load a private commissioned-service environment without leaking values.
+
+    The service definition carries only OFLOOP_SERVICE_ENV_FILE. The referenced
+    file must be an owned regular file beneath a private directory and have no
+    group/other permission bits. Unknown keys or non-string values fail closed.
+    """
+    raw = os.environ.get(_SERVICE_ENV_FILE_VAR, "").strip()
+    if not raw:
+        return []
+    candidate = Path(raw).expanduser()
+    if not candidate.is_absolute() or candidate.is_symlink():
+        raise RuntimeError("service_env_refused: path must be an absolute non-symlink")
+    try:
+        path = candidate.resolve(strict=True)
+        st = path.stat()
+        parent_st = path.parent.stat()
+    except OSError as exc:
+        raise RuntimeError(
+            f"service_env_refused: unreadable service env ({type(exc).__name__})"
+        ) from exc
+    if not stat.S_ISREG(st.st_mode):
+        raise RuntimeError("service_env_refused: service env is not a regular file")
+    if hasattr(os, "getuid") and st.st_uid != os.getuid():
+        raise RuntimeError("service_env_refused: service env owner mismatch")
+    if stat.S_IMODE(st.st_mode) & 0o077:
+        raise RuntimeError("service_env_refused: service env must be mode 0600 or stricter")
+    if stat.S_IMODE(parent_st.st_mode) & 0o077:
+        raise RuntimeError("service_env_refused: service env directory must be mode 0700 or stricter")
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(
+            f"service_env_refused: invalid service env ({type(exc).__name__})"
+        ) from exc
+    if not isinstance(payload, dict):
+        raise RuntimeError("service_env_refused: service env must be a JSON object")
+    unknown = sorted(set(payload) - _SERVICE_ENV_ALLOWED_KEYS)
+    if unknown:
+        raise RuntimeError(
+            "service_env_refused: unsupported keys=" + ",".join(unknown)
+        )
+    loaded: list[str] = []
+    for key, value in payload.items():
+        if not isinstance(value, str) or not value:
+            raise RuntimeError(f"service_env_refused: {key} must be a non-empty string")
+        os.environ[key] = value
+        loaded.append(key)
+    return sorted(loaded)
 
 TERMINAL_SEMANTIC_ATTEMPT_STATUSES = frozenset({
     "COMPLETED", "COST_UNKNOWN", "TOKENS_UNKNOWN",
@@ -111,22 +206,13 @@ def _validate_claude_extra_args(extra: list[str]) -> None:
 
 
 def _parse_adapter_auth_read_paths() -> list[str]:
-    """Resolve operator-supplied adapter auth-read paths.
+    """Resolve exact private credential files an adapter may read.
 
-    The core sandbox denies the operator's entire ``$HOME`` so a worker
-    cannot read arbitrary user data. Adapters (e.g. Claude Code) still
-    need their own auth state (``~/.claude/``) reachable from inside
-    the sandbox for OAuth/session login. Operators who commission an
-    adapter declare those paths via the comma-separated env var
-    ``OFLOOP_ADAPTER_AUTH_READ_PATHS`` — each entry must be an
-    absolute, existing path. Empty / malformed entries are dropped
-    silently; nothing is invented.
-
-    The list is appended to ``allowRead`` after the Loop-owned
-    trust surfaces, so the more-specific ``allowRead`` wins over the
-    broad ``denyRead: [home]``. The Loop core never names an
-    adapter-specific path; the platform installer (which knows which
-    adapter it commissioned) supplies the value.
+    The semantic Bash sandbox denies the operator's entire home. A platform
+    installer may reopen only a concrete credential FILE (never an auth/config
+    directory). Each path must be absolute, existing, owned by the current user,
+    and have no group/other permission bits. Malformed/loose entries are dropped
+    rather than widening the sandbox.
     """
     raw = os.environ.get("OFLOOP_ADAPTER_AUTH_READ_PATHS", "").strip()
     if not raw:
@@ -138,16 +224,22 @@ def _parse_adapter_auth_read_paths() -> list[str]:
         if not candidate:
             continue
         p = Path(candidate).expanduser()
-        if not p.is_absolute():
+        if not p.is_absolute() or p.is_symlink():
             continue
         try:
-            resolved = str(p.resolve(strict=False))
+            resolved_path = p.resolve(strict=True)
+            st = resolved_path.stat()
         except (OSError, RuntimeError):
             continue
+        resolved = str(resolved_path)
         if resolved in seen:
             continue
         seen.add(resolved)
-        if not p.exists():
+        if not stat.S_ISREG(st.st_mode):
+            continue
+        if hasattr(os, "getuid") and st.st_uid != os.getuid():
+            continue
+        if stat.S_IMODE(st.st_mode) & 0o077:
             continue
         out.append(resolved)
     return out
@@ -196,8 +288,10 @@ def _semantic_worker_settings(
         str(cache_root.resolve(strict=False)),
         str(semantic_path.parent.resolve(strict=False)),
     })
+    state_root = default_db_path().parent.expanduser().resolve(strict=False)
+    deny_read = sorted({str(home), str(state_root)})
     filesystem: dict[str, Any] = {
-        "denyRead": [str(home)],
+        "denyRead": deny_read,
         "allowRead": allow_read,
         "allowWrite": allow_write,
     }
@@ -361,8 +455,10 @@ def worker_log_paths(
     state_mod.validate_run_id(run_id)
     safe_role = "builder" if role not in ("builder", "reviewer") else role
     safe_run = run_id
-    d = default_worker_log_dir() / _slug_repo(canonical_repo) / safe_run
-    d.mkdir(parents=True, exist_ok=True)
+    _ensure_private_dir(default_db_path().parent)
+    log_root = _ensure_private_dir(default_worker_log_dir())
+    repo_root = _ensure_private_dir(log_root / _slug_repo(canonical_repo))
+    d = _ensure_private_dir(repo_root / safe_run)
     safe_attempt = "".join(
         ch for ch in str(attempt_id or "") if ch.isalnum() or ch in "-_."
     )[:80]
@@ -398,7 +494,11 @@ def _apply_data_migrations(conn: sqlite3.Connection) -> None:
 def _connect(path: Path) -> sqlite3.Connection:
     path = Path(path).expanduser().resolve(strict=False)
     path.parent.mkdir(parents=True, exist_ok=True)
+    managed_state_root = default_db_path().parent.expanduser().resolve(strict=False)
+    if path.parent == managed_state_root:
+        _ensure_private_dir(path.parent)
     conn = sqlite3.connect(path, timeout=30)
+    _ensure_private_file_mode(path)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=FULL")
@@ -1743,9 +1843,11 @@ class ClaudeCodeRunner:
         ]
         if durable_files is not None:
             out_path, err_path = durable_files
-            out_path.parent.mkdir(parents=True, exist_ok=True)
+            _ensure_private_dir(out_path.parent)
             stdout_fh = out_path.open("w", encoding="utf-8")
             stderr_fh = err_path.open("w", encoding="utf-8")
+            _ensure_private_file_mode(out_path)
+            _ensure_private_file_mode(err_path)
         else:
             stdout_fh = subprocess.PIPE
             stderr_fh = subprocess.PIPE
@@ -2859,6 +2961,7 @@ def serve(
     once: bool = False,
 ) -> dict[str, Any] | None:
     """Run the durable execution clock. Idle iterations make zero model calls."""
+    _load_service_env_file()
     _cleanup_done_runtime_caches(db_path)
     last_emit: float = 0.0
     idle_log_interval = max(60.0, float(poll_seconds) * 30)

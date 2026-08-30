@@ -40,6 +40,11 @@ AppArmor user-namespace policy may require the documented bubblewrap profile.
 A supervisor may be commissioned idle-only when no semantic runner is present.
 It makes no model calls while idle.
 
+Commissioned provider/auth/model environment is persisted in the Loop state
+root as private `service-env.json` rather than embedded in the launchd plist or
+systemd unit. On macOS OAuth remains Keychain-backed. On Linux only the exact
+private Claude credential file may be reopened to the sandbox when required.
+
 ## 3. Human-originated SPEC
 
 Create and inspect the mission using a supported adapter/core workflow.
