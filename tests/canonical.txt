@@ -100,6 +100,9 @@ tests/integration/test_v084_core_install_portability.sh
 # v0.8.4 Linux systemd-user supervisor + Claude sandbox commissioning parity
 tests/integration/test_v084_linux_supervisor_service.sh
 
+# v0.8.4 adversarial runtime/concurrency/crash-consistency repair lane
+tests/integration/test_runtime_recovery_lane.sh
+
 # v0.8.4 static-call-graph correction — install.sh is not a release orchestrator;
 # validate.sh --installed --skip-tests is non-recursive structural validation.
 tests/integration/test_v084_static_call_graph_correction.sh
