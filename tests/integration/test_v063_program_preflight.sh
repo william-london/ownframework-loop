@@ -39,12 +39,14 @@ assert supervisor.resolve_semantic_timeout(no_pass, 0) == 3600
 assert limits.effective_cap("build_pass_count", None) == 32
 assert limits.effective_cap("review_pass_count", None) == 32
 assert limits.effective_cap("build_pass_count", {"risk_budget":{"max_build_passes":74}}) == 74
-tools=set(supervisor.DEFAULT_CLAUDE_ALLOWED_TOOLS.split(","))
-assert "Agent" in tools, tools
-assert "Task" in tools, tools
-assert "TaskOutput" in tools, tools
-assert "TaskStop" in tools, tools
-assert "Skill" in tools, tools
+builder_tools=set(supervisor.CLAUDE_BUILDER_TOOLS.split(","))
+reviewer_tools=set(supervisor.CLAUDE_REVIEWER_TOOLS.split(","))
+assert builder_tools == {"Read","Edit","Write","NotebookEdit","Bash","Glob","Grep"}, builder_tools
+assert reviewer_tools == {"Read","Bash","Glob","Grep"}, reviewer_tools
+for forbidden in ("Agent","Task","TaskOutput","TaskStop","Skill","WebSearch","WebFetch"):
+    assert forbidden not in builder_tools, (forbidden,builder_tools)
+    assert forbidden not in reviewer_tools, (forbidden,reviewer_tools)
+assert not {"Edit","Write","NotebookEdit"}.intersection(reviewer_tools), reviewer_tools
 from ownframework_loop import guards
 assert guards.classify_bash_command("docker compose up -d")["severity"] == "allowed"
 assert guards.classify_bash_command("curl -fsS http://127.0.0.1:3000/health")["severity"] == "allowed"
