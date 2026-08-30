@@ -129,7 +129,7 @@ Builder and reviewer receive different built-in tool sets, with reviewers
 structurally lacking Edit/Write/NotebookEdit.
 
 Bash runs inside Claude's OS sandbox with fail-if-unavailable, no unsandboxed
-escape, strict empty network allowlist, operator-home read denial with narrow
+escape, strict frozen packet network read allowlist (empty by default), operator-home read denial with narrow
 current-pass/runtime re-opens, and credential scrubbing/deny rules.
 `--permission-mode dontAsk` plus explicit pre-approved sealed tools means
 authorized work runs without routine human prompts while out-of-contract calls
@@ -188,7 +188,7 @@ PROGRAM_BUDGETS=finite
 EXTERNAL_ACTION_AUTHORITY=outside_loop
 CLAUDE_RESTRICTED_MODE=required_for_supervised_semantic_passes
 BASH_SANDBOX=fail_closed
-SEMANTIC_NETWORK_EGRESS=none
+SEMANTIC_NETWORK_EGRESS=packet_network_read_allowlist_only
 SEMANTIC_PERMISSION_PROMPTS=none_in_authorized_surface
 TOOL_SURFACE_GUARDS=defense_in_depth
 ```

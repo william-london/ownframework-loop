@@ -70,12 +70,14 @@ The commissioned supervisor intentionally does not expose Agent/Task/Skill,
 WebSearch/WebFetch, browser, MCP, remote, or cloud-session capabilities inside
 this pass. Do not plan around them.
 
-Dependency acquisition, internet research, package downloads, external service
-setup, and container/service provisioning belong to the automated pre-SPEC
-bootstrap phase. Inside the sealed pass, use the already-provisioned local
-toolchain, compilers, test runners, and local services that are available
-without outbound network. If a required dependency or service is absent, report
-the exact bootstrap/spec defect rather than asking a human for permission.
+Internet research, external service setup, publishing, deployment, and remote
+mutation remain outside the sealed pass. Dependency/package downloads are
+allowed only when the frozen packet declares the exact host in
+`network_read_allowlist`; Claude's native sandbox enforces that list without
+prompting. Use the already-provisioned local toolchain and local services where
+possible. If a required dependency host is not in the sealed allowlist, report
+the exact bootstrap/SPEC defect rather than asking a human for permission or
+routing around the sandbox.
 
 The maxTurns frontmatter applies only when this file is invoked manually as a
 Claude custom agent. The durable supervisor uses this file as the main

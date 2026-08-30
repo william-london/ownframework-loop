@@ -48,7 +48,7 @@ stronger.
 
 Every unattended Claude BUILD/REVIEW pass is launched with Claude Code's Bash
 sandbox enabled and fail-closed. The runtime supplies
-`sandbox.network.strictAllowlist=true` with an empty allowed-domain set,
+`sandbox.network.strictAllowlist=true` with the frozen packet's `network_read_allowlist` (empty by default),
 `allowUnsandboxedCommands=false`, and role-specific filesystem write policy.
 `--restricted` is the native shared-machine boundary: user/project/local settings are excluded and built-in file tools are confined to the pass working directory. MCP discovery is strict with an empty explicit MCP configuration. Browser/web research, nested Agent/Task orchestration, Skill, and other non-local built-ins are not exposed through the semantic worker's `--tools` allow-list. Builder and reviewer use different native tool sets; reviewers do not receive Edit/Write/NotebookEdit.
 

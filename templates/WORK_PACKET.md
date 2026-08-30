@@ -32,6 +32,7 @@ against schemas/work-packet.schema.json before approval.
   "relevant_paths": ["src/", "tests/", "docs/"],
   "allowed_paths": ["src/", "tests/", "docs/"],
   "protected_paths": ["AGENTS.md", "CLAUDE.md", ".claude/", ".ownframework-loop/", "state/"],
+  "network_read_allowlist": [],
   "required_validation": [
     { "name": "fast_tests", "command": "<fast test command>", "kind": "fast", "expected_exit_code": 0 },
     { "name": "full_tests", "command": "<full test command>", "kind": "full", "expected_exit_code": 0 },

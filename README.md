@@ -259,7 +259,7 @@ same-user code. The commissioned unattended Claude supervisor does own a
 narrower execution boundary for each semantic BUILD/REVIEW pass:
 
 - Claude Bash sandbox enabled fail-closed;
-- strict empty-domain Bash network allowlist;
+- strict packet-bound Bash network allowlist (empty by default);
 - unsandboxed Bash escape disabled;
 - Claude-native `--restricted` mode: user/project/local settings excluded and built-in file tools confined to the pass working directory;
 - inherited MCP servers disabled with strict empty MCP configuration;
@@ -267,7 +267,7 @@ narrower execution boundary for each semantic BUILD/REVIEW pass:
   built-in surfaces absent from `--tools`;
 - role-specific native tool sets (reviewer has no Edit/Write/NotebookEdit) plus Bash filesystem boundaries, including reviewer worktree deny-write;
 - `dontAsk` + pre-approved sealed tools means no routine permission prompts;
-- Bash sees no outbound network, no unsandboxed escape, a home-directory read deny with narrow pass re-opens, and scrubbed host credentials;
+- Bash sees only SPEC-approved read domains (or no egress), no unsandboxed escape, a home-directory read deny with narrow pass re-opens, and scrubbed host credentials;
 - authority-sensitive runner flags cannot be replaced through `OFLOOP_CLAUDE_EXTRA_ARGS`.
 
 Mechanical hooks remain defense in depth, and deterministic exact-SHA/source/

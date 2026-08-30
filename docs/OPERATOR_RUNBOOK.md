@@ -18,6 +18,15 @@ packet exists.
 
 ## 2. Unattended mode (canonical for background work)
 
+The commissioned Claude runner requires Claude Code 2.1.248+ and uses native
+`--restricted` mode with `dontAsk`, role-specific pre-approved tools, strict
+MCP isolation, and fail-closed sandboxing. Authorized semantic work therefore
+does not stop for routine permission prompts.
+
+Packet `network_read_allowlist` is the only post-SPEC outbound network
+authority for semantic Bash. It is frozen with SPEC and enforced by Claude's
+native strict network allowlist; empty means zero egress.
+
 Enqueue the existing run:
 
 ```bash

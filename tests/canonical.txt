@@ -91,3 +91,6 @@ tests/integration/test_v084_state_transaction_recovery.sh
 
 # v0.8.4 authority-bearing semantic/execution state reads are integrity verified
 tests/integration/test_v084_authoritative_state_reads.sh
+
+# v0.8.4 frozen SPEC network-read authority -> dispatch -> native Claude sandbox.
+tests/integration/test_v084_packet_network_read_authority.sh

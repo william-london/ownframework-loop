@@ -27,6 +27,12 @@ This skill is a host adapter over the deterministic ofloop core.
 3. Inspect only enough repository context to draft an accurate bounded packet.
 4. Use ofloop spec new <repo> "<mission>" to create the run.
 5. Draft WORK_PACKET.md using the repository schema and packet conventions.
+   Inspect the project's declared package managers/toolchain and populate
+   `network_read_allowlist` only with exact dependency/read domains the
+   unattended BUILD/REVIEW may legitimately need after sealing (for example
+   `registry.npmjs.org`, `pypi.org`, `files.pythonhosted.org`). Omit or
+   leave empty when dependencies are already provisioned. Never add a broad
+   internet wildcard, scheme, port, path, publish endpoint, or unrelated host.
 6. For PROGRAM packets with checkpoint-specific outcomes, keep the complete
    mission acceptance contract at top level and assign it deterministically
    with each checkpoint's `acceptance_criterion_ids`. If any checkpoint uses
@@ -87,6 +93,9 @@ Before a v3 PROGRAM is considered ready:
 
 - use acceptance_criterion_ids on checkpoints; never emit checkpoint
   acceptance_criteria;
+- derive the smallest `network_read_allowlist` needed by the declared
+  toolchain. This is frozen SPEC authority and maps directly to Claude's native
+  sandbox network allowlist; the default is no outbound network;
 - validate packet budgets against executable ceilings before first execution;
 - treat top-level build/review/repair values as cumulative PROGRAM envelopes;
 - unless intentionally throttling the whole PROGRAM, fund those global

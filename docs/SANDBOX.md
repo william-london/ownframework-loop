@@ -10,7 +10,7 @@ Every supervisor-spawned BUILD/REVIEW pass requires Claude Code 2.1.248+ and sta
 - `--permission-mode dontAsk`;
 - fail-closed Bash sandboxing;
 - `allowUnsandboxedCommands=false`;
-- strict empty Bash network allowlist;
+- strict packet-bound Bash network allowlist (empty by default);
 - strict empty MCP configuration;
 - Chrome disabled;
 - session persistence disabled.
@@ -47,7 +47,7 @@ The supervisor sets `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1`, and sandbox credential
 
 ## Network
 
-Semantic BUILD/REVIEW passes have no outbound network. Research, dependency provisioning, package acquisition, and external integrations belong to the automated pre-SPEC/bootstrap phase. A sealed pass should not discover that it needs the internet after SPEC approval.
+Semantic BUILD/REVIEW passes have no broad internet. Sandboxed Bash may reach only exact hostnames frozen in the packet's `network_read_allowlist`; omission/empty means zero egress. This is intended for dependency/download reads, not search, browsing, publishing, deployment, or remote mutation. The SPEC author derives the smallest required list from the declared toolchain before sealing.
 
 ## Scope
 

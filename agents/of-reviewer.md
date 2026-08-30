@@ -45,7 +45,8 @@ pass-scoped assessment rather than shared chat history.
 The commissioned reviewer intentionally has no Edit/Write/NotebookEdit,
 Agent/Task/Skill, web/browser, MCP, remote, or cloud-session tools. Source
 immutability is therefore structural. Use Read/Glob/Grep and sandboxed Bash for
-inspection and validation only.
+inspection and validation only. Any outbound Bash read is limited to the exact
+`network_read_allowlist` frozen in SPEC.
 
 The maxTurns frontmatter applies only when invoked manually as a Claude custom
 agent. The durable supervisor uses this file as its main print-mode role prompt

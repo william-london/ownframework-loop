@@ -34,6 +34,12 @@ WORK_CLASSES = {
 
 RISK_CLASSES = {"low", "medium", "high"}
 
+_NETWORK_READ_HOST_RE = re.compile(
+    r"^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)*"
+    r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$"
+)
+MAX_NETWORK_READ_DOMAINS = 64
+
 REQUIRED_FIELDS = (
     "schema", "packet_id", "created_at", "work_class", "risk_class",
     "title", "target", "acceptance_criteria", "non_goals",
@@ -212,6 +218,31 @@ def validate_packet_metadata(meta: dict[str, Any]) -> list[str]:
         errors.append("acceptance_criteria must be a non-empty array")
     if not isinstance(meta.get("work_units"), list) or not meta["work_units"]:
         errors.append("work_units must be a non-empty array")
+
+    network_domains = meta.get("network_read_allowlist", [])
+    if not isinstance(network_domains, list):
+        errors.append("network_read_allowlist must be an array")
+    else:
+        if len(network_domains) > MAX_NETWORK_READ_DOMAINS:
+            errors.append(
+                f"network_read_allowlist may contain at most {MAX_NETWORK_READ_DOMAINS} domains"
+            )
+        seen_network_domains: set[str] = set()
+        for idx, value in enumerate(network_domains):
+            if not isinstance(value, str):
+                errors.append(
+                    f"network_read_allowlist[{idx}] must be a lowercase hostname"
+                )
+                continue
+            if value != value.strip() or value != value.lower() or not _NETWORK_READ_HOST_RE.fullmatch(value):
+                errors.append(
+                    f"network_read_allowlist[{idx}] must be a lowercase hostname without scheme, port, path, or wildcard: {value!r}"
+                )
+                continue
+            if value in seen_network_domains:
+                errors.append(f"network_read_allowlist contains duplicate domain: {value}")
+            seen_network_domains.add(value)
+
     if not isinstance(meta.get("allowed_paths"), list) or not meta["allowed_paths"]:
         errors.append("allowed_paths must be a non-empty array")
     if not isinstance(meta.get("protected_paths"), list) or not meta["protected_paths"]:

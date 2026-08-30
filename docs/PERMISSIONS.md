@@ -38,7 +38,7 @@ Per-pass CLI settings enforce:
 - fail if unavailable;
 - automatic approval for sandboxed Bash;
 - no unsandboxed-command escape;
-- strict empty network allowlist;
+- strict packet-bound network read allowlist (empty by default);
 - operator-home read deny with narrow current-pass/runtime re-opens;
 - reviewer worktree deny-write;
 - credential environment-variable denies.

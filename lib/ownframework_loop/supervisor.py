@@ -117,6 +117,7 @@ def _semantic_worker_settings(
     role: str,
     worktree: Path,
     semantic_path: Path,
+    network_read_allowlist: list[str] | None = None,
 ) -> dict[str, Any]:
     """Fail-closed Claude settings for one unattended semantic worker.
 
@@ -178,7 +179,7 @@ def _semantic_worker_settings(
             "excludedCommands": [],
             "filesystem": filesystem,
             "network": {
-                "allowedDomains": [],
+                "allowedDomains": sorted(set(network_read_allowlist or [])),
                 "strictAllowlist": True,
             },
             "credentials": {
@@ -1611,6 +1612,9 @@ class ClaudeCodeRunner:
             role=role,
             worktree=worktree,
             semantic_path=semantic_path,
+            network_read_allowlist=[
+                str(item) for item in (work_order.get("network_read_allowlist") or [])
+            ],
         )
         # --restricted is the native shared-machine isolation boundary.
         # dontAsk + explicit --allowedTools means there are no human permission

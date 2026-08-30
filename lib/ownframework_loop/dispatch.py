@@ -533,6 +533,7 @@ def claim_next(*, canonical_repo: Path, run_id: str) -> dict[str, Any]:
                     "checkpoint_id": prep.get("cp_id"),
                     "acceptance_criterion_ids": prep.get("acceptance_criterion_ids"),
                     "repair_context": repair_context,
+                    "network_read_allowlist": list(pmeta.get("network_read_allowlist") or []),
                     "claim": claim,
                     "prepare": prep,
                 }
@@ -566,6 +567,7 @@ def claim_next(*, canonical_repo: Path, run_id: str) -> dict[str, Any]:
                     "candidate_sha": prep.get("candidate_sha"),
                     "checkpoint_id": prep.get("checkpoint_id"),
                     "acceptance_criterion_ids": prep.get("acceptance_criterion_ids"),
+                    "network_read_allowlist": list(pmeta.get("network_read_allowlist") or []),
                     "claim": claim,
                     "prepare": prep,
                 }
