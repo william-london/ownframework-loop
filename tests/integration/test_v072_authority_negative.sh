@@ -256,7 +256,14 @@ conn.execute(
 conn.commit()
 PY
 set +e
+# Pass OFLOOP_BIN explicitly so the install script does not follow the
+# test-runner PATH to whatever launcher happens to be installed (e.g. a
+# legacy 0.6.2 plugin-cache payload whose lib does not carry the v0.8.x
+# runtime_identity module). The whole point of the test is to run the
+# v0.8.4 installer's live-worker guard against a deliberately faked
+# RUNNING row.
 GUARD_OUT="$(PATH="$GUARD_BIN_SHIM:$PATH" HOME="$GUARD_HOME" XDG_STATE_HOME="$GUARD_STATE" \
+  OFLOOP_BIN="$ROOT_DIR/bin/ofloop" \
   bash "$ROOT_DIR/install-supervisor-macos.sh" 2>&1)"
 GUARD_RC=$?
 set -e

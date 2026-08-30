@@ -15,9 +15,9 @@ if [[ "$(uname -s)" != "Darwin" ]]; then
 fi
 
 if [[ ! -f "$SUPERVISOR_DB" && -f "$PLIST" && "${OFLOOP_ALLOW_SUPERVISOR_SWAP_WITH_ACTIVE_WORK:-0}" != "1" ]]; then
-  echo "SUPERVISOR_UNINSTALL=REFUSED reason=ledger_missing_live_work_unverifiable" >&2
+  echo "SUPERVISOR_UNINSTALL=REFUSED reason=ledger is missing; cannot verify unfinished runtime dependency" >&2
   echo "unsafe recovery override: OFLOOP_ALLOW_SUPERVISOR_SWAP_WITH_ACTIVE_WORK=1" >&2
-  exit 11
+  exit 13
 fi
 if [[ -f "$SUPERVISOR_DB" && "${OFLOOP_ALLOW_SUPERVISOR_SWAP_WITH_ACTIVE_WORK:-0}" != "1" ]]; then
   set +e

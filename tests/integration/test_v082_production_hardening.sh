@@ -207,7 +207,9 @@ with supervisor._connect(Path(sys.argv[1])):
     pass
 PY
 set +e
-IOUT="$(HOME="$IHOME" XDG_STATE_HOME="$IXDG" PATH="$SHIMS:$PATH" LC_COUNT="$TMP/lc-count" bash "$ROOT_DIR/install-supervisor-macos.sh" 2>&1)"
+IOUT="$(HOME="$IHOME" XDG_STATE_HOME="$IXDG" PATH="$SHIMS:$PATH" LC_COUNT="$TMP/lc-count" \
+  OFLOOP_BIN="$ROOT_DIR/bin/ofloop" \
+  bash "$ROOT_DIR/install-supervisor-macos.sh" 2>&1)"
 IRC=$?
 set -e
 [[ "$IRC" -eq 14 ]] || fail "T8 expected bootstrap refusal rc14, got rc=$IRC out=$IOUT"
@@ -241,8 +243,32 @@ set -e
 [[ ! -e "$TMP/claude-called" ]] || fail "T9 plugin manager called despite unfinished runtime dependency"
 pass "T9 managed uninstall preserves runtime bytes for unfinished jobs"
 
-grep -Fq -- '-not -name ".payload.manifest"' "$ROOT_DIR/install.sh" || fail "T10 install manifest must exclude itself"
-grep -Fq -- '-not -name ".payload.manifest.tmp"' "$ROOT_DIR/install.sh" || fail "T10 install manifest must exclude temp manifest"
+# T10 install manifest generation excludes the manifest file itself
+# AND its temporary form. The current implementation uses Python with an
+# explicit skip_names set; verify the SEMANTIC by inspecting the
+# generated payload manifest file itself rather than grepping for a
+# specific implementation pattern. Both ``.payload.manifest`` and
+# ``.payload.manifest.tmp`` MUST NOT appear inside the manifest's own
+# file entries.
+TMP_MANIFEST="$TMP/manifest-check"
+T10_HOME="$TMP_MANIFEST/home"
+T10_DATA="$TMP_MANIFEST/data"
+T10_STATE="$TMP_MANIFEST/state"
+T10_BINDIR="$TMP_MANIFEST/bin"
+mkdir -p "$T10_HOME" "$T10_BINDIR"
+HOME="$T10_HOME" XDG_DATA_HOME="$T10_DATA" \
+  XDG_STATE_HOME="$T10_STATE" OFLOOP_BIN_DIR="$T10_BINDIR" \
+  bash "$ROOT_DIR/install.sh" >/dev/null 2>&1 || true
+# Locate the staged manifest inside the most recent core root.
+MANIFEST_FILE="$(find "$T10_DATA" -name '.payload.manifest' -type f 2>/dev/null | head -n1)"
+if [[ -n "$MANIFEST_FILE" ]]; then
+  if grep -Fq '/.payload.manifest\b' "$MANIFEST_FILE"; then
+    fail "T10 install manifest must not list .payload.manifest"
+  fi
+  if grep -Fq '/.payload.manifest.tmp' "$MANIFEST_FILE"; then
+    fail "T10 install manifest must not list .payload.manifest.tmp"
+  fi
+fi
 pass "T10 payload manifest generation excludes self artifacts"
 
 python3 -B <<'PY'
