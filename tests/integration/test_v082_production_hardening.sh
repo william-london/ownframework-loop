@@ -252,7 +252,7 @@ HOME="$S2HOME" XDG_STATE_HOME="$S2XDG" PATH="$S2SHIMS:$PATH" \
   bash "$ROOT_DIR/install-supervisor-macos.sh" >/dev/null 2>&1 \
   || fail "T8b macOS supervisor install failed"
 [[ -f "$S2PLIST" ]] || fail "T8b plist not written"
-PLIST_ENV="$(/usr/bin/plutil -extract EnvironmentVariables xml1 -o - "$S2PLIST" 2>/dev/null || true)"
+PLIST_ENV="$(python3 -c "import plistlib,sys; d=plistlib.load(open(sys.argv[1],'rb')); print('\n'.join(f'{k}={v}' for k,v in d.get('EnvironmentVariables',{}).items()))" "$S2PLIST" 2>/dev/null || true)"
 assert_contains "$PLIST_ENV" "OFLOOP_ADAPTER_AUTH_READ_PATHS" "T8b plist captures adapter auth-read home"
 assert_contains "$PLIST_ENV" "$S2HOME/.claude" "T8b plist adapter auth-read points at adapter home"
 assert_contains "$PLIST_ENV" "ANTHROPIC_AUTH_TOKEN" "T8b plist captures ANTHROPIC_AUTH_TOKEN"
@@ -286,7 +286,7 @@ HOME="$NCHOME" XDG_STATE_HOME="$NCXDG" PATH="$MINIMAL_PATH:$NCSHIMS" \
   bash "$ROOT_DIR/install-supervisor-macos.sh" >/dev/null 2>&1 \
   || fail "T8b idle-only macOS supervisor install failed"
 [[ -f "$NCPLIST" ]] || fail "T8b idle-only plist not written"
-NCPLIST_ENV="$(/usr/bin/plutil -extract EnvironmentVariables xml1 -o - "$NCPLIST" 2>/dev/null || true)"
+NCPLIST_ENV="$(python3 -c "import plistlib,sys; d=plistlib.load(open(sys.argv[1],'rb')); print('\n'.join(f'{k}={v}' for k,v in d.get('EnvironmentVariables',{}).items()))" "$NCPLIST" 2>/dev/null || true)"
 assert_contains "$NCPLIST_ENV" "OFLOOP_BIN" "T8b idle-only plist still has OFLOOP_BIN"
 if printf '%s' "$NCPLIST_ENV" | grep -Fq "ANTHROPIC_AUTH_TOKEN"; then
   fail "T8b idle-only plist leaked ANTHROPIC_AUTH_TOKEN: $NCPLIST_ENV"
