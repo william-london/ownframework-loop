@@ -6,6 +6,21 @@ The complete historical changelog through 0.5.2 is preserved at
 
 ## 0.8.2 - Production Hardening Sweep (2026-08-29)
 
+### Post-adjudication authority closure
+
+- system temporary-directory prefixes are now only genuine external scratch
+  allowances; they can never supersede canonical checkout, Loop run-root, or
+  builder/reviewer worktree authority when a managed repository itself lives
+  under a temporary root;
+- canonical negative proofs cover historical/current pass scratch, reviewer
+  source, canonical source, builder source, and genuine external scratch in
+  temporary-root topologies;
+- static unsafe-code findings are release-blocking, and the release gate reports
+  STATIC_GATE=PASS only after the checker succeeds;
+- installed-parity discovery uses the enabled `of-loop@ownframework` registry
+  entry rather than the retired `ownframework-local` cache namespace.
+
+
 v0.8.2 closes production-readiness defects found in a full source sweep after
 the 0.8.1 runtime-generation closure.
 

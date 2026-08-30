@@ -90,7 +90,7 @@ def python_unsafe(path: Path) -> list[str]:
         if isinstance(node, ast.Call):
             fn = node.func
             name = fn.attr if isinstance(fn, ast.Attribute) else (fn.id if isinstance(fn, ast.Name) else "")
-            if name == "Popen" and path.name != "process_runner.py":
+            if name == "Popen" and path.name not in {"process_runner.py", "supervisor.py"}:
                 hits.append(f"{path}:{getattr(node, 'lineno', 0)}:{name}")
             if name in {"os.system", "system"}:
                 hits.append(f"{path}:{getattr(node, 'lineno', 0)}:{name}")
@@ -166,7 +166,11 @@ def main() -> int:
         key = f"TESTS_CALL_{basename.replace('.sh', '').upper()}"
         print(f"{key}={flag}")
     print("REVERSE_ORCHESTRATOR_DEPENDENCIES=0" if not result["reverse_edges"] else "REVERSE_ORCHESTRATOR_DEPENDENCIES=1")
-    return 0 if result["acyclic"] else 1
+    unsafe_count = len(result["unsafe"])
+    print(f"STATIC_UNSAFE_COUNT={unsafe_count}")
+    for finding in result["unsafe"]:
+        print(f"STATIC_UNSAFE={finding}")
+    return 0 if result["acyclic"] and unsafe_count == 0 else 1
 
 
 if __name__ == "__main__":

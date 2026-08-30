@@ -325,4 +325,68 @@ assert external_action._classify_mcp("mcp__jobs__retry_get_status").startswith("
 PY
 pass "T15 common direct remote mutation surfaces and mixed-token MCP mutations fail closed"
 
+# T16: system-temp prefixes never supersede repository-owned authority.
+# make_tmp_repo deliberately lives below the platform temp root on Linux/macOS.
+TREPO="$(make_tmp_repo)"
+TRID="run-v082-temp-authority"
+mkdir -p "$TREPO/.ownframework-loop/$TRID/scratch/builder/pass-0001"
+mkdir -p "$TREPO/.ownframework-loop/$TRID/scratch/builder/pass-0002"
+mkdir -p "$TREPO/.worktrees/ownframework-loop/$TRID/builder"
+mkdir -p "$TREPO/.worktrees/ownframework-loop/$TRID/reviewer"
+TREPO="$TREPO" TRID="$TRID" python3 -B <<'PY'
+import json, os
+from pathlib import Path
+from ownframework_loop import role_context
+repo=Path(os.environ["TREPO"]); rid=os.environ["TRID"]
+(repo/".ownframework-loop"/rid/"STATE.json").write_text(
+    json.dumps({"state":"BUILDING","build_pass_count":2,"review_pass_count":0})
+)
+role_context.enter_semantic_role(canonical_repo=repo, run_id=rid, role="builder")
+PY
+
+temp_hook() {
+  local target="$1"
+  python3 - "$TREPO" "$target" <<'PY' | OFLOOP_PLUGIN_ROOT="$ROOT_DIR" bash "$ROOT_DIR/hooks/block_protected_paths.sh"
+import json,sys
+print(json.dumps({"tool_name":"Write","cwd":sys.argv[1],"tool_input":{"file_path":sys.argv[2]}}))
+PY
+}
+
+TOUT="$(temp_hook "$TREPO/.ownframework-loop/$TRID/scratch/builder/pass-0001/BUILD_AGENT_RESULT.json")"
+assert_contains "$TOUT" "OF_LOOP_PROTECTED_PATH" "T16 historical scratch refused under system temp repo"
+TOUT="$(temp_hook "$TREPO/.ownframework-loop/$TRID/scratch/builder/pass-0002/BUILD_AGENT_RESULT.json")"
+[[ -z "$TOUT" ]] || fail "T16 current scratch refused under system temp repo: $TOUT"
+TOUT="$(temp_hook "$TREPO/.worktrees/ownframework-loop/$TRID/reviewer/source.py")"
+assert_contains "$TOUT" "OF_LOOP_REVIEWER_SOURCE_WRITE" "T16 reviewer source refused under system temp repo"
+TOUT="$(temp_hook "$TREPO/source.py")"
+assert_contains "$TOUT" "OF_LOOP_CANONICAL_CHECKOUT_WRITE_DURING_BUILD" "T16 canonical source refused under system temp repo"
+TOUT="$(temp_hook "$TREPO/.worktrees/ownframework-loop/$TRID/builder/source.py")"
+[[ -z "$TOUT" ]] || fail "T16 active builder source refused under system temp repo: $TOUT"
+EXT_SCRATCH="$(mktemp -d -t ofloop_external_scratch.XXXXXX)"
+TOUT="$(temp_hook "$EXT_SCRATCH/cache.txt")"
+[[ -z "$TOUT" ]] || fail "T16 genuine external system scratch should remain writable: $TOUT"
+rm -rf "$EXT_SCRATCH"
+pass "T16 temp-root topology preserves canonical/reviewer/historical-pass authority"
+
+# T17: release/static gate truth is fail-closed.
+python3 -B - "$TMP" <<'PY'
+import sys
+from pathlib import Path
+from ownframework_loop import static_checks
+tmp=Path(sys.argv[1])/"static-fixture"
+(tmp/"lib").mkdir(parents=True)
+(tmp/"lib"/"unsafe.py").write_text(
+    "import subprocess\nsubprocess.Popen(['echo','x'])\n", encoding="utf-8"
+)
+result=static_checks.scan(tmp)
+assert result["unsafe"], result
+root=Path.cwd()
+assert not static_checks.python_unsafe(root/"lib/ownframework_loop/supervisor.py")
+assert not static_checks.python_unsafe(root/"lib/ownframework_loop/process_runner.py")
+release_text=(root/"lib/ownframework_loop/release_gate_runtime.py").read_text()
+assert "cache/ownframework-local" not in release_text
+assert "of-loop@ownframework" in release_text
+PY
+pass "T17 static unsafe findings block and installed parity uses canonical registry"
+
 echo "V082_PRODUCTION_HARDENING=PASS"

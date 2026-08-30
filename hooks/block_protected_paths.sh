@@ -40,8 +40,10 @@
 # In-lane scratch allowances beyond the builder worktree and exact pass
 # scratch: the supervisor-owned runtime-cache root (where hermetic
 # validation env externalizes caches/TMPDIR) and ordinary system scratch
-# directories (/tmp, /private/tmp, /var/folders). These are non-source
-# scratch; source authority remains confined to the builder worktree.
+# directories (/tmp, /private/tmp, /var/folders). A system-scratch prefix
+# NEVER overrides repository ownership: if the canonical repo itself lives
+# under one of those roots, canonical/run/worktree paths still pass through
+# the normal authority checks below.
 
 set -eo pipefail
 export PYTHONDONTWRITEBYTECODE=1
@@ -168,7 +170,10 @@ if [[ -z "$abs_path" ]]; then
   exit 0
 fi
 
-canonical_repo="$(printf '%s' "$context" | python3 -B -c 'import json,sys; print(json.loads(sys.stdin.read()).get("canonical_repo",""))' 2>/dev/null || true)"
+canonical_repo="$(printf '%s' "$context" | python3 -B -c 'import json,sys
+from pathlib import Path
+raw=json.loads(sys.stdin.read()).get("canonical_repo","")
+print(str(Path(raw).expanduser().resolve(strict=False))) if raw else print("")' 2>/dev/null || true)"
 if [[ -z "$canonical_repo" || ! -d "$canonical_repo" ]]; then
   emit_block "PROTECTED_PATH" "OwnFramework Loop: active semantic context has no resolvable canonical repository; refusing for safety."
   exit 0
@@ -230,7 +235,12 @@ if [[ -n "$active_runtime_cache" && ( "$abs_path" == "$active_runtime_cache" || 
 fi
 case "$abs_path" in
   /tmp/*|/private/tmp/*|/var/folders/*)
-    exit 0
+    # Only genuine external scratch is exempt. Repository-owned paths must
+    # continue through exact-pass/canonical/worktree authority checks even
+    # when the repository itself resides under a system temporary root.
+    if [[ "$abs_path" != "$canonical_repo" && "$abs_path" != "$canonical_repo/"* ]]; then
+      exit 0
+    fi
     ;;
 esac
 

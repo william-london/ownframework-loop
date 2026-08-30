@@ -113,6 +113,53 @@ def _run(root: Path, argv: list[str], timeout: int, env: dict[str, str]) -> Comm
     return run_bounded(argv, cwd=root, timeout_seconds=timeout, env=env)
 
 
+def _discover_active_managed_install() -> tuple[str, str]:
+    """Return (install_path, diagnostic) for enabled of-loop@ownframework."""
+    if not shutil.which("claude"):
+        return "", "claude_missing"
+    try:
+        proc = subprocess.run(
+            ["claude", "plugin", "list", "--json"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return "", f"registry_probe_failed:{type(exc).__name__}"
+    if proc.returncode != 0:
+        return "", f"registry_probe_rc={proc.returncode}"
+    try:
+        data = json.loads(proc.stdout or "[]")
+    except json.JSONDecodeError:
+        return "", "registry_json_invalid"
+    matches: list[str] = []
+    for entry in data if isinstance(data, list) else []:
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("id") != "of-loop@ownframework" or not entry.get("enabled", False):
+            continue
+        install_path = str(entry.get("installPath") or "").strip()
+        if install_path:
+            matches.append(install_path)
+    unique = sorted(set(matches))
+    if len(unique) == 1:
+        return unique[0], "ok"
+    if len(unique) > 1:
+        return "", "registry_ambiguous"
+    return "", "not_installed"
+
+
+def _manifest_version(root: Path) -> str:
+    try:
+        payload = json.loads(
+            (root / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8")
+        )
+    except (OSError, json.JSONDecodeError, TypeError):
+        return ""
+    return str(payload.get("version") or "")
+
+
 def main() -> int:
     root = Path(__file__).resolve().parents[2]
     expected_root = _canonical_root()
@@ -156,12 +203,13 @@ def main() -> int:
             return 1
         _emit(output, "PLUGIN_GATE_REPOSITORY_IDENTITY=PASS")
         _emit(output, "RELEASE_GATE_SINGLE_INSTANCE=PASS")
-        _emit(output, "STATIC_GATE=PASS")
         static = _run(root, [sys.executable, "-m", "ownframework_loop.static_checks", str(root)], MAX_VALIDATE, {**os.environ, "PYTHONPATH": str(root / "lib"), "OFLOOP_RELEASE_GATE_DEPTH": "1"})
         output.extend(static.stdout.splitlines())
         print(static.stdout, end="", flush=True)
         if static.returncode != 0:
+            _emit(output, "STATIC_GATE=FAIL")
             return 1
+        _emit(output, "STATIC_GATE=PASS")
         env = {**os.environ, "PYTHONPATH": str(root / "lib"), "OFLOOP_RELEASE_GATE_DEPTH": "1"}
         validation = _run(root, ["bash", str(root / "validate.sh")], MAX_VALIDATE, env)
         print(validation.stdout, end="", flush=True); output.extend(validation.stdout.splitlines())
@@ -183,32 +231,48 @@ def main() -> int:
         _emit(output, f"OF_LOOP_GATE_VERIFIED_TOTAL={verified_total}")
         _emit(output, f"OF_LOOP_GATE_VERIFIED_PASSED={verified_passed}")
         _emit(output, "NARROW_TESTS=PASS")
-        # v0.3.5 (A6-F07): source/install parity comparison.
-        # Always run the parity comparison when an active matching version
-        # exists in the installed cache, regardless of env. INSTALL_ROOT
-        # is treated as a fixture-mode override; --source-only suppresses
-        # the comparison for candidate-test runs.
+        # Installed parity uses the canonical enabled plugin registry entry.
+        # A currently installed older release is reported but does not make the
+        # newer source release intrinsically invalid; exact parity is required
+        # after installation/recommissioning of the new release.
         skip_install_check = os.environ.get("OFLOOP_SOURCE_ONLY") == "1"
-        install_override = os.environ.get("INSTALL_ROOT", "")
-        install_root = ""
-        if install_override:
-            install_root = install_override
-        else:
-            # Auto-detect: scan ~/.claude/plugins/cache/ownframework-local/of-loop/*
-            cache_base = Path.home() / ".claude" / "plugins" / "cache" / "ownframework-local" / "of-loop"
-            if cache_base.is_dir():
-                versions = sorted([p for p in cache_base.iterdir() if p.is_dir()])
-                if versions:
-                    install_root = str(versions[-1])
-        if not skip_install_check and install_root and Path(install_root).is_dir():
-            installed = _run(root, ["bash", str(root / "validate.sh"), "--installed", install_root, "--skip-tests"], MAX_VALIDATE, env)
-            print(installed.stdout, end="", flush=True); output.extend(installed.stdout.splitlines())
-            if installed.returncode != 0:
-                _emit(output, f"OF_LOOP_INSTALL_PARITY=FAIL root={install_root}")
+        install_override = os.environ.get("INSTALL_ROOT", "").strip()
+        install_root = install_override
+        install_diag = "explicit_override" if install_override else ""
+        if not install_root and not skip_install_check:
+            install_root, install_diag = _discover_active_managed_install()
+
+        if skip_install_check:
+            _emit(output, "OF_LOOP_INSTALL_PARITY=SKIPPED_SOURCE_ONLY")
+        elif install_root:
+            install_path = Path(install_root).expanduser().resolve(strict=False)
+            source_version = _manifest_version(root)
+            installed_version = _manifest_version(install_path)
+            if not install_path.is_dir():
+                _emit(output, f"OF_LOOP_INSTALL_PARITY=REGISTRY_PATH_MISSING root={install_path}")
                 return 1
-            _emit(output, f"OF_LOOP_INSTALL_PARITY=PASS root={install_root}")
+            if not install_override and installed_version != source_version:
+                _emit(
+                    output,
+                    "OF_LOOP_INSTALL_PARITY=NO_MATCHING_VERSION "
+                    f"source={source_version or 'unknown'} "
+                    f"active={installed_version or 'unknown'} root={install_path}",
+                )
+            else:
+                installed = _run(
+                    root,
+                    ["bash", str(root / "validate.sh"), "--installed", str(install_path), "--skip-tests"],
+                    MAX_VALIDATE,
+                    env,
+                )
+                print(installed.stdout, end="", flush=True)
+                output.extend(installed.stdout.splitlines())
+                if installed.returncode != 0:
+                    _emit(output, f"OF_LOOP_INSTALL_PARITY=FAIL root={install_path}")
+                    return 1
+                _emit(output, f"OF_LOOP_INSTALL_PARITY=PASS root={install_path}")
         else:
-            _emit(output, "OF_LOOP_INSTALL_PARITY=SKIPPED" if skip_install_check else "OF_LOOP_INSTALL_PARITY=NO_INSTALL")
+            _emit(output, f"OF_LOOP_INSTALL_PARITY=NO_INSTALL diagnostic={install_diag or 'none'}")
         if shutil.which("claude"):
             probe = _run(root, ["claude", "plugin", "validate", str(root), "--strict"], 120, env)
             if probe.returncode == 0:
