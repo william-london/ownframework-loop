@@ -55,9 +55,19 @@ with supervisor._connect(db):
     pass
 PY
 OUT="$TMP/refresh.out"
+set +e
 env HOME="$HOME_EXISTING" PATH="$FAKEBIN:/usr/local/bin:/usr/bin:/bin" \
   "$CACHE/scripts/refresh-existing-supervisor-macos.sh" "$CACHE" "$SRC" >"$OUT" 2>&1
-grep -Fq "SUPERVISOR_REFRESH=PASS" "$OUT" || fail "existing supervisor did not refresh"
+REFRESH_RC=$?
+set -e
+if [[ "$REFRESH_RC" -ne 0 ]]; then
+  cat "$OUT" >&2
+  fail "existing supervisor refresh returned rc=$REFRESH_RC"
+fi
+grep -Fq "SUPERVISOR_REFRESH=PASS" "$OUT" || {
+  cat "$OUT" >&2
+  fail "existing supervisor did not refresh"
+}
 PLIST="$HOME_EXISTING/Library/LaunchAgents/com.ownframework.loop-supervisor.plist"
 PROV="$HOME_EXISTING/.local/state/ownframework-loop/runtime-provenance.json"
 [[ -f "$PROV" ]] || fail "runtime provenance missing after refresh"
