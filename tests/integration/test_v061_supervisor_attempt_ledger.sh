@@ -49,9 +49,13 @@ with supervisor._connect(db) as c:
     a3,logs3=supervisor._reserve_semantic_attempt(c,job=job,role="reviewer")
     logs3[0].parent.mkdir(parents=True,exist_ok=True)
     logs3[0].write_text(json.dumps({"total_cost_usd":2.0,"is_error":False}),encoding="utf-8")
-    c.execute("""UPDATE jobs SET worker_pid=99999999, worker_started_at=1,
-                 worker_role='reviewer' WHERE id=?""",(job["id"],))
-    c.commit()
+    # Provider output is only possible after gated release, which requires
+    # durable worker ownership. Publish the attempt through the real ownership
+    # helper, then use a non-live PID to model worker death before accounting.
+    supervisor._set_worker_pid(
+        c, int(job["id"]), 99999999, "reviewer",
+        out_path=logs3[0], err_path=logs3[1], attempt_id=a3,
+    )
     recovered=supervisor._recover_stale_running(c)
 assert recovered==1
 s=supervisor.status(canonical_repo=repo,run_id="run-cost",db_path=db)
@@ -66,9 +70,10 @@ with supervisor._connect(db) as c:
     a4,logs4=supervisor._reserve_semantic_attempt(c,job=job,role="builder")
     logs4[0].parent.mkdir(parents=True,exist_ok=True)
     logs4[0].write_text("not-json",encoding="utf-8")
-    c.execute("""UPDATE jobs SET worker_pid=99999998, worker_started_at=1,
-                 worker_role='builder' WHERE id=?""",(job["id"],))
-    c.commit()
+    supervisor._set_worker_pid(
+        c, int(job["id"]), 99999998, "builder",
+        out_path=logs4[0], err_path=logs4[1], attempt_id=a4,
+    )
     recovered=supervisor._recover_stale_running(c)
 assert recovered==0
 s=supervisor.status(canonical_repo=repo,run_id="run-cost",db_path=db)
