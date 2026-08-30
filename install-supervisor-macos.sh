@@ -233,9 +233,15 @@ problems = []
 try:
     # Every NON-terminal enrolled job depends on its recorded runtime.
     # Unbound legacy rows are ambiguous unfinished executions and fail closed.
+    # RETIRED rows are durable historical enrollments — the operator explicitly
+    # retired them; their runtime_generation is preserved verbatim and they
+    # do not participate in install/refresh generation checks (the operator
+    # already accepted them as historical evidence). DONE rows are terminal
+    # successful completions. Refusal is reserved for QUEUED/BACKOFF/RUNNING/
+    # QUARANTINED where dispatch or recovery is still possible.
     for row in conn.execute(
         "SELECT run_id, status, runtime_generation FROM jobs "
-        "WHERE status != 'DONE'"
+        "WHERE status NOT IN ('DONE','RETIRED')"
     ):
         gen = str(row["runtime_generation"] or "")
         if not gen:

@@ -736,6 +736,21 @@ def enqueue(
             "SELECT * FROM jobs WHERE repo=? AND run_id=?", (repo, run_id)
         ).fetchone()
         if existing is not None:
+            # Retired enrollments are durable historical evidence and must not
+            # be silently reactivated by a re-enqueue; the architecture does
+            # not expose a reactivation command by design. Fail closed with an
+            # explicit diagnostic so an operator cannot accidentally rewrite
+            # a retired historical record through normal enqueue traffic.
+            if str(existing["status"] or "") == "RETIRED":
+                out = dict(existing)
+                out.update({
+                    "schema": SCHEMA,
+                    "ok": False,
+                    "db_path": str(db),
+                    "enqueue_refused": True,
+                    "reason": "enqueue_refuses_retired_enrollment",
+                })
+                return out
             if str(existing["status"] or "") == "RUNNING":
                 existing_generation = str(existing["runtime_generation"] or "")
                 if not existing_generation or str(eff_generation) != existing_generation:
@@ -1202,6 +1217,19 @@ def _job_dict(row: sqlite3.Row, db: Path) -> dict[str, Any]:
             or d.get("last_failure_class")
             or d.get("last_error")
         )
+    if str(d.get("status") or "") == "RETIRED":
+        # Retired enrollments preserve their original quarantine context as
+        # durable historical evidence; surface the prior failure class for
+        # operators auditing a retired enrollment. runtime_generation is
+        # preserved verbatim (including legacy empty / UNBOUND).
+        d["retired_enrollment"] = {
+            "previous_quarantine_reason": (
+                d.get("last_failure_reason")
+                or d.get("last_failure_class")
+                or d.get("last_error")
+            ),
+            "preserved_runtime_generation": str(d.get("runtime_generation") or ""),
+        }
     now = time.time()
     worker_started = float(d.get("worker_started_at") or 0.0)
     execution_started = float(d.get("execution_started_at") or 0.0)
@@ -2578,6 +2606,19 @@ def resume(
             "resumed": False,
             "reason": "not_enqueued",
         }
+    # Retired enrollments are durable historical evidence; ``supervisor resume``
+    # must not accidentally resurrect them. The architecture intentionally
+    # exposes no reactivation command — preserved historical enrollments must
+    # stay preserved. Fail closed with a precise retirement diagnostic that
+    # operators can grep, distinct from the generic QUARANTINED-required one.
+    if str(existing["status"] or "") == "RETIRED":
+        result = _job_dict(existing, db)
+        result.update({
+            "ok": False,
+            "resumed": False,
+            "reason": "resume_refuses_retired_enrollment",
+        })
+        return result
     if str(existing["status"]) != "QUARANTINED":
         result = _job_dict(existing, db)
         result.update({
@@ -2666,4 +2707,139 @@ def resume(
     result = _job_dict(row, db)
     result["resumed"] = True
     result["runtime_generation_previous"] = previous_generation
+    return result
+
+
+def retire(
+    *,
+    canonical_repo: Path,
+    run_id: str,
+    db_path: Path | None = None,
+) -> dict[str, Any]:
+    """Non-destructively retire a historical supervisor enrollment.
+
+    Retirement is a SUPERVISOR-LEDGER lifecycle transition only. It MUST NOT
+    modify the target repository, .ownframework-loop run artifacts, WORK_PACKET.md,
+    STATE.json, EVENTS.log, APPROVAL.json, scratch evidence, candidate refs,
+    runtime_generation, semantic-attempt history, or cost/token/retry evidence.
+
+    Supported transition: ``QUARANTINED -> RETIRED`` only. ``QUEUED``,
+    ``BACKOFF``, ``RUNNING``, ``DONE``, and ``RETIRED`` are refused because
+    retirement is not a reactivation, migration, or completion.
+
+    A live or ambiguous semantic worker / attempt refuses retirement; the
+    enrollment must first drain through the normal supervisor lifecycle.
+
+    A retired row's existing ``runtime_generation`` value (including an empty
+    legacy ``UNBOUND`` value) is preserved. Retirement never masquerades as
+    migration or successful completion. The retired enrollment is excluded
+    from runtime-generation dependency checks at install/refresh time, so
+    normal future supervisor replacement no longer requires the migration
+    override to bypass durable historical evidence.
+
+    ``supervisor resume`` continues to refuse ``RETIRED`` rows because it
+    requires the source status to be exactly ``QUARANTINED``. The architecture
+    intentionally does not expose a reactivation command — preserved historical
+    enrollments must stay preserved.
+    """
+    state_mod.validate_run_id(run_id)
+    repo = str(Path(canonical_repo).resolve(strict=False))
+    db = db_path or default_db_path()
+    now = time.time()
+    with _connect(db) as conn:
+        existing = conn.execute(
+            "SELECT * FROM jobs WHERE repo=? AND run_id=?", (repo, run_id)
+        ).fetchone()
+    if existing is None:
+        return {
+            "schema": SCHEMA,
+            "ok": False,
+            "repo": repo,
+            "run_id": run_id,
+            "status": "NOT_ENQUEUED",
+            "db_path": str(db),
+            "retired": False,
+            "reason": "not_enqueued",
+        }
+    current_status = str(existing["status"] or "")
+    if current_status != "QUARANTINED":
+        result = _job_dict(existing, db)
+        result.update({
+            "ok": False,
+            "retired": False,
+            "reason": (
+                "retire_requires_quarantined"
+                if current_status in ("QUEUED", "BACKOFF", "RUNNING")
+                else "retire_refuses_terminal_enrollment"
+            ),
+        })
+        return result
+    # Live / ambiguous semantic worker refuses retirement. The operator must
+    # wait for the worker to drain through the normal supervisor lifecycle
+    # (or kill it) before retiring the enrollment. A retired row must never
+    # be tied to a process that could still write evidence.
+    if existing["worker_pid"] and _pid_alive(
+        int(existing["worker_pid"]),
+        float(existing["worker_started_at"]) if existing["worker_started_at"] else None,
+    ):
+        result = _job_dict(existing, db)
+        result.update({
+            "ok": False,
+            "retired": False,
+            "reason": "quarantined_worker_still_alive",
+        })
+        return result
+    # Preserve runtime_generation verbatim, including legacy empty / UNBOUND.
+    preserved_runtime_generation = str(existing["runtime_generation"] or "")
+    preserved_cost_usd = float(existing["total_cost_usd"] or 0.0)
+    preserved_attempt_id = str(existing["latest_attempt_id"] or "")
+    with _connect(db) as conn:
+        cur = conn.execute(
+            """UPDATE jobs SET
+                 status='RETIRED',
+                 updated_at=?
+               WHERE repo=? AND run_id=? AND status='QUARANTINED'""",
+            (now, repo, run_id),
+        )
+        if cur.rowcount != 1:
+            # Concurrent transition lost; refuse without rewriting state.
+            row = conn.execute(
+                "SELECT * FROM jobs WHERE repo=? AND run_id=?", (repo, run_id)
+            ).fetchone()
+            result = _job_dict(row, db) if row is not None else {
+                "schema": SCHEMA, "ok": False, "status": "NOT_ENQUEUED",
+            }
+            result.update({
+                "ok": False,
+                "retired": False,
+                "reason": "retire_lost_quarantine_race",
+            })
+            return result
+        row = conn.execute(
+            "SELECT * FROM jobs WHERE repo=? AND run_id=?", (repo, run_id)
+        ).fetchone()
+    if row is None:
+        return {
+            "schema": SCHEMA,
+            "ok": False,
+            "repo": repo,
+            "run_id": run_id,
+            "status": "NOT_ENQUEUED",
+            "db_path": str(db),
+            "retired": False,
+        }
+    # Defensive: confirm the preservation contract held end-to-end.
+    actual_runtime_generation = str(row["runtime_generation"] or "")
+    if actual_runtime_generation != preserved_runtime_generation:
+        raise RuntimeError(
+            "retire must preserve runtime_generation verbatim; "
+            f"expected {preserved_runtime_generation!r}, got {actual_runtime_generation!r}"
+        )
+    if float(row["total_cost_usd"] or 0.0) != preserved_cost_usd:
+        raise RuntimeError("retire must preserve total_cost_usd verbatim")
+    if str(row["latest_attempt_id"] or "") != preserved_attempt_id:
+        raise RuntimeError("retire must preserve latest_attempt_id verbatim")
+    result = _job_dict(row, db)
+    result["retired"] = True
+    result["runtime_generation_preserved"] = preserved_runtime_generation
     return result

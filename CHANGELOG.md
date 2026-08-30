@@ -4,6 +4,48 @@ All notable current-release changes to OwnFramework Loop are documented here.
 The complete historical changelog through 0.5.2 is preserved at
 [`docs/history/CHANGELOG-through-0.5.2.md`](docs/history/CHANGELOG-through-0.5.2.md).
 
+## 0.8.3 - Supervisor Enrollment Retirement (2026-08-29)
+
+### Operator lifecycle for durable historical evidence
+
+The previous 0.8.2 closure correctly failed closed on a preserved historical
+QUARANTINED enrollment whose legacy supervisor ledger had no recorded
+runtime_generation, but it exposed a real operator-friction defect: the only
+way to install a new runtime was the explicit migration override, and that
+override only unblocked one install — the same preserved row would block every
+future normal refresh forever.
+
+v0.8.3 closes this defect with a narrow, non-destructive supervisor-level
+lifecycle:
+
+- a new terminal enrollment status ``RETIRED`` records the operator's
+  explicit acceptance of a historical enrollment as evidence rather than work;
+- a new operator command ``ofloop supervisor retire <repo> <run-id>``
+  transitions ``QUARANTINED -> RETIRED`` and refuses every other source state
+  (QUEUEd, BACKOFF, RUNNING, DONE, RETIRED);
+- a live or ambiguous semantic worker / attempt refuses retirement;
+- retirement preserves the enrollment's ``runtime_generation`` verbatim
+  (including legacy empty / UNBOUND), preserves ``total_cost_usd`` and
+  ``latest_attempt_id``, preserves every ``semantic_attempts`` row, and never
+  touches the target repository, ``.ownframework-loop`` artifacts,
+  ``STATE.json``, ``EVENTS.log``, ``APPROVAL.json``, ``WORK_PACKET.md``,
+  scratch evidence, or candidate refs;
+- the installer generation probe now ignores only ``DONE`` and ``RETIRED``
+  rows; QUEUED / BACKOFF / RUNNING / QUARANTINED with a foreign or unbound
+  generation continue to refuse install;
+- ordinary ``supervisor resume`` refuses ``RETIRED`` with a precise
+  ``resume_refuses_retired_enrollment`` diagnostic; the architecture
+  intentionally exposes no reactivation command;
+- ordinary ``supervisor enqueue`` refuses to reactivate a ``RETIRED``
+  enrollment through normal enqueue traffic;
+- ``status`` exposes a ``retired_enrollment`` summary that surfaces the prior
+  quarantine context and the preserved ``runtime_generation`` for operator
+  auditing.
+
+This eliminates the permanent override trap. Normal supervisor replacement no
+longer requires ``OFLOOP_ALLOW_RUNTIME_GENERATION_MIGRATION=1`` merely because
+a durable historical enrollment exists.
+
 ## 0.8.2 - Production Hardening Sweep (2026-08-29)
 
 ### Post-adjudication authority closure

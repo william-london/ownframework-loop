@@ -1819,6 +1819,15 @@ def _build_parser() -> argparse.ArgumentParser:
         )
         _emit(out, exit_code=0 if out.get("ok") else 2)
 
+    def cmd_supervisor_retire(args: argparse.Namespace) -> None:
+        repo = _repo_path(args.repo)
+        out = supervisor_mod.retire(
+            canonical_repo=repo,
+            run_id=args.run_id,
+            db_path=Path(args.db).expanduser() if args.db else None,
+        )
+        _emit(out, exit_code=0 if out.get("retired") else 2)
+
     sup = sub.add_parser("supervisor", help="durable zero-LLM-idle execution supervisor")
     sup_sub = sup.add_subparsers(dest="supervisor_cmd", required=True)
     s_enq = sup_sub.add_parser("enqueue", help="enqueue one existing human-originated run")
@@ -1901,6 +1910,21 @@ def _build_parser() -> argparse.ArgumentParser:
         help="deprecated no-op: preserving the wall-clock origin is now the default",
     )
     s_res.set_defaults(func=cmd_supervisor_resume)
+    # v0.8.3: enrollments can be retired — a SUPERVISOR-LEDGER lifecycle
+    # transition that preserves engineering evidence and excludes the row
+    # from runtime-generation dependency checks at install/refresh time.
+    # Refuses QUEUED / BACKOFF / RUNNING / DONE / RETIRED so retirement
+    # cannot be used as a reactivation, migration, or completion path.
+    s_retr = sup_sub.add_parser(
+        "retire",
+        help="non-destructively retire a QUARANTINED historical enrollment; "
+             "preserves ledger/runtime_generation/artifacts, excludes the row "
+             "from future install generation checks",
+    )
+    s_retr.add_argument("repo")
+    s_retr.add_argument("run_id")
+    s_retr.add_argument("--db", default=None)
+    s_retr.set_defaults(func=cmd_supervisor_retire)
 
     # doctor
     doc = sub.add_parser("doctor", help="inspect repo + run")

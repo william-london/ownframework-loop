@@ -77,3 +77,8 @@ tests/integration/test_v080_http_mutation_diagnostics.sh
 
 # v0.8.2 production hardening — byte identity, read-only status, lifecycle safety
 tests/integration/test_v082_production_hardening.sh
+
+# v0.8.3 supervisor enrollment retirement — non-destructive QUARANTINED -> RETIRED,
+# retired rows excluded from install generation probe, retirement refuses
+# QUEUED/BACKOFF/RUNNING, resume refuses RETIRED, artifacts preserved.
+tests/integration/test_v083_supervisor_retire.sh
