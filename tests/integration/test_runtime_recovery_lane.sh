@@ -117,6 +117,64 @@ print("A01_FIRST_CHILD_REACHED_MODEL_SENTINEL=no")
 print("A01_REPLACEMENT_WORKER_COUNT=1")
 print("A01_DUPLICATE_SEMANTIC_EXECUTION=0")
 
+# The same gate provenance is durable in SQLite. An unpublished gate-v1
+# reservation is known zero-execution; a legacy pre-gate reservation is NOT.
+db_gate = tmp / "gate-ledger.sqlite3"
+repo_gate = new_repo("gate-ledger")
+supervisor.enqueue(canonical_repo=repo_gate, run_id="run-gate-ledger", db_path=db_gate)
+with supervisor._connect(db_gate) as conn:
+    conn.execute(
+        "UPDATE jobs SET status='RUNNING', worker_pid=99999999, worker_started_at=1 "
+        "WHERE run_id='run-gate-ledger'"
+    )
+    conn.commit()
+    job_gate = conn.execute(
+        "SELECT * FROM jobs WHERE run_id='run-gate-ledger'"
+    ).fetchone()
+    gate_attempt, _ = supervisor._reserve_semantic_attempt(
+        conn, job=job_gate, role="builder"
+    )
+    supervisor._recover_stale_running(conn)
+with supervisor._connect_readonly(db_gate) as conn:
+    gated_row = conn.execute(
+        "SELECT * FROM semantic_attempts WHERE attempt_id=?", (gate_attempt,)
+    ).fetchone()
+assert int(gated_row["launch_gate_version"]) == 1, dict(gated_row)
+assert gated_row["status"] == "FAILED", dict(gated_row)
+assert gated_row["failure_reason"] == "worker_ownership_not_published", dict(gated_row)
+assert int(gated_row["cost_known"]) == 1 and float(gated_row["cost_usd"]) == 0.0
+
+db_legacy = tmp / "legacy-reservation.sqlite3"
+repo_legacy = new_repo("legacy-reservation")
+supervisor.enqueue(canonical_repo=repo_legacy, run_id="run-legacy-reserved", db_path=db_legacy)
+with supervisor._connect(db_legacy) as conn:
+    conn.execute(
+        "UPDATE jobs SET status='RUNNING', worker_pid=99999998, worker_started_at=1 "
+        "WHERE run_id='run-legacy-reserved'"
+    )
+    conn.commit()
+    legacy_job = conn.execute(
+        "SELECT * FROM jobs WHERE run_id='run-legacy-reserved'"
+    ).fetchone()
+    legacy_attempt, _ = supervisor._reserve_semantic_attempt(
+        conn, job=legacy_job, role="builder"
+    )
+    conn.execute(
+        "UPDATE semantic_attempts SET launch_gate_version=0 WHERE attempt_id=?",
+        (legacy_attempt,),
+    )
+    conn.commit()
+    supervisor._recover_stale_running(conn)
+with supervisor._connect_readonly(db_legacy) as conn:
+    legacy_row = conn.execute(
+        "SELECT * FROM semantic_attempts WHERE attempt_id=?", (legacy_attempt,)
+    ).fetchone()
+assert int(legacy_row["launch_gate_version"]) == 0, dict(legacy_row)
+assert legacy_row["status"] == "COST_UNKNOWN", dict(legacy_row)
+assert int(legacy_row["cost_known"]) == 0, dict(legacy_row)
+print("A01_GATED_RESERVATION_RECOVERY_KNOWN_ZERO=yes")
+print("A01_LEGACY_RESERVATION_REMAINS_AMBIGUOUS=yes")
+
 # ------------------------------------------------------------------
 # A-02 + A-06: replacement recovery enforces the ORIGINAL persisted
 # deadline on a real orphan, then preserves unknown cost as unknown.
