@@ -2418,9 +2418,14 @@ def run_one(*, db_path: Path | None = None, timeout_seconds: int = 0) -> dict[st
                     }
                 finalizer_timeout = remaining_after_worker
 
-            finalized = dispatch_mod.finalize_work_order(
-                work_order, timeout_seconds=finalizer_timeout
-            )
+            if finalizer_timeout is None:
+                # Preserve the stable single-argument dispatch surface for
+                # unfunded/unbounded runs and test/adapter implementations.
+                finalized = dispatch_mod.finalize_work_order(work_order)
+            else:
+                finalized = dispatch_mod.finalize_work_order(
+                    work_order, timeout_seconds=finalizer_timeout
+                )
             _update_job(
                 conn,
                 job["id"],
