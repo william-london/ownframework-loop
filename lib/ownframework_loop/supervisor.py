@@ -110,6 +110,49 @@ def _validate_claude_extra_args(extra: list[str]) -> None:
             )
 
 
+def _parse_adapter_auth_read_paths() -> list[str]:
+    """Resolve operator-supplied adapter auth-read paths.
+
+    The core sandbox denies the operator's entire ``$HOME`` so a worker
+    cannot read arbitrary user data. Adapters (e.g. Claude Code) still
+    need their own auth state (``~/.claude/``) reachable from inside
+    the sandbox for OAuth/session login. Operators who commission an
+    adapter declare those paths via the comma-separated env var
+    ``OFLOOP_ADAPTER_AUTH_READ_PATHS`` — each entry must be an
+    absolute, existing path. Empty / malformed entries are dropped
+    silently; nothing is invented.
+
+    The list is appended to ``allowRead`` after the Loop-owned
+    trust surfaces, so the more-specific ``allowRead`` wins over the
+    broad ``denyRead: [home]``. The Loop core never names an
+    adapter-specific path; the platform installer (which knows which
+    adapter it commissioned) supplies the value.
+    """
+    raw = os.environ.get("OFLOOP_ADAPTER_AUTH_READ_PATHS", "").strip()
+    if not raw:
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+    for entry in raw.split(","):
+        candidate = entry.strip()
+        if not candidate:
+            continue
+        p = Path(candidate).expanduser()
+        if not p.is_absolute():
+            continue
+        try:
+            resolved = str(p.resolve(strict=False))
+        except (OSError, RuntimeError):
+            continue
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        if not p.exists():
+            continue
+        out.append(resolved)
+    return out
+
+
 def _semantic_worker_settings(
     *,
     canonical_repo: Path,
@@ -147,6 +190,7 @@ def _semantic_worker_settings(
         str(cache_root.resolve(strict=False)),
         str((canonical_repo / ".git").resolve(strict=False)),
         str(_source_root().resolve(strict=False)),
+        *_parse_adapter_auth_read_paths(),
     })
     allow_write = sorted({
         str(cache_root.resolve(strict=False)),

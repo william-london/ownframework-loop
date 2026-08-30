@@ -261,6 +261,13 @@ env_vars = {
 # and automatically continues if Claude later appears on the persisted service PATH.
 if claude_bin:
     env_vars["OFLOOP_CLAUDE_BIN"] = claude_bin
+    # The Claude adapter keeps OAuth/session state under $HOME/.claude.
+    # The core sandbox denies $HOME by default; the operator-supplied
+    # auth-read list re-opens exactly the adapter's own auth home so a
+    # worker can authenticate while the broad home deny stands.
+    adapter_auth = str(Path.home() / ".claude")
+    if Path(adapter_auth).is_dir():
+        env_vars["OFLOOP_ADAPTER_AUTH_READ_PATHS"] = adapter_auth
 
 payload = {
     "Label": label,

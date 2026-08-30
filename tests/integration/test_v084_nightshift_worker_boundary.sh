@@ -118,6 +118,49 @@ expected_cache = str(
 )
 assert expected_cache in allow_read, allow_read
 assert expected_cache in allow_write, allow_write
+# Operator-supplied adapter auth-read paths bypass denyRead: [home]
+# so a commissioned adapter (Claude) can reach its own auth state.
+# Empty / unset env var = no extra paths; non-empty + existing absolute
+# path = added; non-existent / relative paths silently dropped (the
+# core never invents adapter-specific paths).
+fake_claude_home = root / "claude-home"
+fake_claude_home.mkdir()
+os.environ["OFLOOP_ADAPTER_AUTH_READ_PATHS"] = str(fake_claude_home)
+auth_settings = supervisor._semantic_worker_settings(
+    canonical_repo=repo,
+    run_id="run-secure",
+    role="builder",
+    worktree=worktree,
+    semantic_path=semantic,
+)
+auth_allow_read = set(auth_settings["sandbox"]["filesystem"]["allowRead"])
+assert str(fake_claude_home.resolve()) in auth_allow_read, auth_allow_read
+# Non-existent and relative paths are silently dropped.
+missing = root / "missing-claude-home"
+os.environ["OFLOOP_ADAPTER_AUTH_READ_PATHS"] = (
+    f"{missing},relative/path,{fake_claude_home}"
+)
+mixed_settings = supervisor._semantic_worker_settings(
+    canonical_repo=repo,
+    run_id="run-secure",
+    role="builder",
+    worktree=worktree,
+    semantic_path=semantic,
+)
+mixed_allow_read = set(mixed_settings["sandbox"]["filesystem"]["allowRead"])
+assert str(fake_claude_home.resolve()) in mixed_allow_read, mixed_allow_read
+assert str(missing.resolve()) not in mixed_allow_read, mixed_allow_read
+assert "relative/path" not in mixed_allow_read, mixed_allow_read
+del os.environ["OFLOOP_ADAPTER_AUTH_READ_PATHS"]
+empty_settings = supervisor._semantic_worker_settings(
+    canonical_repo=repo,
+    run_id="run-secure",
+    role="builder",
+    worktree=worktree,
+    semantic_path=semantic,
+)
+empty_allow_read = set(empty_settings["sandbox"]["filesystem"]["allowRead"])
+assert str(fake_claude_home.resolve()) not in empty_allow_read, empty_allow_read
 cred_names = {item["name"] for item in sb["credentials"]["envVars"]}
 assert {"GITHUB_TOKEN","GH_TOKEN","NPM_TOKEN","NODE_AUTH_TOKEN","PYPI_TOKEN","TWINE_PASSWORD","DOCKER_AUTH_CONFIG"} <= cred_names
 assert captured["env"]["CLAUDE_CODE_SUBPROCESS_ENV_SCRUB"] == "1"

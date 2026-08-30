@@ -147,6 +147,13 @@ if state_base:
 claude=os.environ.get("CLAUDE_BIN") or None
 if claude:
     env["OFLOOP_CLAUDE_BIN"]=claude
+    # The Claude adapter keeps OAuth/session state under $HOME/.claude.
+    # The core sandbox denies $HOME by default; the operator-supplied
+    # auth-read list re-opens exactly the adapter's own auth home so a
+    # worker can authenticate while the broad home deny stands.
+    adapter_auth = str(Path.home() / ".claude")
+    if Path(adapter_auth).is_dir():
+        env["OFLOOP_ADAPTER_AUTH_READ_PATHS"] = adapter_auth
 lines=[
     "[Unit]",
     "Description=OwnFramework Loop durable supervisor",
