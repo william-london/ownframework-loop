@@ -727,19 +727,25 @@ def finalize_build(
         },
     )
 
-    # 23. Update state counters.
+    # 23-24. Apply finalizer-derived state and the top-level transition in
+    # ONE STATE_TXN-backed mutation.  Previously the derived counters were
+    # saved while the run was still BUILDING and the transition happened
+    # afterward; a crash between those writes made replay of the same claimed
+    # pass increment no_progress_streak a second time.
     cur = state_mod.load_verified(canonical_repo, run_id)
-    cur["no_progress_streak"] = no_progress_streak
-    cur["last_candidate_sha"] = candidate_sha
-    cur["build_pass_count"] = int(new_build_pass_count)
+    transition_extras: dict[str, Any] = {
+        "no_progress_streak": no_progress_streak,
+        "last_candidate_sha": candidate_sha,
+        "build_pass_count": int(new_build_pass_count),
+    }
     if program_source_check is not None and state_mod.is_program_state(cur):
-        counters = (cur.get("program") or {}).get("cumulative_counters")
+        program_block = cur.get("program") or {}
+        counters = program_block.get("cumulative_counters")
         if isinstance(counters, dict):
             counters["files_changed_unique"] = program_source_check["files_changed_unique"]
             counters["diff_lines_total"] = program_source_check["diff_lines_total"]
-    state_mod.save(canonical_repo, run_id, cur)
+            transition_extras["program"] = program_block
 
-    # 24. Transition if appropriate.
     if cur.get("state") != next_state and transitions.is_valid(cur.get("state"), next_state):
         state_mod.transition(
             canonical_repo, run_id,
@@ -747,6 +753,7 @@ def finalize_build(
             actor=actor,
             reason=f"finalizer next_state={next_state}",
             commit_sha=candidate_sha,
+            extras=transition_extras,
         )
 
     return receipt
