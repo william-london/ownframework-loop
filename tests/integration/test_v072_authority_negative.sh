@@ -218,22 +218,15 @@ assert_contains "$PROMO_OUT" "not executable under current authority" \
   "approval refuses merge_on_approved before the TTY gate"
 
 # ---------------------------------------------------------------------------
-# T5: supervisor installer live-work guard (F7).
+# T5: shared supervisor replacement live-work guard (F7).
 #
-# HERMETIC BY CONSTRUCTION: even if the guard regressed, this test can
-# never touch the real machine — HOME points at a throwaway directory (the
-# plist is generated there) and launchctl is shimmed to a stub that fails
-# before any real bootstrap. The fixture worker_pid is the LIVE test-shell
-# pid so the guard sees a genuinely alive worker (a dead pid is correctly
-# classified as stale and would not refuse).
+# Both launchd and systemd installers delegate this authority decision to the
+# same read-only runtime-dependency probe. Exercise that shared owner directly
+# so the proof remains platform-neutral; platform-specific installers are
+# separately required to reject invocation on the wrong OS.
 # ---------------------------------------------------------------------------
 GUARD_STATE="$TMP/guard-state"
-GUARD_HOME="$TMP/guard-home"
-GUARD_BIN_SHIM="$TMP/guard-shims"
-mkdir -p "$GUARD_STATE/ownframework-loop" "$GUARD_HOME" "$GUARD_BIN_SHIM"
-printf '#!/bin/sh\necho "launchctl disabled in hermetic test" >&2\nexit 127\n' \
-  > "$GUARD_BIN_SHIM/launchctl"
-chmod +x "$GUARD_BIN_SHIM/launchctl"
+mkdir -p "$GUARD_STATE/ownframework-loop"
 GUARD_DB="$GUARD_STATE/ownframework-loop/supervisor.sqlite3"
 TEST_LIVE_PID="$$" python3 - "$LIB_DIR" "$GUARD_DB" <<'PY'
 import os, sys, time
@@ -242,7 +235,7 @@ from pathlib import Path
 from ownframework_loop import supervisor
 
 db = Path(sys.argv[2])
-repo = Path(os.path.dirname(str(db))) / "repo"
+repo = db.parent / "repo"
 repo.mkdir(exist_ok=True)
 job = supervisor.enqueue(
     canonical_repo=repo, run_id="run-guard", db_path=db, max_wall_seconds=600
@@ -255,21 +248,20 @@ conn.execute(
 )
 conn.commit()
 PY
+GUARD_GENERATION="$(python3 - "$GUARD_DB" <<'PY'
+import sqlite3,sys
+c=sqlite3.connect(sys.argv[1])
+row=c.execute("SELECT runtime_generation FROM jobs WHERE run_id='run-guard'").fetchone()
+assert row and row[0]
+print(row[0])
+PY
+)"
 set +e
-# Pass OFLOOP_BIN explicitly so the install script does not follow the
-# test-runner PATH to whatever launcher happens to be installed (e.g. a
-# legacy 0.6.2 plugin-cache payload whose lib does not carry the v0.8.x
-# runtime_identity module). The whole point of the test is to run the
-# v0.8.4 installer's live-worker guard against a deliberately faked
-# RUNNING row.
-GUARD_OUT="$(PATH="$GUARD_BIN_SHIM:$PATH" HOME="$GUARD_HOME" XDG_STATE_HOME="$GUARD_STATE" \
-  OFLOOP_BIN="$ROOT_DIR/bin/ofloop" \
-  bash "$ROOT_DIR/install-supervisor-macos.sh" 2>&1)"
+GUARD_OUT="$(PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$LIB_DIR"   python3 -B "$ROOT_DIR/scripts/probe-supervisor-runtime-dependencies.py"   "$GUARD_DB" "$GUARD_GENERATION" 2>&1)"
 GUARD_RC=$?
 set -e
-[[ "$GUARD_RC" -eq 11 ]] || fail "installer must refuse with exit 11 while semantic work is live (rc=$GUARD_RC out=$GUARD_OUT)"
-assert_contains "$GUARD_OUT" "reason=active_semantic_work" \
-  "installer refuses replacement while a semantic worker is live"
+[[ "$GUARD_RC" -eq 11 ]] || fail "shared replacement probe must refuse with exit 11 while semantic work is live (rc=$GUARD_RC out=$GUARD_OUT)"
+assert_contains "$GUARD_OUT" "reason=active_semantic_work"   "shared installer dependency probe refuses replacement while a semantic worker is live"
 
 # ---------------------------------------------------------------------------
 # T6: supervisor envelope preservation + wall-clock origin (F9, F10).
