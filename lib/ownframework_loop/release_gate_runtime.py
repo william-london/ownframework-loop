@@ -20,7 +20,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-from . import plugin_data
+from . import plugin_data, runtime_identity
 from .gate_lock import GateAlreadyRunning, GateLock
 from .process_runner import CommandResult, run_bounded
 from .util import utc_now_compact, utc_now_iso
@@ -144,6 +144,34 @@ def _manifest_version(root: Path) -> str:
     match = re.search(r'^__version__\s*=\s*["\']([^"\']+)', text, re.MULTILINE)
     return match.group(1) if match else ""
 
+
+def _payload_parity(source_root: Path, installed_root: Path) -> tuple[bool, str, str]:
+    """Compare active payload bytes independent of install location."""
+    source_digest = runtime_identity.payload_tree_digest(source_root)
+    installed_digest = runtime_identity.payload_tree_digest(installed_root)
+    return source_digest == installed_digest, source_digest, installed_digest
+
+
+def _installed_parity_status(source_root: Path, installed_root: Path) -> dict[str, str]:
+    """Return exact source↔installed parity truth after self-integrity is proven."""
+    source_version = _manifest_version(source_root)
+    installed_version = _manifest_version(installed_root)
+    equal, source_digest, installed_digest = _payload_parity(source_root, installed_root)
+    if source_version != installed_version:
+        status = "NO_MATCHING_VERSION"
+    elif equal:
+        status = "PASS"
+    else:
+        status = "MISMATCH"
+    return {
+        "status": status,
+        "source_version": source_version,
+        "installed_version": installed_version,
+        "source_digest": source_digest,
+        "installed_digest": installed_digest,
+    }
+
+
 def main() -> int:
     root = Path(__file__).resolve().parents[2]
     expected_root = _canonical_root()
@@ -229,35 +257,58 @@ def main() -> int:
             install_root, install_diag = _discover_active_managed_install()
 
         if skip_install_check:
+            _emit(output, "OF_LOOP_INSTALL_SELF_INTEGRITY=SKIPPED_SOURCE_ONLY")
             _emit(output, "OF_LOOP_INSTALL_PARITY=SKIPPED_SOURCE_ONLY")
         elif install_root:
             install_path = Path(install_root).expanduser().resolve(strict=False)
             source_version = _manifest_version(root)
             installed_version = _manifest_version(install_path)
             if not install_path.is_dir():
+                _emit(output, f"OF_LOOP_INSTALL_SELF_INTEGRITY=CORE_PATH_MISSING root={install_path}")
                 _emit(output, f"OF_LOOP_INSTALL_PARITY=CORE_PATH_MISSING root={install_path}")
                 return 1
-            if not install_override and installed_version != source_version:
-                _emit(
-                    output,
-                    "OF_LOOP_INSTALL_PARITY=NO_MATCHING_VERSION "
-                    f"source={source_version or 'unknown'} "
-                    f"active={installed_version or 'unknown'} root={install_path}",
-                )
+            installed = _run(
+                root,
+                ["bash", str(root / "validate.sh"), "--installed", str(install_path), "--skip-tests"],
+                MAX_VALIDATE,
+                env,
+            )
+            print(installed.stdout, end="", flush=True)
+            output.extend(installed.stdout.splitlines())
+            if installed.returncode != 0:
+                _emit(output, f"OF_LOOP_INSTALL_SELF_INTEGRITY=FAIL root={install_path}")
+                _emit(output, f"OF_LOOP_INSTALL_PARITY=UNPROVEN root={install_path}")
+                return 1
+            _emit(output, f"OF_LOOP_INSTALL_SELF_INTEGRITY=PASS root={install_path}")
+            try:
+                parity = _installed_parity_status(root, install_path)
+            except runtime_identity.RuntimeIdentityError as exc:
+                _emit(output, f"OF_LOOP_INSTALL_PARITY=UNPROVEN reason={type(exc).__name__}")
             else:
-                installed = _run(
-                    root,
-                    ["bash", str(root / "validate.sh"), "--installed", str(install_path), "--skip-tests"],
-                    MAX_VALIDATE,
-                    env,
-                )
-                print(installed.stdout, end="", flush=True)
-                output.extend(installed.stdout.splitlines())
-                if installed.returncode != 0:
-                    _emit(output, f"OF_LOOP_INSTALL_PARITY=FAIL root={install_path}")
-                    return 1
-                _emit(output, f"OF_LOOP_INSTALL_PARITY=PASS root={install_path}")
+                status = parity["status"]
+                if status == "PASS":
+                    _emit(
+                        output,
+                        "OF_LOOP_INSTALL_PARITY=PASS "
+                        f"version={parity['source_version']} payload_sha256={parity['source_digest']}",
+                    )
+                elif status == "NO_MATCHING_VERSION":
+                    _emit(
+                        output,
+                        "OF_LOOP_INSTALL_PARITY=NO_MATCHING_VERSION "
+                        f"source={parity['source_version'] or 'unknown'} "
+                        f"active={parity['installed_version'] or 'unknown'} root={install_path}",
+                    )
+                else:
+                    _emit(
+                        output,
+                        "OF_LOOP_INSTALL_PARITY=MISMATCH "
+                        f"version={parity['source_version'] or 'unknown'} "
+                        f"source_payload_sha256={parity['source_digest']} "
+                        f"installed_payload_sha256={parity['installed_digest']} root={install_path}",
+                    )
         else:
+            _emit(output, f"OF_LOOP_INSTALL_SELF_INTEGRITY=NO_INSTALL diagnostic={install_diag or 'none'}")
             _emit(output, f"OF_LOOP_INSTALL_PARITY=NO_INSTALL diagnostic={install_diag or 'none'}")
         if shutil.which("claude"):
             probe = _run(root, ["claude", "plugin", "validate", str(root), "--strict"], 120, env)

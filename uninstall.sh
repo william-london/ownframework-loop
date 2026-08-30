@@ -15,10 +15,30 @@ INSTALL_ROOT="$DATA_BASE/$VERSION"
 BIN_DIR="${OFLOOP_BIN_DIR:-$HOME/.local/bin}"
 LAUNCHER="$BIN_DIR/ofloop"
 MARKER="$INSTALL_ROOT/.ownframework-loop-managed"
+STATE_ROOT="${XDG_STATE_HOME:-$HOME/.local/state}/ownframework-loop"
+SUPERVISOR_DB="$STATE_ROOT/supervisor.sqlite3"
+LEDGER_MARKER="$STATE_ROOT/ledger-incarnation.json"
 
 if [[ -e "$INSTALL_ROOT" && ! -f "$MARKER" ]]; then
   echo "CORE_UNINSTALL=REFUSED reason=unmanaged_install_root path=$INSTALL_ROOT" >&2
   exit 3
+fi
+
+# The ledger is an independent runtime-dependency signal even if outward
+# service-manager artifacts were lost. Unknown/corrupt truth fails closed.
+if [[ -f "$LEDGER_MARKER" && ! -f "$SUPERVISOR_DB" ]]; then
+  echo "CORE_UNINSTALL=REFUSED reason=commissioned_ledger_missing" >&2
+  exit 13
+fi
+if [[ -f "$SUPERVISOR_DB" && "${OFLOOP_ALLOW_SUPERVISOR_SWAP_WITH_ACTIVE_WORK:-0}" != "1" ]]; then
+  set +e
+  PROBE_OUT="$(PYTHONDONTWRITEBYTECODE=1 python3 -B "$ROOT/scripts/probe-supervisor-runtime-dependencies.py" "$SUPERVISOR_DB" uninstall --allow-generation-migration 2>&1)"
+  PROBE_RC=$?
+  set -e
+  if [[ "$PROBE_RC" -ne 0 ]]; then
+    echo "CORE_UNINSTALL=REFUSED $PROBE_OUT" >&2
+    exit "$PROBE_RC"
+  fi
 fi
 
 # Remove only an already-commissioned service; durable state/ledger/evidence are

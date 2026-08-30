@@ -54,6 +54,20 @@ PY
 fi
 
 mkdir -p "$DATA_BASE" "$BIN_DIR"
+HAD_PREVIOUS_LAUNCHER=0
+PREVIOUS_LAUNCHER_KIND=""
+PREVIOUS_LAUNCHER_TARGET=""
+PREVIOUS_LAUNCHER_BACKUP=""
+if [[ -L "$LAUNCHER" ]]; then
+  HAD_PREVIOUS_LAUNCHER=1
+  PREVIOUS_LAUNCHER_KIND="symlink"
+  PREVIOUS_LAUNCHER_TARGET="$(readlink "$LAUNCHER")"
+elif [[ -f "$LAUNCHER" ]]; then
+  HAD_PREVIOUS_LAUNCHER=1
+  PREVIOUS_LAUNCHER_KIND="file"
+  PREVIOUS_LAUNCHER_BACKUP="$(mktemp "$DATA_BASE/.launcher-preinstall-XXXXXX")"
+  cp -p "$LAUNCHER" "$PREVIOUS_LAUNCHER_BACKUP"
+fi
 STAGE="$(mktemp -d "$DATA_BASE/.stage-$VERSION-XXXXXX")"
 cleanup(){ rm -rf "$STAGE"; }
 trap cleanup EXIT INT TERM HUP
@@ -109,14 +123,15 @@ PY
 STATE_ROOT="${XDG_STATE_HOME:-$HOME/.local/state}/ownframework-loop"
 DB="$STATE_ROOT/supervisor.sqlite3"
 PROVENANCE="$STATE_ROOT/runtime-provenance.json"
+LEDGER_MARKER="$STATE_ROOT/ledger-incarnation.json"
 COMMISSIONED=0
 case "$(uname -s)" in
   Darwin)
-    [[ -f "$HOME/Library/LaunchAgents/com.ownframework.loop-supervisor.plist" || -f "$PROVENANCE" ]] && COMMISSIONED=1
+    [[ -f "$HOME/Library/LaunchAgents/com.ownframework.loop-supervisor.plist" || -f "$PROVENANCE" || -f "$DB" || -f "$LEDGER_MARKER" ]] && COMMISSIONED=1
     ;;
   Linux)
     UNIT_DIR="${OFLOOP_SYSTEMD_USER_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user}"
-    [[ -f "$UNIT_DIR/ownframework-loop-supervisor.service" || -f "$PROVENANCE" ]] && COMMISSIONED=1
+    [[ -f "$UNIT_DIR/ownframework-loop-supervisor.service" || -f "$PROVENANCE" || -f "$DB" || -f "$LEDGER_MARKER" ]] && COMMISSIONED=1
     ;;
 esac
 if [[ "$COMMISSIONED" == "1" ]]; then
@@ -192,23 +207,50 @@ fi
 mv "$STAGE" "$INSTALL_ROOT"
 trap - EXIT INT TERM HUP
 
-rm -f "$LAUNCHER"
-ln -s "$INSTALL_ROOT/bin/ofloop" "$LAUNCHER"
+rollback_core_install() {
+  rm -rf "$INSTALL_ROOT"
+  if [[ "$HAD_OLD" == "1" ]]; then mv "$BACKUP_ROOT" "$INSTALL_ROOT"; fi
+  rm -f "$LAUNCHER"
+  if [[ "$HAD_PREVIOUS_LAUNCHER" == "1" ]]; then
+    if [[ "$PREVIOUS_LAUNCHER_KIND" == "symlink" ]]; then
+      ln -s "$PREVIOUS_LAUNCHER_TARGET" "$LAUNCHER"
+    else
+      cp -p "$PREVIOUS_LAUNCHER_BACKUP" "$LAUNCHER"
+    fi
+  fi
+}
 
-"$LAUNCHER" adapter doctor generic-cli >/dev/null
+NEW_LAUNCHER="$BIN_DIR/.ofloop.new.$$"
+rm -f "$NEW_LAUNCHER"
+if ! ln -s "$INSTALL_ROOT/bin/ofloop" "$NEW_LAUNCHER" ||
+   ! mv -f "$NEW_LAUNCHER" "$LAUNCHER"; then
+  rm -f "$NEW_LAUNCHER"
+  rollback_core_install
+  rm -f "$PREVIOUS_LAUNCHER_BACKUP"
+  echo "CORE_INSTALL=REFUSED reason=launcher_publish_failed rollback=core_runtime_and_launcher_restored" >&2
+  exit 5
+fi
+
+if ! "$LAUNCHER" adapter doctor generic-cli >/dev/null; then
+  rollback_core_install
+  rm -f "$PREVIOUS_LAUNCHER_BACKUP"
+  echo "CORE_INSTALL=REFUSED reason=installed_core_doctor_failed rollback=core_runtime_and_launcher_restored" >&2
+  exit 5
+fi
 
 # Refresh only an already-commissioned durable service. Core installation never
 # creates a service implicitly.
 REFRESH="$INSTALL_ROOT/scripts/refresh-existing-supervisor.sh"
 if [[ -x "$REFRESH" && "${OFLOOP_SKIP_SUPERVISOR_REFRESH:-0}" != "1" ]]; then
   if ! "$REFRESH" "$INSTALL_ROOT" "$ROOT"; then
-    rm -rf "$INSTALL_ROOT"
-    if [[ "$HAD_OLD" == "1" ]]; then mv "$BACKUP_ROOT" "$INSTALL_ROOT"; fi
-    echo "CORE_INSTALL=REFUSED reason=supervisor_refresh_failed rollback=core_runtime_restored" >&2
+    rollback_core_install
+    rm -f "$PREVIOUS_LAUNCHER_BACKUP"
+    echo "CORE_INSTALL=REFUSED reason=supervisor_refresh_failed rollback=core_runtime_and_launcher_restored" >&2
     exit 5
   fi
 fi
 [[ "$HAD_OLD" == "1" ]] && rm -rf "$BACKUP_ROOT"
+rm -f "$PREVIOUS_LAUNCHER_BACKUP"
 
 cat <<EOF
 CORE_INSTALL=PASS

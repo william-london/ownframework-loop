@@ -30,16 +30,16 @@ if [[ "$ADAPTER" == "claude-code" ]]; then
     echo "ADAPTER_INSTALL=REFUSED reason=claude_cli_missing adapter=claude-code" >&2
     exit 4
   }
-  [[ -f "$ROOT/.claude-plugin/plugin.json" && -f "$ROOT/.claude-plugin/marketplace.json" ]] || {
+  [[ -f "$CORE_ROOT/.claude-plugin/plugin.json" && -f "$CORE_ROOT/.claude-plugin/marketplace.json" ]] || {
     echo "ADAPTER_INSTALL=REFUSED reason=claude_adapter_manifest_missing" >&2
     exit 4
   }
-  PLUGIN_VERSION="$(python3 -B - "$ROOT/.claude-plugin/plugin.json" <<'PY'
+  PLUGIN_VERSION="$(python3 -B - "$CORE_ROOT/.claude-plugin/plugin.json" <<'PY'
 import json,sys
 print(json.load(open(sys.argv[1], encoding="utf-8"))["version"])
 PY
 )"
-  MARKET_VERSION="$(python3 -B - "$ROOT/.claude-plugin/marketplace.json" <<'PY'
+  MARKET_VERSION="$(python3 -B - "$CORE_ROOT/.claude-plugin/marketplace.json" <<'PY'
 import json,sys
 print(json.load(open(sys.argv[1], encoding="utf-8"))["plugins"][0]["version"])
 PY
@@ -57,7 +57,7 @@ PY
   # remain the source of a fresh adapter install. The plugin cache is not core.
   claude plugin uninstall "$PLUGIN_ID" --scope "$SCOPE" >/dev/null 2>&1 || true
   claude plugin marketplace remove "$MARKETPLACE_NAME" >/dev/null 2>&1 || true
-  claude plugin marketplace add "$ROOT" >/dev/null
+  claude plugin marketplace add "$CORE_ROOT" >/dev/null
   claude plugin install "$PLUGIN_ID" --scope "$SCOPE" >/dev/null
 
   claude plugin list | grep -F "$PLUGIN_ID" >/dev/null || {
@@ -73,6 +73,7 @@ CORE_ROOT=$CORE_ROOT
 PLUGIN_ID=$PLUGIN_ID
 SCOPE=$SCOPE
 CORE_OWNERSHIP=independent
+ADAPTER_SOURCE_ROOT=$CORE_ROOT
 EOF
   exit 0
 fi
@@ -82,6 +83,71 @@ SKILLS_ROOT="${OFLOOP_AGENT_SKILLS_DIR:-$HOME/.agents/skills}"
 SKILLS=(of-loop-spec of-loop-build of-loop-review of-loop-status)
 mkdir -p "$SKILLS_ROOT"
 
+codex_managed_path_ok() {
+  local dest="$1" skill="$2"
+  python3 -B - "$dest" "$skill" <<'PY'
+import os, sys
+from pathlib import Path
+
+dest=Path(sys.argv[1])
+skill=sys.argv[2]
+marker=dest/".ownframework-loop-managed"
+try:
+    rows=marker.read_text(encoding="utf-8", errors="strict").splitlines()
+except (OSError, UnicodeError):
+    raise SystemExit(1)
+data={}
+for row in rows:
+    if "=" not in row:
+        raise SystemExit(1)
+    key,value=row.split("=",1)
+    if not key or key in data:
+        raise SystemExit(1)
+    data[key]=value
+if data.get("adapter") != "codex":
+    raise SystemExit(1)
+managed=data.get("managed_object")
+if managed is not None:
+    allowed={"adapter","managed_object","version","core_root"}
+    if set(data) != allowed or managed != f"agent-skill:{skill}" or not data.get("version") or not data.get("core_root"):
+        raise SystemExit(1)
+    raise SystemExit(0)
+
+# Legacy marker migration: accept only the exact old schema and only when the
+# entire managed directory still byte-matches its recorded managed-core skill.
+if set(data) != {"adapter","version","core_root"} or not data.get("version") or not data.get("core_root"):
+    raise SystemExit(1)
+core=Path(data["core_root"]).expanduser().resolve(strict=False)
+source=core/".agents"/"skills"/skill
+try:
+    core_marker=(core/".ownframework-loop-managed").read_text(encoding="utf-8",errors="strict")
+except (OSError,UnicodeError):
+    raise SystemExit(1)
+if "kind=core" not in core_marker or not source.is_dir():
+    raise SystemExit(1)
+
+def snapshot(root, *, skip_marker=False):
+    out={}
+    for base,dirs,names in os.walk(root, followlinks=False):
+        dirs.sort(); names.sort()
+        b=Path(base)
+        for name in names:
+            if skip_marker and b == root and name == ".ownframework-loop-managed":
+                continue
+            p=b/name
+            rel=p.relative_to(root).as_posix()
+            if p.is_symlink():
+                out[rel]=("L",os.readlink(p))
+            elif p.is_file():
+                out[rel]=("F",p.read_bytes())
+            else:
+                raise SystemExit(1)
+    return out
+
+raise SystemExit(0 if snapshot(dest,skip_marker=True)==snapshot(source) else 1)
+PY
+}
+
 for skill in "${SKILLS[@]}"; do
   src="$CORE_ROOT/.agents/skills/$skill"
   dest="$SKILLS_ROOT/$skill"
@@ -89,7 +155,7 @@ for skill in "${SKILLS[@]}"; do
     echo "ADAPTER_INSTALL=REFUSED reason=core_skill_missing skill=$skill" >&2
     exit 5
   }
-  if [[ -e "$dest" && ! -f "$dest/.ownframework-loop-managed" ]]; then
+  if [[ -e "$dest" ]] && ! codex_managed_path_ok "$dest" "$skill"; then
     echo "ADAPTER_INSTALL=REFUSED reason=unmanaged_agent_skill path=$dest" >&2
     exit 5
   fi
@@ -103,6 +169,7 @@ for skill in "${SKILLS[@]}"; do
   cp -R "$src/." "$dest/"
   cat > "$dest/.ownframework-loop-managed" <<EOF
 adapter=codex
+managed_object=agent-skill:$skill
 version=$VERSION
 core_root=$CORE_ROOT
 EOF

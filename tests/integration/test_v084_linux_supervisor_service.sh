@@ -42,6 +42,11 @@ cat > "$FAKE/socat" <<'EOF'
 #!/usr/bin/env bash
 exit 0
 EOF
+cat > "$FAKE/loginctl" <<'EOF'
+#!/usr/bin/env bash
+echo yes
+exit 0
+EOF
 cat > "$FAKE/claude" <<'EOF'
 #!/usr/bin/env bash
 if [[ "$1" == "--version" ]]; then echo "2.1.247 (Claude Code)"; exit 0; fi
@@ -75,6 +80,7 @@ chmod +x "$FAKE/claude"
 "$CORE_ROOT/install-supervisor.sh" | tee "$TMP/install.out"
 grep -F 'SUPERVISOR_INSTALL=PASS' "$TMP/install.out" >/dev/null
 grep -F 'SERVICE_MANAGER=systemd-user' "$TMP/install.out" >/dev/null
+grep -F 'USER_MANAGER_PERSISTENCE=linger-enabled' "$TMP/install.out" >/dev/null
 
 UNIT="$OFLOOP_SYSTEMD_USER_DIR/ownframework-loop-supervisor.service"
 PROV="$XDG_STATE_HOME/ownframework-loop/runtime-provenance.json"
@@ -84,7 +90,16 @@ DB="$STATE_ROOT/supervisor.sqlite3"
 test -f "$UNIT"
 test -f "$PROV"
 test -f "$SERVICE_ENV"
-grep -F "supervisor serve" "$UNIT" >/dev/null
+test -f "$DB"
+test -f "$STATE_ROOT/ledger-incarnation.json"
+EXPECTED_PY="$(python3 -B - "$PROV" <<'PY'
+import json,sys
+print(json.load(open(sys.argv[1],encoding="utf-8"))["python_bin"])
+PY
+)"
+grep -F "ExecStart=\"$EXPECTED_PY\" -B \"$CORE_ROOT/scripts/launch-commissioned-supervisor.py\"" "$UNIT" >/dev/null
+grep -F -- "--db \"$DB\"" "$UNIT" >/dev/null
+grep -F -- "--ofloop \"$CORE_ROOT/bin/ofloop\"" "$UNIT" >/dev/null
 grep -F "OFLOOP_RUNTIME_ROOT=$CORE_ROOT" "$UNIT" >/dev/null
 grep -F "OFLOOP_CLAUDE_BIN=$(python3 -B - "$FAKE/claude" <<'PY'
 import sys
@@ -127,6 +142,9 @@ assert p["ofloop_bin"]==str(Path(root,"bin","ofloop")),p
 assert p["ofloop_version"]==version,p
 assert p["runtime_generation"].startswith(f"ofloop-{version}@payload-"),p
 assert p["service_env_file"].endswith("/ownframework-loop/service-env.json"),p
+assert p["user_manager_persistence"]=="linger-enabled",p
+assert p["ledger_incarnation_file"].endswith("/ownframework-loop/ledger-incarnation.json"),p
+assert p["service_entrypoint"].endswith("/scripts/launch-commissioned-supervisor.py"),p
 PY
 
 # Model the ledger the real launched supervisor creates, then prove an ordinary

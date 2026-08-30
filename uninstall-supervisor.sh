@@ -7,8 +7,11 @@ if [[ "${1:-}" == "--if-commissioned" ]]; then IF_COMMISSIONED=1; shift; fi
 case "$(uname -s)" in
   Darwin)
     SIGNAL_A="$HOME/Library/LaunchAgents/com.ownframework.loop-supervisor.plist"
-    SIGNAL_B="${XDG_STATE_HOME:-$HOME/.local/state}/ownframework-loop/runtime-provenance.json"
-    if [[ "$IF_COMMISSIONED" == "1" && ! -e "$SIGNAL_A" && ! -e "$SIGNAL_B" ]]; then
+    STATE_ROOT="${XDG_STATE_HOME:-$HOME/.local/state}/ownframework-loop"
+    SIGNAL_B="$STATE_ROOT/runtime-provenance.json"
+    SIGNAL_C="$STATE_ROOT/supervisor.sqlite3"
+    SIGNAL_D="$STATE_ROOT/ledger-incarnation.json"
+    if [[ "$IF_COMMISSIONED" == "1" && ! -e "$SIGNAL_A" && ! -e "$SIGNAL_B" && ! -e "$SIGNAL_C" && ! -e "$SIGNAL_D" ]]; then
       echo "SUPERVISOR_UNINSTALL=NOOP reason=not_commissioned"
       exit 0
     fi
@@ -17,8 +20,11 @@ case "$(uname -s)" in
   Linux)
     UNIT_DIR="${OFLOOP_SYSTEMD_USER_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user}"
     SIGNAL_A="$UNIT_DIR/ownframework-loop-supervisor.service"
-    SIGNAL_B="${XDG_STATE_HOME:-$HOME/.local/state}/ownframework-loop/runtime-provenance.json"
-    if [[ "$IF_COMMISSIONED" == "1" && ! -e "$SIGNAL_A" && ! -e "$SIGNAL_B" ]]; then
+    STATE_ROOT="${XDG_STATE_HOME:-$HOME/.local/state}/ownframework-loop"
+    SIGNAL_B="$STATE_ROOT/runtime-provenance.json"
+    SIGNAL_C="$STATE_ROOT/supervisor.sqlite3"
+    SIGNAL_D="$STATE_ROOT/ledger-incarnation.json"
+    if [[ "$IF_COMMISSIONED" == "1" && ! -e "$SIGNAL_A" && ! -e "$SIGNAL_B" && ! -e "$SIGNAL_C" && ! -e "$SIGNAL_D" ]]; then
       echo "SUPERVISOR_UNINSTALL=NOOP reason=not_commissioned"
       exit 0
     fi

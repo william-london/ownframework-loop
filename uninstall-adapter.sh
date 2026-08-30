@@ -42,9 +42,75 @@ fi
 
 SKILLS_ROOT="${OFLOOP_AGENT_SKILLS_DIR:-$HOME/.agents/skills}"
 SKILLS=(of-loop-spec of-loop-build of-loop-review of-loop-status)
+
+codex_managed_path_ok() {
+  local dest="$1" skill="$2"
+  python3 -B - "$dest" "$skill" <<'PY'
+import os, sys
+from pathlib import Path
+
+dest=Path(sys.argv[1])
+skill=sys.argv[2]
+marker=dest/".ownframework-loop-managed"
+try:
+    rows=marker.read_text(encoding="utf-8", errors="strict").splitlines()
+except (OSError, UnicodeError):
+    raise SystemExit(1)
+data={}
+for row in rows:
+    if "=" not in row:
+        raise SystemExit(1)
+    key,value=row.split("=",1)
+    if not key or key in data:
+        raise SystemExit(1)
+    data[key]=value
+if data.get("adapter") != "codex":
+    raise SystemExit(1)
+managed=data.get("managed_object")
+if managed is not None:
+    allowed={"adapter","managed_object","version","core_root"}
+    if set(data) != allowed or managed != f"agent-skill:{skill}" or not data.get("version") or not data.get("core_root"):
+        raise SystemExit(1)
+    raise SystemExit(0)
+
+# Legacy marker migration: accept only the exact old schema and only when the
+# entire managed directory still byte-matches its recorded managed-core skill.
+if set(data) != {"adapter","version","core_root"} or not data.get("version") or not data.get("core_root"):
+    raise SystemExit(1)
+core=Path(data["core_root"]).expanduser().resolve(strict=False)
+source=core/".agents"/"skills"/skill
+try:
+    core_marker=(core/".ownframework-loop-managed").read_text(encoding="utf-8",errors="strict")
+except (OSError,UnicodeError):
+    raise SystemExit(1)
+if "kind=core" not in core_marker or not source.is_dir():
+    raise SystemExit(1)
+
+def snapshot(root, *, skip_marker=False):
+    out={}
+    for base,dirs,names in os.walk(root, followlinks=False):
+        dirs.sort(); names.sort()
+        b=Path(base)
+        for name in names:
+            if skip_marker and b == root and name == ".ownframework-loop-managed":
+                continue
+            p=b/name
+            rel=p.relative_to(root).as_posix()
+            if p.is_symlink():
+                out[rel]=("L",os.readlink(p))
+            elif p.is_file():
+                out[rel]=("F",p.read_bytes())
+            else:
+                raise SystemExit(1)
+    return out
+
+raise SystemExit(0 if snapshot(dest,skip_marker=True)==snapshot(source) else 1)
+PY
+}
+
 for skill in "${SKILLS[@]}"; do
   dest="$SKILLS_ROOT/$skill"
-  if [[ -e "$dest" && ! -f "$dest/.ownframework-loop-managed" ]]; then
+  if [[ -e "$dest" ]] && ! codex_managed_path_ok "$dest" "$skill"; then
     echo "ADAPTER_UNINSTALL=REFUSED reason=unmanaged_agent_skill path=$dest" >&2
     exit 3
   fi

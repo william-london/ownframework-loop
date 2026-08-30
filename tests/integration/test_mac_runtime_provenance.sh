@@ -327,6 +327,7 @@ if [[ -f "$PROV5" && -f "$PLIST5" ]]; then
   PROV_STDERR=$(python3 -c "import json; print(json.load(open('$PROV5'))['stderr_log'])")
   PLIST_STDOUT=$(read_plist_key "$PLIST5" "StandardOutPath")
   PLIST_STDERR=$(read_plist_key "$PLIST5" "StandardErrorPath")
+  PLIST_XDG=$(read_plist_key "$PLIST5" "EnvironmentVariables.XDG_STATE_HOME")
   EXPECTED_STATE="$SANDBOX/xdg5/ownframework-loop"
   [[ "$PROV_STATE" == "$EXPECTED_STATE" ]] \
     && pass "T5: provenance.state_root = $EXPECTED_STATE" \
@@ -343,12 +344,19 @@ if [[ -f "$PROV5" && -f "$PLIST5" ]]; then
   [[ "$PLIST_STDERR" == "$EXPECTED_STATE/supervisor.stderr.log" ]] \
     && pass "T5: plist StandardErrorPath = state_root/supervisor.stderr.log" \
     || fail "T5: plist StandardErrorPath=$PLIST_STDERR"
+  [[ "$PLIST_XDG" == "$SANDBOX/xdg5" ]] \
+    && pass "T5: plist persists commissioned XDG_STATE_HOME" \
+    || fail "T5: plist XDG_STATE_HOME=$PLIST_XDG"
 
-  python3 -B - "$EXPECTED_STATE" <<'PY'
+  XDG_STATE_HOME="$PLIST_XDG" PYTHONPATH="$LIB" python3 -B - "$EXPECTED_STATE" <<'PY'
 import pathlib, stat, sys
-root=pathlib.Path(sys.argv[1])
+from ownframework_loop import supervisor, runtime_env
+root=pathlib.Path(sys.argv[1]).resolve(strict=False)
+assert supervisor.default_db_path().parent.resolve(strict=False) == root
+assert supervisor.default_worker_log_dir().parent.resolve(strict=False) == root
+assert runtime_env.default_runtime_cache_root().parent.resolve(strict=False) == root
 assert stat.S_IMODE(root.stat().st_mode)==0o700
-for name in ("supervisor.stdout.log","supervisor.stderr.log","runtime-provenance.json","service-env.json"):
+for name in ("supervisor.stdout.log","supervisor.stderr.log","runtime-provenance.json","service-env.json","supervisor.sqlite3","ledger-incarnation.json"):
     p=root/name
     assert stat.S_IMODE(p.stat().st_mode)==0o600, (p, oct(stat.S_IMODE(p.stat().st_mode)))
 PY
@@ -422,10 +430,57 @@ if [[ -f "$PLIST8" ]]; then
     && pass "T8: ThrottleInterval = 5" \
     || fail "T8: ThrottleInterval missing"
   EXPECTED_OFLOOP="$(python3 -c "from pathlib import Path; print(str(Path('$OFLOOP_FAKE').resolve(strict=False)))")"
+  EXPECTED_PY="$(python3 -c "from pathlib import Path; print(str(Path('$PYTHON_FAKE').resolve(strict=False)))")"
+  EXPECTED_HELPER="$(python3 -c "from pathlib import Path; print(str(Path('$ROOT/scripts/launch-commissioned-supervisor.py').resolve(strict=False)))")"
+  EXPECTED_PROBE="$(python3 -c "from pathlib import Path; print(str(Path('$ROOT/scripts/probe-supervisor-runtime-dependencies.py').resolve(strict=False)))")"
+  EXPECTED_DB="$SANDBOX/xdg8/ownframework-loop/supervisor.sqlite3"
+  EXPECTED_MARKER="$SANDBOX/xdg8/ownframework-loop/ledger-incarnation.json"
   PROG=$(read_plist_key "$PLIST8" "ProgramArguments")
-  [[ "$PROG" == "['$EXPECTED_OFLOOP', 'supervisor', 'serve']" ]] \
-    && pass "T8: ProgramArguments = [ofloop, supervisor, serve]" \
-    || fail "T8: ProgramArguments=$PROG"
+  EXPECTED_PROG="['$EXPECTED_PY', '-B', '$EXPECTED_HELPER', '--db', '$EXPECTED_DB', '--ledger-marker', '$EXPECTED_MARKER', '--probe', '$EXPECTED_PROBE', '--ofloop', '$EXPECTED_OFLOOP']"
+  [[ "$PROG" == "$EXPECTED_PROG" ]] \
+    && pass "T8: ProgramArguments execute through exact commissioned Python + ledger guard" \
+    || fail "T8: ProgramArguments=$PROG expected=$EXPECTED_PROG"
+  if command -v plutil >/dev/null 2>&1; then
+    plutil -lint "$PLIST8" >/dev/null \
+      && pass "T8: emitted plist passes plutil validation" \
+      || fail "T8: emitted plist failed plutil validation"
+  fi
+fi
+
+# =====================================================================
+# T9: optional real launchctl smoke on actual Darwin user domain
+# =====================================================================
+echo ""
+echo "=== T9: real launchctl disposable service-manager smoke ==="
+REAL_LAUNCHCTL="$(command -v launchctl || true)"
+if [[ -n "$REAL_LAUNCHCTL" ]]; then
+  SMOKE_LABEL="com.ownframework.loop-ci-smoke.$$"
+  SMOKE_PLIST="$SANDBOX/$SMOKE_LABEL.plist"
+  python3 -B - "$SMOKE_PLIST" "$SMOKE_LABEL" <<'PY'
+import plistlib,sys
+with open(sys.argv[1],"wb") as f:
+    plistlib.dump({
+        "Label":sys.argv[2],
+        "ProgramArguments":["/bin/sleep","30"],
+        "RunAtLoad":True,
+    },f)
+PY
+  plutil -lint "$SMOKE_PLIST" >/dev/null \
+    || fail "T9: generated disposable smoke plist failed plutil"
+  if "$REAL_LAUNCHCTL" bootstrap "gui/$UID" "$SMOKE_PLIST" >/dev/null 2>&1; then
+    if "$REAL_LAUNCHCTL" print "gui/$UID/$SMOKE_LABEL" >/dev/null 2>&1; then
+      pass "T9: real launchctl bootstrap/print succeeded"
+    else
+      fail "T9: real launchctl bootstrap succeeded but service was not observable"
+    fi
+    "$REAL_LAUNCHCTL" bootout "gui/$UID/$SMOKE_LABEL" >/dev/null 2>&1 \
+      && pass "T9: real launchctl bootout succeeded" \
+      || fail "T9: real launchctl bootout failed"
+  else
+    echo "  SKIP: real launchctl bootstrap unavailable in hosted/user domain"
+  fi
+else
+  echo "  SKIP: launchctl unavailable"
 fi
 
 echo ""

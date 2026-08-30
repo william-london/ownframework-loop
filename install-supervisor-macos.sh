@@ -109,14 +109,68 @@ fi
 LABEL="com.ownframework.loop-supervisor"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 
-# 4. Compute STATE_ROOT ONCE and pass it consistently to the plist
-#    generator. The generator never silently recomputes a different
-#    root (e.g. via Path.home() / ".local" / "state").
-STATE_ROOT="${XDG_STATE_HOME:-$HOME/.local/state}/ownframework-loop"
+# 4. Compute the commissioned state base/root once.  Persist the state base in
+#    launchd so the running supervisor derives the exact same DB/log/cache root
+#    that installation, provenance, and dependency probes use.
+STATE_BASE="${XDG_STATE_HOME:-$HOME/.local/state}"
+STATE_ROOT="$STATE_BASE/ownframework-loop"
 STDOUT_LOG="$STATE_ROOT/supervisor.stdout.log"
 STDERR_LOG="$STATE_ROOT/supervisor.stderr.log"
 RUNTIME_PROVENANCE="$STATE_ROOT/runtime-provenance.json"
 SERVICE_ENV="$STATE_ROOT/service-env.json"
+SUPERVISOR_DB="$STATE_ROOT/supervisor.sqlite3"
+LEDGER_MARKER="$STATE_ROOT/ledger-incarnation.json"
+TXN_DIR="$STATE_ROOT/.supervisor-install-transaction"
+DOMAIN="gui/$UID"
+
+if [[ "$(uname -s)" != "Darwin" ]]; then
+  echo "SUPERVISOR_INSTALL=REFUSED reason=macos_required" >&2
+  exit 2
+fi
+
+mkdir -p "$HOME/Library/LaunchAgents" "$STATE_ROOT"
+chmod 0700 "$STATE_ROOT"
+
+recover_pending_transaction() {
+  [[ -d "$TXN_DIR" ]] || return 0
+  echo "SUPERVISOR_INSTALL_RECOVERY=pending_transaction"
+  # Prove the launchd user domain itself is reachable before treating a
+  # missing label as benign absence.
+  if ! launchctl print "$DOMAIN" >/dev/null 2>&1; then
+    echo "SUPERVISOR_INSTALL=REFUSED reason=transaction_recovery_manager_unavailable" >&2
+    return 15
+  fi
+  if launchctl print "$DOMAIN/$LABEL" >/dev/null 2>&1; then
+    if ! launchctl bootout "$DOMAIN" "$PLIST" >/dev/null 2>&1; then
+      echo "SUPERVISOR_INSTALL=REFUSED reason=transaction_recovery_stop_failed" >&2
+      return 15
+    fi
+  fi
+  if [[ -f "$TXN_DIR/had-plist" ]]; then
+    cp "$TXN_DIR/old.plist" "$PLIST"; chmod 0600 "$PLIST"
+  else
+    rm -f "$PLIST"
+  fi
+  if [[ -f "$TXN_DIR/had-provenance" ]]; then
+    cp "$TXN_DIR/old.provenance.json" "$RUNTIME_PROVENANCE"; chmod 0600 "$RUNTIME_PROVENANCE"
+  else
+    rm -f "$RUNTIME_PROVENANCE"
+  fi
+  if [[ -f "$TXN_DIR/had-service-env" ]]; then
+    cp "$TXN_DIR/old.service-env.json" "$SERVICE_ENV"; chmod 0600 "$SERVICE_ENV"
+  else
+    rm -f "$SERVICE_ENV"
+  fi
+  if [[ -f "$TXN_DIR/had-plist" ]]; then
+    if ! launchctl bootstrap "$DOMAIN" "$PLIST" >/dev/null 2>&1; then
+      echo "SUPERVISOR_INSTALL=REFUSED reason=transaction_recovery_bootstrap_failed" >&2
+      return 15
+    fi
+  fi
+  rm -rf "$TXN_DIR"
+  echo "SUPERVISOR_INSTALL_RECOVERY=recovered_incomplete_transaction"
+}
+recover_pending_transaction
 
 # 4b. RUNTIME-GENERATION + LIVE-EXECUTION GUARD.
 #
@@ -154,6 +208,12 @@ if [[ -z "$INSTALL_VERSION" ]]; then
   echo "SUPERVISOR_INSTALL=REFUSED reason=runtime_version_undetermined install_root=$INSTALL_ROOT" >&2
   exit 12
 fi
+SERVICE_ENTRYPOINT="$INSTALL_ROOT/scripts/launch-commissioned-supervisor.py"
+DEPENDENCY_PROBE="$INSTALL_ROOT/scripts/probe-supervisor-runtime-dependencies.py"
+[[ -x "$SERVICE_ENTRYPOINT" && -f "$DEPENDENCY_PROBE" ]] || {
+  echo "SUPERVISOR_INSTALL=REFUSED reason=installed_payload_incomplete component=commissioned_service_entrypoint_or_probe" >&2
+  exit 12
+}
 OFLOOP_VERSION="$INSTALL_VERSION"
 RUNTIME_GENERATION="$(PYTHONPATH="$INSTALL_ROOT/lib" INSTALL_ROOT="$INSTALL_ROOT" INSTALL_VERSION="$INSTALL_VERSION" "$PYTHON_BIN" -B - <<'PY'
 import os
@@ -167,25 +227,53 @@ if [[ -z "$RUNTIME_GENERATION" ]]; then
   exit 12
 fi
 
-SUPERVISOR_DB="$STATE_ROOT/supervisor.sqlite3"
-if [[ ( -f "$PLIST" || -f "$RUNTIME_PROVENANCE" ) && ! -f "$SUPERVISOR_DB" && "${OFLOOP_ALLOW_RUNTIME_GENERATION_MIGRATION:-0}" != "1" ]]; then
+# A durable ledger-incarnation marker distinguishes first-ever initialization
+# from unexplained loss of an already commissioned ledger.  Missing history is
+# never recoverable via the generation-migration override.
+if [[ ( -f "$PLIST" || -f "$RUNTIME_PROVENANCE" || -f "$LEDGER_MARKER" ) && ! -f "$SUPERVISOR_DB" ]]; then
   echo "SUPERVISOR_INSTALL=REFUSED reason=runtime_dependency_ledger_missing" >&2
-  echo "hint: restore the ledger or use OFLOOP_ALLOW_RUNTIME_GENERATION_MIGRATION=1 for an explicit migration" >&2
+  echo "hint: restore the commissioned ledger; missing history cannot be migrated safely" >&2
   exit 13
 fi
-if [[ -f "$SUPERVISOR_DB" ]]; then
-  PROBE_ARGS=("$SUPERVISOR_DB" "$RUNTIME_GENERATION")
-  [[ "${OFLOOP_ALLOW_SUPERVISOR_SWAP_WITH_ACTIVE_WORK:-0}" == "1" ]] && PROBE_ARGS+=(--allow-active)
-  [[ "${OFLOOP_ALLOW_RUNTIME_GENERATION_MIGRATION:-0}" == "1" ]] && PROBE_ARGS+=(--allow-generation-migration)
-  set +e
-  PROBE_OUT="$(PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$INSTALL_ROOT/lib" "$PYTHON_BIN" -B "$INSTALL_ROOT/scripts/probe-supervisor-runtime-dependencies.py" "${PROBE_ARGS[@]}" 2>&1)"
-  PROBE_RC=$?
-  set -e
-  if [[ "$PROBE_RC" -ne 0 ]]; then
-    echo "SUPERVISOR_INSTALL=REFUSED $PROBE_OUT" >&2
-    exit "$PROBE_RC"
-  fi
+if [[ ! -f "$SUPERVISOR_DB" ]]; then
+  PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$INSTALL_ROOT/lib" "$PYTHON_BIN" -B - "$SUPERVISOR_DB" <<'PY'
+import sys
+from pathlib import Path
+from ownframework_loop import supervisor
+with supervisor._connect(Path(sys.argv[1])):
+    pass
+PY
 fi
+PROBE_ARGS=("$SUPERVISOR_DB" "$RUNTIME_GENERATION")
+[[ "${OFLOOP_ALLOW_SUPERVISOR_SWAP_WITH_ACTIVE_WORK:-0}" == "1" ]] && PROBE_ARGS+=(--allow-active)
+[[ "${OFLOOP_ALLOW_RUNTIME_GENERATION_MIGRATION:-0}" == "1" ]] && PROBE_ARGS+=(--allow-generation-migration)
+set +e
+PROBE_OUT="$(PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$INSTALL_ROOT/lib" "$PYTHON_BIN" -B "$INSTALL_ROOT/scripts/probe-supervisor-runtime-dependencies.py" "${PROBE_ARGS[@]}" 2>&1)"
+PROBE_RC=$?
+set -e
+if [[ "$PROBE_RC" -ne 0 ]]; then
+  echo "SUPERVISOR_INSTALL=REFUSED $PROBE_OUT" >&2
+  exit "$PROBE_RC"
+fi
+if [[ ! -f "$LEDGER_MARKER" ]]; then
+  LEDGER_MARKER="$LEDGER_MARKER" RUNTIME_GENERATION="$RUNTIME_GENERATION" "$PYTHON_BIN" -B - <<'PY'
+import json, os
+from pathlib import Path
+path=Path(os.environ["LEDGER_MARKER"])
+fd=os.open(path, os.O_WRONLY|os.O_CREAT|os.O_EXCL, 0o600)
+try:
+    os.fchmod(fd, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8", closefd=False) as fh:
+        json.dump({
+            "schema":"ownframework-loop-ledger-incarnation/v1",
+            "created_runtime_generation":os.environ["RUNTIME_GENERATION"],
+        }, fh, indent=2, sort_keys=True)
+        fh.write("\n"); fh.flush(); os.fsync(fh.fileno())
+finally:
+    os.close(fd)
+PY
+fi
+chmod 0600 "$LEDGER_MARKER"
 # 5. Build a minimal PATH for the noninteractive service so it can find
 #    Python, ofloop, claude, git, jq, etc. Persisted so a future
 #    operator can reproduce the environment exactly.
@@ -193,26 +281,25 @@ SERVICE_PATH="/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 [[ -d "/opt/homebrew/bin" ]] && SERVICE_PATH="/opt/homebrew/bin:$SERVICE_PATH"
 [[ -d "$HOME/.local/bin" ]] && SERVICE_PATH="$HOME/.local/bin:$SERVICE_PATH"
 
-if [[ "$(uname -s)" != "Darwin" ]]; then
-  echo "SUPERVISOR_INSTALL=REFUSED reason=macos_required" >&2
-  exit 2
-fi
-
-mkdir -p "$HOME/Library/LaunchAgents" "$STATE_ROOT"
-chmod 0700 "$STATE_ROOT"
 touch "$STDOUT_LOG" "$STDERR_LOG"
 chmod 0600 "$STDOUT_LOG" "$STDERR_LOG"
 
-INSTALLER_PID="$$"
-OLD_PLIST_BACKUP="$STATE_ROOT/.supervisor.plist.preinstall.${INSTALLER_PID}"
-OLD_PROVENANCE_BACKUP="$STATE_ROOT/.runtime-provenance.preinstall.${INSTALLER_PID}"
-OLD_SERVICE_ENV_BACKUP="$STATE_ROOT/.service-env.preinstall.${INSTALLER_PID}"
+# Persistent transaction state survives installer death/power loss.  Backups are
+# retained until launchd activation commits.
+rm -rf "$TXN_DIR"
+mkdir -p "$TXN_DIR"
+chmod 0700 "$TXN_DIR"
+OLD_PLIST_BACKUP="$TXN_DIR/old.plist"
+OLD_PROVENANCE_BACKUP="$TXN_DIR/old.provenance.json"
+OLD_SERVICE_ENV_BACKUP="$TXN_DIR/old.service-env.json"
 HAD_OLD_PLIST=0
 HAD_OLD_PROVENANCE=0
 HAD_OLD_SERVICE_ENV=0
-if [[ -f "$PLIST" ]]; then cp "$PLIST" "$OLD_PLIST_BACKUP"; chmod 0600 "$OLD_PLIST_BACKUP"; HAD_OLD_PLIST=1; fi
-if [[ -f "$RUNTIME_PROVENANCE" ]]; then cp "$RUNTIME_PROVENANCE" "$OLD_PROVENANCE_BACKUP"; chmod 0600 "$OLD_PROVENANCE_BACKUP"; HAD_OLD_PROVENANCE=1; fi
-if [[ -f "$SERVICE_ENV" ]]; then cp "$SERVICE_ENV" "$OLD_SERVICE_ENV_BACKUP"; chmod 0600 "$OLD_SERVICE_ENV_BACKUP"; HAD_OLD_SERVICE_ENV=1; fi
+if [[ -f "$PLIST" ]]; then cp "$PLIST" "$OLD_PLIST_BACKUP"; chmod 0600 "$OLD_PLIST_BACKUP"; touch "$TXN_DIR/had-plist"; chmod 0600 "$TXN_DIR/had-plist"; HAD_OLD_PLIST=1; fi
+if [[ -f "$RUNTIME_PROVENANCE" ]]; then cp "$RUNTIME_PROVENANCE" "$OLD_PROVENANCE_BACKUP"; chmod 0600 "$OLD_PROVENANCE_BACKUP"; touch "$TXN_DIR/had-provenance"; chmod 0600 "$TXN_DIR/had-provenance"; HAD_OLD_PROVENANCE=1; fi
+if [[ -f "$SERVICE_ENV" ]]; then cp "$SERVICE_ENV" "$OLD_SERVICE_ENV_BACKUP"; chmod 0600 "$OLD_SERVICE_ENV_BACKUP"; touch "$TXN_DIR/had-service-env"; chmod 0600 "$TXN_DIR/had-service-env"; HAD_OLD_SERVICE_ENV=1; fi
+printf 'prepared\n' > "$TXN_DIR/state"
+chmod 0600 "$TXN_DIR/state"
 
 # 6. Generate plist + provenance atomically. The python block is the
 #    sole owner of both artifacts; STATE_ROOT, CLAUDE_BIN, OFLOOP_BIN,
@@ -221,7 +308,10 @@ if [[ -f "$SERVICE_ENV" ]]; then cp "$SERVICE_ENV" "$OLD_SERVICE_ENV_BACKUP"; ch
 PLIST="$PLIST" \
 RUNTIME_PROVENANCE="$RUNTIME_PROVENANCE" \
 SERVICE_ENV="$SERVICE_ENV" \
+STATE_BASE="$STATE_BASE" \
 STATE_ROOT="$STATE_ROOT" \
+SUPERVISOR_DB="$SUPERVISOR_DB" \
+LEDGER_MARKER="$LEDGER_MARKER" \
 STDOUT_LOG="$STDOUT_LOG" \
 STDERR_LOG="$STDERR_LOG" \
 PYTHON_BIN="$PYTHON_BIN" \
@@ -241,11 +331,16 @@ from pathlib import Path
 plist = Path(os.environ["PLIST"])
 provenance_path = Path(os.environ["RUNTIME_PROVENANCE"])
 service_env_path = Path(os.environ["SERVICE_ENV"])
+state_base = os.environ["STATE_BASE"]
 state_root = os.environ["STATE_ROOT"]
+supervisor_db = os.environ["SUPERVISOR_DB"]
+ledger_marker = os.environ["LEDGER_MARKER"]
 stdout_log = os.environ["STDOUT_LOG"]
 stderr_log = os.environ["STDERR_LOG"]
 python_bin = os.environ["PYTHON_BIN"]
 ofloop_bin = os.environ["OFLOOP_BIN"]
+launcher_script = str(Path(ofloop_bin).resolve(strict=False).parent.parent / "scripts" / "launch-commissioned-supervisor.py")
+probe_script = str(Path(ofloop_bin).resolve(strict=False).parent.parent / "scripts" / "probe-supervisor-runtime-dependencies.py")
 claude_bin = os.environ.get("CLAUDE_BIN") or None
 service_path = os.environ["SERVICE_PATH"]
 source_root = os.environ.get("SOURCE_ROOT") or None
@@ -262,6 +357,7 @@ env_vars = {
     "PYTHON_BIN": python_bin,
     "OFLOOP_BIN": ofloop_bin,
     "OFLOOP_RUNTIME_ROOT": str(Path(ofloop_bin).resolve(strict=False).parent.parent),
+    "XDG_STATE_HOME": state_base,
 }
 # CRITICAL: only export OFLOOP_CLAUDE_BIN when a Claude binary was
 # actually commissioned. Writing a bogus path here would let the
@@ -296,7 +392,13 @@ if claude_bin:
 
 payload = {
     "Label": label,
-    "ProgramArguments": [ofloop_bin, "supervisor", "serve"],
+    "ProgramArguments": [
+        python_bin, "-B", launcher_script,
+        "--db", supervisor_db,
+        "--ledger-marker", ledger_marker,
+        "--probe", probe_script,
+        "--ofloop", ofloop_bin,
+    ],
     "EnvironmentVariables": env_vars,
     "RunAtLoad": True,
     "KeepAlive": True,
@@ -309,6 +411,11 @@ payload = {
 plist.parent.mkdir(parents=True, exist_ok=True)
 service_env_path.parent.mkdir(parents=True, exist_ok=True)
 os.chmod(service_env_path.parent, 0o700)
+
+def test_abort_after(stage: str) -> None:
+    if os.environ.get("OFLOOP_TEST_ABORT_AFTER_PUBLICATION") == stage:
+        os._exit(97)
+
 
 def write_private_json(path: Path, value: object) -> None:
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
@@ -331,8 +438,10 @@ try:
         os.fsync(f.fileno())
 finally:
     os.close(fd)
+test_abort_after("plist")
 
 write_private_json(service_env_path, service_env)
+test_abort_after("service-env")
 
 provenance = {
     "schema": "ownframework-loop-supervisor-runtime-provenance/v1",
@@ -348,7 +457,10 @@ provenance = {
     "claude_bin": claude_bin,
     "service_path": service_path,
     "plist": str(plist),
+    "state_base": state_base,
     "state_root": state_root,
+    "ledger_incarnation_file": ledger_marker,
+    "service_entrypoint": launcher_script,
     "stdout_log": stdout_log,
     "stderr_log": stderr_log,
     "source_root": source_root,
@@ -360,9 +472,17 @@ provenance = {
 }
 provenance_path.parent.mkdir(parents=True, exist_ok=True)
 write_private_json(provenance_path, provenance)
+test_abort_after("provenance")
 PY
 
-DOMAIN="gui/$UID"
+if command -v plutil >/dev/null 2>&1; then
+  if ! plutil -lint "$PLIST" >/dev/null 2>&1; then
+    recover_pending_transaction || true
+    echo "SUPERVISOR_INSTALL=REFUSED reason=launchd_plist_invalid" >&2
+    exit 14
+  fi
+fi
+
 launchctl bootout "$DOMAIN" "$PLIST" >/dev/null 2>&1 || true
 if ! launchctl bootstrap "$DOMAIN" "$PLIST"; then
   rollback="none"
@@ -383,19 +503,20 @@ if ! launchctl bootstrap "$DOMAIN" "$PLIST"; then
     fi
     if launchctl bootstrap "$DOMAIN" "$PLIST" >/dev/null 2>&1; then
       rollback="restored_previous_service"
+      rm -rf "$TXN_DIR"
     else
       rollback="previous_service_restore_failed"
     fi
   else
     rm -f "$PLIST" "$RUNTIME_PROVENANCE" "$SERVICE_ENV"
     rollback="removed_failed_new_service"
+    rm -rf "$TXN_DIR"
   fi
-  rm -f "$OLD_PLIST_BACKUP" "$OLD_PROVENANCE_BACKUP" "$OLD_SERVICE_ENV_BACKUP"
   echo "SUPERVISOR_INSTALL=REFUSED reason=bootstrap_failed rollback=$rollback" >&2
   exit 14
 fi
 launchctl enable "$DOMAIN/$LABEL" >/dev/null 2>&1 || true
-rm -f "$OLD_PLIST_BACKUP" "$OLD_PROVENANCE_BACKUP" "$OLD_SERVICE_ENV_BACKUP"
+rm -rf "$TXN_DIR"
 
 echo "SUPERVISOR_INSTALL=PASS"
 echo "LABEL=$LABEL"

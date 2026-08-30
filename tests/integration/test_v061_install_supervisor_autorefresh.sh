@@ -95,7 +95,12 @@ with open(prov_path) as f:
     prov = json.load(f)
 expected_ofloop = str(Path(ofloop).resolve(strict=False))
 expected_source = str(Path(source).resolve(strict=False))
-assert plist['ProgramArguments'] == [expected_ofloop, 'supervisor', 'serve'], plist
+args = plist['ProgramArguments']
+assert args[0] == prov['python_bin'], (args, prov)
+assert args[1] == '-B', args
+assert args[2] == prov['service_entrypoint'], (args, prov)
+assert args[args.index('--ofloop') + 1] == expected_ofloop, args
+assert args[args.index('--db') + 1].endswith('/ownframework-loop/supervisor.sqlite3'), args
 assert prov['ofloop_bin'] == expected_ofloop, prov
 assert prov['source_root'] == expected_source, prov
 assert prov['source_head'] == head, prov

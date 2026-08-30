@@ -46,24 +46,18 @@ def _pid_alive(pid: object) -> bool | None:
 
 
 def _column_names(conn: sqlite3.Connection, table: str) -> set[str]:
-    try:
-        return {
-            str(row["name"])
-            for row in conn.execute(f"PRAGMA table_info({table})")
-        }
-    except sqlite3.Error:
-        return set()
+    return {
+        str(row["name"])
+        for row in conn.execute(f"PRAGMA table_info({table})")
+    }
 
 
 def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
-    try:
-        cur = conn.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=? LIMIT 1",
-            (table,),
-        )
-        return cur.fetchone() is not None
-    except sqlite3.Error:
-        return False
+    cur = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=? LIMIT 1",
+        (table,),
+    )
+    return cur.fetchone() is not None
 
 
 def main() -> int:
@@ -85,8 +79,33 @@ def main() -> int:
         print(f"reason=ledger_unreadable detail={type(exc).__name__}")
         return 12
 
-    jobs_columns = _column_names(conn, "jobs")
-    attempts_exists = _table_exists(conn, "semantic_attempts")
+    try:
+        quick = [str(row[0]) for row in conn.execute("PRAGMA quick_check").fetchall()]
+        if not quick or any(item.lower() != "ok" for item in quick):
+            print("reason=ledger_unreadable detail=quick_check_failed")
+            return 12
+        if not _table_exists(conn, "jobs"):
+            print("reason=ledger_schema_unrecognized detail=jobs_table_missing")
+            return 12
+        jobs_columns = _column_names(conn, "jobs")
+        required = {"run_id", "status"}
+        missing = sorted(required - jobs_columns)
+        if missing:
+            print("reason=ledger_schema_unrecognized detail=jobs_columns_missing:" + ",".join(missing))
+            return 12
+        attempts_exists = _table_exists(conn, "semantic_attempts")
+        known_statuses = {"QUEUED", "BACKOFF", "RUNNING", "QUARANTINED", "DONE", "RETIRED"}
+        unknown = [
+            str(row["status"] or "")
+            for row in conn.execute("SELECT DISTINCT status FROM jobs")
+            if str(row["status"] or "") not in known_statuses
+        ]
+        if unknown:
+            print("reason=ledger_schema_unrecognized detail=unknown_job_status:" + ",".join(sorted(set(unknown))))
+            return 12
+    except sqlite3.Error as exc:
+        print(f"reason=ledger_unreadable detail={type(exc).__name__}")
+        return 12
 
     if not args.allow_active:
         problems: list[str] = []
@@ -124,26 +143,30 @@ def main() -> int:
         problems = []
         try:
             if "runtime_generation" not in jobs_columns:
-                # A legacy ledger without runtime_generation cannot answer
-                # generation-dependency questions; refuse with the
-                # generation-dependency reason rather than failing closed
-                # with ledger_probe_failed, so a normal refresh on a legacy
-                # ledger surfaces the correct operator decision path.
-                print("reason=legacy_unbound detail=no_runtime_generation_column")
-                return 13
-            for row in conn.execute(
-                "SELECT run_id,status,runtime_generation FROM jobs "
-                "WHERE status NOT IN ('DONE','RETIRED')"
-            ):
-                gen = str(row["runtime_generation"] or "")
-                if not gen:
-                    problems.append(
-                        f"generation_dependency={row['run_id']}:{row['status']}:UNBOUND"
-                    )
-                elif gen != args.incoming_generation:
-                    problems.append(
-                        f"generation_dependency={row['run_id']}:{row['status']}:{gen}"
-                    )
+                # Legacy ledgers can be proven safe only when all enrollment is
+                # already terminal.  Any unfinished legacy row is unbound and
+                # therefore blocks replacement.
+                unfinished = conn.execute(
+                    "SELECT run_id,status FROM jobs "
+                    "WHERE status NOT IN ('DONE','RETIRED') LIMIT 1"
+                ).fetchone()
+                if unfinished is not None:
+                    print("reason=legacy_unbound detail=no_runtime_generation_column")
+                    return 13
+            else:
+                for row in conn.execute(
+                    "SELECT run_id,status,runtime_generation FROM jobs "
+                    "WHERE status NOT IN ('DONE','RETIRED')"
+                ):
+                    gen = str(row["runtime_generation"] or "")
+                    if not gen:
+                        problems.append(
+                            f"generation_dependency={row['run_id']}:{row['status']}:UNBOUND"
+                        )
+                    elif gen != args.incoming_generation:
+                        problems.append(
+                            f"generation_dependency={row['run_id']}:{row['status']}:{gen}"
+                        )
         except sqlite3.Error as exc:
             print(f"reason=ledger_probe_failed detail={type(exc).__name__}")
             return 12
@@ -164,7 +187,7 @@ def main() -> int:
     # incoming runtime generation) from uninstall (2nd positional arg is
     # the literal string "uninstall"). Only enforce the broad
     # non-terminal check for uninstall.
-    if args.incoming_generation == "uninstall" and "status" in jobs_columns:
+    if args.incoming_generation == "uninstall":
         try:
             problems = [
                 f"unfinished_job={row['run_id']}:{row['status']}"
