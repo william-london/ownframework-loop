@@ -31,10 +31,14 @@ not call a model. It creates a local-only v3 PROGRAM with two checkpoints and
 an empty network allowlist.
 
 CP-1 is deliberately staged to require one genuine
-`CHANGES_REQUESTED -> repair -> APPROVED` cycle. The first builder is also
-asked to execute a harmless `.invalid` HTTP mutation negative-control that
-must be refused; final verification requires the trusted Loop hook diagnostic
-for that run. CP-2 proves continuation after a controlled supervisor restart.
+`CHANGES_REQUESTED -> repair -> APPROVED` cycle. The first builder is required
+to keep deterministic validation green while leaving the reviewer-visible
+`CANARY_REPAIR_REQUIRED` sentinel; the first reviewer must reject that
+sentinel, and the funded repair removes it and implements the final behavior.
+The first builder is also asked to execute a harmless `.invalid` HTTP
+mutation negative-control that must be refused; final verification requires
+the trusted Loop hook diagnostic for that run. CP-2 proves continuation after
+a controlled supervisor restart.
 
 Run later, after integration and commissioning:
 

@@ -49,6 +49,15 @@ CHANGES_REQUESTED -> STOPPED
 
 `APPROVED` and `BLOCKED` are terminal in single-run mode. PROGRAM continuation is a narrow extension: when unfinished checkpoint work remains, the host run may continue to `READY_TO_BUILD` through `state.program_transition()`. `STOPPED` is always absorbing. Once a PROGRAM has no claimable checkpoint, terminal host states have no outbound edge.
 
+`CHANGES_REQUESTED` has two intentional origins. A deterministic build
+finalizer may enter it when required validation fails; this is a
+`BUILD_VALIDATION_RETRY`, so the next builder may claim another build without
+any reviewer pass or `repair_round` increment. A reviewer may also enter it
+with a `CHANGES_REQUESTED` verdict; that is a `REVIEW_FUNDED_REPAIR`, and the
+review finalizer atomically claims one repair entitlement before the next
+builder can claim its pass. The `repair_round` counter therefore means
+reviewer-funded repairs only.
+
 ## Concurrency
 
 Every transition acquires an exclusive `fcntl.flock` on
