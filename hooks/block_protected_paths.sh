@@ -40,7 +40,8 @@
 # In-lane scratch allowances beyond the builder worktree and exact pass
 # scratch: the supervisor-owned runtime-cache root (where hermetic
 # validation env externalizes caches/TMPDIR) and ordinary system scratch
-# directories (/tmp, /private/tmp, /var/folders). A system-scratch prefix
+# directories (/tmp, /private/tmp, /var/folders; macOS resolves the latter
+# canonically as /private/var/folders). A system-scratch prefix
 # NEVER overrides repository ownership: if the canonical repo itself lives
 # under one of those roots, canonical/run/worktree paths still pass through
 # the normal authority checks below.
@@ -234,7 +235,7 @@ if [[ -n "$active_runtime_cache" && ( "$abs_path" == "$active_runtime_cache" || 
   exit 0
 fi
 case "$abs_path" in
-  /tmp/*|/private/tmp/*|/var/folders/*)
+  /tmp/*|/private/tmp/*|/var/folders/*|/private/var/folders/*)
     # Only genuine external scratch is exempt. Repository-owned paths must
     # continue through exact-pass/canonical/worktree authority checks even
     # when the repository itself resides under a system temporary root.
