@@ -141,6 +141,32 @@ TERMINAL_SEMANTIC_ATTEMPT_STATUSES = frozenset({
     "FAILED", "RECOVERED", "SUPERSEDED",
 })
 
+
+class WorkerLaunchError(RuntimeError):
+    """The semantic process provably failed before a child existed."""
+
+
+# The OS child is born as this tiny gate, not as the model process. It inherits
+# one read end of a pipe. The parent publishes exact PID/attempt/deadline
+# ownership to SQLite and commits it before writing the release byte. If the
+# parent dies in the post-Popen/pre-publication window, the write end closes
+# and the gate exits without ever exec'ing the semantic provider.
+_WORKER_RELEASE_GATE_CODE = r"""
+import os
+import sys
+fd = int(sys.argv[1])
+try:
+    token = os.read(fd, 1)
+finally:
+    os.close(fd)
+if token != b"1":
+    os._exit(125)
+argv = sys.argv[2:]
+if not argv:
+    os._exit(126)
+os.execvpe(argv[0], argv, os.environ)
+"""
+
 # --restricted is Claude Code's native scripted/evaluation boundary for shared
 # machines. It confines built-in file tools to working directories, ignores
 # user/project/local settings, refuses bypass/cloud sessions, and removes
@@ -529,6 +555,8 @@ def _connect(path: Path) -> sqlite3.Connection:
           updated_at REAL NOT NULL,
           worker_pid INTEGER,
           worker_started_at REAL,
+          worker_pgid INTEGER,
+          worker_deadline_at REAL,
           worker_role TEXT,
           max_total_cost_usd REAL NOT NULL DEFAULT 0,
           max_total_tokens INTEGER NOT NULL DEFAULT 0,
@@ -555,11 +583,14 @@ def _connect(path: Path) -> sqlite3.Connection:
           started_at REAL NOT NULL,
           completed_at REAL,
           worker_pid INTEGER,
+          worker_pgid INTEGER,
+          deadline_at REAL,
           stdout_path TEXT NOT NULL,
           stderr_path TEXT NOT NULL,
           returncode INTEGER,
           cost_usd REAL NOT NULL DEFAULT 0,
           cost_accounted INTEGER NOT NULL DEFAULT 0,
+          cost_known INTEGER NOT NULL DEFAULT 1,
           input_tokens INTEGER NOT NULL DEFAULT 0,
           output_tokens INTEGER NOT NULL DEFAULT 0,
           cache_read_tokens INTEGER NOT NULL DEFAULT 0,
@@ -579,6 +610,8 @@ def _connect(path: Path) -> sqlite3.Connection:
     migrations = {
         "worker_pid": "ALTER TABLE jobs ADD COLUMN worker_pid INTEGER",
         "worker_started_at": "ALTER TABLE jobs ADD COLUMN worker_started_at REAL",
+        "worker_pgid": "ALTER TABLE jobs ADD COLUMN worker_pgid INTEGER",
+        "worker_deadline_at": "ALTER TABLE jobs ADD COLUMN worker_deadline_at REAL",
         "worker_role": "ALTER TABLE jobs ADD COLUMN worker_role TEXT",
         # New columns migrate DISABLED. Existing values are preserved;
         # the ambiguous historical $25 / unlimited-token / 8-hour tuple is
@@ -614,6 +647,9 @@ def _connect(path: Path) -> sqlite3.Connection:
         for row in conn.execute("PRAGMA table_info(semantic_attempts)").fetchall()
     }
     attempt_migrations = {
+        "worker_pgid": "ALTER TABLE semantic_attempts ADD COLUMN worker_pgid INTEGER",
+        "deadline_at": "ALTER TABLE semantic_attempts ADD COLUMN deadline_at REAL",
+        "cost_known": "ALTER TABLE semantic_attempts ADD COLUMN cost_known INTEGER NOT NULL DEFAULT 1",
         "input_tokens": "ALTER TABLE semantic_attempts ADD COLUMN input_tokens INTEGER NOT NULL DEFAULT 0",
         "output_tokens": "ALTER TABLE semantic_attempts ADD COLUMN output_tokens INTEGER NOT NULL DEFAULT 0",
         "cache_read_tokens": "ALTER TABLE semantic_attempts ADD COLUMN cache_read_tokens INTEGER NOT NULL DEFAULT 0",
@@ -670,6 +706,55 @@ def _pid_alive(pid: int | None, worker_started_at: float | None = None) -> bool:
     except Exception:
         return True
     return True
+
+
+def _pid_identity_proven(pid: int | None, worker_started_at: float | None) -> bool:
+    """Strict process identity proof used before signalling an orphan."""
+    if not pid or int(pid) <= 0 or not worker_started_at or worker_started_at <= 0:
+        return False
+    pid = int(pid)
+    try:
+        os.kill(pid, 0)
+    except (ProcessLookupError, PermissionError):
+        return False
+    try:
+        start_ts = _read_pid_start_time(pid)
+    except Exception:
+        return False
+    return start_ts is not None and abs(float(start_ts) - float(worker_started_at)) <= 10
+
+
+def _terminate_owned_process_group(
+    pid: int,
+    pgid: int | None,
+    worker_started_at: float | None,
+) -> bool:
+    """Terminate only a process group whose leader identity is proven."""
+    if not pgid or int(pgid) != int(pid):
+        return False
+    if not _pid_identity_proven(pid, worker_started_at):
+        return False
+    try:
+        os.killpg(int(pgid), signal.SIGTERM)
+    except ProcessLookupError:
+        return True
+    deadline = time.monotonic() + 2.0
+    while time.monotonic() < deadline:
+        if not _pid_alive(pid, worker_started_at):
+            return True
+        time.sleep(0.05)
+    if not _pid_identity_proven(pid, worker_started_at):
+        return not _pid_alive(pid, worker_started_at)
+    try:
+        os.killpg(int(pgid), signal.SIGKILL)
+    except ProcessLookupError:
+        return True
+    deadline = time.monotonic() + 2.0
+    while time.monotonic() < deadline:
+        if not _pid_alive(pid, worker_started_at):
+            return True
+        time.sleep(0.05)
+    return not _pid_alive(pid, worker_started_at)
 
 
 def _read_pid_start_time(pid: int) -> float | None:
@@ -827,6 +912,7 @@ def _account_attempt_cost(
     cost_usd: float,
     returncode: int | None = None,
     status_value: str = "COMPLETED",
+    cost_known: bool = True,
     input_tokens: int = 0,
     output_tokens: int = 0,
     cache_read_tokens: int = 0,
@@ -860,7 +946,7 @@ def _account_attempt_cost(
     if not already:
         conn.execute(
             """UPDATE semantic_attempts SET status=?, completed_at=?,
-               returncode=?, cost_usd=?, cost_accounted=1,
+               returncode=?, cost_usd=?, cost_accounted=1, cost_known=?,
                input_tokens=?, output_tokens=?, cache_read_tokens=?,
                cache_creation_tokens=?, tokens_known=?
                WHERE attempt_id=?""",
@@ -869,6 +955,7 @@ def _account_attempt_cost(
                 time.time(),
                 returncode,
                 float(cost_usd),
+                1 if cost_known else 0,
                 *usage_values,
                 1 if tokens_known else 0,
                 attempt_id,
@@ -903,8 +990,45 @@ def _account_attempt_cost(
     return float(row[0] or 0.0)
 
 
+def _unknown_cost_attempt_count(conn: sqlite3.Connection, job_id: int) -> int:
+    row = conn.execute(
+        """SELECT COUNT(*) FROM semantic_attempts
+           WHERE job_id=? AND cost_known=0
+             AND status IN ('COMPLETED','COST_UNKNOWN','RECOVERED')""",
+        (int(job_id),),
+    ).fetchone()
+    return int((row[0] if row is not None else 0) or 0)
+
+
+def _mark_attempt_launch_failed(
+    conn: sqlite3.Connection,
+    *,
+    job_id: int,
+    attempt_id: str,
+    detail: str,
+) -> None:
+    """Terminalize a RESERVED attempt only when no OS child was created."""
+    conn.execute("BEGIN IMMEDIATE")
+    cur = conn.execute(
+        """UPDATE semantic_attempts SET
+             status='FAILED', completed_at=?, returncode=NULL,
+             cost_usd=0, cost_accounted=1, cost_known=1,
+             input_tokens=0, output_tokens=0, cache_read_tokens=0,
+             cache_creation_tokens=0, tokens_known=1,
+             failure_class='configuration', failure_reason='worker_launch_failed'
+           WHERE attempt_id=? AND job_id=? AND status='RESERVED'""",
+        (time.time(), attempt_id, int(job_id)),
+    )
+    if cur.rowcount != 1:
+        conn.rollback()
+        raise RuntimeError(
+            f"launch-failed attempt was not RESERVED: {attempt_id}: {detail[-500:]}"
+        )
+    conn.commit()
+
+
 def _recover_stale_running(conn: sqlite3.Connection) -> int:
-    """Recover dead RUNNING ownership without losing model-cost evidence."""
+    """Recover dead/expired RUNNING ownership without losing model-cost evidence."""
     recovered = 0
     rows = conn.execute(
         "SELECT * FROM jobs WHERE status='RUNNING' ORDER BY id"
@@ -912,8 +1036,25 @@ def _recover_stale_running(conn: sqlite3.Connection) -> int:
     for row in rows:
         pid = row["worker_pid"]
         started_at = float(row["worker_started_at"]) if row["worker_started_at"] else None
+        deadline_at = float(row["worker_deadline_at"]) if row["worker_deadline_at"] else None
+        recovery_reason = "recovered stale RUNNING job after supervisor/worker exit"
         if _pid_alive(pid, started_at):
-            continue
+            if deadline_at is None or time.time() < deadline_at:
+                continue
+            pgid = int(row["worker_pgid"]) if row["worker_pgid"] else None
+            if not _terminate_owned_process_group(int(pid), pgid, started_at):
+                conn.execute(
+                    """UPDATE jobs SET last_error=?, updated_at=? WHERE id=?""",
+                    (
+                        "semantic deadline expired but exact orphan process identity "
+                        "could not be proven/terminated; retaining RUNNING ownership",
+                        time.time(),
+                        row["id"],
+                    ),
+                )
+                conn.commit()
+                continue
+            recovery_reason = "semantic deadline expired; exact owned orphan terminated"
 
         attempt_id = str(row["worker_attempt_id"] or "")
         if attempt_id:
@@ -957,6 +1098,9 @@ def _recover_stale_running(conn: sqlite3.Connection) -> int:
                         conn.commit()
                         continue
                     recovered_cost = 0.0
+                recovered_cost_known = (
+                    _parse_cost_from_durable_stdout(attempt["stdout_path"]) is not None
+                )
                 recovered_usage = _parse_token_usage_from_durable_stdout(
                     attempt["stdout_path"]
                 )
@@ -990,7 +1134,8 @@ def _recover_stale_running(conn: sqlite3.Connection) -> int:
                     attempt_id=attempt_id,
                     cost_usd=recovered_cost,
                     returncode=None,
-                    status_value="RECOVERED",
+                    status_value=("RECOVERED" if recovered_cost_known else "COST_UNKNOWN"),
+                    cost_known=recovered_cost_known,
                     input_tokens=int(usage.get("input_tokens", 0)),
                     output_tokens=int(usage.get("output_tokens", 0)),
                     cache_read_tokens=int(usage.get("cache_read_tokens", 0)),
@@ -1004,6 +1149,8 @@ def _recover_stale_running(conn: sqlite3.Connection) -> int:
               status='QUEUED',
               worker_pid=NULL,
               worker_started_at=NULL,
+              worker_pgid=NULL,
+              worker_deadline_at=NULL,
               worker_role=NULL,
               worker_attempt_id=NULL,
               last_error=?,
@@ -1011,7 +1158,7 @@ def _recover_stale_running(conn: sqlite3.Connection) -> int:
               updated_at=?
             WHERE id=?
             """,
-            ("recovered stale RUNNING job after supervisor/worker exit", time.time(), row["id"]),
+            (recovery_reason, time.time(), row["id"]),
         )
         recovered += 1
     if recovered:
@@ -1069,9 +1216,11 @@ def enqueue(
         else _current_runtime_generation()
     )
     # Idempotent enqueue: create a new QUEUED row, or update only safe
-    # configuration on an existing row. Operational state, backoff and worker
-    # ownership are never rewritten by a repeated enqueue.
+    # configuration on an existing row. Authorization and mutation share one
+    # SQLite write transaction so a concurrent run_one() cannot claim the row
+    # between the status/generation check and this upsert.
     with _connect(db) as conn:
+        conn.execute("BEGIN IMMEDIATE")
         existing = conn.execute(
             "SELECT * FROM jobs WHERE repo=? AND run_id=?", (repo, run_id)
         ).fetchone()
@@ -1873,29 +2022,66 @@ class ClaudeCodeRunner:
         worker_env["GIT_COMMITTER_NAME"] = "OwnFramework Loop"
         worker_env["GIT_COMMITTER_EMAIL"] = "loop@localhost"
 
-        proc = subprocess.Popen(
-            cmd,
-            cwd=str(worktree),
-            stdin=subprocess.PIPE,
-            stdout=stdout_fh,
-            stderr=stderr_fh,
-            text=True,
-            start_new_session=True,
-            env=worker_env,
-        )
-        # Persist worker ownership BEFORE the child produces any output. If
-        # anything between here and a successful communicate() raises, the
-        # worker is terminated and reaped so we never leak an unowned Claude
-        # process.
-        if on_start is not None:
+        release_r, release_w = os.pipe()
+        os.set_inheritable(release_r, True)
+        gated_cmd = [
+            sys.executable, "-c", _WORKER_RELEASE_GATE_CODE,
+            str(release_r), *cmd,
+        ]
+        try:
+            proc = subprocess.Popen(
+                gated_cmd,
+                cwd=str(worktree),
+                stdin=subprocess.PIPE,
+                stdout=stdout_fh,
+                stderr=stderr_fh,
+                text=True,
+                start_new_session=True,
+                env=worker_env,
+                pass_fds=(release_r,),
+            )
+        except OSError as exc:
             try:
+                os.close(release_r)
+            except OSError:
+                pass
+            try:
+                os.close(release_w)
+            except OSError:
+                pass
+            if durable_files is not None:
+                stdout_fh.close()  # type: ignore[union-attr]
+                stderr_fh.close()  # type: ignore[union-attr]
+            raise WorkerLaunchError(
+                f"semantic worker launch failed before child creation: {exc}"
+            ) from exc
+        finally:
+            try:
+                os.close(release_r)
+            except OSError:
+                pass
+
+        # The child is alive but cannot exec the semantic provider until exact
+        # ownership is durably published by on_start.
+        try:
+            if on_start is not None:
                 on_start(int(proc.pid), role)
-            except Exception:
-                _terminate_group(proc)
-                if durable_files is not None:
-                    stdout_fh.close()  # type: ignore[union-attr]
-                    stderr_fh.close()  # type: ignore[union-attr]
-                raise
+            os.write(release_w, b"1")
+        except BaseException:
+            try:
+                os.close(release_w)
+            except OSError:
+                pass
+            _terminate_group(proc)
+            if durable_files is not None:
+                stdout_fh.close()  # type: ignore[union-attr]
+                stderr_fh.close()  # type: ignore[union-attr]
+            raise
+        finally:
+            try:
+                os.close(release_w)
+            except OSError:
+                pass
 
         timed_out = False
         # Use communicate(input=prompt) to feed stdin in a portable way
@@ -2138,6 +2324,8 @@ def _classify_runner_failure(result: RunnerResult) -> tuple[str, str]:
 
 
 def _classify_exception(exc: BaseException) -> tuple[str, str]:
+    if isinstance(exc, WorkerLaunchError):
+        return "configuration", "worker_launch_failed"
     if isinstance(exc, dispatch_mod.DispatchError):
         return "invariant", "dispatch_refused"
     if isinstance(exc, (FileNotFoundError, PermissionError)):
@@ -2324,11 +2512,13 @@ def _set_worker_pid(
     out_path: Path | None = None,
     err_path: Path | None = None,
     attempt_id: str | None = None,
+    deadline_at: float | None = None,
 ) -> None:
     started = time.time()
     cur = conn.execute(
         """
-        UPDATE jobs SET worker_pid=?, worker_started_at=?, worker_role=?,
+        UPDATE jobs SET worker_pid=?, worker_started_at=?, worker_pgid=?,
+          worker_deadline_at=?, worker_role=?,
           worker_stdout_path=?, worker_stderr_path=?,
           worker_attempt_id=COALESCE(?, worker_attempt_id), updated_at=?
         WHERE id=? AND status='RUNNING'
@@ -2336,6 +2526,8 @@ def _set_worker_pid(
         (
             int(pid),
             started,
+            int(pid),
+            float(deadline_at) if deadline_at is not None else None,
             role,
             str(out_path) if out_path else None,
             str(err_path) if err_path else None,
@@ -2350,8 +2542,13 @@ def _set_worker_pid(
     if attempt_id:
         a = conn.execute(
             """UPDATE semantic_attempts SET status='RUNNING', worker_pid=?,
-               started_at=? WHERE attempt_id=? AND job_id=?""",
-            (int(pid), started, attempt_id, int(job_id)),
+               worker_pgid=?, deadline_at=?, started_at=?
+               WHERE attempt_id=? AND job_id=?""",
+            (
+                int(pid), int(pid),
+                float(deadline_at) if deadline_at is not None else None,
+                started, attempt_id, int(job_id),
+            ),
         )
         if a.rowcount != 1:
             conn.rollback()
@@ -2390,6 +2587,8 @@ def _update_job(
           next_attempt_at=?,
           worker_pid=NULL,
           worker_started_at=NULL,
+          worker_pgid=NULL,
+          worker_deadline_at=NULL,
           worker_role=NULL,
           worker_attempt_id=NULL,
           updated_at=?
@@ -2516,6 +2715,7 @@ def run_one(*, db_path: Path | None = None, timeout_seconds: int = 0) -> dict[st
                 "serving_runtime_generation": serving_generation,
             }
 
+        attempt_id: str | None = None
         try:
             work_order = dispatch_mod.claim_next(
                 canonical_repo=Path(job["repo"]),
@@ -2632,6 +2832,32 @@ def run_one(*, db_path: Path | None = None, timeout_seconds: int = 0) -> dict[st
             max_wall = int(job["max_wall_seconds"] or 0)
             max_cost = float(job["max_total_cost_usd"] or 0.0)
             spent = float(job["total_cost_usd"] or 0.0)
+            if max_cost > 0:
+                unknown_cost_attempts = _unknown_cost_attempt_count(
+                    conn, int(job["id"])
+                )
+                if unknown_cost_attempts:
+                    _update_job(
+                        conn,
+                        job["id"],
+                        status_value="QUARANTINED",
+                        last_error=(
+                            "finite cost ceiling cannot be enforced from a known "
+                            f"baseline: {unknown_cost_attempts} historical semantic "
+                            "attempt(s) have unknown provider cost"
+                        ),
+                        last_failure_class="usage_unknown",
+                        last_failure_reason="historical_cost_unknown",
+                        next_attempt_at=0,
+                    )
+                    return {
+                        "schema": SCHEMA,
+                        "ok": False,
+                        "action": "QUARANTINED",
+                        "job_id": job["id"],
+                        "reason": "historical_cost_unknown",
+                        "unknown_cost_attempts": unknown_cost_attempts,
+                    }
             max_tokens = int(job["max_total_tokens"] or 0)
             spent_tokens = (
                 int(job["total_input_tokens"] or 0)
@@ -2731,6 +2957,7 @@ def run_one(*, db_path: Path | None = None, timeout_seconds: int = 0) -> dict[st
                     out_path=durable_files[0],
                     err_path=durable_files[1],
                     attempt_id=attempt_id,
+                    deadline_at=time.time() + semantic_timeout_seconds,
                 ),
                 durable_files=durable_files,
             )
@@ -2742,7 +2969,8 @@ def run_one(*, db_path: Path | None = None, timeout_seconds: int = 0) -> dict[st
                 # unattended PROGRAM is not stopped by telemetry loss.
                 conn.execute(
                     """UPDATE semantic_attempts SET status='COST_UNKNOWN',
-                       completed_at=?, returncode=? WHERE attempt_id=? AND job_id=?""",
+                       completed_at=?, returncode=?, cost_known=0
+                       WHERE attempt_id=? AND job_id=?""",
                     (time.time(), int(result.returncode), attempt_id, int(job["id"])),
                 )
                 conn.commit()
@@ -2819,7 +3047,8 @@ def run_one(*, db_path: Path | None = None, timeout_seconds: int = 0) -> dict[st
                 attempt_id=attempt_id,
                 cost_usd=float(result.cost_usd),
                 returncode=int(result.returncode),
-                status_value="COMPLETED",
+                status_value=("COMPLETED" if result.cost_known else "COST_UNKNOWN"),
+                cost_known=result.cost_known,
                 input_tokens=result.input_tokens,
                 output_tokens=result.output_tokens,
                 cache_read_tokens=result.cache_read_tokens,
@@ -2923,6 +3152,13 @@ def run_one(*, db_path: Path | None = None, timeout_seconds: int = 0) -> dict[st
                 "finalized": finalized,
             }
         except Exception as exc:
+            if attempt_id and isinstance(exc, WorkerLaunchError):
+                _mark_attempt_launch_failed(
+                    conn,
+                    job_id=int(job["id"]),
+                    attempt_id=attempt_id,
+                    detail=str(exc),
+                )
             # Completed semantic attempts are accounted transactionally by
             # attempt identity. If an exception happened before completion,
             # stale-worker recovery will inspect the durable attempt/output;
@@ -3135,15 +3371,32 @@ def resume(
     previous_generation = str(existing["runtime_generation"] or "")
     sets.append("runtime_generation=?")
     params.append(_current_runtime_generation())
-    params.extend([repo, run_id])
+    params.extend([repo, run_id, previous_generation])
     with _connect(db) as conn:
-        conn.execute(
-            f"UPDATE jobs SET {', '.join(sets)} WHERE repo=? AND run_id=?",
+        cur = conn.execute(
+            f"UPDATE jobs SET {', '.join(sets)} "
+            "WHERE repo=? AND run_id=? AND status='QUARANTINED' "
+            "AND runtime_generation=?",
             params,
         )
         row = conn.execute(
             "SELECT * FROM jobs WHERE repo=? AND run_id=?", (repo, run_id)
         ).fetchone()
+        if cur.rowcount != 1:
+            result = _job_dict(row, db) if row is not None else {
+                "schema": SCHEMA,
+                "ok": False,
+                "repo": repo,
+                "run_id": run_id,
+                "status": "NOT_ENQUEUED",
+                "db_path": str(db),
+            }
+            result.update({
+                "ok": False,
+                "resumed": False,
+                "reason": "resume_lost_quarantine_race",
+            })
+            return result
     if row is None:
         return {
             "schema": SCHEMA,
