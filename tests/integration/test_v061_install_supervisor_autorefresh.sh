@@ -41,6 +41,18 @@ exit 0
 EOF
 chmod +x "$FAKEBIN/claude"
 
+# Provide the SAME python3 to the install/refresh probe that the DB was
+# created with. Without this, a host that ships multiple pythons (e.g.
+# macOS with /usr/bin/python3 and /opt/homebrew/bin/python3) creates the
+# ledger under one major Python and probes it under another, which the
+# sqlite3 module can refuse to read even when the on-disk format is
+# wire-compatible.
+cat > "$FAKEBIN/python3" <<EOF
+#!/usr/bin/env bash
+exec "$(command -v python3)" "\$@"
+EOF
+chmod +x "$FAKEBIN/python3"
+
 # Existing commissioning signal must refresh to CORE/bin/ofloop.
 mkdir -p "$HOME_EXISTING/Library/LaunchAgents"
 echo existing > "$HOME_EXISTING/Library/LaunchAgents/com.ownframework.loop-supervisor.plist"
