@@ -643,6 +643,141 @@ def transition(
     return new
 
 
+def transition_review_rejection_with_repair(
+    canonical_repo: Path,
+    run_id: str,
+    *,
+    packet: dict[str, Any],
+    actor: str,
+    commit_sha: str,
+    extras: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Atomically fund a rejected review before exposing repair execution.
+
+    REVIEWING -> CHANGES_REQUESTED and the exact repair entitlement are one
+    STATE_TXN-backed mutation.  When the repair envelope is exhausted the same
+    mutation seals BLOCKED instead, so no crash boundary can expose an unfunded
+    builder state.
+    """
+    sp = state_path(canonical_repo, run_id)
+    with flock_exclusive(lock_path(canonical_repo, run_id)):
+        _verify_mutation_integrity_locked(canonical_repo, run_id)
+        current = read_json(sp)
+        if not isinstance(current, dict) or not current:
+            raise FileNotFoundError(f"STATE.json missing for run {run_id}")
+        if current.get("state") != "REVIEWING":
+            raise RuntimeError(
+                "atomic review rejection requires REVIEWING state, got "
+                f"{current.get('state')!r}"
+            )
+
+        new = dict(current)
+        repair_claimed = False
+        repair_block_reason = ""
+        if is_program_state(current):
+            from . import program as program_mod
+            program_state = current.get("program")
+            if not isinstance(program_state, dict):
+                raise RuntimeError("PROGRAM review rejection missing program block")
+            ok, reason = program_mod.verify_frozen_graph(packet, program_state)
+            if not ok:
+                raise RuntimeError(
+                    f"PROGRAM review rejection frozen-graph drift: {reason}"
+                )
+            mirror = int(current.get("repair_round", 0) or 0)
+            cumulative = int(
+                program_state["cumulative_counters"].get("repair_round_count", 0)
+            )
+            if mirror != cumulative:
+                raise RuntimeError(
+                    f"repair counter mirror drift: top={mirror}, cumulative={cumulative}"
+                )
+            cp_id = program_mod.select_next_checkpoint(packet, program_state)
+            if cp_id is None:
+                raise RuntimeError("PROGRAM review rejection has no current checkpoint")
+            packet_cp = program_mod._resolve_packet_cp(packet, cp_id)
+            try:
+                new_program = program_mod._bump_counter_one(
+                    program_state,
+                    cp_id=cp_id,
+                    counter="repair_round_count",
+                    packet_cp=packet_cp,
+                )
+            except program_mod.ProgramStateError as exc:
+                target = "BLOCKED"
+                repair_block_reason = f"repair claim refused (cap exhausted): {exc}"
+            else:
+                cp_new = program_mod._find_cp(new_program, cp_id)
+                ev_map = dict(cp_new.get("last_evidence_sha_by_counter") or {})
+                ev_map["repair_round_count"] = commit_sha
+                cp_new["last_evidence_sha_by_counter"] = ev_map
+                new["program"] = new_program
+                new["repair_round"] = mirror + 1
+                target = "CHANGES_REQUESTED"
+                repair_claimed = True
+        else:
+            current_round = int(current.get("repair_round", 0) or 0)
+            cap = limits_mod.effective_cap("repair_round", packet)
+            if cap is not None and current_round >= cap:
+                target = "BLOCKED"
+                repair_block_reason = (
+                    f"repair claim refused (cap exhausted): "
+                    f"repair_round={current_round} cap={cap}"
+                )
+            else:
+                new["repair_round"] = current_round + 1
+                target = "CHANGES_REQUESTED"
+                repair_claimed = True
+
+        transitions.assert_valid("REVIEWING", target)
+        now = utc_now_iso()
+        new["state"] = target
+        new["transitions_count"] = int(current.get("transitions_count", 0)) + 1
+        new["updated_at"] = now
+        new["last_actor"] = actor
+        new["last_candidate_sha"] = commit_sha
+        history = list(current.get("state_history", []))
+        reason = (
+            "review rejected; repair entitlement claimed atomically"
+            if repair_claimed
+            else repair_block_reason
+        )
+        history.append({
+            "from": "REVIEWING",
+            "to": target,
+            "at": now,
+            "actor": actor,
+            "reason": reason,
+        })
+        new["state_history"] = history
+        if target == "BLOCKED":
+            new["terminal_reason"] = reason
+        if extras:
+            new.update(extras)
+
+        _commit_state_event_locked(
+            canonical_repo,
+            run_id,
+            new,
+            event_type="state_transition",
+            old_state="REVIEWING",
+            new_state=target,
+            actor=actor,
+            commit_sha=commit_sha,
+            reason=reason,
+        )
+    try:
+        fsync_dir(sp.parent)
+    except OSError:
+        pass
+    return {
+        "state": target,
+        "repair_claimed": repair_claimed,
+        "repair_round": int(new.get("repair_round", 0) or 0),
+        "reason": reason,
+    }
+
+
 def increment_counter(
     canonical_repo: Path,
     run_id: str,

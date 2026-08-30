@@ -831,6 +831,23 @@ def finalize_review(
                 # the in-memory verdict after hashing/writing it.
             except program_mod.ProgramStateError as e:
                 raise RuntimeError(f"program advancement refused: {e}")
+        elif next_state == "CHANGES_REQUESTED":
+            # The rejection state and its repair entitlement are one
+            # STATE_TXN-backed mutation. A crash can no longer expose a
+            # build-claimable CHANGES_REQUESTED without charging the round.
+            repair_transition = state_mod.transition_review_rejection_with_repair(
+                canonical_repo,
+                run_id,
+                packet=meta,
+                actor=actor,
+                commit_sha=receipt_candidate_sha,
+                extras={
+                    "identical_finding_streak": identical_finding_streak,
+                    "last_must_fix_fingerprint": must_fix_fp,
+                    "no_progress_streak": 0,
+                },
+            )
+            next_state = str(repair_transition["state"])
         else:
             state_mod.transition(
                 canonical_repo, run_id,
@@ -844,73 +861,6 @@ def finalize_review(
                 },
             )
         if next_state == "CHANGES_REQUESTED":
-            # v0.3.2: in program mode, route the repair-round increment
-            # through the unified claim owner so per-cp and cumulative
-            # caps are enforced and top-level mirror stays in sync.
-            # Single mode keeps the legacy direct mutation.
-            cur = state_mod.load_verified(canonical_repo, run_id)
-            if state_mod.is_program_state(cur):
-                # v0.3.5 (F-4-01): use the candidate SHA from the
-                # verdict (or the current state) as the source evidence.
-                # Each repair round produces a fresh candidate SHA so
-                # the replay guard sees distinct evidence.
-                ev_sha = (
-                    new_verdict.get("candidate_sha_reviewed")
-                    or (cur or {}).get("last_candidate_sha")
-                    or ""
-                )
-                try:
-                    program_mod.claim_repair_round(
-                        canonical_repo=canonical_repo,
-                        run_id=run_id,
-                        packet=meta,
-                        source_evidence_sha=ev_sha or None,
-                    )
-                except program_mod.ClaimRefused as e:
-                    # Defect B (v0.4.5): cap exhaustion fails closed. Seal
-                    # the run BLOCKED so no further builder pass can start
-                    # without new human authorization. A failed seal must
-                    # NOT be swallowed: if the run stays CHANGES_REQUESTED
-                    # a builder claim could start an unfunded repair pass.
-                    # Tolerate only the idempotent already-sealed case.
-                    try:
-                        state_mod.transition(
-                            canonical_repo,
-                            run_id,
-                            to_state="BLOCKED",
-                            actor="review_finalize",
-                            reason=f"repair claim refused (cap exhausted): {e}",
-                            commit_sha=receipt_candidate_sha,
-                        )
-                    except transitions.InvalidTransitionError:
-                        now = state_mod.load_verified(canonical_repo, run_id)
-                        if (now or {}).get("state") not in ("BLOCKED", "STOPPED"):
-                            raise
-            else:
-                # Single mode: enforce the repair envelope AT CLAIM TIME,
-                # fail closed. The build finalizer no longer blocks on
-                # repair_round >= cap, so the final funded repair's
-                # candidate always reaches review; when this claim cannot
-                # be funded, no builder pass may start without new human
-                # authorization.
-                try:
-                    state_mod.increment_counter(
-                        canonical_repo, run_id, counter="repair_round",
-                        actor="review_finalize", packet=meta, hard_cap=True,
-                    )
-                except limits_mod.RepairLimitExceeded as e:
-                    state_mod.transition(
-                        canonical_repo, run_id,
-                        to_state="BLOCKED",
-                        actor="review_finalize",
-                        reason=f"repair claim refused (cap exhausted): {e}",
-                        commit_sha=receipt_candidate_sha,
-                    )
-                else:
-                    cur = state_mod.load_verified(canonical_repo, run_id)
-                    cur["no_progress_streak"] = 0
-                    state_mod.save(canonical_repo, run_id, cur)
-
             # Single-mode post-hook: transition CHANGES_REQUESTED back to
             # READY_TO_BUILD so the next build pass is reachable. Skipped
             # when the run was sealed BLOCKED by repair-cap exhaustion. A
