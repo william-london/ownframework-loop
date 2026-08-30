@@ -115,6 +115,14 @@ run_installer() {
     bash "$INSTALLER" 2>&1)
 }
 
+# Several cases below are fresh-install provenance tests that intentionally
+# switch XDG_STATE_HOME. They must not inherit the plist produced by an earlier
+# case, because plist/provenance presence is a real commissioning signal and a
+# commissioned service without the matching ledger correctly fails closed.
+reset_shared_commissioning() {
+  rm -f "$HOME/Library/LaunchAgents/com.ownframework.loop-supervisor.plist"
+}
+
 read_plist_key() {
   # Returns the value as Python would print it (no surrounding quotes
   # for strings, no repr prefix). Comparison-friendly.
@@ -282,6 +290,7 @@ fi
 # =====================================================================
 echo ""
 echo "=== T5: custom XDG_STATE_HOME causes all STATE_ROOT paths to agree ==="
+reset_shared_commissioning
 CLAUDE_BIN="$CLAUDE_FAKE" XDG_STATE_HOME="$SANDBOX/xdg5" run_installer > /tmp/t5.out 2>&1 || true
 PROV5="$SANDBOX/xdg5/ownframework-loop/runtime-provenance.json"
 PLIST5="$HOME/Library/LaunchAgents/com.ownframework.loop-supervisor.plist"
@@ -339,6 +348,7 @@ fi
 # =====================================================================
 echo ""
 echo "=== T7: provenance.source_head equals Git HEAD ==="
+reset_shared_commissioning
 CLAUDE_BIN="$CLAUDE_FAKE" XDG_STATE_HOME="$SANDBOX/xdg7" run_installer > /tmp/t7.out 2>&1 || true
 PROV7="$SANDBOX/xdg7/ownframework-loop/runtime-provenance.json"
 [[ -f "$PROV7" ]] || { fail "T7: provenance not written. out=$(cat /tmp/t7.out)"; }
@@ -359,6 +369,7 @@ fi
 # =====================================================================
 echo ""
 echo "=== T8: launchd plist regression ==="
+reset_shared_commissioning
 CLAUDE_BIN="$CLAUDE_FAKE" XDG_STATE_HOME="$SANDBOX/xdg8" run_installer > /tmp/t8.out 2>&1 || true
 PLIST8="$HOME/Library/LaunchAgents/com.ownframework.loop-supervisor.plist"
 [[ -f "$PLIST8" ]] || { fail "T8: plist not written. out=$(cat /tmp/t8.out)"; }

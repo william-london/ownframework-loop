@@ -193,6 +193,19 @@ IHOME="$TMP/install-home"; IXDG="$TMP/install-xdg"; mkdir -p "$IHOME/Library/Lau
 IPLIST="$IHOME/Library/LaunchAgents/com.ownframework.loop-supervisor.plist"
 IPROV="$IXDG/ownframework-loop/runtime-provenance.json"
 printf 'OLD-PLIST\n' > "$IPLIST"; printf 'OLD-PROVENANCE\n' > "$IPROV"
+# T8 models an already-commissioned supervisor whose replacement reaches the
+# launchctl bootstrap/rollback path. Under the current fail-closed runtime
+# dependency contract, a commissioned service without its supervisor ledger is
+# intentionally unverifiable and must refuse earlier. Create an intact empty
+# ledger so this fixture represents a legitimate commissioned system with no
+# unfinished runtime dependencies.
+PYTHONPATH="$ROOT_DIR/lib" python3 -B - "$IXDG/ownframework-loop/supervisor.sqlite3" <<'PY'
+import sys
+from pathlib import Path
+from ownframework_loop import supervisor
+with supervisor._connect(Path(sys.argv[1])):
+    pass
+PY
 set +e
 IOUT="$(HOME="$IHOME" XDG_STATE_HOME="$IXDG" PATH="$SHIMS:$PATH" LC_COUNT="$TMP/lc-count" bash "$ROOT_DIR/install-supervisor-macos.sh" 2>&1)"
 IRC=$?
