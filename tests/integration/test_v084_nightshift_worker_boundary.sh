@@ -101,6 +101,7 @@ allow_read = set(fs["allowRead"])
 assert fs["denyRead"] == [str(pathlib.Path.home().resolve())], fs
 assert str(worktree.resolve()) in allow_read, allow_read
 assert str(semantic.parent.resolve()) in allow_read, allow_read
+assert str((repo / ".ownframework-loop" / "run-secure").resolve()) in allow_read, allow_read
 assert str((repo / ".git").resolve()) in allow_read, allow_read
 assert str(semantic.parent.resolve()) in allow_write, allow_write
 expected_cache = str(
@@ -111,6 +112,13 @@ assert expected_cache in allow_write, allow_write
 cred_names = {item["name"] for item in sb["credentials"]["envVars"]}
 assert {"GITHUB_TOKEN","GH_TOKEN","NPM_TOKEN","NODE_AUTH_TOKEN","PYPI_TOKEN","TWINE_PASSWORD","DOCKER_AUTH_CONFIG"} <= cred_names
 assert captured["env"]["CLAUDE_CODE_SUBPROCESS_ENV_SCRUB"] == "1"
+assert captured["env"]["GIT_CONFIG_GLOBAL"] == os.devnull
+assert captured["env"]["GIT_CONFIG_NOSYSTEM"] == "1"
+assert captured["env"]["GIT_TERMINAL_PROMPT"] == "0"
+assert captured["env"]["GIT_AUTHOR_NAME"] == "OwnFramework Loop"
+assert captured["env"]["GIT_AUTHOR_EMAIL"] == "loop@localhost"
+assert captured["env"]["GIT_COMMITTER_NAME"] == "OwnFramework Loop"
+assert captured["env"]["GIT_COMMITTER_EMAIL"] == "loop@localhost"
 
 # Reviewer sandbox also makes exact-SHA worktree read-only to Bash.
 review_wt = repo / ".worktrees" / "ownframework-loop" / "run-secure" / "reviewer"

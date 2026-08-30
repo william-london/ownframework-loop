@@ -138,9 +138,11 @@ def _semantic_worker_settings(
     # entire home directory, then re-open only the current pass and trusted Loop
     # runtime surfaces. More-specific allowRead wins over the broad denyRead.
     home = Path.home().expanduser().resolve(strict=False)
+    run_evidence_dir = (canonical_repo / ".ownframework-loop" / run_id).resolve(strict=False)
     allow_read = sorted({
         str(worktree.resolve(strict=False)),
         str(semantic_path.parent.resolve(strict=False)),
+        str(run_evidence_dir),
         str(cache_root.resolve(strict=False)),
         str((canonical_repo / ".git").resolve(strict=False)),
         str(_source_root().resolve(strict=False)),
@@ -1659,6 +1661,17 @@ class ClaudeCodeRunner:
         # the Claude process itself while stripping Anthropic/cloud credentials
         # from Bash children. This also forces filesystem isolation to remain on.
         worker_env["CLAUDE_CODE_SUBPROCESS_ENV_SCRUB"] = "1"
+
+        # Do not expose ~/.gitconfig merely so an unattended builder can commit.
+        # Give semantic Git a deterministic bot identity and disable terminal
+        # credential prompting/global config discovery.
+        worker_env["GIT_CONFIG_GLOBAL"] = os.devnull
+        worker_env["GIT_CONFIG_NOSYSTEM"] = "1"
+        worker_env["GIT_TERMINAL_PROMPT"] = "0"
+        worker_env["GIT_AUTHOR_NAME"] = "OwnFramework Loop"
+        worker_env["GIT_AUTHOR_EMAIL"] = "loop@localhost"
+        worker_env["GIT_COMMITTER_NAME"] = "OwnFramework Loop"
+        worker_env["GIT_COMMITTER_EMAIL"] = "loop@localhost"
 
         proc = subprocess.Popen(
             cmd,
