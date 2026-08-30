@@ -37,8 +37,9 @@ the 0.8.1 runtime-generation closure.
   flagged as ambiguous rather than silently rewritten;
 - supervisor status opens the operational ledger read-only and cannot perform
   schema/data migrations merely because an operator is monitoring;
-- a RUNNING job cannot be re-enqueued to rewrite its generation or resource
-  envelope mid-pass.
+- a RUNNING job cannot be re-enqueued under a different/unbound runtime
+  generation; same-generation re-enqueue remains an explicit operator path for
+  updating operational ceilings while preserving worker ownership/backoff.
 
 ### Install/uninstall lifecycle safety
 

@@ -101,11 +101,18 @@ tmp=Path(sys.argv[1]); db=tmp/"reenqueue.sqlite3"; repo=tmp/"reenqueue-repo"; re
 supervisor.enqueue(canonical_repo=repo, run_id="run-live", db_path=db, runtime_generation="ofloop-old@git-a", max_wall_seconds=600)
 c=sqlite3.connect(str(db)); c.execute("UPDATE jobs SET status='RUNNING', worker_pid=12345 WHERE run_id='run-live'"); c.commit(); c.close()
 out=supervisor.enqueue(canonical_repo=repo, run_id="run-live", db_path=db, runtime_generation="ofloop-new@git-b", max_wall_seconds=0)
-assert out["ok"] is False and out["reason"] == "cannot_reenqueue_running_job", out
-c=sqlite3.connect(str(db)); row=c.execute("SELECT runtime_generation,max_wall_seconds FROM jobs WHERE run_id='run-live'").fetchone(); c.close()
-assert row == ("ofloop-old@git-a",600), row
+assert out["ok"] is False and out["reason"] == "cannot_change_runtime_generation_while_running", out
+c=sqlite3.connect(str(db)); row=c.execute("SELECT runtime_generation,max_wall_seconds,worker_pid FROM jobs WHERE run_id='run-live'").fetchone(); c.close()
+assert row == ("ofloop-old@git-a",600,12345), row
+
+# Re-enqueue under the SAME generation is an explicit operator configuration
+# update and may widen/narrow ceilings without rewriting worker ownership.
+out2=supervisor.enqueue(canonical_repo=repo, run_id="run-live", db_path=db, runtime_generation="ofloop-old@git-a", max_wall_seconds=900)
+assert out2["ok"] is True and out2["status"] == "RUNNING", out2
+assert out2["runtime_generation"] == "ofloop-old@git-a", out2
+assert out2["max_wall_seconds"] == 900 and out2["worker_pid"] == 12345, out2
 PY
-pass "T4 re-enqueue cannot rewrite a live job generation or envelope"
+pass "T4 RUNNING re-enqueue preserves generation/ownership; same-generation ceiling updates remain explicit operator actions"
 
 python3 -B - "$TMP" <<'PY'
 import sys

@@ -737,15 +737,21 @@ def enqueue(
         ).fetchone()
         if existing is not None:
             if str(existing["status"] or "") == "RUNNING":
-                out = dict(existing)
-                out.update({
-                    "schema": SCHEMA,
-                    "ok": False,
-                    "db_path": str(db),
-                    "enqueue_refused": True,
-                    "reason": "cannot_reenqueue_running_job",
-                })
-                return out
+                existing_generation = str(existing["runtime_generation"] or "")
+                if not existing_generation or str(eff_generation) != existing_generation:
+                    out = dict(existing)
+                    out.update({
+                        "schema": SCHEMA,
+                        "ok": False,
+                        "db_path": str(db),
+                        "enqueue_refused": True,
+                        "reason": (
+                            "running_job_runtime_generation_unbound"
+                            if not existing_generation
+                            else "cannot_change_runtime_generation_while_running"
+                        ),
+                    })
+                    return out
             def _keep(field: str, supplied: Any, default: Any) -> Any:
                 return supplied if supplied is not None else existing[field]
             eff_infra = _keep("max_infra_failures", max_infra_failures, 3)
