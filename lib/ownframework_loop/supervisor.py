@@ -1965,10 +1965,9 @@ def run_one(*, db_path: Path | None = None, timeout_seconds: int = 0) -> dict[st
         # RUNTIME-GENERATION CONTRACT. A job binds the generation that
         # enrolled it; executing it under a different generation is a
         # silent runtime switch of a sealed run and fails closed toward
-        # quarantine. Legacy rows with no recorded binding adopt the
-        # serving generation ONCE at first contact (recorded), which is an
-        # initial binding, never a mid-lifecycle switch. Migration to a
-        # new generation is an explicit operator act: re-enqueue or resume.
+        # quarantine. Legacy rows with no recorded binding are ambiguous
+        # unfinished executions and fail closed; migration to a new generation
+        # is an explicit operator act: re-enqueue or resume.
         bound_generation = str(job["runtime_generation"] or "")
         try:
             serving_generation = _current_runtime_generation()

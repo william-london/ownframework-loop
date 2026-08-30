@@ -1769,7 +1769,7 @@ def _build_parser() -> argparse.ArgumentParser:
             max_total_tokens=args.max_total_tokens,
             max_wall_seconds=max_wall_seconds,
         )
-        _emit(out)
+        _emit(out, exit_code=0 if out.get("ok", True) else 2)
 
     def cmd_supervisor_status(args: argparse.Namespace) -> None:
         repo = _repo_path(args.repo)

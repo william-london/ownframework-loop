@@ -4,6 +4,59 @@ All notable current-release changes to OwnFramework Loop are documented here.
 The complete historical changelog through 0.5.2 is preserved at
 [`docs/history/CHANGELOG-through-0.5.2.md`](docs/history/CHANGELOG-through-0.5.2.md).
 
+## 0.8.2 - Production Hardening Sweep (2026-08-29)
+
+v0.8.2 closes production-readiness defects found in a full source sweep after
+the 0.8.1 runtime-generation closure.
+
+### Runtime identity and migration truth
+
+- runtime generations now identify actual serving bytes: clean Git source binds
+  the full commit SHA, dirty Git source binds a full SHA-256 content identity,
+  and installed/non-Git payloads bind a full path-independent SHA-256 payload
+  identity;
+- serving-runtime identity failure quarantines before semantic dispatch;
+- unfinished legacy rows without a generation fail closed instead of silently
+  adopting a new runtime;
+- the historical exact $25 / unlimited-token / 8h tuple is preserved and
+  flagged as ambiguous rather than silently rewritten;
+- supervisor status opens the operational ledger read-only and cannot perform
+  schema/data migrations merely because an operator is monitoring;
+- a RUNNING job cannot be re-enqueued to rewrite its generation or resource
+  envelope mid-pass.
+
+### Install/uninstall lifecycle safety
+
+- managed install checks unfinished runtime dependencies before plugin cache
+  mutation;
+- runtime provenance takes ofloop_version from the exact installed payload and
+  records source_version separately;
+- supervisor replacement restores the previous plist/provenance/service if a
+  new launchd bootstrap fails;
+- managed uninstall refuses to destroy runtime bytes required by unfinished
+  jobs unless the operator explicitly chooses migration;
+- payload-manifest generation excludes its own manifest files.
+
+### Semantic-lane hardening
+
+- Write/Edit/NotebookEdit authority is bound to the explicit semantic-context
+  run id; cross-run writes are refused and notebook_path is governed;
+- active write calls with no path and active Bash calls with no command fail
+  closed;
+- Write/Edit runtime-cache exceptions are narrowed to the exact active
+  repo/run/role cache;
+- hermetic validation preserves project-supplied PYTEST_ADDOPTS while appending
+  Loop cache-isolation controls.
+
+### Proof
+
+A new canonical production-hardening suite covers byte identity, dirty Git
+identity, read-only status, runtime-identity failure, live re-enqueue refusal,
+pytest-env compatibility, cross-run/NotebookEdit writes, empty Bash, launchd
+rollback, uninstall dependency safety, and manifest self-exclusion. The prior
+runtime-generation suite now proves unbound unfinished runs fail closed and
+ambiguous historical limits are preserved/flagged.
+
 ## 0.8.1 - Runtime-Generation and Authority Closure (2026-08-29)
 
 v0.8.1 closes the four remaining independent-adjudication findings against

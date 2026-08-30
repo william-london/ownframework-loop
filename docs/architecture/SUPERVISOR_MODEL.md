@@ -155,8 +155,7 @@ Installation/refresh is guarded by two read-only, fail-closed ledger probes:
    is live (RUNNING job with an alive/unknown worker pid, or a non-terminal
    attempt of one);
 2. **runtime-generation dependency** — every job binds the runtime
-   generation that enrolled it (`ofloop-<version>@<source-head or
-   cache-hash>`). Replacement is refused while any non-terminal enrolled
+   generation that enrolled it (clean Git full SHA, dirty-source SHA-256, or installed-payload SHA-256). Replacement is refused while any non-terminal enrolled
    job (QUEUED, BACKOFF, RUNNING, QUARANTINED-but-resumable) is bound to a
    generation different from the incoming runtime. Terminal (DONE) jobs
    never block a normal install, and legacy unbound rows carry no provable
@@ -171,10 +170,10 @@ bound runs fail closed on the generation mismatch at serve time, and
 `ofloop supervisor resume` is the operator act that rebinds a run to the
 new generation (previous binding reported).
 
-Operational budget ceilings (cost/token/wall) are disabled by default in
-both fresh ledgers and schema migrations; a one-time data migration
-normalizes rows materialized by the retired historical `$25` / 8-hour DDL
-defaults without touching explicitly configured values.
+Operational budget ceilings (cost/token/wall) are disabled by default for
+fresh/missing schema fields. Existing rows are never silently reinterpreted:
+the historical exact $25 / unlimited-token / 8-hour tuple is ambiguous and is
+preserved with an operator-visible warning until explicitly re-registered.
 
 Use `uninstall-supervisor-macos.sh` to remove the launch agent.
 
@@ -210,6 +209,9 @@ passes through its packet budget (up to 28800 seconds per pass) rather than
 by widening the default fuse.
 
 ## Live read-only observability
+
+Supervisor status opens an existing SQLite ledger in read-only mode; observing an older run never performs schema or data migration.
+
 
 ofloop supervisor status exposes raw progress telemetry without mutating the
 run: worker/execution elapsed seconds, time since the job row changed,

@@ -261,78 +261,44 @@ PY
 pass "T9 generation binding: mismatch quarantines fail-closed; resume rebinds explicitly"
 
 # ---------------------------------------------------------------------------
-# T10: a legacy UNBOUND job adopts the serving generation at first contact
-#      and executes (initial binding, never a silent switch).
+# T10: a legacy UNBOUND unfinished job fails closed until explicit migration.
 # ---------------------------------------------------------------------------
 PYTHONPATH="$LIB_DIR" python3 -B - "$TMP" <<'PY'
-import json, os, sqlite3, sys
-sys.path.insert(0, os.path.join(os.getcwd(), "lib"))
+import sqlite3, sys
 from pathlib import Path
+sys.path.insert(0, str(Path.cwd() / "lib"))
 from ownframework_loop import supervisor
 
 tmp = Path(sys.argv[1])
-root = Path(os.getcwd())
-lib = str(root / "lib")
-repo = tmp / "adopt-repo"
+db = tmp / "unbound.sqlite3"
+repo = tmp / "unbound-repo"
 repo.mkdir(exist_ok=True)
-rd = repo / ".ownframework-loop" / "run-adopt"
-rd.mkdir(parents=True)
-(rd / "STATE.json").write_text(json.dumps({"state": "BUILDING"}), encoding="utf-8")
-(rd / "WORK_PACKET.md").write_text(
-    "```json\n" + json.dumps({"schema": "ownframework-work-packet/v2",
-                              "execution_mode": "single", "risk_budget": {}})
-    + "\n```\n", encoding="utf-8")
-semantic = rd / "BUILD_AGENT_RESULT.json"
-semantic.write_text("{}", encoding="utf-8")
-db = tmp / "adopt.sqlite3"
 
-class RecordingRunner:
-    runner_id = "recording-runner"
-    def preflight(self):
-        return supervisor.RunnerReadiness(True)
-    def run(self, work_order, **kwargs):
-        return supervisor.RunnerResult(
-            ok=True, returncode=0, cost_usd=0.1, cost_known=True,
-            tokens_known=True, input_tokens=10, output_tokens=5,
-            stdout='{"is_error":false,"total_cost_usd":0.1}', stderr="",
-        )
-
-supervisor.register_runner(RecordingRunner)
-order = {
-    "schema": supervisor.dispatch_mod.SCHEMA,
-    "decision": "BUILD",
-    "role": "builder",
-    "run_id": "run-adopt",
-    "state": "BUILDING",
-    "replayed": False,
-    "canonical_repo": str(repo),
-    "worktree": str(repo),
-    "semantic_path": str(semantic),
-}
-supervisor.dispatch_mod.claim_next = lambda **kwargs: dict(order)
-supervisor.dispatch_mod.semantic_result_ready = lambda work_order: (False, "builder_summary_empty")
-supervisor.dispatch_mod.finalize_work_order = lambda work_order: {"ok": True, "finalized": True}
-
-job = supervisor.enqueue(
-    canonical_repo=repo, run_id="run-adopt", runner="recording-runner", db_path=db,
+supervisor.enqueue(
+    canonical_repo=repo,
+    run_id="run-unbound",
+    db_path=db,
+    runtime_generation="ofloop-legacy@known",
 )
-# Simulate a pre-contract legacy row: binding cleared.
 conn = sqlite3.connect(str(db))
-conn.execute("UPDATE jobs SET runtime_generation='' WHERE run_id='run-adopt'")
+conn.execute(
+    "UPDATE jobs SET runtime_generation='', status='QUEUED', next_attempt_at=0 "
+    "WHERE run_id='run-unbound'"
+)
 conn.commit()
 conn.close()
 
 res = supervisor.run_one(db_path=db)
-assert res["action"] == "BUILD", res  # executed, NOT quarantined
-conn = sqlite3.connect(str(db))
-adopted = conn.execute(
-    "SELECT runtime_generation FROM jobs WHERE run_id='run-adopt'"
-).fetchone()[0]
-conn.close()
-assert adopted == supervisor.runtime_generation(), adopted
-print("LEGACY_ADOPTION=OK")
+assert res["action"] == "QUARANTINED", res
+assert res["reason"] == "runtime_generation_unbound", res
+
+res2 = supervisor.resume(canonical_repo=repo, run_id="run-unbound", db_path=db)
+assert res2["ok"], res2
+assert res2["runtime_generation"], res2
+assert res2["runtime_generation_previous"] == "", res2
+print("LEGACY_UNBOUND_FAIL_CLOSED=OK")
 PY
-pass "T10 legacy unbound job adopts the serving generation once and executes"
+pass "T10 legacy unbound unfinished jobs fail closed until explicit resume/rebind"
 
 # ---------------------------------------------------------------------------
 # T11: ledger defaults — fresh databases are disabled-by-default; legacy
@@ -402,16 +368,22 @@ conn.close()
 supervisor.enqueue(canonical_repo=repo, run_id="run-fresh2", db_path=db2)
 conn = supervisor._connect(db2)
 rows = {
-    r["run_id"]: (r["max_total_cost_usd"], r["max_wall_seconds"], r["max_total_tokens"])
-    for r in conn.execute("SELECT run_id, max_total_cost_usd, max_wall_seconds, max_total_tokens FROM jobs").fetchall()
+    r["run_id"]: (
+        r["max_total_cost_usd"], r["max_wall_seconds"],
+        r["max_total_tokens"], r["legacy_budget_ambiguous"],
+    )
+    for r in conn.execute(
+        "SELECT run_id, max_total_cost_usd, max_wall_seconds, "
+        "max_total_tokens, legacy_budget_ambiguous FROM jobs"
+    ).fetchall()
 }
-assert rows["run-legacy-default"] == (0.0, 0, 0), rows
-assert rows["run-explicit-intent"] == (25.0, 28800, 500), rows
-assert rows["run-fresh2"] == (0.0, 0, 0), rows
+assert rows["run-legacy-default"] == (25.0, 28800, 0, 1), rows
+assert rows["run-explicit-intent"] == (25.0, 28800, 500, 0), rows
+assert rows["run-fresh2"] == (0.0, 0, 0, 0), rows
 assert int(conn.execute("PRAGMA user_version").fetchone()[0]) == supervisor.SCHEMA_DATA_VERSION
 conn.close()
 print("LEDGER_DEFAULTS=OK")
 PY
-pass "T11 fresh ledgers disabled-by-default; legacy defaults normalized once; explicit intent preserved"
+pass "T11 fresh defaults disabled; ambiguous historical fingerprint preserved and flagged"
 
 echo "V080_RUNTIME_GENERATION=PASS"

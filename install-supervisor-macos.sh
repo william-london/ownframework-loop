@@ -110,10 +110,10 @@ RUNTIME_PROVENANCE="$STATE_ROOT/runtime-provenance.json"
 #     (b) RUNTIME-GENERATION CONTRACT: a sealed unfinished PROGRAM must not
 #         silently change runtime generation merely because it is between
 #         passes. Every non-terminal enrolled job (QUEUED, BACKOFF, RUNNING,
-#         QUARANTINED-but-resumable) that is BOUND to a generation different
-#         from the incoming runtime refuses the replacement. Terminal (DONE)
-#         jobs never block a normal install. Legacy rows with no recorded
-#         binding carry no provable dependency and do not block.
+#         QUARANTINED-but-resumable) must retain its recorded runtime. A
+#         different generation refuses replacement; an unbound legacy
+#         unfinished job also refuses because its generation is ambiguous.
+#         Terminal (DONE) jobs never block a normal install.
 #
 #     The probes are read-only and fail closed (unreadable ledger = refuse).
 #     Overrides are explicit operator declarations, clearly unsafe:
@@ -409,4 +409,5 @@ echo "STATE_ROOT=$STATE_ROOT"
 echo "RUNTIME_PROVENANCE=$RUNTIME_PROVENANCE"
 echo "SOURCE_HEAD=${SOURCE_HEAD:-(not-a-git-checkout)}"
 echo "OFLOOP_VERSION=${OFLOOP_VERSION:-(unknown)}"
+echo "SOURCE_VERSION=${SOURCE_VERSION:-(unknown)}"
 echo "RUNTIME_GENERATION=${RUNTIME_GENERATION:-(unknown)}"
