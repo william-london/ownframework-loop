@@ -1,17 +1,14 @@
-# Portability notes
+# Portability Notes
 
-## Portable core
+OwnFramework Loop core is intentionally host-neutral.
 
-The work packet and approval binding, lifecycle transitions, budgets, worktree/candidate Git SHA, exact-SHA review/verdict binding, terminal state, and promotion boundary are host-neutral.
+Claude Code is currently the first production-hardened semantic runner.
+Codex is experimental. Future integrations such as other coding-agent CLIs
+should register/implement the shared runner contract or consume the generic CLI
+contract rather than fork the deterministic state machine.
 
-## Host-specific integration
+Platform service support is currently macOS launchd and Linux systemd-user.
+WSL2 follows the Linux path when its user service manager is available.
 
-Claude Code remains the stable reference adapter because it has a mature plugin surface, custom agents, and deterministic hooks already used by OwnFramework Loop.
-
-Codex is experimental: it can consume the portable Agent Skills contract, but the repository does not claim Claude-equivalent hard enforcement until a real Codex environment proves it.
-
-## Future adapters
-
-Copilot, Cursor, Gemini CLI, OpenCode, or other hosts should reuse the same core/capability contract rather than fork the state machine. New adapters start experimental and must pass conformance before being advertised as supported.
-
-Mixed-agent build/review is structurally possible because the handoff is deterministic evidence—approved packet hash, candidate Git SHA, and SHA-bound verdict—not shared model context. Automatic cross-vendor spawning is intentionally out of scope for v0.4.0.
+Do not describe plugin installation, `/loop`, or any one model host as the
+canonical OwnFramework Loop execution architecture.

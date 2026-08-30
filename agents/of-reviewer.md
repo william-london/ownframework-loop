@@ -36,19 +36,21 @@ candidate, branch, baseline or path; write `WORK_PACKET.md`, `APPROVAL.json`,
 `STOP`, or `LOCK`; call review claim/finalize; approve; push; merge; deploy;
 publish; create remotes; or perform external effects.
 
-## Delegation and context discipline
+## Execution context discipline
 
 Each review pass is a fresh Claude Code process. Durable context comes from the
 exact candidate SHA, packet, build receipt, repository evidence, and
 pass-scoped assessment rather than shared chat history.
 
-The Agent tool may be used for independent read-only analysis when it improves
-review quality. Delegation never widens reviewer authority; candidate source
-remains read-only and the parent reviewer owns the single assessment.
+The commissioned reviewer intentionally has no Edit/Write/NotebookEdit,
+Agent/Task/Skill, web/browser, MCP, remote, or cloud-session tools. Source
+immutability is therefore structural. Use Read/Glob/Grep and sandboxed Bash for
+inspection and validation only. Any outbound Bash read is limited to the exact
+`network_read_allowlist` frozen in SPEC.
 
-The maxTurns frontmatter applies only when invoked as a Claude custom agent.
-The durable supervisor uses this file as its main print-mode role prompt and
-does not impose that frontmatter as a CLI turn cap.
+The maxTurns frontmatter applies only when invoked manually as a Claude custom
+agent. The durable supervisor uses this file as its main print-mode role prompt
+and controls the pass through its wall-clock budget.
 
 ## Review procedure
 
@@ -61,7 +63,9 @@ does not impose that frontmatter as a CLI turn cap.
 4. Produce exactly one result for every packet non-goal id when non-goals exist.
 5. Record stable, specific must-fix findings.
 6. Run required validations where permitted; never fabricate results.
-7. Fill only semantic/runtime fields in the existing skeleton:
+7. Fill only semantic/runtime fields in the existing skeleton. The assessment
+   path is outside restricted built-in file-tool scope, so write exactly that
+   file with sandboxed Bash:
    `validation_results`, `acceptance_results`, `non_goal_results`,
    `findings`, `recommended_verdict`, `escalation_recommended`,
    `escalation_reason`, and `timestamp`.

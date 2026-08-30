@@ -1,37 +1,18 @@
-# Agent Skills portability
+# Agent Skills
 
-OwnFramework Loop uses Agent Skills as a portable presentation layer while
-keeping protocol authority in the deterministic core.
+Portable skills are optional adapter UX over the deterministic core.
 
-Canonical host-neutral skills:
+- `.agents/skills/` contains portable Agent Skills for hosts such as Codex.
+- `skills/` contains Claude Code adapter skills.
 
-- `.agents/skills/of-loop-spec`
-- `.agents/skills/of-loop-build`
-- `.agents/skills/of-loop-review`
-- `.agents/skills/of-loop-status`
+Neither directory is the OwnFramework Loop scheduler or source of protocol
+truth.
 
-They describe how an agent participates while delegating execution sealing,
-state transitions, candidate/worktree identity, verdict identity, crash
-reconciliation, and repair accounting to `ofloop`.
+The durable supervisor owns unattended cadence and invokes a registered
+semantic runner after deterministic dispatch/prepare.
 
-## Shared semantics
+A skill may coordinate supported CLI calls; it may not invent repository,
+worktree, state, candidate, or promotion authority.
 
-- **SPEC** creates/validates a bounded packet and returns a run ID plus canonical
-  builder/reviewer launch commands. It does not require a normal approval step.
-- **BUILD** treats the unstarted compatibility state as `READY_TO_START`; first
-  build claim may create the immutable execution seal.
-- **REVIEW** waits before first start and reviews only when a candidate is
-  reviewable.
-- **STATUS** is read-only and reports core-owned evidence.
-
-Claude Code remains the stable/reference adapter and keeps its plugin-compatible
-skill surface under `skills/`. Those files may use Claude-specific extensions,
-but their lifecycle semantics must match the portable skills.
-
-Codex uses the portable skills plus repository `AGENTS.md`; live Codex execution
-remains a separate proof before `live_verified` can become true.
-
-Skills guide behavior; they are not the security boundary. Mechanical authority
-comes from execution binding, locks/state transitions, deterministic worktree/SHA
-identity, finalizers, exact-pass reconciliation, host guards, and the promotion
-boundary.
+Claude skills may use Claude-specific metadata because they live in the Claude
+adapter surface. Portable skills must not assume Claude plugin commands.

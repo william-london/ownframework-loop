@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -114,51 +115,34 @@ def _run(root: Path, argv: list[str], timeout: int, env: dict[str, str]) -> Comm
 
 
 def _discover_active_managed_install() -> tuple[str, str]:
-    """Return (install_path, diagnostic) for enabled of-loop@ownframework."""
-    if not shutil.which("claude"):
-        return "", "claude_missing"
+    """Return (core_root, diagnostic) for the managed vendor-neutral runtime."""
+    launcher = shutil.which("ofloop")
+    if not launcher:
+        return "", "ofloop_missing"
     try:
-        proc = subprocess.run(
-            ["claude", "plugin", "list", "--json"],
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=30,
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        return "", f"registry_probe_failed:{type(exc).__name__}"
-    if proc.returncode != 0:
-        return "", f"registry_probe_rc={proc.returncode}"
-    try:
-        data = json.loads(proc.stdout or "[]")
-    except json.JSONDecodeError:
-        return "", "registry_json_invalid"
-    matches: list[str] = []
-    for entry in data if isinstance(data, list) else []:
-        if not isinstance(entry, dict):
-            continue
-        if entry.get("id") != "of-loop@ownframework" or not entry.get("enabled", False):
-            continue
-        install_path = str(entry.get("installPath") or "").strip()
-        if install_path:
-            matches.append(install_path)
-    unique = sorted(set(matches))
-    if len(unique) == 1:
-        return unique[0], "ok"
-    if len(unique) > 1:
-        return "", "registry_ambiguous"
-    return "", "not_installed"
+        resolved = Path(launcher).expanduser().resolve(strict=False)
+        root = resolved.parent.parent
+        marker = root / ".ownframework-loop-managed"
+        if not marker.is_file():
+            return "", "managed_marker_missing"
+        marker_text = marker.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        return "", f"core_probe_failed:{type(exc).__name__}"
+    if "kind=core" not in marker_text:
+        return "", "managed_marker_not_core"
+    return str(root), "ok"
 
 
 def _manifest_version(root: Path) -> str:
+    """Read canonical core version from a source or installed payload."""
     try:
-        payload = json.loads(
-            (root / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8")
+        text = (root / "lib" / "ownframework_loop" / "__init__.py").read_text(
+            encoding="utf-8"
         )
-    except (OSError, json.JSONDecodeError, TypeError):
+    except OSError:
         return ""
-    return str(payload.get("version") or "")
-
+    match = re.search(r'^__version__\s*=\s*["\']([^"\']+)', text, re.MULTILINE)
+    return match.group(1) if match else ""
 
 def main() -> int:
     root = Path(__file__).resolve().parents[2]
@@ -231,8 +215,10 @@ def main() -> int:
         _emit(output, f"OF_LOOP_GATE_VERIFIED_TOTAL={verified_total}")
         _emit(output, f"OF_LOOP_GATE_VERIFIED_PASSED={verified_passed}")
         _emit(output, "NARROW_TESTS=PASS")
-        # Installed parity uses the canonical enabled plugin registry entry.
-        # A currently installed older release is reported but does not make the
+        # Installed parity is core-owned. Discover the managed vendor-neutral
+        # runtime from the active ofloop launcher; adapter/plugin registries are
+        # validated separately and never define product installation identity.
+        # A currently installed older core is reported but does not make the
         # newer source release intrinsically invalid; exact parity is required
         # after installation/recommissioning of the new release.
         skip_install_check = os.environ.get("OFLOOP_SOURCE_ONLY") == "1"
@@ -249,7 +235,7 @@ def main() -> int:
             source_version = _manifest_version(root)
             installed_version = _manifest_version(install_path)
             if not install_path.is_dir():
-                _emit(output, f"OF_LOOP_INSTALL_PARITY=REGISTRY_PATH_MISSING root={install_path}")
+                _emit(output, f"OF_LOOP_INSTALL_PARITY=CORE_PATH_MISSING root={install_path}")
                 return 1
             if not install_override and installed_version != source_version:
                 _emit(

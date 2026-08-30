@@ -1,32 +1,21 @@
-# Adapter capability matrix
+# Adapter Capability Matrix
 
-| Capability | Claude Code | Generic CLI host | Codex |
-|---|---|---|---|
-| Maturity | Stable / reference | Portable baseline | Experimental |
-| Shared work-packet protocol | Yes | Yes | Yes |
-| Automatic first-start execution seal | Core-owned | Core-owned | Core-owned |
-| Spec-time baseline SHA/branch binding | Core-owned | Core-owned | Core-owned |
-| Exact candidate SHA | Core-owned | Core-owned | Core-owned |
-| Exact-SHA review contract | Yes | Yes | Yes |
-| Core-owned repair/checkpoint budgets | Yes | Yes | Yes |
-| Exact-pass crash reconciliation | Core-owned | Core-owned | Core-owned |
-| Agent Skills | Yes | Optional / not required | Yes |
-| Native custom agents/subagents | Yes | Not assumed | Not claimed |
-| Native deterministic hooks | Yes | Not assumed | Not claimed |
-| Hard command interception | Yes | Not assumed | Not claimed |
-| Built-in/session loop integration | Yes | Not assumed | Not claimed |
-| Managed OwnFramework installer | Yes | Source checkout | Yes, experimental adapter installer |
+| Capability | Claude Code | Generic CLI contract | Codex |
+| --- | --- | --- | --- |
 | Protocol compatible | Yes | Yes | Yes |
-| Hardened | Yes, tool-surface rails | No named-host claim | No |
-| OS sandbox / arbitrary same-user containment | No | No | No |
-| Live host verification | Yes | Not applicable to abstract host | Pending real Codex proof |
+| Core/runtime owner | No | No | No |
+| Durable scheduler owner | No | No | No |
+| Semantic runner registered/live | Yes | Host-defined | Not yet |
+| Live verified | Yes | N/A abstract contract | No |
+| Hardened unattended boundary | Yes | Host-defined | No |
+| Native plugin/skills | Plugin + skills | Not required | Agent Skills |
+| Native hooks/interception | Yes | Not required | No equivalent claim |
+| Exact-SHA review contract | Yes via core | Required | Required |
+| Human promotion boundary | Yes | Required | Required |
 
-The **Generic CLI host** column is the portability floor, not a claim that every
-agent product behaves identically. Any host that can operate a Git checkout and
-invoke supported local `ofloop` commands can integrate at this layer.
+The core/runtime/supervisor columns are deliberately absent: those capabilities
+belong to OwnFramework Loop itself and are shared by every adapter.
 
-`hardened` describes additional deterministic host rails. It does not mean that
-a same-user process with arbitrary code execution is contained like an OS
-sandbox.
-
-See [`PORTABILITY_MODEL.md`](PORTABILITY_MODEL.md).
+Claude is the first production runner, not the reference identity that new
+adapters should copy. New adapters start from the vendor-neutral contract and
+add only host-specific surfaces they can actually prove.

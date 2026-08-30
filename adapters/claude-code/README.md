@@ -1,17 +1,37 @@
-# Claude Code adapter — stable reference
+# Claude Code Adapter
 
-Claude Code remains OwnFramework Loop's stable reference adapter.
+Claude Code is OwnFramework Loop's first stable, live-verified, hardened
+semantic runner and an optional interactive adapter.
 
-The existing public experience remains first-class:
+It is **not** the owner of the OwnFramework Loop core runtime or durable
+scheduler.
 
-- managed plugin `of-loop@ownframework`;
-- `/of-loop:spec`;
-- `/of-loop:build`;
-- `/of-loop:review`;
-- custom Claude agents;
-- Claude hooks and command interception;
-- direct `claude --plugin-dir /path/to/ownframework-loop` evaluation.
+## Install
 
-The actual plugin surfaces intentionally remain at the repository root (`.claude-plugin/`, `skills/`, `agents/`, and `hooks/`) for backward compatibility. They are not moved merely to make the adapter directory visually complete.
+```bash
+bash install.sh
+bash install-adapter.sh claude-code
+```
 
-Claude-specific integration may be more hardened than other hosts, but approval, state, budgets, candidate SHA, verdict identity, and promotion remain deterministic-core concerns.
+The adapter installs the `of-loop@ownframework` Claude plugin. The core remains
+in OwnFramework Loop's versioned user-data runtime.
+
+## Interactive surfaces
+
+- `/of-loop:spec`
+- `/of-loop:build`
+- `/of-loop:review`
+- custom Claude agents/hooks
+
+BUILD/REVIEW slash commands are foreground/debug coordinators. Canonical
+unattended scheduling is supervisor enqueue + durable service.
+
+## Commissioned runner
+
+Claude Code 2.1.248+ is required for the hardened unattended boundary.
+Commissioned passes use native restricted mode, dontAsk, exact role tools,
+fail-closed sandboxing, strict MCP isolation, credential scrubbing, and frozen
+packet network-read authority.
+
+Interactive plugin capability is broader than commissioned runner authority.
+Do not infer supervisor permissions from an ordinary Claude session.

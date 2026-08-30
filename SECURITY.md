@@ -8,7 +8,7 @@ or OS-level containment of arbitrary same-user code.
 
 ## Supported release posture
 
-- The currently supported release line is **0.8.3**.
+- The currently supported release line is **0.8.4**.
 - Earlier 0.2.x/0.3.x/0.4.x/0.5.0-0.5.4 behavior remains in Git history for
   compatibility/audit context but is not the current product contract.
 
@@ -40,22 +40,29 @@ A run start authorizes bounded local engineering only. It does not grant push,
 merge, deploy, publish, payment, message sending, remote mutation, or unrelated
 external-action authority.
 
-## Tool-surface hardening versus OS containment
+## Tool-surface hardening and commissioned worker isolation
 
-The Claude Code reference adapter uses mechanical hooks to block direct and
-several normalized dangerous-command forms during active runs. Those hooks are
-meaningful guardrails, but they do **not** turn a same-user coding agent into an
-untrusted OS principal.
+The project does not claim that arbitrary same-user software becomes a separate
+untrusted OS principal. The narrower commissioned-supervisor contract is
+stronger.
 
-The project does not claim arbitrary semantic containment of Turing-complete
-local programs without a real OS/runtime isolation boundary.
+Every unattended Claude BUILD/REVIEW pass is launched with Claude Code's Bash
+sandbox enabled and fail-closed. The runtime supplies
+`sandbox.network.strictAllowlist=true` with the frozen packet's `network_read_allowlist` (empty by default),
+`allowUnsandboxedCommands=false`, and role-specific filesystem write policy.
+`--restricted` is the native shared-machine boundary: user/project/local settings are excluded and built-in file tools are confined to the pass working directory. MCP discovery is strict with an empty explicit MCP configuration. Browser/web research, nested Agent/Task orchestration, Skill, and other non-local built-ins are not exposed through the semantic worker's `--tools` allow-list. Builder and reviewer use different native tool sets; reviewers do not receive Edit/Write/NotebookEdit.
 
-A coding agent must never intentionally route around a guard refusal using
-indirection such as hidden subprocess construction, aliases, encoded commands,
-or dynamic shell assembly. A guard refusal is a policy boundary, not a puzzle.
+The supervisor uses `--permission-mode dontAsk` together with an explicit pre-approved sealed tool set and sandbox auto-allow. Inside the authorized pass there are no routine human permission prompts; anything outside the sealed capability set is denied rather than escalated. Bash is additionally denied reads of the operator home except for the current worktree, semantic artifact, runtime cache, Git metadata, and trusted Loop payload. `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1` plus sandbox credential denies keep host credentials out of Bash children.
 
-`hardened=true` means a named adapter has additional deterministic host rails for
-its declared workflow. It does not mean sandboxed arbitrary-code containment.
+The minimum commissioned-runner version is Claude Code 2.1.248 because `--restricted` is part of the boundary. Newer compatible versions are accepted. On Linux/WSL2, supervisor commissioning also proves `bubblewrap`, `socat`, and a usable bubblewrap sandbox before enabling the service. If the version/prerequisites cannot be proven or the sandbox cannot arm, semantic execution fails closed.
+
+Adapter hooks remain a second boundary for direct/normalized command forms, and
+the deterministic core re-proves exact source/candidate identity before
+accepting evidence. Interactive/foreground Claude sessions do not automatically
+inherit this exact commissioned envelope.
+
+`hardened=true` describes these deterministic host/runtime rails for the
+declared workflow; it is not a claim of universal arbitrary-code containment.
 
 ## Core security-relevant invariants
 

@@ -4,6 +4,86 @@ All notable current-release changes to OwnFramework Loop are documented here.
 The complete historical changelog through 0.5.2 is preserved at
 [`docs/history/CHANGELOG-through-0.5.2.md`](docs/history/CHANGELOG-through-0.5.2.md).
 
+## 0.8.4 - Autonomous Runtime Portability and Containment (2026-08-30)
+
+A post-closure adversarial sweep exercised failure/containment paths that the
+successful 0.8.3 live PROGRAM canary did not.
+
+### Vendor-neutral runtime topology
+
+- `install.sh` now owns a versioned vendor-neutral OwnFramework Loop core;
+  Claude/Codex integrations are optional adapters installed independently;
+- the durable supervisor is commissioned from that core rather than a Claude
+  plugin cache;
+- `install-supervisor.sh` selects launchd on macOS or systemd-user on Linux;
+- both platform installers use one shared read-only runtime-dependency probe for
+  live-work and runtime-generation replacement safety;
+- installed-core discovery/validation resolves from the managed `ofloop`
+  launcher rather than an agent/plugin registry;
+- Linux Claude commissioning proves Claude Code >=2.1.248, bubblewrap, socat,
+  and a usable native sandbox before starting unattended work;
+- adapter uninstall preserves the core; supervisor uninstall preserves
+  ledger/evidence while removing service provenance.
+
+### Dead-surface and runtime hygiene
+
+- removed the retired pre-0.6 `ofloop loop run` orchestrator/parser;
+- removed deprecated `build write-receipt` and `review write-verdict` parser
+  stubs; deterministic finalize remains the sole receipt/verdict path;
+- removed the legacy Claude skills-directory `rollback.sh` root command;
+- verified recovery removes a dead `.EVENTS.log.append.tmp` under the run
+  flock;
+- durable DONE performs/retries disposable runtime-cache GC while QUARANTINED
+  cache and durable worker/attempt evidence remain preserved.
+
+### Crash-atomic protocol state
+
+- STATE.json + EVENTS.log mutations now use a per-run write-ahead
+  STATE_TXN.json intent and deterministic recovery;
+- standalone EVENTS.log append is atomic old-or-new rather than an in-place
+  JSONL tail write;
+- critical semantic/execution call sites consume verified state instead of raw
+  STATE.json bytes;
+- caller event extras may not overwrite run/state/event-chain identity or spoof
+  the internal state_txn_id recovery marker.
+
+### Supervisor lifecycle parity
+
+- the shared runtime-dependency probe treats DONE + RETIRED as
+  non-runtime-dependent historical enrollment states for core install,
+  launchd/systemd commissioning, and removal;
+- retirement additionally refuses unresolved semantic_attempt rows even if the
+  job-level worker PID is absent/dead.
+
+### Sealed unattended Claude worker
+
+- commissioned workers require Claude Code 2.1.248+ and use the native `--restricted` shared-machine boundary;
+- Bash sandbox is fail-closed with a strict packet-bound network read
+  allow-list (empty by default) and unsandboxed-command escape disabled;
+- optional `network_read_allowlist` is frozen SPEC authority and maps directly
+  to Claude's native `sandbox.network.allowedDomains`; exact hostnames only,
+  no runtime prompt/widening;
+- user/project/local settings are excluded by `--restricted`; built-in file tools are confined to the pass working directory;
+- inherited MCPs are disabled with strict empty MCP configuration;
+- builder and reviewer have different native tool sets: builders get Read/Edit/Write/NotebookEdit/Bash/Glob/Grep; reviewers get Read/Bash/Glob/Grep only; no WebSearch/WebFetch, Agent/Task, Skill, browser, or nested orchestration inside the sealed pass;
+- historical OFLOOP_CLAUDE_ALLOWED_TOOLS environment tuning cannot widen the
+  product-owned semantic tool boundary;
+- `--permission-mode dontAsk` plus pre-approved sealed tools and sandbox auto-allow eliminate routine permission prompts without using `bypassPermissions` (which restricted mode intentionally refuses);
+- Bash read access denies the operator home except narrow current-pass/runtime re-opens, and subprocess credentials are scrubbed/denied;
+- authority-sensitive extra CLI flags are refused before Claude starts.
+
+Research/integrations remain outside sealed BUILD/REVIEW passes. Promotion and
+external mutation remain operator-owned outside Loop.
+
+### Regression proof
+
+The canonical v0.8.4 tests fault-inject state/event crash windows, prove
+unexplained tampering remains refused, verify authority-bearing state reads,
+exercise the worker sandbox/settings/version boundary, prove RETIRED managed
+lifecycle parity, cover unresolved-attempt retirement refusal, validate
+vendor-neutral core install/discovery/uninstall, and exercise Linux systemd-user
+commissioning alongside macOS launchd parity.
+
 ## 0.8.3 - Supervisor Enrollment Retirement (2026-08-29)
 
 ### Operator lifecycle for durable historical evidence

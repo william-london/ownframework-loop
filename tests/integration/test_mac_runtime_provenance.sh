@@ -74,6 +74,7 @@ REAL_CLAUDE="$SANDBOX/fakebin-claude/real-claude"
 mkdir -p "$SANDBOX/fakebin-claude"
 cat > "$REAL_CLAUDE" <<'FAKE_EOF'
 #!/usr/bin/env bash
+if [[ "${1:-}" == "--version" ]]; then echo "2.1.251 (Claude Code)"; fi
 exit 0
 FAKE_EOF
 chmod +x "$REAL_CLAUDE"

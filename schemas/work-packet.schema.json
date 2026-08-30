@@ -83,6 +83,18 @@
     "elevated_allowed_paths": { "type": "array", "items": { "type": "string" } },
     "sensitive_path_reason": { "type": "string" },
     "additional_review_required": { "type": "boolean" },
+    "network_read_allowlist": {
+      "type": "array",
+      "maxItems": 64,
+      "uniqueItems": true,
+      "description": "Optional frozen read-only network domains for sandboxed semantic Bash (for example package registries). Omit/empty means no outbound network. Exact lowercase hostnames only; no schemes, ports, paths, or wildcards.",
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 253,
+        "pattern": "^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.)*[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$"
+      }
+    },
     "required_validation": {
       "type": "array",
       "items": {

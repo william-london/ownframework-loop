@@ -31,15 +31,19 @@ make_fake_cache() {
   echo "ow" > "$root/.ownframework-loop/EVENTS.log"
 }
 
-# 1. install.sh manifest pattern excludes __pycache__/* from staged payload.
-echo "Test 1: install.sh PAYLOAD_FILES find excludes __pycache__ and bytecode"
-grep -F -q "*/__pycache__/" "$ROOT/install.sh" || fail "Test 1: install.sh missing __pycache__ exclusion"
-grep -F -q "*.pyc" "$ROOT/install.sh" || fail "Test 1: install.sh missing *.pyc exclusion"
-grep -F -q "*.pyo" "$ROOT/install.sh" || fail "Test 1: install.sh missing *.pyo exclusion"
-grep -F -q "./.ownframework-loop/" "$ROOT/install.sh" || fail "Test 1: install.sh missing .ownframework-loop exclusion"
-grep -F -q "./.git/" "$ROOT/install.sh" || fail "Test 1: install.sh missing .git exclusion"
-grep -F -q "./logs/" "$ROOT/install.sh" || fail "Test 1: install.sh missing logs exclusion"
-pass "Test 1: install.sh PAYLOAD_FILES excludes bytecode/.git/.ownframework-loop/logs"
+# 1. Core installer manifest generator excludes disposable/runtime state.
+echo "Test 1: install.sh manifest generator excludes bytecode and runtime state"
+PYTHONDONTWRITEBYTECODE=1 python3 -B - "$ROOT/install.sh" <<'PY'
+import pathlib,sys
+src=pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+for token in ('"__pycache__"', '".git"', '"logs"', '".ownframework-loop"'):
+    assert token in src, f"missing directory exclusion {token}"
+for token in ('".pyc"', '".pyo"', '".pyd"'):
+    assert token in src, f"missing bytecode exclusion {token}"
+assert "verify_payload_manifest.py" in src
+assert "manifest_count_check.py" in src
+PY
+pass "Test 1: core install manifest excludes bytecode/.git/.ownframework-loop/logs"
 
 # 2. install.sh exclusion produces a manifest that does NOT contain bytecode.
 echo "Test 2: simulated manifest run excludes bytecode from staged payload"

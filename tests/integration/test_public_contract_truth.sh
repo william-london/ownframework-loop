@@ -78,13 +78,13 @@ grep -Fq 'first claim may auto-seal' "$BUILD_SKILL" || fail "build skill does no
 pass "active build skill has no approval-era pre-start contradiction"
 
 # Spec: normal background flow is supervisor-first and explicitly has no
-# approval ceremony. Foreground /loop commands remain available for debug.
+# approval ceremony. Plugin-era /loop scheduling must not return.
 grep -Fq 'ofloop supervisor enqueue <repo> <run-id>' "$SPEC_SKILL" || fail "spec skill missing supervisor enqueue handoff"
 grep -Fq 'ofloop supervisor status <repo> <run-id>' "$SPEC_SKILL" || fail "spec skill missing supervisor status handoff"
 grep -Fq 'ofloop supervisor serve' "$SPEC_SKILL" || fail "spec skill missing supervisor execution-clock handoff"
-grep -Fq '/loop /of-loop:build <run-id>' "$SPEC_SKILL" || fail "spec skill missing foreground builder debug handoff"
-grep -Fq '/loop /of-loop:review <run-id>' "$SPEC_SKILL" || fail "spec skill missing foreground reviewer debug handoff"
-grep -Fq 'FOREGROUND / DEBUG' "$SPEC_SKILL" || fail "spec skill does not label /loop as foreground/debug"
+if grep -Fq '/loop /of-loop:' "$SPEC_SKILL"; then
+  fail "spec skill reintroduced retired /loop scheduling"
+fi
 grep -Fq 'no approval ceremony is required' "$SPEC_SKILL" || fail "spec skill does not state no-ceremony contract"
 pass "active spec skill exposes supervisor-first no-ceremony UX"
 
@@ -93,4 +93,18 @@ grep -Fq 'AWAITING_APPROVAL / READY_TO_START | WAIT' "$REVIEW_SKILL" || fail "re
 grep -Fq 'builder owns first start' "$REVIEW_SKILL" || fail "review skill does not assign first-start ownership to builder"
 pass "active review skill waits before first start"
 
+# Product identity: active generic contracts may name Claude only as an
+# adapter/runner, never as the owner of the core runtime or scheduler.
+if grep -Fq 'A reusable Claude Code plugin' "$ROOT_DIR/docs/ARCHITECTURE.md"; then
+  fail "architecture still identifies product as Claude Code plugin"
+fi
+if grep -Fq 'claude plugin list --json' "$ROOT_DIR/README.md"; then
+  fail "README still derives core installation from Claude plugin registry"
+fi
+for f in "$ROOT_DIR/README.md" "$ROOT_DIR/docs/ARCHITECTURE.md" "$ROOT_DIR/docs/OPERATOR_RUNBOOK.md"; do
+  if grep -Fq '/loop /of-loop:' "$f"; then
+    fail "active public contract advertises retired /loop scheduler: $f"
+  fi
+done
+pass "active product identity is core/supervisor/adapter, not plugin-era /loop"
 echo "PUBLIC_CONTRACT_TRUTH=PASS"

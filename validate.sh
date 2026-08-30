@@ -1,48 +1,17 @@
 #!/usr/bin/env bash
 # OwnFramework Loop — validate.
 #
-# Two distinct code paths:
+#   bash validate.sh                    # validate this source tree
+#   bash validate.sh --installed        # validate the active managed core
+#   bash validate.sh --installed <path> # validate an explicit core payload
 #
-#   bash validate.sh                   # validate the source tree at <repo>
-#   bash validate.sh --installed       # validate the installed copy at the
-#                                       # actual install root (the copy you
-#                                       # get from install.sh)
+# Bare --installed resolves the vendor-neutral core from the active `ofloop`
+# executable and its .ownframework-loop-managed marker. Agent/plugin registries
+# are adapter-specific and are never used to decide what "OwnFramework Loop is
+# installed" means.
 #
-# Both paths verify structural integrity: required files present, plugin.json
-# parses, schemas parse, Python module imports, CLI runs, hook scripts are
-# executable, all unit tests pass. The --installed path additionally verifies
-# the install root is a copy (not a symlink), that there is no .git/ directory
-# inside it, and that the CLI invoked through the installed paths actually
-# works end-to-end.
-#
-# Honor:
-#   OFLOOP_VALIDATE_SOURCE_ROOT  - default source root (when not passing as arg)
-#   OFLOOP_VALIDATE_INSTALL_ROOT - default installed root for --installed
-#                                  (used only when --installed=<path> or
-#                                   --installed <path> is supplied; bare
-#                                   --installed ALWAYS queries the live
-#                                   Claude Code plugin registry)
-#
-# v0.3.3 Repair A: active installed-cache discovery
-# -----------------------------------------------
-# Bare `--installed` MUST discover the live active managed install via
-# `claude plugin list --json`. The legacy `~/.claude/skills/of-loop` path
-# is a rolled-back backup artifact (audit v0.3.3) and MUST NOT be selected
-# silently as the active install. Three argument forms are supported:
-#   bash validate.sh --installed
-#   bash validate.sh --installed /explicit/path
-#   bash validate.sh --installed=/explicit/path
-# When an explicit path is supplied, that path is used verbatim — but we
-# still warn (do not fail) if it does not match the live registry entry,
-# because operators may legitimately be validating a side-by-side cache
-# while the managed install is active. The warning is informational; the
-# explicit path is authoritative for that run.
-#
-# v0.3.3 Repair B: bytecode-free validation
-# ----------------------------------------
-# All outer Python launch boundaries in this script use
-# `PYTHONDONTWRITEBYTECODE=1` and `python3 -B`, so validation NEVER
-# creates .pyc files inside the cache tree it is inspecting.
+# All outer Python launch boundaries suppress bytecode so validation does not
+# mutate the payload it is inspecting.
 set -uo pipefail
 
 INSTALLED_MODE=0
@@ -62,20 +31,13 @@ for arg in "$@"; do
     --help|-h)
       cat <<USAGE
 Usage:
-  bash validate.sh                    # validate the SOURCE tree
-  bash validate.sh --installed        # validate the live INSTALLED copy
-                                       #   (discovered via
-                                       #    \`claude plugin list --json\`)
-  bash validate.sh --installed <path> # validate the INSTALLED copy at <path>
-  bash validate.sh --installed=<path> # same, equals form
+  bash validate.sh
+  bash validate.sh --installed
+  bash validate.sh --installed <path>
+  bash validate.sh --installed=<path>
 
 Source root : OFLOOP_VALIDATE_SOURCE_ROOT (or repo of this script)
-Install root: explicit path argument, OR the active managed install
-              reported by \`claude plugin list --json\` for
-              of-loop@ownframework (enabled, non-empty installPath).
-
-The legacy path \$HOME/.claude/skills/of-loop is a rolled-back backup
-artifact and is NEVER auto-selected as the active install.
+Install root: explicit path, or the managed core resolved from `command -v ofloop`.
 USAGE
       exit 0 ;;
     *)
@@ -91,72 +53,42 @@ done
 ok() { echo "  PASS: $*"; }
 bad() { echo "  FAIL: $*"; exit 1; }
 
-# Active installed-cache discovery: query the Claude Code plugin registry
-# for the single enabled of-loop@ownframework entry. The legacy
-# skills-dir copy is intentionally NOT consulted as a fallback; if the
-# registry has no live entry, bare --installed fails closed with a clear
-# error.
+# Active managed-core discovery. The PATH entry may be the canonical symlink
+# created by install.sh; Path.resolve() lands inside the versioned core payload.
 discover_active_install_path() {
-  if ! command -v claude >/dev/null 2>&1; then
-    echo ""
-    return 1
-  fi
-  local raw
-  raw="$(claude plugin list --json 2>/dev/null || true)"
-  [[ -z "$raw" ]] && { echo ""; return 1; }
-  # PYTHONDONTWRITEBYTECODE=1 + python3 -B prevents the discovery helper
-  # from polluting the cache tree with .pyc files (Repair B).
-  PYTHONDONTWRITEBYTECODE=1 python3 -B - "$raw" <<'PY'
-import json, sys
-try:
-    data = json.loads(sys.argv[1])
-except Exception:
-    sys.exit(0)
-matches = []
-for e in data or []:
-    if not isinstance(e, dict):
-        continue
-    if e.get("id") != "of-loop@ownframework":
-        continue
-    if not e.get("enabled", False):
-        continue
-    ip = e.get("installPath") or ""
-    if not ip:
-        continue
-    matches.append(ip)
-if len(matches) == 1:
-    print(matches[0])
-    sys.exit(0)
-if len(matches) > 1:
-    print("__AMBIGUOUS__:" + "\n".join(matches), file=sys.stderr)
-    sys.exit(2)
-print("")
-sys.exit(0)
+  local launcher
+  launcher="$(command -v ofloop 2>/dev/null || true)"
+  [[ -n "$launcher" ]] || { echo ""; return 1; }
+  PYTHONDONTWRITEBYTECODE=1 python3 -B - "$launcher" <<'PY'
+import sys
+from pathlib import Path
+p=Path(sys.argv[1]).expanduser().resolve(strict=False)
+root=p.parent.parent
+marker=root/".ownframework-loop-managed"
+if not marker.is_file():
+    raise SystemExit(1)
+text=marker.read_text(encoding="utf-8",errors="replace")
+if "kind=core" not in text:
+    raise SystemExit(1)
+print(root)
 PY
 }
 
 if [[ "$INSTALLED_MODE" -eq 1 ]]; then
-  echo "=== OwnFramework Loop — validate (INSTALLED COPY) ==="
+  echo "=== OwnFramework Loop — validate (INSTALLED CORE) ==="
+  discovered="$(discover_active_install_path || true)"
   if [[ -n "$EXPLICIT_INSTALL_PATH" ]]; then
     ROOT="$EXPLICIT_INSTALL_PATH"
     echo "  using explicit --installed path: $ROOT"
-    # Informational cross-check: if the explicit path differs from the
-    # live registry entry, warn but do not fail.
-    discovered="$(discover_active_install_path || true)"
-    if [[ -n "$discovered" && "$discovered" != "$ROOT" ]]; then
-      echo "  NOTE: explicit --installed path differs from live registry entry"
-      echo "        explicit:  $ROOT"
-      echo "        registry:  $discovered"
+    if [[ -n "$discovered" && "$(cd "$ROOT" 2>/dev/null && pwd -P || true)" != "$(cd "$discovered" 2>/dev/null && pwd -P || true)" ]]; then
+      echo "  NOTE: explicit installed path differs from active managed core"
+      echo "        explicit: $ROOT"
+      echo "        active:   $discovered"
     fi
   else
-    # Bare --installed: ALWAYS query the live registry. Never fall back
-    # to the legacy skills-dir path or to OFLOOP_VALIDATE_INSTALL_ROOT.
-    discovered="$(discover_active_install_path || true)"
-    if [[ -z "$discovered" ]]; then
-      bad "bare --installed requested but claude plugin list --json returned no enabled of-loop@ownframework entry; re-run install.sh"
-    fi
+    [[ -n "$discovered" ]] || bad "bare --installed requested but no managed core was resolved from 'ofloop'; run bash install.sh"
     ROOT="$discovered"
-    echo "  discovered active install: $ROOT"
+    echo "  discovered active core: $ROOT"
   fi
 else
   echo "=== OwnFramework Loop — validate (SOURCE TREE) ==="
@@ -169,53 +101,45 @@ if [[ ! -d "$ROOT" ]]; then
   bad "root path does not exist: $ROOT"
 fi
 
-# 1. Plugin manifest.
-PYTHONDONTWRITEBYTECODE=1 python3 -B - "$ROOT" <<'PY'
-import json, sys
-root = sys.argv[1]
+# 1. Core version truth.
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$ROOT/lib" python3 -B - <<'PY'
 import re
-data = json.load(open(f"{root}/.claude-plugin/plugin.json"))
-assert data["name"] == "of-loop", f"plugin name must be of-loop, got {data.get('name')}"
-assert data["displayName"] == "OwnFramework Loop"
-assert "version" in data
-ver = data["version"]
-m = re.match(r"^(\d+)\.(\d+)\.(\d+)$", ver)
-assert m, f"version must be semver, got {ver!r}"
-major = int(m.group(1)); minor = int(m.group(2)); patch = int(m.group(3))
-assert (major, minor, patch) >= (0, 3, 0), (
-    f"installed version must be >= 0.3.0 (got {ver})"
-)
-print(f"  PASS: plugin manifest valid (version={ver} >= 0.3.0)")
+from ownframework_loop import __version__
+m=re.fullmatch(r"(\d+)\.(\d+)\.(\d+)", __version__)
+assert m, f"core version must be semver, got {__version__!r}"
+print(f"  PASS: core version valid ({__version__})")
 PY
 
-# 2. Required files.
+# 2. Required core/portability files.
 for f in \
-  .claude-plugin/plugin.json \
-  skills/spec/SKILL.md \
-  skills/build/SKILL.md \
-  skills/review/SKILL.md \
-  agents/of-builder.md \
-  agents/of-reviewer.md \
-  hooks/hooks.json \
   bin/ofloop \
   lib/ownframework_loop/__init__.py \
-  lib/ownframework_loop/limits.py \
-  lib/ownframework_loop/integrity.py \
+  lib/ownframework_loop/cli.py \
+  lib/ownframework_loop/supervisor.py \
+  lib/ownframework_loop/dispatch.py \
+  lib/ownframework_loop/adapters.py \
   schemas/work-packet.schema.json \
   schemas/work-packet-v3.schema.json \
   schemas/state.schema.json \
   schemas/state-v2.schema.json \
   schemas/build-receipt.schema.json \
-  schemas/review-verdict.schema.json
+  schemas/review-verdict.schema.json \
+  adapters/README.md \
+  adapters/generic-cli/README.md \
+  docs/architecture/ADAPTER_CONTRACT.md \
+  install-supervisor.sh \
+  uninstall-supervisor.sh
 do
   [[ -e "$ROOT/$f" ]] || bad "missing $ROOT/$f"
 done
-ok "all required files present at $ROOT"
+ok "vendor-neutral core and adapter contract surfaces present at $ROOT"
 
 # 3. Installed-only checks.
 if [[ "$INSTALLED_MODE" -eq 1 ]]; then
+  [[ -f "$ROOT/.ownframework-loop-managed" ]] || bad "installed core marker missing"
+  grep -Fq 'kind=core' "$ROOT/.ownframework-loop-managed" || bad "installed marker is not a core runtime"
   if [[ -L "$ROOT" ]]; then
-    bad "installed copy is a symlink — install.sh produces a COPY"
+    bad "versioned installed core root must be a real directory, not a symlink"
   fi
   if [[ -e "$ROOT/.git" ]]; then
     bad "installed copy contains .git/ — install.sh excludes it"
@@ -243,7 +167,7 @@ if [[ "$INSTALLED_MODE" -eq 1 ]]; then
   if [[ -d "$ROOT/lib/ownframework_loop/__pycache__" ]]; then
     echo "  NOTE: __pycache__ exists (post-import artifact, not blocked)"
   fi
-  ok "installed copy layout: not a symlink, no .git, structures intact"
+  ok "installed core layout: managed real directory, no .git, manifest intact"
 fi
 
 # 4. JSON schemas parse.
@@ -263,7 +187,7 @@ sys.path.insert(0, '$LIB_DIR')
 from ownframework_loop import (
     cli, packet, state, transitions, worktrees, git_checks,
     guards, receipts, verdicts, scheduling, locking, util,
-    integrity, limits, orchestrator, program, reconcile,
+    integrity, limits, program, reconcile,
 )
 print('  PASS: Python core library imports cleanly')
 "
@@ -275,7 +199,7 @@ print('  PASS: Python core library imports cleanly')
 cd "$ROOT"
 if [[ "$INSTALLED_MODE" -eq 1 ]]; then
   if PYTHONDONTWRITEBYTECODE=1 python3 -B bin/ofloop --help >/dev/null 2>&1; then
-    ok "installed ofloop CLI runs (python3 bin/ofloop)"
+    ok "installed core ofloop CLI runs (python3 bin/ofloop)"
   else
     bad "installed ofloop CLI failed (python3 bin/ofloop)"
   fi

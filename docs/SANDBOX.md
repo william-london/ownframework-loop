@@ -1,62 +1,64 @@
-# Claude Bash Sandbox — Required for Supervised V2 Pilot
+# Commissioned Claude Semantic-Worker Sandbox
 
-> The OwnFramework Loop supervised-local-only pilot REQUIRES Claude's
-> Bash sandbox to be enabled with `failIfUnavailable=true`. The first
-> pilot runs with `network=deny` as a default.
+OwnFramework Loop 0.8.4 uses Claude Code's native shared-machine controls instead of recreating them.
 
-## Activation steps (session-only — does not modify global settings)
+## Native boundary
 
-Per official Claude Code documentation, the sandbox is enabled per
-session by passing the appropriate flag at launch. We document the
-activation path; the loop refuses to start without it.
+Every supervisor-spawned BUILD/REVIEW pass requires Claude Code 2.1.248+ and starts with:
 
-```bash
-# Activate per-session. Safe — does NOT modify ~/.claude/settings.json.
-claude --plugin-dir $HOME/.claude/skills/of-loop \
-      --sandbox \
-      --sandbox-fail-if-unavailable \
-      --network-default deny
+- `--restricted`;
+- `--permission-mode dontAsk`;
+- fail-closed Bash sandboxing;
+- `allowUnsandboxedCommands=false`;
+- strict packet-bound Bash network allowlist (empty by default);
+- strict empty MCP configuration;
+- Chrome disabled;
+- session persistence disabled.
+
+Restricted mode excludes user/project/local settings and confines built-in file tools to the pass working directory. Loop supplies only pass-specific runtime settings and role instructions; the optional interactive Claude plugin is not the owner of the commissioned core runtime.
+
+## Zero routine prompts
+
+`dontAsk` is paired with an explicit pre-approved tool set and `sandbox.autoAllowBashIfSandboxed=true`. Allowed local engineering actions run without human prompts. Anything outside the sealed set is denied, not escalated.
+
+This is intentionally not `bypassPermissions`: Claude Code's native restricted mode refuses bypassPermissions. The operational goal is the same—no human in the BUILD/REVIEW loop—but with a real isolation boundary.
+
+## Role-specific capabilities
+
+Builder:
+
+```text
+Read,Edit,Write,NotebookEdit,Bash,Glob,Grep
 ```
 
-The `--sandbox-fail-if-unavailable` flag (or its equivalent documented
-setting) ensures the session **fails closed** if the sandbox cannot be
-activated — never silently falling back to unsandboxed execution.
+Reviewer:
 
-## Filesystem write scope
+```text
+Read,Bash,Glob,Grep
+```
 
-When the sandbox is active, writes are confined to:
+Reviewer source immutability is therefore structural. Sandboxed Bash may write only the pass semantic-result directory/runtime cache, and reviewer Bash is deny-write for the exact-SHA worktree.
 
-- The approved builder worktree (`.worktrees/ownframework-loop/<run-id>/builder/`).
-- The per-run loop state directory (`.ownframework-loop/<run-id>/`).
-- Temporary directories explicitly granted by the user.
+## Bash read and credential boundary
 
-Any attempt to write outside these paths is refused at the OS layer
-and triggers `SANDBOX_VIOLATION` in the event chain.
+Bash denies reads of the operator home directory and re-opens only the current worktree, current semantic-result directory, runtime cache, required Git metadata, and the trusted Loop runtime payload.
 
-## Network default
+The supervisor sets `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1`, and sandbox credential rules deny common GitHub/npm/PyPI/container tokens. Model authentication remains available to the Claude process itself, not to its Bash children.
 
-For the first supervised pilot, `network=deny` is the default. This
-forces the loop to prove itself in a fully air-gapped mode before any
-network access is granted.
+## Network
 
-## Why this matters
+Semantic BUILD/REVIEW passes have no broad internet. Sandboxed Bash may reach only exact hostnames frozen in the packet's `network_read_allowlist`; omission/empty means zero egress. This is intended for dependency/download reads, not search, browsing, publishing, deployment, or remote mutation. The SPEC author derives the smallest required list from the declared toolchain before sealing.
 
-The textual hook cannot be 100% reliable against shell indirection
-forms. The sandbox is the OS-level safety net. The post-pass
-verification catches any remaining violations before acceptance.
-Together, they cover the bypass surface that the textual hook alone
-cannot.
+## Scope
 
-## Required markers
+This is the commissioned unattended worker contract. Interactive Claude sessions are not equivalent evidence.
 
-The release gate emits:
+## Platform prerequisites
 
-- `SANDBOX_REQUIRED=yes`
-- `SANDBOX_AVAILABLE=yes`
-- `SANDBOX_FAIL_CLOSED=yes`
-- `NETWORK_DEFAULT=deny`
-- `UNSANDBOXED_FALLBACK=no`
+- macOS: Claude's native sandbox uses the platform sandbox implementation.
+- Linux/WSL2: commissioned Claude execution requires `bubblewrap` and `socat`.
+  The Linux service installer also performs a real bubblewrap usability probe
+  and refuses commissioning when the native boundary cannot arm.
 
-These markers are emitted by `release_gate.sh` after consulting the
-session's documented configuration. If the markers are absent, the
-release gate fails.
+A missing Linux sandbox prerequisite is an installation/configuration defect,
+not a reason to fall back to unsandboxed unattended execution.

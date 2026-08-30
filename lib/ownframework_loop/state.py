@@ -74,10 +74,61 @@ def stop_path(canonical_repo: Path, run_id: str) -> Path:
 
 STATE_TXN_SCHEMA = "ownframework-loop-state-txn/v1"
 
+# Callers may attach diagnostic metadata, but may never replace protocol
+# identity/integrity fields. state_txn_id is reserved to the internal
+# write-ahead transaction mechanism.
+_EVENT_AUTHORITATIVE_FIELDS = frozenset({
+    "ts", "run_id", "event_type", "old_state", "new_state", "actor",
+    "commit_sha", "reason", "state_sha256", "event_chain_sha256",
+})
+_EVENT_CALLER_RESERVED_FIELDS = _EVENT_AUTHORITATIVE_FIELDS | {"state_txn_id"}
+
+
+def _validate_event_extras(
+    extras: dict[str, Any] | None,
+    *,
+    allow_state_txn_id: bool = False,
+) -> None:
+    if not extras:
+        return
+    reserved = (
+        _EVENT_AUTHORITATIVE_FIELDS
+        if allow_state_txn_id
+        else _EVENT_CALLER_RESERVED_FIELDS
+    )
+    overlap = reserved.intersection(extras)
+    if overlap:
+        raise ValueError(
+            "event extras may not override authoritative fields: "
+            + ", ".join(sorted(overlap))
+        )
+
 
 def state_txn_path(canonical_repo: Path, run_id: str) -> Path:
     """Write-ahead intent for one STATE.json + EVENTS.log transaction."""
     return run_dir(canonical_repo, run_id) / "STATE_TXN.json"
+
+
+def _event_append_tmp_path(canonical_repo: Path, run_id: str) -> Path:
+    """Non-authoritative temp used for atomic EVENTS.log replacement."""
+    return run_dir(canonical_repo, run_id) / ".EVENTS.log.append.tmp"
+
+
+def _cleanup_stale_event_append_tmp_locked(
+    canonical_repo: Path,
+    run_id: str,
+) -> bool:
+    """Remove append temp left by a dead writer while caller holds run flock."""
+    tmp = _event_append_tmp_path(canonical_repo, run_id)
+    try:
+        tmp.unlink()
+    except FileNotFoundError:
+        return False
+    try:
+        fsync_dir(tmp.parent)
+    except OSError:
+        pass
+    return True
 
 
 def _state_payload_sha(payload: dict[str, Any]) -> str:
@@ -110,6 +161,7 @@ def _recover_pending_state_txn_locked(
     closed; this mechanism only heals a transaction that this runtime durably
     declared before the crash.
     """
+    _cleanup_stale_event_append_tmp_locked(canonical_repo, run_id)
     tp = state_txn_path(canonical_repo, run_id)
     if not tp.exists():
         return None
@@ -211,6 +263,8 @@ def _commit_state_event_locked(
     extras: dict[str, Any] | None = None,
 ) -> None:
     """Durably commit STATE.json + its binding event using write-ahead intent."""
+    # Reject invalid caller metadata before writing the journal or STATE bytes.
+    _validate_event_extras(extras)
     tp = state_txn_path(canonical_repo, run_id)
     if tp.exists():
         raise integrity.TamperingDetected(
@@ -445,6 +499,9 @@ def _append_event_locked(
     kernels, so the unified claim path holds one flock and uses this
     helper for both STATE.json write and EVENTS.log append.
     """
+    # Internal state transactions may attach state_txn_id; no other
+    # authoritative event field can be supplied through extras.
+    _validate_event_extras(extras, allow_state_txn_id=True)
     sp = state_path(canonical_repo, run_id)
     ep = events_path(canonical_repo, run_id)
     state_sha_now = integrity.sha256_file(sp) if sp.exists() else None
@@ -470,7 +527,7 @@ def _append_event_locked(
 
     ep.parent.mkdir(parents=True, exist_ok=True)
     existing = ep.read_bytes() if ep.exists() else b""
-    tmp = ep.parent / f".{ep.name}.append.tmp"
+    tmp = _event_append_tmp_path(canonical_repo, run_id)
     with open(tmp, "wb") as f:
         f.write(existing)
         f.write((line + "\n").encode("utf-8"))
@@ -497,79 +554,26 @@ def append_event(
     reason: str | None = None,
     extras: dict[str, Any] | None = None,
 ) -> None:
-    """Append a JSON Lines event under flock.
+    """Append one verified event atomically under the per-run flock.
 
-    The new event carries an `event_chain_sha256` field: SHA-256 over the
-    full EVENTS.log as it will exist once this line lands. Subsequent
-    reads can verify the event chain by recomputing (see
-    `integrity.compute_event_chain_hash`) and comparing it to the most
-    recent recorded value.
-
-    v0.3.5 (A1-002): the previous-hash read and the chain-hash
-    computation now happen INSIDE the flock. Two concurrent appenders
-    can no longer interleave: one acquires the flock, reads the prior
-    chain hash, computes the new one, and appends; the other waits.
-
-    v0.3.5 (limitation): if the LAST event is removed, the chain still
-    validates because the chain hash of N-1 lines equals the recorded
-    chain hash of N-1 lines. Truncation detection requires an
-    external terminal anchor (out of scope for this patch).
+    Caller-supplied extras are diagnostic only. They cannot override run/state/
+    chain identity or spoof the internal state_txn_id recovery marker.
     """
-    sp = state_path(canonical_repo, run_id)
-    ep = events_path(canonical_repo, run_id)
-
-    # Read the prior chain hash, current state SHA, and compute the
-    # new chain hash ALL under the flock. This closes the TOCTOU
-    # window where two concurrent appenders could both compute their
-    # chain hash from the same prior hash.
+    _validate_event_extras(extras)
     with flock_exclusive(lock_path(canonical_repo, run_id)):
         _verify_mutation_integrity_locked(canonical_repo, run_id)
-        state_sha_now = integrity.sha256_file(sp) if sp.exists() else None
-        record: dict[str, Any] = {
-            "ts": utc_now_iso(),
-            "run_id": run_id,
-            "event_type": event_type,
-            "old_state": old_state,
-            "new_state": new_state,
-            "actor": actor,
-            "commit_sha": commit_sha,
-            "reason": reason,
-            "state_sha256": state_sha_now,
-            "event_chain_sha256": "0" * 64,  # 64-zero placeholder (same length as SHA-256 hex)
-        }
-        if extras:
-            record.update(extras)
-        # Compute the chain hash over the line as it will exist AFTER
-        # substitution. Since the placeholder has the same byte length as the
-        # SHA-256 hex, the only bytes that change in the canonical serialization
-        # are within the chain_hash field itself — the rest of the line is
-        # byte-identical. We substitute the computed hash into the field, then
-        # re-serialize. Recomputation via compute_event_chain_hash yields the
-        # same hash because both writes go through the same canonical serializer
-        # and the chain hash is itself a function of the (length-stable) line.
-        line = _json_dumps(record)
-        chain_hash = _compute_chain_hash_for_append(ep, line, state_sha_now)
-        record["event_chain_sha256"] = chain_hash
-        line = _json_dumps(record)
+        _append_event_locked(
+            canonical_repo,
+            run_id,
+            event_type=event_type,
+            old_state=old_state,
+            new_state=new_state,
+            actor=actor,
+            commit_sha=commit_sha,
+            reason=reason,
+            extras=extras,
+        )
 
-        ep.parent.mkdir(parents=True, exist_ok=True)
-        # Rewrite the JSONL file through an fsynced temp + atomic replace.
-        # A power loss therefore leaves either the complete old chain or the
-        # complete new chain, never a half-written final JSON line.
-        existing = ep.read_bytes() if ep.exists() else b""
-        tmp = ep.parent / f".{ep.name}.append.tmp"
-        with open(tmp, "wb") as f:
-            f.write(existing)
-            f.write((line + "\n").encode("utf-8"))
-            f.flush()
-            os.fsync(f.fileno())
-        ensure_mode(tmp, 0o600)
-        os.replace(tmp, ep)
-        ensure_mode(ep, 0o600)
-        try:
-            fsync_dir(ep.parent)
-        except OSError:
-            pass
 
 def transition(
     canonical_repo: Path,
@@ -723,9 +727,8 @@ def program_transition(
 ) -> dict[str, Any]:
     """Atomic PROGRAM-mode state transition + event append under one flock.
 
-    v0.3.5 (A1-001/A1-004/A1-005): the program-mode orchestrator no
-    longer bypasses the FSM via state_mod.save(). Every orchestrator-
-    initiated state transition goes through this function, which:
+    PROGRAM-mode transitions never bypass the FSM via raw state writes.
+    Every deterministic program transition goes through this function, which:
 
       1. Acquires the per-run flock.
       2. Reads STATE.json.

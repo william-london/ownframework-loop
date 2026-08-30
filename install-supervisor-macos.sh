@@ -1,12 +1,10 @@
 #!/usr/bin/env bash
 # Install the OwnFramework Loop durable supervisor as a per-user macOS launchd service.
 #
-# v0.6.1 hardening: this installer resolves the runtime executables
-# (Python, ofloop, Claude) to canonical absolute paths and persists
-# them as the single source of truth in runtime-provenance.json AND
-# in the generated launchd plist EnvironmentVariables. The supervisor
-# subprocess MUST therefore execute the exact same Claude binary that
-# was commissioned; PATH resolution is no longer trusted.
+# The supervisor is commissioned from the vendor-neutral installed core
+# runtime. Claude Code is currently the first production semantic runner, not
+# the owner of the core installation. Runtime executables are canonicalized and
+# persisted in runtime-provenance.json and the generated launchd plist.
 #
 # When Claude is genuinely unavailable the install is intentionally
 # idle-only: claude_bin is recorded as null, OFLOOP_CLAUDE_BIN is
@@ -29,7 +27,7 @@ ROOT="$(cd "$(dirname "$0")" && pwd)"
 #    the install is intentionally idle-only and OFLOOP_CLAUDE_BIN is
 #    omitted from the plist.
 PYTHON_BIN_RAW="${PYTHON_BIN:-$(command -v python3 || true)}"
-OFLOOP_BIN_RAW="${OFLOOP_BIN:-$ROOT/bin/ofloop}"
+OFLOOP_BIN_RAW="${OFLOOP_BIN:-$(command -v ofloop || true)}"
 CLAUDE_BIN_RAW="${CLAUDE_BIN:-$(command -v claude || true)}"
 
 # Canonicalize paths via python3 (always available alongside this script).
@@ -47,6 +45,12 @@ p = Path(sys.argv[1]).expanduser().resolve(strict=False)
 print(str(p))
 PY
 }
+
+if [[ -z "$OFLOOP_BIN_RAW" ]]; then
+  echo "SUPERVISOR_INSTALL=REFUSED reason=core_not_installed" >&2
+  echo "hint: run 'bash install.sh' first or set OFLOOP_BIN explicitly for development/testing" >&2
+  exit 2
+fi
 
 if [[ -z "$PYTHON_BIN_RAW" ]]; then
   echo "SUPERVISOR_INSTALL=REFUSED reason=python3_missing" >&2
@@ -70,6 +74,16 @@ if [[ -n "$CLAUDE_BIN_RAW" ]]; then
   if [[ ! -x "$CLAUDE_BIN" ]]; then
     echo "SUPERVISOR_INSTALL=REFUSED reason=claude_not_executable path=$CLAUDE_BIN" >&2
     exit 2
+  fi
+  CLAUDE_VERSION="$("$CLAUDE_BIN" --version 2>/dev/null | head -n1 || true)"
+  if ! "$PYTHON_BIN" - "$CLAUDE_VERSION" <<'PY'
+import re,sys
+m=re.search(r'(\d+)\.(\d+)\.(\d+)', sys.argv[1])
+raise SystemExit(0 if m and tuple(map(int,m.groups())) >= (2,1,248) else 1)
+PY
+  then
+    echo "SUPERVISOR_INSTALL=REFUSED reason=claude_version_unsupported minimum=2.1.248 actual=$CLAUDE_VERSION" >&2
+    exit 6
   fi
 fi
 
@@ -158,113 +172,18 @@ if [[ ( -f "$PLIST" || -f "$RUNTIME_PROVENANCE" ) && ! -f "$SUPERVISOR_DB" && "$
   exit 13
 fi
 if [[ -f "$SUPERVISOR_DB" ]]; then
-  if [[ "${OFLOOP_ALLOW_SUPERVISOR_SWAP_WITH_ACTIVE_WORK:-0}" != "1" ]]; then
-    ACTIVE_REPORT="$("$PYTHON_BIN" - "$SUPERVISOR_DB" <<'PY'
-import os, sqlite3, sys
-
-db = sys.argv[1]
-terminal_attempts = {
-    "COMPLETED", "COST_UNKNOWN", "TOKENS_UNKNOWN",
-    "FAILED", "RECOVERED", "SUPERSEDED",
-}
-
-def pid_alive(pid):
-    if pid is None:
-        return None  # unknown — fail closed upstream
-    try:
-        os.kill(int(pid), 0)
-        return True
-    except (ValueError, TypeError):
-        return None
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-
-try:
-    conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
-except sqlite3.Error:
-    print("ledger_probe_failed")
-    sys.exit(0)
-conn.row_factory = sqlite3.Row
-problems = []
-try:
-    for row in conn.execute(
-        "SELECT id, run_id, worker_pid FROM jobs WHERE status='RUNNING'"
-    ):
-        alive = pid_alive(row["worker_pid"])
-        if alive is not False:  # alive OR unknown: refuse
-            problems.append(f"running_job={row['run_id']}")
-    for row in conn.execute(
-        """SELECT a.attempt_id AS attempt_id, a.status AS status,
-                  j.run_id AS run_id, j.worker_pid AS worker_pid
-           FROM semantic_attempts a JOIN jobs j ON j.id = a.job_id
-           WHERE j.status='RUNNING'"""
-    ):
-        if str(row["status"]) in terminal_attempts:
-            continue
-        if pid_alive(row["worker_pid"]) is False:
-            continue
-        problems.append(f"active_attempt={row['attempt_id']}:{row['status']}")
-except sqlite3.Error:
-    problems.append("ledger_probe_failed")
-print(";".join(problems[:4]))
-PY
-    )" || ACTIVE_REPORT="ledger_probe_failed"
-    if [[ -n "$ACTIVE_REPORT" ]]; then
-      echo "SUPERVISOR_INSTALL=REFUSED reason=active_semantic_work detail=$ACTIVE_REPORT" >&2
-      echo "hint: refresh again after the active pass completes, or set OFLOOP_ALLOW_SUPERVISOR_SWAP_WITH_ACTIVE_WORK=1 to force (unsafe: may orphan a live sealed execution)" >&2
-      exit 11
-    fi
-  fi
-  if [[ "${OFLOOP_ALLOW_RUNTIME_GENERATION_MIGRATION:-0}" != "1" ]]; then
-    GENERATION_REPORT="$(RUNTIME_GENERATION="$RUNTIME_GENERATION" "$PYTHON_BIN" - "$SUPERVISOR_DB" <<'PY'
-import os, sqlite3, sys
-
-db = sys.argv[1]
-incoming = os.environ.get("RUNTIME_GENERATION", "")
-try:
-    conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
-except sqlite3.Error:
-    print("ledger_probe_failed")
-    sys.exit(0)
-conn.row_factory = sqlite3.Row
-problems = []
-try:
-    # Every NON-terminal enrolled job depends on its recorded runtime.
-    # Unbound legacy rows are ambiguous unfinished executions and fail closed.
-    # RETIRED rows are durable historical enrollments — the operator explicitly
-    # retired them; their runtime_generation is preserved verbatim and they
-    # do not participate in install/refresh generation checks (the operator
-    # already accepted them as historical evidence). DONE rows are terminal
-    # successful completions. Refusal is reserved for QUEUED/BACKOFF/RUNNING/
-    # QUARANTINED where dispatch or recovery is still possible.
-    for row in conn.execute(
-        "SELECT run_id, status, runtime_generation FROM jobs "
-        "WHERE status NOT IN ('DONE','RETIRED')"
-    ):
-        gen = str(row["runtime_generation"] or "")
-        if not gen:
-            problems.append(
-                f"generation_dependency={row['run_id']}:{row['status']}:UNBOUND"
-            )
-        elif gen != incoming:
-            problems.append(
-                f"generation_dependency={row['run_id']}:{row['status']}:{gen}"
-            )
-except sqlite3.Error:
-    problems.append("ledger_probe_failed")
-print(";".join(problems[:4]))
-PY
-    )" || GENERATION_REPORT="ledger_probe_failed"
-    if [[ -n "$GENERATION_REPORT" ]]; then
-      echo "SUPERVISOR_INSTALL=REFUSED reason=runtime_generation_dependency incoming=$RUNTIME_GENERATION detail=$GENERATION_REPORT" >&2
-      echo "hint: let enrolled runs reach terminal, or migrate deliberately with OFLOOP_ALLOW_RUNTIME_GENERATION_MIGRATION=1 and then rebind each quarantined run via 'ofloop supervisor resume'" >&2
-      exit 13
-    fi
+  PROBE_ARGS=("$SUPERVISOR_DB" "$RUNTIME_GENERATION")
+  [[ "${OFLOOP_ALLOW_SUPERVISOR_SWAP_WITH_ACTIVE_WORK:-0}" == "1" ]] && PROBE_ARGS+=(--allow-active)
+  [[ "${OFLOOP_ALLOW_RUNTIME_GENERATION_MIGRATION:-0}" == "1" ]] && PROBE_ARGS+=(--allow-generation-migration)
+  set +e
+  PROBE_OUT="$(PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$INSTALL_ROOT/lib" "$PYTHON_BIN" -B "$INSTALL_ROOT/scripts/probe-supervisor-runtime-dependencies.py" "${PROBE_ARGS[@]}" 2>&1)"
+  PROBE_RC=$?
+  set -e
+  if [[ "$PROBE_RC" -ne 0 ]]; then
+    echo "SUPERVISOR_INSTALL=REFUSED $PROBE_OUT" >&2
+    exit "$PROBE_RC"
   fi
 fi
-
 # 5. Build a minimal PATH for the noninteractive service so it can find
 #    Python, ofloop, claude, git, jq, etc. Persisted so a future
 #    operator can reproduce the environment exactly.
@@ -332,7 +251,7 @@ env_vars = {
     "PYTHONDONTWRITEBYTECODE": "1",
     "PYTHON_BIN": python_bin,
     "OFLOOP_BIN": ofloop_bin,
-    "OFLOOP_PLUGIN_ROOT": str(Path(ofloop_bin).resolve(strict=False).parent.parent),
+    "OFLOOP_RUNTIME_ROOT": str(Path(ofloop_bin).resolve(strict=False).parent.parent),
 }
 # CRITICAL: only export OFLOOP_CLAUDE_BIN when a Claude binary was
 # actually commissioned. Writing a bogus path here would let the
@@ -361,9 +280,11 @@ with plist.open("wb") as f:
 
 provenance = {
     "schema": "ownframework-loop-supervisor-runtime-provenance/v1",
+    "service_manager": "launchd",
     "service_label": label,
     "python_bin": python_bin,
     "ofloop_bin": ofloop_bin,
+    "runtime_root": str(Path(ofloop_bin).resolve(strict=False).parent.parent),
     # claude_bin is recorded exactly as the plist will export: the
     # canonical absolute path when commissioned, or null when this
     # install is intentionally idle-only. The provenance and the

@@ -1,259 +1,226 @@
 #!/usr/bin/env bash
-# OwnFramework Loop — self-contained marketplace installer.
+# Install the vendor-neutral OwnFramework Loop core runtime.
 #
-# This script installs the plugin through Claude Code's official plugin
-# manager using the marketplace catalog that lives INSIDE this repository
-# at .claude-plugin/marketplace.json. No external parent repository or
-# sibling catalog is required.
-#
-# After install:
-#   * marketplace name : ownframework
-#   * plugin identity  : of-loop@ownframework
-#   * managed cache    : ~/.claude/plugins/cache/ownframework/of-loop/<version>
-#   * persistent data  : ~/.claude/plugins/data/of-loop-ownframework
-#
-# The script is idempotent: a second run re-installs the same plugin.
-# A legacy ~/.claude/skills/of-loop directory is NOT touched by this
-# script; if one exists from a prior installation, the user must remove
-# it manually (it is not a managed install path).
-#
-# Pre-requisites:
-#   * claude CLI on PATH
-#   * the source tree must be clean (no uncommitted changes)
-#   * the source must be a git repository (for SHA provenance)
-#
-# Honors:
-#   SOURCE_ROOT     - the plugin source directory (default: script dir)
-#   SCOPE           - install scope: user (default) | project | local
-#   KEEP_MARKETPLACE - if set to 1, do not remove the marketplace on exit
-#   OFLOOP_SKIP_SUPERVISOR_REFRESH - set to 1 to skip refresh of an already-commissioned macOS supervisor
-
+# This is intentionally NOT an agent/plugin installer. Host integrations are
+# installed separately with:
+#   bash install-adapter.sh claude-code
+#   bash install-adapter.sh codex
 set -euo pipefail
-HERE="$(cd "$(dirname "$0")" && pwd)"
-SOURCE_ROOT="${SOURCE_ROOT:-$HERE}"
-SCOPE="${SCOPE:-user}"
-PLUGIN_ID="of-loop@ownframework"
-MARKETPLACE_NAME="ownframework"
 
-log() { echo "[install] $*"; }
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+command -v python3 >/dev/null 2>&1 || { echo "CORE_INSTALL=REFUSED reason=python3_missing" >&2; exit 2; }
+command -v git >/dev/null 2>&1 || { echo "CORE_INSTALL=REFUSED reason=git_missing" >&2; exit 2; }
+command -v tar >/dev/null 2>&1 || { echo "CORE_INSTALL=REFUSED reason=tar_missing" >&2; exit 2; }
 
-# --- pre-flight ---
-if ! command -v claude >/dev/null 2>&1; then
-    log "claude CLI not on PATH; cannot perform managed install"
-    exit 3
-fi
+case "$(uname -s)" in
+  Darwin|Linux) ;;
+  *) echo "CORE_INSTALL=REFUSED reason=unsupported_platform platform=$(uname -s)" >&2; exit 2 ;;
+esac
 
-if ! git -C "$SOURCE_ROOT" rev-parse --git-dir >/dev/null 2>&1; then
-    log "SOURCE_ROOT is not a git repository: $SOURCE_ROOT"
-    exit 6
-fi
-
-if [[ ! -f "$SOURCE_ROOT/.claude-plugin/marketplace.json" ]]; then
-    log "marketplace catalog missing at $SOURCE_ROOT/.claude-plugin/marketplace.json"
-    log "this script must be run from a clone of the ownframework-loop repository"
-    exit 7
-fi
-
-SOURCE_BRANCH="$(git -C "$SOURCE_ROOT" branch --show-current 2>/dev/null || echo unknown)"
-SOURCE_SHA="$(git -C "$SOURCE_ROOT" rev-parse HEAD 2>/dev/null || echo unknown)"
-SOURCE_DIRTY="$(git -C "$SOURCE_ROOT" status --porcelain 2>/dev/null | wc -l | tr -d ' ')"
-EXPECTED_VERSION="$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['version'])" "$SOURCE_ROOT/.claude-plugin/plugin.json")"
-MKT_VERSION="$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['plugins'][0]['version'])" "$SOURCE_ROOT/.claude-plugin/marketplace.json")"
-
-log "source: $SOURCE_ROOT (branch=${SOURCE_BRANCH}, sha=${SOURCE_SHA}, dirty=${SOURCE_DIRTY})"
-log "plugin version: $EXPECTED_VERSION"
-log "marketplace version: $MKT_VERSION"
-
-if [[ "$EXPECTED_VERSION" != "$MKT_VERSION" ]]; then
-    log "version mismatch between plugin.json ($EXPECTED_VERSION) and marketplace.json ($MKT_VERSION); refusing"
-    exit 2
-fi
-
-if [[ "$SOURCE_DIRTY" != "0" ]]; then
-    log "source tree is dirty (${SOURCE_DIRTY} files); refusing"
-    exit 6
-fi
-
-# Before plugin-manager mutation, refuse to replace cache bytes relied on by
-# any unfinished commissioned run. This protects old/unbound ledgers too.
-if [[ "$(uname -s)" == "Darwin" ]]; then
-    PRE_STATE_ROOT="${XDG_STATE_HOME:-$HOME/.local/state}/ownframework-loop"
-    PRE_DB="$PRE_STATE_ROOT/supervisor.sqlite3"
-    PRE_PLIST="$HOME/Library/LaunchAgents/com.ownframework.loop-supervisor.plist"
-    PRE_PROV="$PRE_STATE_ROOT/runtime-provenance.json"
-    if [[ ( -f "$PRE_PLIST" || -f "$PRE_PROV" ) && ! -f "$PRE_DB" && "${OFLOOP_ALLOW_RUNTIME_GENERATION_MIGRATION:-0}" != "1" ]]; then
-        log "managed install REFUSED: commissioned supervisor exists but ledger is missing; runtime dependencies cannot be proven"
-        log "explicit migration override: OFLOOP_ALLOW_RUNTIME_GENERATION_MIGRATION=1"
-        exit 13
-    fi
-    if [[ ( -f "$PRE_PLIST" || -f "$PRE_PROV" ) && -f "$PRE_DB" ]]; then
-        PRE_REPORT="$(python3 -B - "$PRE_DB" <<'PY'
-import sqlite3, sys
-try:
-    c=sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True)
-    rows=c.execute("SELECT run_id,status FROM jobs WHERE status NOT IN ('DONE','RETIRED') ORDER BY id").fetchall()
-except sqlite3.Error:
-    print("ledger_probe_failed")
-    raise SystemExit(0)
-print(";".join(f"{r[0]}:{r[1]}" for r in rows[:8]))
+VERSION="$(PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$ROOT/lib" python3 -B - <<'PY'
+from ownframework_loop import __version__
+print(__version__)
 PY
-        )" || PRE_REPORT="ledger_probe_failed"
-        if [[ "$PRE_REPORT" == "ledger_probe_failed" ]]; then
-            log "managed install REFUSED: commissioned supervisor ledger unreadable"
-            exit 13
-        fi
-        if [[ -n "$PRE_REPORT" ]]; then
-            if [[ "$PRE_REPORT" == *":RUNNING"* && "${OFLOOP_ALLOW_SUPERVISOR_SWAP_WITH_ACTIVE_WORK:-0}" != "1" ]]; then
-                log "managed install REFUSED: RUNNING supervisor work exists ($PRE_REPORT)"
-                exit 11
-            fi
-            if [[ "${OFLOOP_ALLOW_RUNTIME_GENERATION_MIGRATION:-0}" != "1" ]]; then
-                log "managed install REFUSED: unfinished supervisor jobs depend on commissioned runtime ($PRE_REPORT)"
-                log "finish/stop them first, or explicitly migrate with OFLOOP_ALLOW_RUNTIME_GENERATION_MIGRATION=1"
-                exit 13
-            fi
-        fi
-    fi
+)"
+DATA_BASE="${OFLOOP_DATA_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/ownframework-loop}"
+INSTALL_ROOT="$DATA_BASE/$VERSION"
+BIN_DIR="${OFLOOP_BIN_DIR:-$HOME/.local/bin}"
+LAUNCHER="$BIN_DIR/ofloop"
+MARKER="$INSTALL_ROOT/.ownframework-loop-managed"
+
+if [[ -e "$INSTALL_ROOT" && ! -f "$MARKER" ]]; then
+  echo "CORE_INSTALL=REFUSED reason=unmanaged_install_root path=$INSTALL_ROOT" >&2
+  exit 3
+fi
+if [[ -e "$LAUNCHER" || -L "$LAUNCHER" ]]; then
+  LAUNCHER_MANAGED=0
+  if [[ -L "$LAUNCHER" ]]; then
+    RESOLVED_LAUNCHER="$(python3 -B - "$LAUNCHER" <<'PY'
+import sys
+from pathlib import Path
+print(Path(sys.argv[1]).resolve(strict=False))
+PY
+)"
+    RESOLVED_ROOT="$(dirname "$(dirname "$RESOLVED_LAUNCHER")")"
+    [[ -f "$RESOLVED_ROOT/.ownframework-loop-managed" ]] && LAUNCHER_MANAGED=1
+  elif grep -q 'OWNFRAMEWORK_LOOP_MANAGED_LAUNCHER' "$LAUNCHER" 2>/dev/null; then
+    # One-time migration from the pre-generic managed wrapper.
+    LAUNCHER_MANAGED=1
+  fi
+  [[ "$LAUNCHER_MANAGED" == "1" ]] || {
+    echo "CORE_INSTALL=REFUSED reason=unmanaged_launcher path=$LAUNCHER" >&2
+    exit 3
+  }
 fi
 
-# Record provenance (does not affect the managed install)
-PROVENANCE="$SOURCE_ROOT/.install.provenance"
-{
-    echo "source_branch=${SOURCE_BRANCH}"
-    echo "source_sha=${SOURCE_SHA}"
-    echo "expected_version=${EXPECTED_VERSION}"
-    echo "marketplace_name=${MARKETPLACE_NAME}"
-    echo "plugin_id=${PLUGIN_ID}"
-    echo "scope=${SCOPE}"
-    echo "installed_at_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-} > "$PROVENANCE"
-log "provenance: $PROVENANCE"
+mkdir -p "$DATA_BASE" "$BIN_DIR"
+STAGE="$(mktemp -d "$DATA_BASE/.stage-$VERSION-XXXXXX")"
+cleanup(){ rm -rf "$STAGE"; }
+trap cleanup EXIT INT TERM HUP
 
-# --- marketplace registration ---
-# If the marketplace is not already registered, register it pointing at
-# this source. Using `claude plugin marketplace add` with a local path
-# is supported by the official plugin manager.
-EXISTING="$(claude plugin marketplace list 2>/dev/null || true)"
-if ! echo "$EXISTING" | grep -q "^[[:space:]]*${MARKETPLACE_NAME}[[:space:]]*$"; then
-    log "registering marketplace ${MARKETPLACE_NAME} -> $SOURCE_ROOT"
-    if ! claude plugin marketplace add "$SOURCE_ROOT" >"$SOURCE_ROOT/.install.log" 2>&1; then
-        log "marketplace registration FAILED; see $SOURCE_ROOT/.install.log"
-        exit 8
-    fi
+# Prefer immutable Git HEAD from a checkout. Release/source tarballs without
+# .git fall back to their on-disk payload with transient paths excluded.
+if git -C "$ROOT" rev-parse --show-toplevel >/dev/null 2>&1 &&
+   [[ "$(cd "$(git -C "$ROOT" rev-parse --show-toplevel)" && pwd)" == "$ROOT" ]]; then
+  git -C "$ROOT" archive HEAD | tar -x -C "$STAGE"
+  SOURCE_KIND="git-head"
+  SOURCE_HEAD="$(git -C "$ROOT" rev-parse HEAD)"
 else
-    log "marketplace ${MARKETPLACE_NAME} already registered"
+  (
+    cd "$ROOT"
+    tar -cf - \
+      --exclude='.git' \
+      --exclude='.ownframework-loop' \
+      --exclude='.worktrees' \
+      --exclude='__pycache__' \
+      --exclude='*.pyc' \
+      --exclude='.DS_Store' \
+      --exclude='.install.log' \
+      --exclude='.uninstall.log' \
+      --exclude='.supervisor-refresh.log' \
+      .
+  ) | tar -xf - -C "$STAGE"
+  SOURCE_KIND="source-tree"
+  SOURCE_HEAD=""
 fi
 
-# --- managed install ---
-# Uninstall any pre-existing copy first to avoid upgrade refusal.
-log "removing any pre-existing ${PLUGIN_ID}"
-if ! claude plugin uninstall "$PLUGIN_ID" --scope "$SCOPE" >"$SOURCE_ROOT/.uninstall.log" 2>&1; then
-    log "warning: pre-existing uninstall returned non-zero (likely no prior install); continuing"
+[[ -x "$STAGE/bin/ofloop" ]] || { echo "CORE_INSTALL=REFUSED reason=staged_launcher_missing" >&2; exit 4; }
+STAGED_VERSION="$(PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$STAGE/lib" python3 -B - <<'PY'
+from ownframework_loop import __version__
+print(__version__)
+PY
+)"
+[[ "$STAGED_VERSION" == "$VERSION" ]] || {
+  echo "CORE_INSTALL=REFUSED reason=staged_version_mismatch expected=$VERSION actual=$STAGED_VERSION" >&2
+  exit 4
+}
+
+INCOMING_GENERATION="$(PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$STAGE/lib" STAGE_ROOT="$STAGE" STAGED_VERSION="$STAGED_VERSION" python3 -B - <<'PY'
+import os
+from pathlib import Path
+from ownframework_loop.runtime_identity import runtime_generation_for_root
+print(runtime_generation_for_root(Path(os.environ["STAGE_ROOT"]), os.environ["STAGED_VERSION"]))
+PY
+)"
+[[ -n "$INCOMING_GENERATION" ]] || { echo "CORE_INSTALL=REFUSED reason=runtime_generation_undetermined" >&2; exit 4; }
+
+# Before replacing any installed bytes, enforce the same runtime-dependency
+# contract used by the platform service installers.
+STATE_ROOT="${XDG_STATE_HOME:-$HOME/.local/state}/ownframework-loop"
+DB="$STATE_ROOT/supervisor.sqlite3"
+PROVENANCE="$STATE_ROOT/runtime-provenance.json"
+COMMISSIONED=0
+case "$(uname -s)" in
+  Darwin)
+    [[ -f "$HOME/Library/LaunchAgents/com.ownframework.loop-supervisor.plist" || -f "$PROVENANCE" ]] && COMMISSIONED=1
+    ;;
+  Linux)
+    UNIT_DIR="${OFLOOP_SYSTEMD_USER_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user}"
+    [[ -f "$UNIT_DIR/ownframework-loop-supervisor.service" || -f "$PROVENANCE" ]] && COMMISSIONED=1
+    ;;
+esac
+if [[ "$COMMISSIONED" == "1" ]]; then
+  [[ -f "$DB" ]] || { echo "CORE_INSTALL=REFUSED reason=runtime_dependency_ledger_missing" >&2; exit 13; }
+  PROBE_ARGS=("$DB" "$INCOMING_GENERATION")
+  [[ "${OFLOOP_ALLOW_SUPERVISOR_SWAP_WITH_ACTIVE_WORK:-0}" == "1" ]] && PROBE_ARGS+=(--allow-active)
+  [[ "${OFLOOP_ALLOW_RUNTIME_GENERATION_MIGRATION:-0}" == "1" ]] && PROBE_ARGS+=(--allow-generation-migration)
+  set +e
+  PROBE_OUT="$(PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$STAGE/lib" python3 -B "$STAGE/scripts/probe-supervisor-runtime-dependencies.py" "${PROBE_ARGS[@]}" 2>&1)"
+  PROBE_RC=$?
+  set -e
+  if [[ "$PROBE_RC" -ne 0 ]]; then
+    echo "CORE_INSTALL=REFUSED $PROBE_OUT" >&2
+    exit "$PROBE_RC"
+  fi
 fi
 
-log "installing ${PLUGIN_ID}@${EXPECTED_VERSION} (scope=${SCOPE})"
-if ! claude plugin install "$PLUGIN_ID" --scope "$SCOPE" >"$SOURCE_ROOT/.install.log" 2>&1; then
-    log "managed install FAILED; see $SOURCE_ROOT/.install.log"
-    exit 4
-fi
+cat > "$STAGE/.ownframework-loop-managed" <<EOF
+kind=core
+version=$VERSION
+source_kind=$SOURCE_KIND
+source_head=$SOURCE_HEAD
+EOF
 
-# --- parity check ---
-EXPECTED_CACHE="$HOME/.claude/plugins/cache/${MARKETPLACE_NAME}/of-loop/$EXPECTED_VERSION"
-if [[ ! -d "$EXPECTED_CACHE" ]]; then
-    log "parity check FAILED: expected cache tree missing at $EXPECTED_CACHE"
+# Installed payload integrity is core-owned, not adapter/plugin-owned.
+STAGE_ROOT="$STAGE" VERSION="$VERSION" SOURCE_KIND="$SOURCE_KIND" SOURCE_HEAD="$SOURCE_HEAD" \
+python3 -B - <<'PY'
+import fnmatch,hashlib,os
+from pathlib import Path
+root=Path(os.environ["STAGE_ROOT"])
+skip_dirs={".git","logs",".ownframework-loop","__pycache__"}
+skip_names={".payload.manifest",".payload.manifest.tmp"}
+skip_suffixes=(".pyc",".pyo",".pyd")
+files=[]
+for dirpath,dirnames,filenames in os.walk(root):
+    dirnames[:]=sorted(d for d in dirnames if d not in skip_dirs)
+    base=Path(dirpath)
+    for name in sorted(filenames):
+        if name in skip_names or name.endswith(skip_suffixes):
+            continue
+        p=base/name
+        if not p.is_file():
+            continue
+        files.append(p)
+files=sorted(files,key=lambda p:p.relative_to(root).as_posix())
+manifest=root/".payload.manifest"
+lines=[
+    "# OwnFramework Loop core payload manifest",
+    f"# installed_version={os.environ['VERSION']}",
+    f"# source_kind={os.environ['SOURCE_KIND']}",
+    f"# source_head={os.environ.get('SOURCE_HEAD') or '(none)'}",
+]
+for p in files:
+    rel=p.relative_to(root).as_posix()
+    h=hashlib.sha256(p.read_bytes()).hexdigest()
+    lines.append(f"sha256  {h}  {rel}")
+lines.append(f"# file_count={len(files)}")
+manifest.write_text("\n".join(lines)+"\n",encoding="utf-8")
+PY
+
+PYTHONDONTWRITEBYTECODE=1 python3 -B "$STAGE/scripts/verify_payload_manifest.py" \
+  --root "$STAGE" --manifest "$STAGE/.payload.manifest" >/dev/null
+PYTHONDONTWRITEBYTECODE=1 python3 -B "$STAGE/scripts/manifest_count_check.py" \
+  --root "$STAGE" --manifest "$STAGE/.payload.manifest" >/dev/null
+
+BACKUP_ROOT="$(mktemp -d "$DATA_BASE/.preinstall-$VERSION-XXXXXX")"
+rmdir "$BACKUP_ROOT"
+HAD_OLD=0
+if [[ -e "$INSTALL_ROOT" ]]; then
+  mv "$INSTALL_ROOT" "$BACKUP_ROOT"
+  HAD_OLD=1
+fi
+mv "$STAGE" "$INSTALL_ROOT"
+trap - EXIT INT TERM HUP
+
+rm -f "$LAUNCHER"
+ln -s "$INSTALL_ROOT/bin/ofloop" "$LAUNCHER"
+
+"$LAUNCHER" adapter doctor generic-cli >/dev/null
+
+# Refresh only an already-commissioned durable service. Core installation never
+# creates a service implicitly.
+REFRESH="$INSTALL_ROOT/scripts/refresh-existing-supervisor.sh"
+if [[ -x "$REFRESH" && "${OFLOOP_SKIP_SUPERVISOR_REFRESH:-0}" != "1" ]]; then
+  if ! "$REFRESH" "$INSTALL_ROOT" "$ROOT"; then
+    rm -rf "$INSTALL_ROOT"
+    if [[ "$HAD_OLD" == "1" ]]; then mv "$BACKUP_ROOT" "$INSTALL_ROOT"; fi
+    echo "CORE_INSTALL=REFUSED reason=supervisor_refresh_failed rollback=core_runtime_restored" >&2
     exit 5
+  fi
 fi
-log "cache verified at $EXPECTED_CACHE"
+[[ "$HAD_OLD" == "1" ]] && rm -rf "$BACKUP_ROOT"
 
-# --- payload manifest ---
-# Same as before — captures every regular file in the installed cache
-# tree with its SHA-256, so post-install tampering is detectable.
-MANIFEST="$EXPECTED_CACHE/.payload.manifest"
-PAYLOAD_FILES="$( ( cd "$EXPECTED_CACHE" && find . -type f \
-  -not -path "./logs/*" \
-  -not -path "./.git/*" \
-  -not -path "./.ownframework-loop/*" \
-  -not -path "*/__pycache__/*" \
-  -not -name ".payload.manifest" \
-  -not -name ".payload.manifest.tmp" \
-  -not -name "*.pyc" \
-  -not -name "*.pyo" \
-  -not -name "*.pyd" \
-  | LC_ALL=C sort ) )"
-> "$MANIFEST.tmp"
-{
-  echo "# OwnFramework Loop payload manifest"
-  echo "# generated_at_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  echo "# cache_root=$EXPECTED_CACHE"
-  echo "# source_branch=$SOURCE_BRANCH"
-  echo "# source_sha=$SOURCE_SHA"
-  echo "# installed_version=$EXPECTED_VERSION"
-  echo "# marketplace_name=$MARKETPLACE_NAME"
-  echo "# plugin_id=$PLUGIN_ID"
-} >> "$MANIFEST.tmp"
-ENTRY_COUNT=0
-while IFS= read -r f; do
-  [[ -z "$f" ]] && continue
-  rel="${f#./}"
-  sha="$(shasum -a 256 "$EXPECTED_CACHE/$rel" 2>/dev/null | awk '{print $1}')"
-  echo "sha256  $sha  $rel" >> "$MANIFEST.tmp"
-  ENTRY_COUNT=$((ENTRY_COUNT+1))
-done <<< "$PAYLOAD_FILES"
-echo "# file_count=$ENTRY_COUNT" >> "$MANIFEST.tmp"
-mv "$MANIFEST.tmp" "$MANIFEST"
-log "payload manifest written: $MANIFEST (with $ENTRY_COUNT files)"
-
-# --- operator CLI shim ---
-# Install a small symlink so a fresh operator shell can invoke `ofloop`
-# directly without `cd`-ing to the source tree or relying on the
-# user's shell config to know about the source bin directory. Idempotent
-# and refuses to overwrite an unmanaged binary at the same path.
-#
-# Default shim location: $HOME/.local/bin (already on most shells' PATH
-# via Homebrew / platform defaults). Override with OFLOOP_SHIM_DIR.
-# Set OFLOOP_SKIP_SHIM=1 to skip this step entirely.
-if [[ "${OFLOOP_SKIP_SHIM:-0}" == "1" ]]; then
-    log "operator CLI shim: skipped (OFLOOP_SKIP_SHIM=1)"
-else
-    SHIM_DIR="${OFLOOP_SHIM_DIR:-$HOME/.local/bin}"
-    SHIM_PATH="$SHIM_DIR/ofloop"
-    SHIM_TARGET="$EXPECTED_CACHE/bin/ofloop"
-    if [[ ! -d "$SHIM_DIR" ]]; then
-        log "operator CLI shim: creating $SHIM_DIR"
-        mkdir -p "$SHIM_DIR"
-    fi
-    if [[ -L "$SHIM_PATH" ]]; then
-        EXISTING_TARGET="$(readlink "$SHIM_PATH" 2>/dev/null || true)"
-        if [[ "$EXISTING_TARGET" == "$SHIM_TARGET" ]]; then
-            log "operator CLI shim: already installed at $SHIM_PATH"
-        else
-            log "operator CLI shim: replacing stale shim $SHIM_PATH -> $SHIM_TARGET (was $EXISTING_TARGET)"
-            ln -sfn "$SHIM_TARGET" "$SHIM_PATH"
-        fi
-    elif [[ -e "$SHIM_PATH" ]]; then
-        log "operator CLI shim: refusing to overwrite unmanaged binary at $SHIM_PATH"
-        log "  remove it manually, or set OFLOOP_SHIM_DIR to a different location"
-    else
-        ln -sfn "$SHIM_TARGET" "$SHIM_PATH"
-        log "operator CLI shim: created $SHIM_PATH -> $SHIM_TARGET"
-    fi
-fi
-
-# --- refresh an already-commissioned macOS supervisor ---
-# Delegate to a narrow helper so install orchestration stays acyclic/testable.
-REFRESH_HELPER="$EXPECTED_CACHE/scripts/refresh-existing-supervisor-macos.sh"
-if [[ ! -x "$REFRESH_HELPER" ]]; then
-    log "supervisor refresh helper missing from installed payload: $REFRESH_HELPER"
-    exit 9
-fi
-if ! OFLOOP_SKIP_SUPERVISOR_REFRESH="${OFLOOP_SKIP_SUPERVISOR_REFRESH:-0}" \
-    "$REFRESH_HELPER" "$EXPECTED_CACHE" "$SOURCE_ROOT" >"$SOURCE_ROOT/.supervisor-refresh.log" 2>&1; then
-    log "supervisor refresh FAILED; see $SOURCE_ROOT/.supervisor-refresh.log"
-    exit 9
-fi
-if grep -Fq "SUPERVISOR_REFRESH=PASS" "$SOURCE_ROOT/.supervisor-refresh.log"; then
-    log "existing macOS supervisor refreshed to installed payload $EXPECTED_VERSION"
-fi
-
-log "managed install complete; reload with: claude /reload-plugins"
-exit 0
+cat <<EOF
+CORE_INSTALL=PASS
+VERSION=$VERSION
+CORE_ROOT=$INSTALL_ROOT
+OFLOOP_LAUNCHER=$LAUNCHER
+PLATFORM=$(uname -s)
+SOURCE_KIND=$SOURCE_KIND
+SOURCE_HEAD=${SOURCE_HEAD:-(none)}
+RUNTIME_GENERATION=$INCOMING_GENERATION
+EOF
+case ":$PATH:" in
+  *":$BIN_DIR:"*) ;;
+  *) echo "PATH_NOTE=Add $BIN_DIR to PATH to invoke 'ofloop' directly." ;;
+esac

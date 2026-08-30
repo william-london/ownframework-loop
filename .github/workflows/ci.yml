@@ -124,14 +124,15 @@ jobs:
         run: |
           export HOME="$RUNNER_TEMP/claude-home"
           mkdir -p "$HOME"
-          bash install.sh
+          bash install-adapter.sh claude-code
           claude plugin list | tee "$RUNNER_TEMP/claude-plugin-list.txt"
           grep -F 'of-loop@ownframework' "$RUNNER_TEMP/claude-plugin-list.txt"
           # v0.4.4: derive expected version from the canonical machine
           # source-of-truth, do NOT hardcode the release number into CI.
           EXPECTED_VERSION="$(PYTHONPATH="$PWD/lib" python3 -c 'from ownframework_loop import __version__; print(__version__)')"
           grep -F "$EXPECTED_VERSION" "$RUNNER_TEMP/claude-plugin-list.txt"
-          REMOVE_MARKETPLACE=1 bash uninstall.sh
+          REMOVE_MARKETPLACE=1 bash uninstall-adapter.sh claude-code
+          bash uninstall.sh
 
   codex-adapter-static:
     runs-on: ubuntu-latest

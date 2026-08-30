@@ -1,107 +1,163 @@
 # Troubleshooting
 
-## The plugin does not appear in Claude Code
+Troubleshoot the layer that actually owns the failure: core, durable service,
+or optional host adapter.
+
+## Core is not installed
 
 ```bash
-ls -la $HOME/.claude/skills/of-loop
-ls $HOME/.claude/skills/of-loop/skills
+command -v ofloop
+bash install.sh
+bash validate.sh --installed
 ```
 
-If missing, run:
+Bare `validate.sh --installed` resolves the managed vendor-neutral core from
+the active `ofloop` launcher. It does not query an agent/plugin registry.
+
+## Claude adapter is missing
+
+The Claude adapter is optional:
 
 ```bash
-bash /path/to/ownframework-loop/install.sh
+bash install-adapter.sh claude-code
+claude plugin list
 ```
 
-Inside the Claude session, run `/reload-plugins`.
+Reload/restart Claude if its plugin inventory has not refreshed.
 
-## A hook blocks a benign command
+Do not use a Claude plugin cache path as the OwnFramework Loop core runtime.
 
-1. Identify the hook output (Claude Code prints the block reason).
-2. Run the command through `ofloop` first. The CLI uses the same
-   guards as the hooks, so what passes the CLI passes the hooks.
-3. V2 has NO operator escape hatch and no model-controllable bypass.
-   Any future emergency override must be human-operated, out-of-band,
-   and outside V2. Push, merge, deploy, and remote creation are
-   forbidden structurally — there is no way to opt in.
+## Codex skills are missing
 
-## State transitions fail with "invalid transition"
+```bash
+bash install-adapter.sh codex
+```
 
-Read `EVENTS.log` to see the last state. The state machine is
-documented in `docs/STATE_MACHINE.md`. The transition must be in the
-allowed map; otherwise the CLI rejects it.
+Codex remains experimental until live lifecycle evidence upgrades that adapter.
+
+## Durable supervisor is not running
+
+Commission:
+
+```bash
+bash install-supervisor.sh
+```
+
+Inspect:
+
+```bash
+ofloop supervisor status <repo> <run-id>
+```
+
+macOS uses launchd. Linux uses systemd-user.
+
+## Linux commissioning refuses sandbox prerequisites
+
+The current Claude runner needs Claude Code 2.1.248+, `bubblewrap`, and
+`socat`.
+
+If bubblewrap exists but cannot run, inspect Linux unprivileged user-namespace
+policy. Ubuntu 24.04+ may require the AppArmor profile documented by Claude
+Code for `bwrap`.
+
+Do not bypass the sandbox to make unattended execution start.
+
+## Claude version is refused
+
+```bash
+claude --version
+```
+
+The commissioned minimum is 2.1.248. This is a lower bound, not an exact pin;
+newer compatible releases are valid.
+
+## Runtime refresh is refused
+
+A normal core reinstall refuses when unfinished supervisor jobs depend on
+another runtime generation or live semantic work exists.
+
+Inspect:
+
+```bash
+ofloop supervisor status <repo> <run-id>
+```
+
+Do not turn migration/active-work overrides into routine upgrade flags.
+Finish/retire the enrollment through supported lifecycle semantics.
 
 ## Packet validation fails
 
-Run the validator explicitly:
+Use the installed core:
 
 ```bash
-python3 -c "
-import sys; sys.path.insert(0, '$HOME/.claude/skills/of-loop/lib')
+python3 -B - <<'PY'
+from pathlib import Path
 from ownframework_loop import packet
-meta, _ = packet.parse_packet_file(__import__('pathlib').Path('WORK_PACKET.md'))
+meta, _ = packet.parse_packet_file(Path("WORK_PACKET.md"))
 print(packet.validate_packet_metadata(meta))
-"
+PY
 ```
 
-The validator lists each missing or invalid field with the field name.
-Fix the metadata block; do not edit `STATE.json` directly.
+When invoking Python directly, ensure the installed core `lib` is on
+`PYTHONPATH`; normally use the `ofloop` CLI instead.
 
-## The reviewer cannot find a SHA
+Never repair validation by editing STATE.json directly.
 
-The reviewer worktree is detached at the candidate SHA. If git cannot
-resolve the SHA, the receipt is invalid. Check:
+## A dependency download is denied
+
+Outbound semantic Bash is limited to the frozen packet
+`network_read_allowlist`.
+
+If a required exact host was omitted, that is a SPEC/bootstrap defect. Stop the
+run and mint a corrected packet rather than asking for a runtime permission
+exception or routing around the sandbox.
+
+## Reviewer cannot resolve the candidate SHA
 
 ```bash
 git -C <repo> cat-file -e <candidate_sha>
 ```
 
-If the SHA does not exist, the build never committed, or the receipt
-references a wrong SHA. Rebuild and re-receipt.
+The deterministic review preparation must pin the exact candidate from the
+authoritative build receipt. Missing/drifted identity is not reviewer
+discretion.
 
-## Build refuses with "dirty baseline"
-
-The repo has uncommitted changes that do not belong to this run.
+## Dirty baseline
 
 ```bash
 git -C <repo> status --porcelain
 ```
 
-If the changes belong to this run, complete or revert them. If they
-are unattributed work, stop and ask the operator — do not reset, stash,
-clean, or revert.
+Unattributed canonical checkout changes are not silently reset/stashed/cleaned
+by Loop.
 
-## Build refuses with "wrong repository"
-
-The current working directory is not the canonical repo, or the branch
-is not `master`, or the repo has remotes that the packet forbids.
+## Wrong repository/classification
 
 ```bash
 ofloop doctor <repo>
 ```
 
-## Reviewer returns `STALE_CANDIDATE`
+Repository classification is bound at SPEC time. A local-only packet cannot
+silently become a remote-backed project after minting.
 
-The candidate SHA drifted between review start and verdict write.
-The loop re-pins to the current SHA on the next pass. No action
-required unless this persists.
+## State/event integrity refusal
 
-## Reviewer returns `BLOCKED` with tracked mutation
+Do not edit STATE.json, EVENTS.log, or STATE_TXN.json manually.
 
-The reviewer changed tracked source during its pass. The verdict
-records the changed paths. The run is blocked. Inspect
-`REVIEW_VERDICT.json` and the changed paths. Restart the reviewer
-pass only after manual inspection.
+The core automatically completes only a proven write-ahead transaction. Any
+unexplained mismatch remains a tampering/integrity refusal.
 
-## The smoke budget is exceeded
+## Claude hook blocks a benign foreground command
 
-`TOTAL_MODEL_SMOKE_BUDGET_USD=3.00` is a hard ceiling for the
-bounded real-model smoke. If exceeded, the smoke aborts. Re-run after
-inspecting the artifact.
+Hooks are Claude-adapter defense in depth. Confirm the foreground session is
+using the intended run/repo context and reproduce through the deterministic
+core where possible.
 
-## The release gate fails
+The commissioned supervisor also has a native OS sandbox; do not weaken the
+sandbox because a hook is inconvenient.
 
-`release_gate.sh` runs the deterministic fixtures, the validator, and
-the plugin-load smoke. A failure includes the failing test name and
-the expected vs. actual markers. Repair the failing component and
-re-run.
+## Release gate failure
+
+`release_gate.sh` and the canonical suite cover core, platform, security, and
+adapter contracts. Read the exact failing test. Distinguish a stale test from a
+product defect; never weaken authority merely to make CI green.

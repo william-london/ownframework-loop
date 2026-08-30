@@ -59,31 +59,29 @@ You may NOT write `WORK_PACKET.md`, `APPROVAL.json`, `STATE.json`,
 approve, push, merge, deploy, publish, create remotes, or perform external
 effects.
 
-## Delegation and context discipline
+## Execution context discipline
 
-Each unattended semantic pass is a fresh Claude Code main process. Passes do
-not share conversational context; continuity comes from the sealed packet,
-repository/worktree, checkpoint AC ids, and deterministic repair_context.
+Each unattended semantic pass is one fresh Claude Code process. Passes do not
+share conversational context; continuity comes from the sealed packet,
+repository/worktree, checkpoint AC ids, durable evidence, and deterministic
+repair_context.
 
-Use the Agent tool when delegation materially improves the pass (for example
-broad exploration, independent root-cause analysis, test diagnosis, or a
-separable implementation slice). Do not delegate merely to appear busy.
-Prefer read-only delegation for research and avoid concurrent write-capable
-subagents touching the same files. The parent remains responsible for one
-coherent candidate and semantic artifact. Subagents inherit the same run
-authority and may not push, merge, deploy, mutate protocol state, or perform
-external effects.
-Local developer-workstation engineering remains available inside the builder
-worktree: package installation, compilers, test runners, localhost services,
-local HTTP probes, browser/e2e tooling, and local container orchestration are
-legitimate when required by the packet. These capabilities do not grant remote
-push/deploy/publish/provider authority. Prefer the project's canonical recipes
-(`just`, package scripts, compose files, etc.) so local runtime proof stays
-reproducible.
+The commissioned supervisor intentionally does not expose Agent/Task/Skill,
+WebSearch/WebFetch, browser, MCP, remote, or cloud-session capabilities inside
+this pass. Do not plan around them.
 
-The maxTurns frontmatter applies when this file is invoked as a Claude custom
-agent. The durable supervisor uses this file as the main print-mode role prompt
-and does not impose that frontmatter as a CLI turn cap.
+Internet research, external service setup, publishing, deployment, and remote
+mutation remain outside the sealed pass. Dependency/package downloads are
+allowed only when the frozen packet declares the exact host in
+`network_read_allowlist`; Claude's native sandbox enforces that list without
+prompting. Use the already-provisioned local toolchain and local services where
+possible. If a required dependency host is not in the sealed allowlist, report
+the exact bootstrap/SPEC defect rather than asking a human for permission or
+routing around the sandbox.
+
+The maxTurns frontmatter applies only when this file is invoked manually as a
+Claude custom agent. The durable supervisor uses this file as the main
+print-mode role prompt and controls the pass through its wall-clock budget.
 
 ## Build procedure
 
@@ -95,8 +93,10 @@ and does not impose that frontmatter as a CLI turn cap.
    findings, failed validation evidence, failure reason, and exact reviewed
    SHA as the primary repair evidence. Reason independently about root cause
    and choose the best coherent fix; do not mechanically patch wording or
-   merely silence the reviewer. You may read the authoritative artifact at
-   `repair_context.source` for full context, but never modify it.
+   merely silence the reviewer. The supervisor sandbox allows read-only Bash
+   access to this run's evidence directory, so you may inspect the
+   authoritative artifact at `repair_context.source` when needed; never
+   modify it.
 3. If `repair_context` is absent on a repair pass, do not invent feedback.
    Read the prior authoritative `BUILD_RECEIPT.json` / `REVIEW_VERDICT.json`
    in the run directory, re-run the packet's required validations to
@@ -113,8 +113,10 @@ and does not impose that frontmatter as a CLI turn cap.
    path is present.
 8. Commit the coherent candidate on the supplied candidate branch with the
    current run/work-unit identity in the message.
-9. Read the existing `agent_result_path` skeleton. Fill only runtime/semantic
-   fields: `summary`, `evidence`, `blocker_reason`,
+9. Read the existing `agent_result_path` skeleton. Because the pass-scoped
+   artifact is outside restricted built-in file-tool scope, use sandboxed Bash
+   to update exactly that file. Fill only runtime/semantic fields:
+   `summary`, `evidence`, `blocker_reason`,
    `escalation_recommended`, `escalation_reason`, `outcome_requested`,
    `unit_ids_completed`, `acceptance_addressed`, `notes`, `timestamp`.
 10. Do not rename/add fixed identity keys. Do not supply `candidate_sha`; Git is

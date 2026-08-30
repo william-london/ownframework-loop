@@ -407,9 +407,10 @@ root=Path.cwd()
 assert not static_checks.python_unsafe(root/"lib/ownframework_loop/supervisor.py")
 assert not static_checks.python_unsafe(root/"lib/ownframework_loop/process_runner.py")
 release_text=(root/"lib/ownframework_loop/release_gate_runtime.py").read_text()
-assert "cache/ownframework-local" not in release_text
-assert "of-loop@ownframework" in release_text
+assert "claude plugin list" not in release_text
+assert ".ownframework-loop-managed" in release_text
+assert 'shutil.which("ofloop")' in release_text
 PY
-pass "T17 static unsafe findings block and installed parity uses canonical registry"
+pass "T17 static unsafe findings block and installed parity uses managed core"
 
 echo "V082_PRODUCTION_HARDENING=PASS"

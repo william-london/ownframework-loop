@@ -33,7 +33,8 @@ chmod +x "$GUARD_SHIMS/launchctl"
 run_installer() {
   # run_installer <state-root> [extra env KEY=VAL ...] — hermetic invocation.
   local state_root="$1"; shift
-  env PATH="$GUARD_SHIMS:$PATH" HOME="$GUARD_HOME" XDG_STATE_HOME="$state_root" "$@" \
+  env PATH="$GUARD_SHIMS:$PATH" HOME="$GUARD_HOME" XDG_STATE_HOME="$state_root" \
+    OFLOOP_BIN="$ROOT_DIR/bin/ofloop" "$@" \
     bash "$ROOT_DIR/install-supervisor-macos.sh" 2>&1
 }
 

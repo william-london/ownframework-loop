@@ -16,7 +16,6 @@ tests/unit/test_no_silent_tests.sh
 tests/integration/test_v032_bytecode_boundary.sh
 tests/integration/test_release_gate_preflight.sh
 tests/integration/test_version_truth.sh
-tests/integration/test_v033_installed_discovery.sh
 tests/integration/test_v034_hook_bytecode.sh
 tests/integration/test_event_chain_concurrency_e2e.sh
 tests/integration/test_repair_round_budget.sh
@@ -91,3 +90,12 @@ tests/integration/test_v084_state_transaction_recovery.sh
 
 # v0.8.4 authority-bearing semantic/execution state reads are integrity verified
 tests/integration/test_v084_authoritative_state_reads.sh
+
+# v0.8.4 frozen SPEC network-read authority -> dispatch -> native Claude sandbox.
+tests/integration/test_v084_packet_network_read_authority.sh
+
+# v0.8.4 vendor-neutral core install/discovery/uninstall portability
+tests/integration/test_v084_core_install_portability.sh
+
+# v0.8.4 Linux systemd-user supervisor + Claude sandbox commissioning parity
+tests/integration/test_v084_linux_supervisor_service.sh

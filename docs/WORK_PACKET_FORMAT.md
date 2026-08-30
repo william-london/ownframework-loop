@@ -54,6 +54,22 @@ All current packets carry:
 v3 PROGRAM packets may additionally define `execution_mode=program` and a
 finite `checkpoint_graph`.
 
+## Read-only network authority
+
+`network_read_allowlist` is optional frozen SPEC authority for sandboxed
+semantic Bash. Each entry is an exact lowercase hostname with no scheme, port,
+path, or wildcard. Omit it or use an empty array for zero outbound network.
+
+Use it only for dependency/download/read endpoints that the declared toolchain
+legitimately needs after sealing. It does not grant WebSearch/WebFetch, MCP,
+push, publish, deploy, or remote mutation authority. The supervisor maps the
+frozen list directly to Claude Code's native sandbox
+`network.allowedDomains` with `strictAllowlist=true`.
+
+If a sealed run later discovers that it needs an undeclared domain, that is a
+SPEC/bootstrap defect and requires a new run rather than an interactive
+permission prompt.
+
 ## Required validation
 
 `required_validation` commands are executable policy. Deterministic build and

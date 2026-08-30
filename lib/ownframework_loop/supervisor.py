@@ -35,17 +35,22 @@ SCHEMA = "ownframework-loop-supervisor/v1"
 # risk_budget.max_pass_runtime_seconds (packet authority; up to 28800 for v3)
 # rather than by widening the default fuse.
 DEFAULT_SEMANTIC_TIMEOUT_SECONDS = 3600
-DEFAULT_CLAUDE_ALLOWED_TOOLS = (
-    "Read,Edit,Write,NotebookEdit,Bash,Glob,Grep,WebSearch,WebFetch,"
-    "Agent,Task,TaskOutput,TaskStop,TaskCreate,TaskUpdate,TaskList,TaskGet,"
-    "TodoWrite,Skill"
-)
+# Commissioned semantic passes are sealed local workers.  Builder and reviewer
+# intentionally get different first-party Claude capability sets so reviewer
+# source immutability is structural, not merely a prompt/hook convention.
+CLAUDE_BUILDER_TOOLS = "Read,Edit,Write,NotebookEdit,Bash,Glob,Grep"
+CLAUDE_REVIEWER_TOOLS = "Read,Bash,Glob,Grep"
 
-# Claude Code v2.1.246 is the first documented release where excluding a
-# filesystem setting source also excludes that source's sandbox filesystem
-# entries. The unattended worker depends on that property so an untrusted
-# target repository cannot widen its own Bash sandbox via .claude settings.
-MIN_SECURE_CLAUDE_CODE_VERSION = (2, 1, 246)
+TERMINAL_SEMANTIC_ATTEMPT_STATUSES = frozenset({
+    "COMPLETED", "COST_UNKNOWN", "TOKENS_UNKNOWN",
+    "FAILED", "RECOVERED", "SUPERSEDED",
+})
+
+# --restricted is Claude Code's native scripted/evaluation boundary for shared
+# machines. It confines built-in file tools to working directories, ignores
+# user/project/local settings, refuses bypass/cloud sessions, and removes
+# command/code/web tools unless explicitly named. Available from v2.1.248.
+MIN_SECURE_CLAUDE_CODE_VERSION = (2, 1, 248)
 
 # Extra arguments are operator convenience only. They must never be able to
 # replace the unattended worker's tool boundary, sandbox, project-root, or
@@ -66,6 +71,12 @@ _CLAUDE_EXTRA_ARG_AUTHORITY_FLAGS = {
     "--plugin-dir",
     "--mcp-config",
     "--strict-mcp-config",
+    "--chrome",
+    "--no-chrome",
+    "--remote",
+    "--teleport",
+    "--no-session-persistence",
+    "--restricted",
 }
 
 
@@ -106,6 +117,7 @@ def _semantic_worker_settings(
     role: str,
     worktree: Path,
     semantic_path: Path,
+    network_read_allowlist: list[str] | None = None,
 ) -> dict[str, Any]:
     """Fail-closed Claude settings for one unattended semantic worker.
 
@@ -115,29 +127,66 @@ def _semantic_worker_settings(
     write only their pass-scoped semantic-result directory and Loop's
     externalized runtime cache outside the worktree.
 
-    Project/local Claude settings are excluded at process launch, so a target
-    repository cannot widen these sandbox arrays or add project-local hooks.
-    User/managed settings remain an explicit trusted-operator boundary.
+    --restricted excludes user/project/local settings from the semantic worker.
+    Managed policy remains the explicit organization-owned trust boundary;
+    Loop supplies the pass-specific sandbox through CLI --settings.
     """
     cache_root = runtime_env.runtime_cache_path(canonical_repo, run_id, role)
+
+    # Restricted mode already confines built-in Read/Edit/Write to the working
+    # directories. Bash is explicitly re-enabled for local compilers/tests/git,
+    # so give Bash the complementary OS-level read boundary: deny the operator's
+    # entire home directory, then re-open only the current pass and trusted Loop
+    # runtime surfaces. More-specific allowRead wins over the broad denyRead.
+    home = Path.home().expanduser().resolve(strict=False)
+    run_evidence_dir = (canonical_repo / ".ownframework-loop" / run_id).resolve(strict=False)
+    allow_read = sorted({
+        str(worktree.resolve(strict=False)),
+        str(semantic_path.parent.resolve(strict=False)),
+        str(run_evidence_dir),
+        str(cache_root.resolve(strict=False)),
+        str((canonical_repo / ".git").resolve(strict=False)),
+        str(_source_root().resolve(strict=False)),
+    })
     allow_write = sorted({
         str(cache_root.resolve(strict=False)),
         str(semantic_path.parent.resolve(strict=False)),
     })
-    filesystem: dict[str, Any] = {"allowWrite": allow_write}
+    filesystem: dict[str, Any] = {
+        "denyRead": [str(home)],
+        "allowRead": allow_read,
+        "allowWrite": allow_write,
+    }
     if role == "reviewer":
         filesystem["denyWrite"] = [str(worktree.resolve(strict=False))]
+
+    # Semantic passes never inherit broad host credentials. Outbound Bash
+    # reads are restricted to exact packet-frozen network_read_allowlist hosts
+    # (empty by default); these native credential rules keep common non-cloud
+    # tokens out of Bash even if
+    # they exist in the supervisor's environment; the subprocess scrub env var
+    # separately strips Anthropic/cloud-provider credentials.
+    credential_vars = [
+        "GITHUB_TOKEN", "GH_TOKEN", "NPM_TOKEN", "NODE_AUTH_TOKEN",
+        "PYPI_TOKEN", "TWINE_PASSWORD", "DOCKER_AUTH_CONFIG",
+    ]
     return {
         "autoMemoryEnabled": False,
         "sandbox": {
             "enabled": True,
             "failIfUnavailable": True,
+            "autoAllowBashIfSandboxed": True,
             "allowUnsandboxedCommands": False,
             "excludedCommands": [],
             "filesystem": filesystem,
             "network": {
-                "allowedDomains": [],
+                "allowedDomains": sorted(set(network_read_allowlist or [])),
                 "strictAllowlist": True,
+            },
+            "credentials": {
+                "envVars": [
+                    {"name": name, "mode": "deny"} for name in credential_vars
+                ],
             },
         },
     }
@@ -174,7 +223,7 @@ def resolve_semantic_timeout(
     return DEFAULT_SEMANTIC_TIMEOUT_SECONDS
 
 ACTIVE = {"QUEUED", "BACKOFF", "RUNNING"}
-TERMINAL = {"DONE", "QUARANTINED"}
+TERMINAL = {"DONE", "QUARANTINED", "RETIRED"}
 
 
 def runtime_generation() -> str:
@@ -199,6 +248,51 @@ def default_worker_log_dir() -> Path:
     root = os.environ.get("XDG_STATE_HOME", "").strip()
     base = Path(root).expanduser() if root else Path.home() / ".local" / "state"
     return base / "ownframework-loop" / "worker-logs"
+
+
+def _runtime_cache_run_root(canonical_repo: Path, run_id: str) -> Path:
+    """Pure path for disposable semantic runtime cache for one run."""
+    return runtime_env.runtime_cache_path(canonical_repo, run_id, "builder").parent
+
+
+def _cleanup_terminal_runtime_cache(
+    canonical_repo: Path,
+    run_id: str,
+) -> dict[str, Any]:
+    """Best-effort GC for non-evidence cache after durable DONE."""
+    root = _runtime_cache_run_root(canonical_repo, run_id)
+    existed = root.exists()
+    error = ""
+    if existed:
+        try:
+            shutil.rmtree(root)
+            try:
+                root.parent.rmdir()
+            except OSError:
+                pass
+        except OSError as exc:
+            error = str(exc)
+    return {
+        "path": str(root),
+        "existed": existed,
+        "removed": existed and not root.exists(),
+        "error": error,
+    }
+
+
+def _cleanup_done_runtime_caches(db_path: Path | None = None) -> list[dict[str, Any]]:
+    """Retry disposable-cache GC for durable DONE jobs at supervisor startup."""
+    db = db_path or default_db_path()
+    if not db.exists():
+        return []
+    with _connect_readonly(db) as conn:
+        rows = conn.execute(
+            "SELECT repo,run_id FROM jobs WHERE status='DONE' ORDER BY id"
+        ).fetchall()
+    return [
+        _cleanup_terminal_runtime_cache(Path(row["repo"]), str(row["run_id"]))
+        for row in rows
+    ]
 
 
 def _slug_repo(canonical_repo: Path) -> str:
@@ -1538,17 +1632,19 @@ class ClaudeCodeRunner:
               "The deterministic core already claimed and prepared the pass. "
               "Do not call claim, prepare, finalize, push, merge, deploy, or create remotes. "
               "Use the exact paths and identities below. Complete the source work (builder) "
-              "or exact-SHA assessment (reviewer), fill only the supplied semantic artifact, "
-              "then stop.\n\n"
+              "or exact-SHA assessment (reviewer). The supplied semantic artifact may sit "
+              "outside restricted built-in file-tool scope; write that artifact with sandboxed "
+              "Bash when needed. Do not widen access. Then stop.\n\n"
             + payload
         )
 
         claude_bin = os.environ.get("OFLOOP_CLAUDE_BIN", "claude")
         extra = shlex.split(os.environ.get("OFLOOP_CLAUDE_EXTRA_ARGS", ""))
         _validate_claude_extra_args(extra)
-        allowed_tools = os.environ.get(
-            "OFLOOP_CLAUDE_ALLOWED_TOOLS",
-            DEFAULT_CLAUDE_ALLOWED_TOOLS,
+        # Tool availability is product authority, not an environment-tunable
+        # convenience. Reviewers structurally lack Edit/Write/NotebookEdit.
+        allowed_tools = (
+            CLAUDE_BUILDER_TOOLS if role == "builder" else CLAUDE_REVIEWER_TOOLS
         )
         canonical_repo = Path(
             str(work_order.get("canonical_repo") or "")
@@ -1562,12 +1658,14 @@ class ClaudeCodeRunner:
             role=role,
             worktree=worktree,
             semantic_path=semantic_path,
+            network_read_allowlist=[
+                str(item) for item in (work_order.get("network_read_allowlist") or [])
+            ],
         )
-        # Only trusted user settings are loaded. Project/local settings belong
-        # to the target repository and may not widen an unattended worker's
-        # filesystem/network sandbox. --tools is the actual availability
-        # boundary; --allowedTools only removes permission friction inside that
-        # already restricted surface.
+        # --restricted is the native shared-machine isolation boundary.
+        # dontAsk + explicit --allowedTools means there are no human permission
+        # prompts: capabilities inside the sealed set run, everything else is
+        # denied. The Bash sandbox auto-allows contained commands.
         #
         # Pipe the prompt via stdin. Passing it as an argv string lets Claude
         # CLI mis-parse leading `---` (YAML frontmatter in the role file) as
@@ -1577,11 +1675,17 @@ class ClaudeCodeRunner:
             "-p",
             "--output-format",
             "json",
+            "--restricted",
+            "--permission-mode",
+            "dontAsk",
+            "--no-chrome",
+            "--no-session-persistence",
+            "--strict-mcp-config",
+            "--mcp-config",
+            "{}",
             "--plugin-dir",
             str(_source_root()),
             *extra,
-            "--setting-sources",
-            "user",
             "--settings",
             json.dumps(secure_settings, separators=(",", ":"), sort_keys=True),
             "--tools",
@@ -1598,6 +1702,27 @@ class ClaudeCodeRunner:
             stdout_fh = subprocess.PIPE
             stderr_fh = subprocess.PIPE
 
+        worker_env = runtime_env.hermetic_subprocess_env(
+            Path(str(work_order.get("canonical_repo") or "")).resolve(strict=False),
+            str(work_order.get("run_id") or ""),
+            role,
+        )
+        # Claude-native subprocess scrub: keep model authentication available to
+        # the Claude process itself while stripping Anthropic/cloud credentials
+        # from Bash children. This also forces filesystem isolation to remain on.
+        worker_env["CLAUDE_CODE_SUBPROCESS_ENV_SCRUB"] = "1"
+
+        # Do not expose ~/.gitconfig merely so an unattended builder can commit.
+        # Give semantic Git a deterministic bot identity and disable terminal
+        # credential prompting/global config discovery.
+        worker_env["GIT_CONFIG_GLOBAL"] = os.devnull
+        worker_env["GIT_CONFIG_NOSYSTEM"] = "1"
+        worker_env["GIT_TERMINAL_PROMPT"] = "0"
+        worker_env["GIT_AUTHOR_NAME"] = "OwnFramework Loop"
+        worker_env["GIT_AUTHOR_EMAIL"] = "loop@localhost"
+        worker_env["GIT_COMMITTER_NAME"] = "OwnFramework Loop"
+        worker_env["GIT_COMMITTER_EMAIL"] = "loop@localhost"
+
         proc = subprocess.Popen(
             cmd,
             cwd=str(worktree),
@@ -1606,11 +1731,7 @@ class ClaudeCodeRunner:
             stderr=stderr_fh,
             text=True,
             start_new_session=True,
-            env=runtime_env.hermetic_subprocess_env(
-                Path(str(work_order.get("canonical_repo") or "")).resolve(strict=False),
-                str(work_order.get("run_id") or ""),
-                role,
-            ),
+            env=worker_env,
         )
         # Persist worker ownership BEFORE the child produces any output. If
         # anything between here and a successful communicate() raises, the
@@ -2253,12 +2374,16 @@ def run_one(*, db_path: Path | None = None, timeout_seconds: int = 0) -> dict[st
             decision = str(work_order.get("decision") or "")
             if decision == "TERMINAL":
                 _update_job(conn, job["id"], status_value="DONE", last_error=None)
+                cache_cleanup = _cleanup_terminal_runtime_cache(
+                    Path(job["repo"]), str(job["run_id"])
+                )
                 return {
                     "schema": SCHEMA,
                     "ok": True,
                     "action": "TERMINAL",
                     "job_id": job["id"],
                     "work_order": work_order,
+                    "runtime_cache_cleanup": cache_cleanup,
                 }
             if decision == "WAIT":
                 # Bounded next-attempt delay so a recurring WAIT cannot
@@ -2686,6 +2811,7 @@ def serve(
     once: bool = False,
 ) -> dict[str, Any] | None:
     """Run the durable execution clock. Idle iterations make zero model calls."""
+    _cleanup_done_runtime_caches(db_path)
     last_emit: float = 0.0
     idle_log_interval = max(60.0, float(poll_seconds) * 30)
     while True:
@@ -2946,10 +3072,40 @@ def retire(
             ),
         })
         return result
-    # Live / ambiguous semantic worker refuses retirement. The operator must
-    # wait for the worker to drain through the normal supervisor lifecycle
-    # (or kill it) before retiring the enrollment. A retired row must never
-    # be tied to a process that could still write evidence.
+    # An unresolved semantic-attempt row is ambiguous paid/model execution
+    # evidence even when the job-level PID is empty or dead. Retirement must
+    # not hide it behind a historical status before crash reconciliation has
+    # proven the attempt terminal.
+    with _connect_readonly(db) as attempt_conn:
+        attempt_rows = attempt_conn.execute(
+            "SELECT attempt_id,status,worker_pid FROM semantic_attempts "
+            "WHERE job_id=? ORDER BY started_at DESC",
+            (int(existing["id"]),),
+        ).fetchall()
+    unresolved_attempts = [
+        row for row in attempt_rows
+        if str(row["status"] or "") not in TERMINAL_SEMANTIC_ATTEMPT_STATUSES
+    ]
+    if unresolved_attempts:
+        result = _job_dict(existing, db)
+        result.update({
+            "ok": False,
+            "retired": False,
+            "reason": "retire_refuses_unresolved_semantic_attempt",
+            "unresolved_attempts": [
+                {
+                    "attempt_id": str(row["attempt_id"] or ""),
+                    "status": str(row["status"] or ""),
+                    "worker_pid": row["worker_pid"],
+                }
+                for row in unresolved_attempts[:8]
+            ],
+        })
+        return result
+
+    # Live job ownership also refuses retirement. The operator must wait for
+    # the worker to drain through the normal supervisor lifecycle before
+    # retiring the enrollment.
     if existing["worker_pid"] and _pid_alive(
         int(existing["worker_pid"]),
         float(existing["worker_started_at"]) if existing["worker_started_at"] else None,
