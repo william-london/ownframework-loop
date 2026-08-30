@@ -35,22 +35,22 @@ SCHEMA = "ownframework-loop-supervisor/v1"
 # risk_budget.max_pass_runtime_seconds (packet authority; up to 28800 for v3)
 # rather than by widening the default fuse.
 DEFAULT_SEMANTIC_TIMEOUT_SECONDS = 3600
-# A commissioned semantic pass is a sealed local engineering worker, not a
-# general Claude session. Research, browsers, MCPs and nested agent/task
-# orchestration stay outside the pass so external egress and model spend remain
-# governed by the parent Loop envelope.
-DEFAULT_CLAUDE_ALLOWED_TOOLS = "Read,Edit,Write,NotebookEdit,Bash,Glob,Grep"
+# Commissioned semantic passes are sealed local workers.  Builder and reviewer
+# intentionally get different first-party Claude capability sets so reviewer
+# source immutability is structural, not merely a prompt/hook convention.
+CLAUDE_BUILDER_TOOLS = "Read,Edit,Write,NotebookEdit,Bash,Glob,Grep"
+CLAUDE_REVIEWER_TOOLS = "Read,Bash,Glob,Grep"
 
 TERMINAL_SEMANTIC_ATTEMPT_STATUSES = frozenset({
     "COMPLETED", "COST_UNKNOWN", "TOKENS_UNKNOWN",
     "FAILED", "RECOVERED", "SUPERSEDED",
 })
 
-# strictAllowlist is the newest security primitive required by the
-# commissioned worker envelope and is documented as available from Claude Code
-# v2.1.219. It is supplied through CLI --settings (a supported scope) while
-# project/local settings are excluded with --setting-sources user.
-MIN_SECURE_CLAUDE_CODE_VERSION = (2, 1, 219)
+# --restricted is Claude Code's native scripted/evaluation boundary for shared
+# machines. It confines built-in file tools to working directories, ignores
+# user/project/local settings, refuses bypass/cloud sessions, and removes
+# command/code/web tools unless explicitly named. Available from v2.1.248.
+MIN_SECURE_CLAUDE_CODE_VERSION = (2, 1, 248)
 
 # Extra arguments are operator convenience only. They must never be able to
 # replace the unattended worker's tool boundary, sandbox, project-root, or
@@ -76,6 +76,7 @@ _CLAUDE_EXTRA_ARG_AUTHORITY_FLAGS = {
     "--remote",
     "--teleport",
     "--no-session-persistence",
+    "--restricted",
 }
 
 
@@ -125,29 +126,63 @@ def _semantic_worker_settings(
     write only their pass-scoped semantic-result directory and Loop's
     externalized runtime cache outside the worktree.
 
-    Project/local Claude settings are excluded at process launch, so a target
-    repository cannot widen these sandbox arrays or add project-local hooks.
-    User/managed settings remain an explicit trusted-operator boundary.
+    --restricted excludes user/project/local settings from the semantic worker.
+    Managed policy remains the explicit organization-owned trust boundary;
+    Loop supplies the pass-specific sandbox through CLI --settings.
     """
     cache_root = runtime_env.runtime_cache_path(canonical_repo, run_id, role)
+
+    # Restricted mode already confines built-in Read/Edit/Write to the working
+    # directories. Bash is explicitly re-enabled for local compilers/tests/git,
+    # so give Bash the complementary OS-level read boundary: deny the operator's
+    # entire home directory, then re-open only the current pass and trusted Loop
+    # runtime surfaces. More-specific allowRead wins over the broad denyRead.
+    home = Path.home().expanduser().resolve(strict=False)
+    allow_read = sorted({
+        str(worktree.resolve(strict=False)),
+        str(semantic_path.parent.resolve(strict=False)),
+        str(cache_root.resolve(strict=False)),
+        str((canonical_repo / ".git").resolve(strict=False)),
+        str(_source_root().resolve(strict=False)),
+    })
     allow_write = sorted({
         str(cache_root.resolve(strict=False)),
         str(semantic_path.parent.resolve(strict=False)),
     })
-    filesystem: dict[str, Any] = {"allowWrite": allow_write}
+    filesystem: dict[str, Any] = {
+        "denyRead": [str(home)],
+        "allowRead": allow_read,
+        "allowWrite": allow_write,
+    }
     if role == "reviewer":
         filesystem["denyWrite"] = [str(worktree.resolve(strict=False))]
+
+    # No semantic pass needs host credentials or outbound network. Dependency
+    # provisioning/research is a pre-SPEC/bootstrap responsibility. These
+    # native credential rules keep common non-cloud tokens out of Bash even if
+    # they exist in the supervisor's environment; the subprocess scrub env var
+    # separately strips Anthropic/cloud-provider credentials.
+    credential_vars = [
+        "GITHUB_TOKEN", "GH_TOKEN", "NPM_TOKEN", "NODE_AUTH_TOKEN",
+        "PYPI_TOKEN", "TWINE_PASSWORD", "DOCKER_AUTH_CONFIG",
+    ]
     return {
         "autoMemoryEnabled": False,
         "sandbox": {
             "enabled": True,
             "failIfUnavailable": True,
+            "autoAllowBashIfSandboxed": True,
             "allowUnsandboxedCommands": False,
             "excludedCommands": [],
             "filesystem": filesystem,
             "network": {
                 "allowedDomains": [],
                 "strictAllowlist": True,
+            },
+            "credentials": {
+                "envVars": [
+                    {"name": name, "mode": "deny"} for name in credential_vars
+                ],
             },
         },
     }
@@ -1548,18 +1583,20 @@ class ClaudeCodeRunner:
               "The deterministic core already claimed and prepared the pass. "
               "Do not call claim, prepare, finalize, push, merge, deploy, or create remotes. "
               "Use the exact paths and identities below. Complete the source work (builder) "
-              "or exact-SHA assessment (reviewer), fill only the supplied semantic artifact, "
-              "then stop.\n\n"
+              "or exact-SHA assessment (reviewer). The supplied semantic artifact may sit "
+              "outside restricted built-in file-tool scope; write that artifact with sandboxed "
+              "Bash when needed. Do not widen access. Then stop.\n\n"
             + payload
         )
 
         claude_bin = os.environ.get("OFLOOP_CLAUDE_BIN", "claude")
         extra = shlex.split(os.environ.get("OFLOOP_CLAUDE_EXTRA_ARGS", ""))
         _validate_claude_extra_args(extra)
-        # The semantic-worker tool surface is product authority, not an
-        # environment-tunable convenience. In particular, WebSearch/WebFetch,
-        # Agent/Task, Skill and MCP tools must not appear inside a sealed pass.
-        allowed_tools = DEFAULT_CLAUDE_ALLOWED_TOOLS
+        # Tool availability is product authority, not an environment-tunable
+        # convenience. Reviewers structurally lack Edit/Write/NotebookEdit.
+        allowed_tools = (
+            CLAUDE_BUILDER_TOOLS if role == "builder" else CLAUDE_REVIEWER_TOOLS
+        )
         canonical_repo = Path(
             str(work_order.get("canonical_repo") or "")
         ).resolve(strict=False)
@@ -1573,11 +1610,10 @@ class ClaudeCodeRunner:
             worktree=worktree,
             semantic_path=semantic_path,
         )
-        # Only trusted user settings are loaded. Project/local settings belong
-        # to the target repository and may not widen an unattended worker's
-        # filesystem/network sandbox. --tools is the actual availability
-        # boundary; --allowedTools only removes permission friction inside that
-        # already restricted surface.
+        # --restricted is the native shared-machine isolation boundary.
+        # dontAsk + explicit --allowedTools means there are no human permission
+        # prompts: capabilities inside the sealed set run, everything else is
+        # denied. The Bash sandbox auto-allows contained commands.
         #
         # Pipe the prompt via stdin. Passing it as an argv string lets Claude
         # CLI mis-parse leading `---` (YAML frontmatter in the role file) as
@@ -1587,6 +1623,9 @@ class ClaudeCodeRunner:
             "-p",
             "--output-format",
             "json",
+            "--restricted",
+            "--permission-mode",
+            "dontAsk",
             "--no-chrome",
             "--no-session-persistence",
             "--strict-mcp-config",
@@ -1595,8 +1634,6 @@ class ClaudeCodeRunner:
             "--plugin-dir",
             str(_source_root()),
             *extra,
-            "--setting-sources",
-            "user",
             "--settings",
             json.dumps(secure_settings, separators=(",", ":"), sort_keys=True),
             "--tools",
@@ -1613,6 +1650,16 @@ class ClaudeCodeRunner:
             stdout_fh = subprocess.PIPE
             stderr_fh = subprocess.PIPE
 
+        worker_env = runtime_env.hermetic_subprocess_env(
+            Path(str(work_order.get("canonical_repo") or "")).resolve(strict=False),
+            str(work_order.get("run_id") or ""),
+            role,
+        )
+        # Claude-native subprocess scrub: keep model authentication available to
+        # the Claude process itself while stripping Anthropic/cloud credentials
+        # from Bash children. This also forces filesystem isolation to remain on.
+        worker_env["CLAUDE_CODE_SUBPROCESS_ENV_SCRUB"] = "1"
+
         proc = subprocess.Popen(
             cmd,
             cwd=str(worktree),
@@ -1621,11 +1668,7 @@ class ClaudeCodeRunner:
             stderr=stderr_fh,
             text=True,
             start_new_session=True,
-            env=runtime_env.hermetic_subprocess_env(
-                Path(str(work_order.get("canonical_repo") or "")).resolve(strict=False),
-                str(work_order.get("run_id") or ""),
-                role,
-            ),
+            env=worker_env,
         )
         # Persist worker ownership BEFORE the child produces any output. If
         # anything between here and a successful communicate() raises, the

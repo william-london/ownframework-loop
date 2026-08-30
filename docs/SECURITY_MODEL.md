@@ -18,8 +18,10 @@ Git repositories. Relevant threats include:
     messaging, remote mutation, or customer-system mutation;
 11. a same-user agent intentionally trying to route around host tool guards.
 
-The project provides deterministic workflow/integrity controls. It does not
-claim arbitrary same-user OS sandboxing.
+The project does not claim universal isolation for arbitrary same-user
+software. Commissioned unattended semantic passes do use Claude Code's native
+shared-machine boundary (`--restricted`) plus its Bash sandbox, strict network
+policy, credential scrubbing, and role-specific tool availability.
 
 ## Defense layers
 
@@ -118,21 +120,25 @@ Checkpoint approval requires real build/review evidence. Repair exhaustion is
 fail-closed. Approved checkpoint advancement is deterministic and operator-free;
 final checkpoint approval yields terminal program `APPROVED`.
 
-### 7. Host tool-surface guards
+### 7. Commissioned semantic-worker isolation
 
-The Claude reference adapter uses `PreToolUse`/`PostToolUse` hooks to block or
-classify dangerous command/path/external-action patterns during active runs.
-The implementation normalizes several common forms such as chained shell
-commands, quoting/escaping, some literal Python subprocess forms, variable
-assignments, and wrapper executable names.
+The durable supervisor launches each BUILD/REVIEW pass with Claude Code
+2.1.248+ in native `--restricted` mode. Built-in file tools are confined to
+the pass working directory; user/project/local settings are not loaded.
+Builder and reviewer receive different built-in tool sets, with reviewers
+structurally lacking Edit/Write/NotebookEdit.
 
-These guards are **tool-surface guardrails**, not an OS sandbox. Arbitrary
-dynamic code that cannot be statically interpreted is outside the mechanical
-containment claim.
+Bash runs inside Claude's OS sandbox with fail-if-unavailable, no unsandboxed
+escape, strict empty network allowlist, operator-home read denial with narrow
+current-pass/runtime re-opens, and credential scrubbing/deny rules.
+`--permission-mode dontAsk` plus explicit pre-approved sealed tools means
+authorized work runs without routine human prompts while out-of-contract calls
+are denied.
 
-A coding agent must never intentionally route around a guard refusal. The
-repository operating doctrine treats such a bypass as a policy violation even
-when the underlying same-user OS permissions technically permit it.
+`PreToolUse`/`PostToolUse` hooks remain defense in depth for protocol/path
+semantics that Claude's generic sandbox does not know, such as exact pass
+scratch authority and Loop external-action classification. They are not the
+primary OS isolation boundary.
 
 ### 8. External-action boundary
 
@@ -180,8 +186,11 @@ REVIEW_SHA=exact
 CRASH_RECONCILIATION=exact_current_pass_only
 PROGRAM_BUDGETS=finite
 EXTERNAL_ACTION_AUTHORITY=outside_loop
-TOOL_SURFACE_GUARDS=mechanical_guardrails
-ARBITRARY_SAME_USER_CODE_SANDBOX=no
+CLAUDE_RESTRICTED_MODE=required_for_supervised_semantic_passes
+BASH_SANDBOX=fail_closed
+SEMANTIC_NETWORK_EGRESS=none
+SEMANTIC_PERMISSION_PROMPTS=none_in_authorized_surface
+TOOL_SURFACE_GUARDS=defense_in_depth
 ```
 
 ## Compatibility notes
@@ -210,10 +219,15 @@ concurrency or security property unless the test exercises the behavioral path.
 
 ## Tooling autonomy posture
 
-The reference workflow is compatible with broad coding-agent tool access. The
-plugin does not need to mutate global provider/model/permission settings to
-operate.
+Interactive Claude sessions may use the broader plugin/agent surface. The
+commissioned unattended supervisor intentionally does not: it uses Claude's
+native restricted mode and role-specific local tools so SPEC approval can be
+followed by unattended BUILD/REVIEW/repair without permission babysitting.
 
-Authority comes from deterministic packet/source/worktree/SHA/state/finalizer
-boundaries, not from pretending a broad tool-using model is an OS-sandboxed
-principal.
+Research, dependency provisioning, and external integrations happen before the
+sealed PROGRAM is minted. Promotion remains after terminal APPROVED and
+human-owned.
+
+Authority still comes from deterministic packet/source/worktree/SHA/state/
+finalizer boundaries; the native sandbox limits what a compromised semantic
+worker can reach while those deterministic checks decide what evidence counts.

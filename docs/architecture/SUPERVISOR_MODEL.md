@@ -192,14 +192,19 @@ build finalizer's own failed-validation evidence). A stale verdict after a
 post-review validation failure is legitimate and falls through rather than
 hard-stopping the run.
 
-The reference runner exposes Claude Code's Agent and Skill tools alongside the
-normal engineering tool set. Subagent delegation is optional and should be
-used when it improves a complex pass, not as busy work. The same semantic-role
-authority continues to apply to delegated work.
+The commissioned runner uses Claude Code's native `--restricted` mode and
+does not expose Agent, Task, Skill, WebSearch, WebFetch, browser, or MCP
+capabilities inside a semantic pass. Builder tools are
+`Read,Edit,Write,NotebookEdit,Bash,Glob,Grep`; reviewer tools are
+`Read,Bash,Glob,Grep`.
+
+The pass starts in `dontAsk` permission mode with that exact tool set
+pre-approved. Sandboxed Bash auto-runs, so ordinary authorized engineering does
+not wait for a human permission prompt. Out-of-contract calls are denied rather
+than escalated.
 
 The supervisor main print-mode worker does not receive a --max-turns flag.
-Agent-file maxTurns applies only when that custom agent is invoked through
-Claude's agent mechanism.
+Pass duration is controlled by the packet/supervisor wall-clock timeout below.
 
 For v3 packets, risk_budget.max_pass_runtime_seconds is the semantic worker
 timeout authority. A positive supervisor serve --timeout-seconds value can

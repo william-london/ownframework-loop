@@ -261,14 +261,14 @@ narrower execution boundary for each semantic BUILD/REVIEW pass:
 - Claude Bash sandbox enabled fail-closed;
 - strict empty-domain Bash network allowlist;
 - unsandboxed Bash escape disabled;
-- project/local Claude settings excluded;
+- Claude-native `--restricted` mode: user/project/local settings excluded and built-in file tools confined to the pass working directory;
 - inherited MCP servers disabled with strict empty MCP configuration;
 - browser, WebSearch/WebFetch, nested Agent/Task, Skill, and other non-local
   built-in surfaces absent from `--tools`;
-- role-specific filesystem write boundaries, including reviewer worktree
-  deny-write;
-- authority-sensitive runner flags cannot be replaced through
-  `OFLOOP_CLAUDE_EXTRA_ARGS`.
+- role-specific native tool sets (reviewer has no Edit/Write/NotebookEdit) plus Bash filesystem boundaries, including reviewer worktree deny-write;
+- `dontAsk` + pre-approved sealed tools means no routine permission prompts;
+- Bash sees no outbound network, no unsandboxed escape, a home-directory read deny with narrow pass re-opens, and scrubbed host credentials;
+- authority-sensitive runner flags cannot be replaced through `OFLOOP_CLAUDE_EXTRA_ARGS`.
 
 Mechanical hooks remain defense in depth, and deterministic exact-SHA/source/
 effect checks remain authority after the worker exits. Interactive/foreground
@@ -322,8 +322,8 @@ Core/runtime:
 Claude reference adapter:
 
 - Claude Code 2.1+ for ordinary interactive adapter use
-- Claude Code 2.1.219+ for the commissioned unattended supervisor
-  (`sandbox.network.strictAllowlist` is part of the sealed worker boundary)
+- Claude Code 2.1.248+ for the commissioned unattended supervisor
+  (`--restricted` is the native shared-machine boundary)
 
 ## Project status
 

@@ -1,51 +1,58 @@
 # Commissioned Claude Semantic-Worker Permission Contract
 
-OwnFramework Loop 0.8.4 owns the permission/tool envelope for unattended
-supervisor-spawned BUILD/REVIEW passes.
+OwnFramework Loop 0.8.4 is designed for SPEC -> unattended BUILD/REVIEW/repair -> human merge.
 
-## Fixed built-in tool set
+## No human permission loop
+
+Claude Code starts each semantic pass in native `--restricted` mode with `--permission-mode dontAsk`.
+
+The exact tool set is pre-approved with `--allowedTools`, and sandboxed Bash auto-runs inside the OS boundary. Therefore ordinary authorized work does not prompt. Calls outside the sealed capability set are denied rather than asking the operator.
+
+## Tool availability
+
+Builder:
 
 ```text
 Read,Edit,Write,NotebookEdit,Bash,Glob,Grep
 ```
 
-`--tools` is the structural availability boundary. `--allowedTools`
-pre-approves that same already-restricted local set so headless workers do not
-stop for ordinary engineering prompts.
+Reviewer:
 
-`OFLOOP_CLAUDE_ALLOWED_TOOLS` does not widen this surface.
+```text
+Read,Bash,Glob,Grep
+```
 
-## Settings and MCP sources
+No WebSearch/WebFetch, Agent/Task, Skill, browser, promotion, deployment, or remote-mutation surface is present inside a semantic pass.
 
-The worker loads trusted user settings but excludes project/local target-repo
-settings. The OwnFramework Loop plugin is supplied explicitly.
+## Settings and MCP
 
-MCP discovery uses strict mode with an empty explicit configuration, so
-user/project/plugin MCP servers cannot silently grant additional capabilities
-inside the sealed pass.
+`--restricted` excludes user/project/local settings. The Loop plugin and pass settings are supplied explicitly.
+
+MCP discovery uses `--strict-mcp-config --mcp-config {}`, because `--tools` does not govern MCP tools.
 
 ## Sandbox
 
-Per-invocation CLI settings enforce:
+Per-pass CLI settings enforce:
 
 - sandbox enabled;
 - fail if unavailable;
+- automatic approval for sandboxed Bash;
 - no unsandboxed-command escape;
-- strict empty-domain Bash network allow-list;
-- role-specific filesystem write policy.
+- strict empty network allowlist;
+- operator-home read deny with narrow current-pass/runtime re-opens;
+- reviewer worktree deny-write;
+- credential environment-variable denies.
 
-Claude Code 2.1.219+ is required because strict sandbox network allow-list
-enforcement is part of the commissioned boundary.
+The worker environment also sets `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1`.
 
-## Authority-sensitive overrides
+## Human authority
 
-`OFLOOP_CLAUDE_EXTRA_ARGS` is convenience only. The supervisor refuses
-attempts to replace settings sources, sandbox settings, tool lists, MCP config,
-plugin roots, permission modes, browser/remote surfaces, or session authority.
+The only intended human gates are:
 
-## External effects
+1. SPEC/packet approval before execution.
+2. Final merge/promotion after terminal APPROVED.
 
-Executable Loop packets retain:
+Executable packets remain:
 
 ```text
 merge_authority=human_only
@@ -55,5 +62,4 @@ external_action_authority=none
 promotion_policy=human_gate
 ```
 
-Research/integrations happen before the PROGRAM is minted or after Loop stops.
-Promotion remains outside Loop.
+Everything between those gates is expected to run unattended.

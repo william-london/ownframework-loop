@@ -1,62 +1,54 @@
 # Commissioned Claude Semantic-Worker Sandbox
 
-OwnFramework Loop 0.8.4 makes sandbox activation a property of the durable
-supervisor runner, not an operator ceremony.
+OwnFramework Loop 0.8.4 uses Claude Code's native shared-machine controls instead of recreating them.
 
-## Unattended BUILD / REVIEW contract
+## Native boundary
 
-The supervisor supplies CLI settings for every fresh semantic pass with:
+Every supervisor-spawned BUILD/REVIEW pass requires Claude Code 2.1.248+ and starts with:
 
-- `sandbox.enabled=true`;
-- `sandbox.failIfUnavailable=true`;
-- `sandbox.allowUnsandboxedCommands=false`;
-- `sandbox.network.strictAllowlist=true`;
-- `sandbox.network.allowedDomains=[]`;
-- role-specific filesystem write rules.
+- `--restricted`;
+- `--permission-mode dontAsk`;
+- fail-closed Bash sandboxing;
+- `allowUnsandboxedCommands=false`;
+- strict empty Bash network allowlist;
+- strict empty MCP configuration;
+- Chrome disabled;
+- session persistence disabled.
 
-The strict network setting requires Claude Code 2.1.219 or later. The runner
-proves the Claude Code version before accepting it.
+Restricted mode excludes user/project/local settings and confines built-in file tools to the pass working directory. Loop supplies only the pass-specific CLI settings and its explicit plugin.
 
-Project and local settings from the target repository are excluded using the
-Claude setting-source boundary. User/managed configuration remains a trusted
-operator/organization boundary, but the Loop's CLI `--settings` supplies the
-security-critical sandbox scalars.
+## Zero routine prompts
 
-## Tool and MCP boundary
+`dontAsk` is paired with an explicit pre-approved tool set and `sandbox.autoAllowBashIfSandboxed=true`. Allowed local engineering actions run without human prompts. Anything outside the sealed set is denied, not escalated.
 
-A sealed semantic worker receives only:
+This is intentionally not `bypassPermissions`: Claude Code's native restricted mode refuses bypassPermissions. The operational goal is the same—no human in the BUILD/REVIEW loop—but with a real isolation boundary.
+
+## Role-specific capabilities
+
+Builder:
 
 ```text
-Read
-Edit
-Write
-NotebookEdit
-Bash
-Glob
-Grep
+Read,Edit,Write,NotebookEdit,Bash,Glob,Grep
 ```
 
-The runner does not expose WebSearch, WebFetch, browser integration, Agent/Task
-orchestration, Skill, or other non-local built-ins.
+Reviewer:
 
-MCP discovery is disabled with strict MCP configuration and an empty explicit
-MCP config. This prevents user/project/plugin MCP servers from silently
-expanding a sealed pass.
+```text
+Read,Bash,Glob,Grep
+```
 
-## Filesystem behavior
+Reviewer source immutability is therefore structural. Sandboxed Bash may write only the pass semantic-result directory/runtime cache, and reviewer Bash is deny-write for the exact-SHA worktree.
 
-Builder Bash runs in the builder worktree and may write its pass-scoped semantic
-result directory plus the Loop runtime cache. Reviewer Bash receives an
-explicit deny-write rule for the exact-SHA reviewer worktree and may write only
-its pass-scoped assessment/runtime cache surfaces.
+## Bash read and credential boundary
 
-Protected-path hooks and deterministic finalizers remain defense in depth.
+Bash denies reads of the operator home directory and re-opens only the current worktree, current semantic-result directory, runtime cache, required Git metadata, and the trusted Loop runtime payload.
 
-## Scope of the claim
+The supervisor sets `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1`, and sandbox credential rules deny common GitHub/npm/PyPI/container tokens. Model authentication remains available to the Claude process itself, not to its Bash children.
 
-This is an OS/runtime boundary for commissioned semantic Bash plus a structural
-Claude tool/MCP boundary. It is not a claim that arbitrary same-user software is
-a separate untrusted OS principal.
+## Network
 
-Interactive Claude sessions are not automatically equivalent to the
-commissioned supervisor envelope.
+Semantic BUILD/REVIEW passes have no outbound network. Research, dependency provisioning, package acquisition, and external integrations belong to the automated pre-SPEC/bootstrap phase. A sealed pass should not discover that it needs the internet after SPEC approval.
+
+## Scope
+
+This is the commissioned unattended worker contract. Interactive Claude sessions are not equivalent evidence.

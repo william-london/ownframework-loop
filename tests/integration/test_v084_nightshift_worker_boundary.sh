@@ -72,33 +72,45 @@ finally:
     os.environ.pop("OFLOOP_CLAUDE_ALLOWED_TOOLS", None)
 
 cmd = captured["cmd"]
+assert "--restricted" in cmd, cmd
+assert cmd[cmd.index("--permission-mode") + 1] == "dontAsk", cmd
 assert "--tools" in cmd, cmd
 assert "--allowedTools" in cmd, cmd
-assert cmd[cmd.index("--tools") + 1] == supervisor.DEFAULT_CLAUDE_ALLOWED_TOOLS
-assert cmd[cmd.index("--allowedTools") + 1] == supervisor.DEFAULT_CLAUDE_ALLOWED_TOOLS
-toolset = set(supervisor.DEFAULT_CLAUDE_ALLOWED_TOOLS.split(","))
+assert cmd[cmd.index("--tools") + 1] == supervisor.CLAUDE_BUILDER_TOOLS
+assert cmd[cmd.index("--allowedTools") + 1] == supervisor.CLAUDE_BUILDER_TOOLS
+toolset = set(supervisor.CLAUDE_BUILDER_TOOLS.split(","))
 assert toolset == {"Read","Edit","Write","NotebookEdit","Bash","Glob","Grep"}, toolset
 assert not toolset.intersection({"WebSearch","WebFetch","Agent","Task","Skill"}), toolset
 assert "--strict-mcp-config" in cmd, cmd
 assert cmd[cmd.index("--mcp-config") + 1] == "{}", cmd
 assert "--no-chrome" in cmd, cmd
 assert "--no-session-persistence" in cmd, cmd
-assert "--setting-sources" in cmd, cmd
-assert cmd[cmd.index("--setting-sources") + 1] == "user", cmd
+assert "--setting-sources" not in cmd, cmd
 settings = json.loads(cmd[cmd.index("--settings") + 1])
 sb = settings["sandbox"]
 assert sb["enabled"] is True
 assert sb["failIfUnavailable"] is True
+assert sb["autoAllowBashIfSandboxed"] is True
 assert sb["allowUnsandboxedCommands"] is False
 assert sb["excludedCommands"] == []
 assert sb["network"]["strictAllowlist"] is True
 assert sb["network"]["allowedDomains"] == []
-allow = set(sb["filesystem"]["allowWrite"])
-assert str(semantic.parent.resolve()) in allow, allow
+fs = sb["filesystem"]
+allow_write = set(fs["allowWrite"])
+allow_read = set(fs["allowRead"])
+assert fs["denyRead"] == [str(pathlib.Path.home().resolve())], fs
+assert str(worktree.resolve()) in allow_read, allow_read
+assert str(semantic.parent.resolve()) in allow_read, allow_read
+assert str((repo / ".git").resolve()) in allow_read, allow_read
+assert str(semantic.parent.resolve()) in allow_write, allow_write
 expected_cache = str(
     runtime_env.runtime_cache_path(repo, "run-secure", "builder").resolve()
 )
-assert expected_cache in allow, allow
+assert expected_cache in allow_read, allow_read
+assert expected_cache in allow_write, allow_write
+cred_names = {item["name"] for item in sb["credentials"]["envVars"]}
+assert {"GITHUB_TOKEN","GH_TOKEN","NPM_TOKEN","NODE_AUTH_TOKEN","PYPI_TOKEN","TWINE_PASSWORD","DOCKER_AUTH_CONFIG"} <= cred_names
+assert captured["env"]["CLAUDE_CODE_SUBPROCESS_ENV_SCRUB"] == "1"
 
 # Reviewer sandbox also makes exact-SHA worktree read-only to Bash.
 review_wt = repo / ".worktrees" / "ownframework-loop" / "run-secure" / "reviewer"
@@ -114,6 +126,34 @@ review_settings = supervisor._semantic_worker_settings(
 )
 assert review_settings["sandbox"]["filesystem"]["denyWrite"] == [str(review_wt.resolve())]
 
+# Reviewer invocation structurally lacks source-editing tools while retaining
+# sandboxed Bash for validation and its one semantic assessment artifact.
+captured.clear()
+supervisor.subprocess.Popen = FakePopen
+os.environ["OFLOOP_CLAUDE_BIN"] = "/bin/sh"
+try:
+    review_order = dict(order)
+    review_order.update({
+        "role": "reviewer",
+        "state": "REVIEWING",
+        "worktree": str(review_wt),
+        "semantic_path": str(review_sem),
+    })
+    try:
+        supervisor.ClaudeCodeRunner().run(review_order, timeout_seconds=1)
+    except SystemExit:
+        pass
+finally:
+    supervisor.subprocess.Popen = real_popen
+    os.environ.pop("OFLOOP_CLAUDE_BIN", None)
+review_cmd = captured["cmd"]
+assert review_cmd[review_cmd.index("--tools") + 1] == supervisor.CLAUDE_REVIEWER_TOOLS
+assert review_cmd[review_cmd.index("--allowedTools") + 1] == supervisor.CLAUDE_REVIEWER_TOOLS
+review_tools = set(supervisor.CLAUDE_REVIEWER_TOOLS.split(","))
+assert review_tools == {"Read","Bash","Glob","Grep"}, review_tools
+assert not review_tools.intersection({"Edit","Write","NotebookEdit"}), review_tools
+assert captured["env"]["CLAUDE_CODE_SUBPROCESS_ENV_SCRUB"] == "1"
+
 # Operator convenience args may not override any authority-bearing worker flag.
 os.environ["OFLOOP_CLAUDE_EXTRA_ARGS"] = "--settings '{}'"
 try:
@@ -126,11 +166,10 @@ try:
 finally:
     os.environ.pop("OFLOOP_CLAUDE_EXTRA_ARGS", None)
 
-# Readiness proves the documented strictAllowlist feature baseline used by
-# the commissioned sandbox. Old or unparseable versions fail closed before a
-# semantic attempt.
+# Readiness proves the Claude-native --restricted shared-machine baseline.
+# Old or unparseable versions fail closed before a semantic attempt.
 fake = root / "claude"
-fake.write_text("#!/bin/sh\necho '2.1.218 (Claude Code)'\n", encoding="utf-8")
+fake.write_text("#!/bin/sh\necho '2.1.247 (Claude Code)'\n", encoding="utf-8")
 fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
 os.environ["OFLOOP_CLAUDE_BIN"] = str(fake)
 old = supervisor.ClaudeCodeRunner().preflight()
@@ -138,7 +177,7 @@ assert old.ready is False, old
 assert old.classification == "configuration", old
 assert old.reason == "runner_secure_sandbox_version_too_old", old
 
-fake.write_text("#!/bin/sh\necho '2.1.219 (Claude Code)'\n", encoding="utf-8")
+fake.write_text("#!/bin/sh\necho '2.1.248 (Claude Code)'\n", encoding="utf-8")
 ready = supervisor.ClaudeCodeRunner().preflight()
 assert ready.ready is True, ready
 os.environ.pop("OFLOOP_CLAUDE_BIN", None)

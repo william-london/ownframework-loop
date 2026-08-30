@@ -30,18 +30,16 @@ successful 0.8.3 live PROGRAM canary did not.
 
 ### Sealed unattended Claude worker
 
-- commissioned workers require Claude Code 2.1.219+ (the documented baseline
-  for sandbox.network.strictAllowlist);
+- commissioned workers require Claude Code 2.1.248+ and use the native `--restricted` shared-machine boundary;
 - Bash sandbox is fail-closed with an empty strict network allow-list and
   unsandboxed-command escape disabled;
-- project/local settings are excluded and role-specific filesystem policy is
-  supplied through CLI settings;
+- user/project/local settings are excluded by `--restricted`; built-in file tools are confined to the pass working directory;
 - inherited MCPs are disabled with strict empty MCP configuration;
-- the built-in tool surface is fixed to
-  Read/Edit/Write/NotebookEdit/Bash/Glob/Grep: no WebSearch/WebFetch,
-  Agent/Task, Skill, browser, or nested orchestration inside the sealed pass;
+- builder and reviewer have different native tool sets: builders get Read/Edit/Write/NotebookEdit/Bash/Glob/Grep; reviewers get Read/Bash/Glob/Grep only; no WebSearch/WebFetch, Agent/Task, Skill, browser, or nested orchestration inside the sealed pass;
 - historical OFLOOP_CLAUDE_ALLOWED_TOOLS environment tuning cannot widen the
   product-owned semantic tool boundary;
+- `--permission-mode dontAsk` plus pre-approved sealed tools and sandbox auto-allow eliminate routine permission prompts without using `bypassPermissions` (which restricted mode intentionally refuses);
+- Bash read access denies the operator home except narrow current-pass/runtime re-opens, and subprocess credentials are scrubbed/denied;
 - authority-sensitive extra CLI flags are refused before Claude starts.
 
 Research/integrations remain outside sealed BUILD/REVIEW passes. Promotion and

@@ -50,15 +50,11 @@ Every unattended Claude BUILD/REVIEW pass is launched with Claude Code's Bash
 sandbox enabled and fail-closed. The runtime supplies
 `sandbox.network.strictAllowlist=true` with an empty allowed-domain set,
 `allowUnsandboxedCommands=false`, and role-specific filesystem write policy.
-Project/local Claude settings are excluded. MCP discovery is strict with an
-empty explicit MCP configuration. Browser/web research, nested Agent/Task
-orchestration, Skill, and other non-local built-ins are not exposed through the
-semantic worker's `--tools` allow-list.
+`--restricted` is the native shared-machine boundary: user/project/local settings are excluded and built-in file tools are confined to the pass working directory. MCP discovery is strict with an empty explicit MCP configuration. Browser/web research, nested Agent/Task orchestration, Skill, and other non-local built-ins are not exposed through the semantic worker's `--tools` allow-list. Builder and reviewer use different native tool sets; reviewers do not receive Edit/Write/NotebookEdit.
 
-The minimum commissioned-runner version is Claude Code 2.1.219 because strict
-network allow-list enforcement is part of the boundary. If the version cannot
-be proven, is older, or the sandbox cannot arm, the supervisor fails closed
-before/at semantic execution.
+The supervisor uses `--permission-mode dontAsk` together with an explicit pre-approved sealed tool set and sandbox auto-allow. Inside the authorized pass there are no routine human permission prompts; anything outside the sealed capability set is denied rather than escalated. Bash is additionally denied reads of the operator home except for the current worktree, semantic artifact, runtime cache, Git metadata, and trusted Loop payload. `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1` plus sandbox credential denies keep host credentials out of Bash children.
+
+The minimum commissioned-runner version is Claude Code 2.1.248 because `--restricted` is part of the boundary. If the version cannot be proven, is older, or the sandbox cannot arm, the supervisor fails closed before/at semantic execution.
 
 Adapter hooks remain a second boundary for direct/normalized command forms, and
 the deterministic core re-proves exact source/candidate identity before
