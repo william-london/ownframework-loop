@@ -12,9 +12,10 @@
 #       the retired $25 / 8-hour conservation ceilings; explicitly
 #       configured historical limits are preserved.
 #
-# ALL installer invocations here are hermetic: fake HOME, fake
-# XDG_STATE_HOME, and a launchctl shim that refuses to touch the real
-# machine even if the guard regressed. No model is called.
+# Runtime replacement dependency decisions are platform-neutral authority owned
+# by probe-supervisor-runtime-dependencies.py and consumed by both launchd and
+# systemd installers. Exercise that shared owner directly so Linux CI does not
+# pretend to be macOS merely to reach the generation guard. No model is called.
 
 set -euo pipefail
 TESTS_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -23,19 +24,12 @@ TESTS_DIR="$(cd "$(dirname "$0")" && pwd)"
 TMP="$(mktemp -d -t ofloop_v080_gen.XXXXXX)"
 trap 'rm -rf "$TMP"' EXIT
 
-GUARD_HOME="$TMP/home"
-GUARD_SHIMS="$TMP/shims"
-mkdir -p "$GUARD_HOME" "$GUARD_SHIMS"
-printf '#!/bin/sh\necho "launchctl disabled in hermetic test" >&2\nexit 127\n' \
-  > "$GUARD_SHIMS/launchctl"
-chmod +x "$GUARD_SHIMS/launchctl"
-
-run_installer() {
-  # run_installer <state-root> [extra env KEY=VAL ...] — hermetic invocation.
+run_dependency_probe() {
+  # run_dependency_probe <state-root> [probe flags...]
   local state_root="$1"; shift
-  env PATH="$GUARD_SHIMS:$PATH" HOME="$GUARD_HOME" XDG_STATE_HOME="$state_root" \
-    OFLOOP_BIN="$ROOT_DIR/bin/ofloop" "$@" \
-    bash "$ROOT_DIR/install-supervisor-macos.sh" 2>&1
+  PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$LIB_DIR" \
+    python3 -B "$ROOT_DIR/scripts/probe-supervisor-runtime-dependencies.py" \
+    "$state_root/ownframework-loop/supervisor.sqlite3" "$INCOMING_GENERATION" "$@" 2>&1
 }
 
 make_ledger() {
@@ -122,7 +116,7 @@ S1="$TMP/state-live-worker"
 make_ledger "$S1" >/dev/null
 add_job "$S1" "run-live" "RUNNING" "$INCOMING_GENERATION" "$$"
 set +e
-OUT1="$(run_installer "$S1")"; RC1=$?
+OUT1="$(run_dependency_probe "$S1")"; RC1=$?
 set -e
 [[ "$RC1" -eq 11 ]] || fail "T1 live worker must refuse rc=11 (rc=$RC1 out=$OUT1)"
 assert_contains "$OUT1" "reason=active_semantic_work" "T1 live semantic worker refuses replacement"
@@ -134,7 +128,7 @@ S2="$TMP/state-queued"
 make_ledger "$S2" >/dev/null
 add_job "$S2" "run-queued" "QUEUED" "$OTHER_GENERATION"
 set +e
-OUT2="$(run_installer "$S2")"; RC2=$?
+OUT2="$(run_dependency_probe "$S2")"; RC2=$?
 set -e
 [[ "$RC2" -eq 13 ]] || fail "T2 QUEUED generation dependency must refuse rc=13 (rc=$RC2 out=$OUT2)"
 assert_contains "$OUT2" "reason=runtime_generation_dependency" "T2 QUEUED run bound to another generation refuses"
@@ -146,7 +140,7 @@ S3="$TMP/state-backoff"
 make_ledger "$S3" >/dev/null
 add_job "$S3" "run-backoff" "BACKOFF" "$OTHER_GENERATION"
 set +e
-OUT3="$(run_installer "$S3")"; RC3=$?
+OUT3="$(run_dependency_probe "$S3")"; RC3=$?
 set -e
 [[ "$RC3" -eq 13 ]] || fail "T3 BACKOFF generation dependency must refuse (rc=$RC3 out=$OUT3)"
 assert_contains "$OUT3" "reason=runtime_generation_dependency" "T3 BACKOFF run bound to another generation refuses"
@@ -158,7 +152,7 @@ S4="$TMP/state-quarantined"
 make_ledger "$S4" >/dev/null
 add_job "$S4" "run-quarantined" "QUARANTINED" "$OTHER_GENERATION"
 set +e
-OUT4="$(run_installer "$S4")"; RC4=$?
+OUT4="$(run_dependency_probe "$S4")"; RC4=$?
 set -e
 [[ "$RC4" -eq 13 ]] || fail "T4 QUARANTINED generation dependency must refuse (rc=$RC4 out=$OUT4)"
 assert_contains "$OUT4" "reason=runtime_generation_dependency" "T4 resumable QUARANTINED run refuses generation swap"
@@ -171,7 +165,7 @@ S5="$TMP/state-dead-worker"
 make_ledger "$S5" >/dev/null
 add_job "$S5" "run-dead-worker" "RUNNING" "$OTHER_GENERATION" 999999
 set +e
-OUT5="$(run_installer "$S5")"; RC5=$?
+OUT5="$(run_dependency_probe "$S5")"; RC5=$?
 set -e
 [[ "$RC5" -eq 13 ]] || fail "T5 dead-worker foreign generation must refuse (rc=$RC5 out=$OUT5)"
 assert_contains "$OUT5" "reason=runtime_generation_dependency" "T5 dead worker does not hide a generation dependency"
@@ -183,14 +177,12 @@ S6="$TMP/state-done"
 make_ledger "$S6" >/dev/null
 add_job "$S6" "run-done" "DONE" "$OTHER_GENERATION"
 set +e
-OUT6="$(run_installer "$S6")"; RC6=$?
+OUT6="$(run_dependency_probe "$S6")"; RC6=$?
 set -e
 assert_not_contains "$OUT6" "reason=active_semantic_work" "T6 terminal DONE job is not an active-work dependency"
 assert_not_contains "$OUT6" "reason=runtime_generation_dependency" "T6 terminal DONE job is not a generation dependency"
-# The hermetic host may stop later at macos_required or the disabled launchctl;
-# this proof is specifically about getting past the runtime-dependency guards.
-[[ "$RC6" -ne 11 && "$RC6" -ne 13 ]] || fail "T6 unexpected dependency refusal rc=$RC6 out=$OUT6"
-pass "T6 terminal-only ledger proceeds past runtime dependency guards"
+[[ "$RC6" -eq 0 ]] || fail "T6 terminal-only ledger must be safe (rc=$RC6 out=$OUT6)"
+assert_contains "$OUT6" "reason=safe" "T6 terminal-only ledger proceeds past runtime dependency guards"
 
 # ---------------------------------------------------------------------------
 # T7: same-generation refresh is allowed (QUEUED bound to incoming).
@@ -199,11 +191,11 @@ S7="$TMP/state-same-gen"
 make_ledger "$S7" >/dev/null
 add_job "$S7" "run-same" "QUEUED" "$INCOMING_GENERATION"
 set +e
-OUT7="$(run_installer "$S7")"; RC7=$?
+OUT7="$(run_dependency_probe "$S7")"; RC7=$?
 set -e
 assert_not_contains "$OUT7" "reason=runtime_generation_dependency" "T7 same-generation refresh is not a generation dependency"
-[[ "$RC7" -ne 13 ]] || fail "T7 same-generation refresh unexpectedly hit generation guard: $OUT7"
-pass "T7 same-generation refresh proceeds past generation guard (rc=$RC7 hermetic tail)"
+[[ "$RC7" -eq 0 ]] || fail "T7 same-generation refresh must be safe (rc=$RC7 out=$OUT7)"
+assert_contains "$OUT7" "reason=safe" "T7 same-generation refresh proceeds past generation guard"
 
 # ---------------------------------------------------------------------------
 # T8: explicit migration override bypasses the generation guard (unsafe,
@@ -213,11 +205,11 @@ S8="$TMP/state-migration"
 make_ledger "$S8" >/dev/null
 add_job "$S8" "run-migrate" "QUEUED" "$OTHER_GENERATION"
 set +e
-OUT8="$(run_installer "$S8" OFLOOP_ALLOW_RUNTIME_GENERATION_MIGRATION=1)"; RC8=$?
+OUT8="$(run_dependency_probe "$S8" --allow-generation-migration)"; RC8=$?
 set -e
 assert_not_contains "$OUT8" "reason=runtime_generation_dependency" "T8 explicit migration override bypasses generation guard"
-[[ "$RC8" -ne 13 ]] || fail "T8 explicit migration override unexpectedly hit generation guard: $OUT8"
-pass "T8 OFLOOP_ALLOW_RUNTIME_GENERATION_MIGRATION=1 bypasses generation dependency guard"
+[[ "$RC8" -eq 0 ]] || fail "T8 explicit generation migration override must be safe at dependency probe (rc=$RC8 out=$OUT8)"
+assert_contains "$OUT8" "reason=safe" "T8 explicit generation migration override bypasses generation dependency guard"
 
 # ---------------------------------------------------------------------------
 # T9: supervisor execution contract — binding, mismatch fail-closed, adoption
