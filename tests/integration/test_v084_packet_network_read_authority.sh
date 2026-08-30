@@ -33,7 +33,8 @@ packet_path.write_text(
 )
 
 assert packet.validate_packet_metadata(meta) == [], packet.validate_packet_metadata(meta)
-assert schema_validate.validate_packet(meta) == [], schema_validate.validate_packet(meta)
+if schema_validate.jsonschema is not None:
+    assert schema_validate.validate_packet(meta) == [], schema_validate.validate_packet(meta)
 
 for bad in (
     ["https://pypi.org"],
@@ -46,9 +47,10 @@ for bad in (
     probe = dict(meta)
     probe["network_read_allowlist"] = bad
     handwritten = packet.validate_packet_metadata(probe)
-    schema = schema_validate.validate_packet(probe)
     assert handwritten, (bad, handwritten)
-    assert schema, (bad, schema)
+    if schema_validate.jsonschema is not None:
+        schema = schema_validate.validate_packet(probe)
+        assert schema, (bad, schema)
 
 execution_start.ensure_executable(
     canonical_repo=repo,
