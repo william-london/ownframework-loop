@@ -432,7 +432,11 @@ order = {
 supervisor.dispatch_mod.claim_next = lambda **kwargs: dict(order)
 # Not replay-ready: force the real runner launch path under test.
 supervisor.dispatch_mod.semantic_result_ready = lambda work_order: (False, "builder_summary_empty")
-supervisor.dispatch_mod.finalize_work_order = lambda work_order: {"ok": True}
+finalizer_timeouts = []
+def fake_finalize(work_order, **kwargs):
+    finalizer_timeouts.append(kwargs.get("timeout_seconds"))
+    return {"ok": True}
+supervisor.dispatch_mod.finalize_work_order = fake_finalize
 
 supervisor.enqueue(
     canonical_repo=repo, run_id="run-wall", runner="recording-runner",
@@ -452,7 +456,10 @@ result = supervisor.run_one(db_path=db)
 assert result["action"] == "BUILD", result
 t = RecordingRunner.recorded_timeout
 assert t is not None and t <= 60, f"pass timeout not clamped to remaining wall: {t}"
-print(f"WALL_CLAMP_OK timeout={t}")
+assert len(finalizer_timeouts) == 1, finalizer_timeouts
+ft = finalizer_timeouts[0]
+assert ft is not None and 0 < ft <= 60, f"finalizer timeout not clamped to remaining wall: {ft}"
+print(f"WALL_CLAMP_OK runner_timeout={t} finalizer_timeout={ft}")
 PY
 rm -rf "$TMP_WALL"
 pass "funded wall ceiling clamps the launched pass to remaining wall time"

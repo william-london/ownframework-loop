@@ -273,8 +273,9 @@ fi
 
 mkdir -p "$HOME/Library/LaunchAgents" "$STATE_ROOT"
 
-OLD_PLIST_BACKUP="$STATE_ROOT/.supervisor.plist.preinstall.${BASHPID}"
-OLD_PROVENANCE_BACKUP="$STATE_ROOT/.runtime-provenance.preinstall.${BASHPID}"
+INSTALLER_PID="${BASHPID:-$}"
+OLD_PLIST_BACKUP="$STATE_ROOT/.supervisor.plist.preinstall.${INSTALLER_PID}"
+OLD_PROVENANCE_BACKUP="$STATE_ROOT/.runtime-provenance.preinstall.${INSTALLER_PID}"
 HAD_OLD_PLIST=0
 HAD_OLD_PROVENANCE=0
 if [[ -f "$PLIST" ]]; then cp "$PLIST" "$OLD_PLIST_BACKUP"; HAD_OLD_PLIST=1; fi
