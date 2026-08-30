@@ -31,6 +31,26 @@ rd.mkdir(parents=True)
 state.save(repo, run_id, state.initial_state(run_id))
 assert state.load_verified(repo, run_id)["state"] == "AWAITING_APPROVAL"
 
+# Diagnostic extras are never allowed to replace protocol identity/integrity
+# fields or spoof the transaction recovery marker.
+event_bytes = state.events_path(repo, run_id).read_bytes()
+for reserved in ("run_id", "state_sha256", "event_chain_sha256", "state_txn_id"):
+    try:
+        state.append_event(
+            repo,
+            run_id,
+            event_type="reserved-extra-probe",
+            old_state=None,
+            new_state=None,
+            actor="test",
+            extras={reserved: "spoofed"},
+        )
+    except ValueError as exc:
+        assert "authoritative fields" in str(exc), exc
+    else:
+        raise AssertionError(f"reserved event extra accepted: {reserved}")
+assert state.events_path(repo, run_id).read_bytes() == event_bytes
+
 # 1) Crash after STATE replacement but before event append.
 real_append = state._append_event_locked
 def crash_before_event(*args, **kwargs):

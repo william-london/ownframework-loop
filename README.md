@@ -254,13 +254,26 @@ checkpoint identity, or pass-scoped result path.
 
 ## Security boundary
 
-OwnFramework Loop provides deterministic workflow/integrity controls, not an OS
-sandbox for arbitrary same-user code.
+OwnFramework Loop does not claim universal OS containment for arbitrary
+same-user code. The commissioned unattended Claude supervisor does own a
+narrower execution boundary for each semantic BUILD/REVIEW pass:
 
-The Claude reference adapter has mechanical tool-surface guards for direct and
-several normalized command forms. Those guards are valuable but do not prove
-semantic containment of arbitrary local programs. A coding agent must never
-intentionally route around a guard refusal.
+- Claude Bash sandbox enabled fail-closed;
+- strict empty-domain Bash network allowlist;
+- unsandboxed Bash escape disabled;
+- project/local Claude settings excluded;
+- inherited MCP servers disabled with strict empty MCP configuration;
+- browser, WebSearch/WebFetch, nested Agent/Task, Skill, and other non-local
+  built-in surfaces absent from `--tools`;
+- role-specific filesystem write boundaries, including reviewer worktree
+  deny-write;
+- authority-sensitive runner flags cannot be replaced through
+  `OFLOOP_CLAUDE_EXTRA_ARGS`.
+
+Mechanical hooks remain defense in depth, and deterministic exact-SHA/source/
+effect checks remain authority after the worker exits. Interactive/foreground
+Claude sessions are not automatically equivalent to this commissioned
+supervisor envelope.
 
 The strongest practical safety properties come from layered boundaries:
 
@@ -308,11 +321,13 @@ Core/runtime:
 
 Claude reference adapter:
 
-- Claude Code 2.1+
+- Claude Code 2.1+ for ordinary interactive adapter use
+- Claude Code 2.1.219+ for the commissioned unattended supervisor
+  (`sandbox.network.strictAllowlist` is part of the sealed worker boundary)
 
 ## Project status
 
-Current release line: **0.8.3**.
+Current release line: **0.8.4**.
 
 This remains an early public project. Correctness depends on the target
 repository, mission, validation supplied by the packet, agent host, and local

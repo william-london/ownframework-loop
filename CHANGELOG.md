@@ -4,6 +4,56 @@ All notable current-release changes to OwnFramework Loop are documented here.
 The complete historical changelog through 0.5.2 is preserved at
 [`docs/history/CHANGELOG-through-0.5.2.md`](docs/history/CHANGELOG-through-0.5.2.md).
 
+## 0.8.4 - Night-Shift Durability and Containment (2026-08-29)
+
+A post-closure adversarial sweep exercised failure/containment paths that the
+successful 0.8.3 live PROGRAM canary did not.
+
+### Crash-atomic protocol state
+
+- STATE.json + EVENTS.log mutations now use a per-run write-ahead
+  STATE_TXN.json intent and deterministic recovery;
+- standalone EVENTS.log append is atomic old-or-new rather than an in-place
+  JSONL tail write;
+- critical semantic/execution call sites consume verified state instead of raw
+  STATE.json bytes;
+- caller event extras may not overwrite run/state/event-chain identity or spoof
+  the internal state_txn_id recovery marker.
+
+### Supervisor lifecycle parity
+
+- canonical managed install.sh and uninstall.sh now treat DONE + RETIRED as
+  non-runtime-dependent historical enrollment states, matching the dedicated
+  supervisor installer;
+- retirement additionally refuses unresolved semantic_attempt rows even if the
+  job-level worker PID is absent/dead.
+
+### Sealed unattended Claude worker
+
+- commissioned workers require Claude Code 2.1.219+ (the documented baseline
+  for sandbox.network.strictAllowlist);
+- Bash sandbox is fail-closed with an empty strict network allow-list and
+  unsandboxed-command escape disabled;
+- project/local settings are excluded and role-specific filesystem policy is
+  supplied through CLI settings;
+- inherited MCPs are disabled with strict empty MCP configuration;
+- the built-in tool surface is fixed to
+  Read/Edit/Write/NotebookEdit/Bash/Glob/Grep: no WebSearch/WebFetch,
+  Agent/Task, Skill, browser, or nested orchestration inside the sealed pass;
+- historical OFLOOP_CLAUDE_ALLOWED_TOOLS environment tuning cannot widen the
+  product-owned semantic tool boundary;
+- authority-sensitive extra CLI flags are refused before Claude starts.
+
+Research/integrations remain outside sealed BUILD/REVIEW passes. Promotion and
+external mutation remain operator-owned outside Loop.
+
+### Regression proof
+
+The canonical v0.8.4 tests fault-inject state/event crash windows, prove
+unexplained tampering remains refused, verify authority-bearing state reads,
+exercise the worker sandbox/settings/version boundary, prove RETIRED managed
+lifecycle parity, and cover unresolved-attempt retirement refusal.
+
 ## 0.8.3 - Supervisor Enrollment Retirement (2026-08-29)
 
 ### Operator lifecycle for durable historical evidence

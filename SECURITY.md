@@ -8,7 +8,7 @@ or OS-level containment of arbitrary same-user code.
 
 ## Supported release posture
 
-- The currently supported release line is **0.8.3**.
+- The currently supported release line is **0.8.4**.
 - Earlier 0.2.x/0.3.x/0.4.x/0.5.0-0.5.4 behavior remains in Git history for
   compatibility/audit context but is not the current product contract.
 
@@ -40,22 +40,33 @@ A run start authorizes bounded local engineering only. It does not grant push,
 merge, deploy, publish, payment, message sending, remote mutation, or unrelated
 external-action authority.
 
-## Tool-surface hardening versus OS containment
+## Tool-surface hardening and commissioned worker isolation
 
-The Claude Code reference adapter uses mechanical hooks to block direct and
-several normalized dangerous-command forms during active runs. Those hooks are
-meaningful guardrails, but they do **not** turn a same-user coding agent into an
-untrusted OS principal.
+The project does not claim that arbitrary same-user software becomes a separate
+untrusted OS principal. The narrower commissioned-supervisor contract is
+stronger.
 
-The project does not claim arbitrary semantic containment of Turing-complete
-local programs without a real OS/runtime isolation boundary.
+Every unattended Claude BUILD/REVIEW pass is launched with Claude Code's Bash
+sandbox enabled and fail-closed. The runtime supplies
+`sandbox.network.strictAllowlist=true` with an empty allowed-domain set,
+`allowUnsandboxedCommands=false`, and role-specific filesystem write policy.
+Project/local Claude settings are excluded. MCP discovery is strict with an
+empty explicit MCP configuration. Browser/web research, nested Agent/Task
+orchestration, Skill, and other non-local built-ins are not exposed through the
+semantic worker's `--tools` allow-list.
 
-A coding agent must never intentionally route around a guard refusal using
-indirection such as hidden subprocess construction, aliases, encoded commands,
-or dynamic shell assembly. A guard refusal is a policy boundary, not a puzzle.
+The minimum commissioned-runner version is Claude Code 2.1.219 because strict
+network allow-list enforcement is part of the boundary. If the version cannot
+be proven, is older, or the sandbox cannot arm, the supervisor fails closed
+before/at semantic execution.
 
-`hardened=true` means a named adapter has additional deterministic host rails for
-its declared workflow. It does not mean sandboxed arbitrary-code containment.
+Adapter hooks remain a second boundary for direct/normalized command forms, and
+the deterministic core re-proves exact source/candidate identity before
+accepting evidence. Interactive/foreground Claude sessions do not automatically
+inherit this exact commissioned envelope.
+
+`hardened=true` describes these deterministic host/runtime rails for the
+declared workflow; it is not a claim of universal arbitrary-code containment.
 
 ## Core security-relevant invariants
 

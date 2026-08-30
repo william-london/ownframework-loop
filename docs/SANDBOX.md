@@ -1,62 +1,62 @@
-# Claude Bash Sandbox — Required for Supervised V2 Pilot
+# Commissioned Claude Semantic-Worker Sandbox
 
-> The OwnFramework Loop supervised-local-only pilot REQUIRES Claude's
-> Bash sandbox to be enabled with `failIfUnavailable=true`. The first
-> pilot runs with `network=deny` as a default.
+OwnFramework Loop 0.8.4 makes sandbox activation a property of the durable
+supervisor runner, not an operator ceremony.
 
-## Activation steps (session-only — does not modify global settings)
+## Unattended BUILD / REVIEW contract
 
-Per official Claude Code documentation, the sandbox is enabled per
-session by passing the appropriate flag at launch. We document the
-activation path; the loop refuses to start without it.
+The supervisor supplies CLI settings for every fresh semantic pass with:
 
-```bash
-# Activate per-session. Safe — does NOT modify ~/.claude/settings.json.
-claude --plugin-dir $HOME/.claude/skills/of-loop \
-      --sandbox \
-      --sandbox-fail-if-unavailable \
-      --network-default deny
+- `sandbox.enabled=true`;
+- `sandbox.failIfUnavailable=true`;
+- `sandbox.allowUnsandboxedCommands=false`;
+- `sandbox.network.strictAllowlist=true`;
+- `sandbox.network.allowedDomains=[]`;
+- role-specific filesystem write rules.
+
+The strict network setting requires Claude Code 2.1.219 or later. The runner
+proves the Claude Code version before accepting it.
+
+Project and local settings from the target repository are excluded using the
+Claude setting-source boundary. User/managed configuration remains a trusted
+operator/organization boundary, but the Loop's CLI `--settings` supplies the
+security-critical sandbox scalars.
+
+## Tool and MCP boundary
+
+A sealed semantic worker receives only:
+
+```text
+Read
+Edit
+Write
+NotebookEdit
+Bash
+Glob
+Grep
 ```
 
-The `--sandbox-fail-if-unavailable` flag (or its equivalent documented
-setting) ensures the session **fails closed** if the sandbox cannot be
-activated — never silently falling back to unsandboxed execution.
+The runner does not expose WebSearch, WebFetch, browser integration, Agent/Task
+orchestration, Skill, or other non-local built-ins.
 
-## Filesystem write scope
+MCP discovery is disabled with strict MCP configuration and an empty explicit
+MCP config. This prevents user/project/plugin MCP servers from silently
+expanding a sealed pass.
 
-When the sandbox is active, writes are confined to:
+## Filesystem behavior
 
-- The approved builder worktree (`.worktrees/ownframework-loop/<run-id>/builder/`).
-- The per-run loop state directory (`.ownframework-loop/<run-id>/`).
-- Temporary directories explicitly granted by the user.
+Builder Bash runs in the builder worktree and may write its pass-scoped semantic
+result directory plus the Loop runtime cache. Reviewer Bash receives an
+explicit deny-write rule for the exact-SHA reviewer worktree and may write only
+its pass-scoped assessment/runtime cache surfaces.
 
-Any attempt to write outside these paths is refused at the OS layer
-and triggers `SANDBOX_VIOLATION` in the event chain.
+Protected-path hooks and deterministic finalizers remain defense in depth.
 
-## Network default
+## Scope of the claim
 
-For the first supervised pilot, `network=deny` is the default. This
-forces the loop to prove itself in a fully air-gapped mode before any
-network access is granted.
+This is an OS/runtime boundary for commissioned semantic Bash plus a structural
+Claude tool/MCP boundary. It is not a claim that arbitrary same-user software is
+a separate untrusted OS principal.
 
-## Why this matters
-
-The textual hook cannot be 100% reliable against shell indirection
-forms. The sandbox is the OS-level safety net. The post-pass
-verification catches any remaining violations before acceptance.
-Together, they cover the bypass surface that the textual hook alone
-cannot.
-
-## Required markers
-
-The release gate emits:
-
-- `SANDBOX_REQUIRED=yes`
-- `SANDBOX_AVAILABLE=yes`
-- `SANDBOX_FAIL_CLOSED=yes`
-- `NETWORK_DEFAULT=deny`
-- `UNSANDBOXED_FALLBACK=no`
-
-These markers are emitted by `release_gate.sh` after consulting the
-session's documented configuration. If the markers are absent, the
-release gate fails.
+Interactive Claude sessions are not automatically equivalent to the
+commissioned supervisor envelope.
