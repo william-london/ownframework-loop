@@ -664,15 +664,17 @@ def _connect(path: Path) -> sqlite3.Connection:
         "failure_class": "ALTER TABLE semantic_attempts ADD COLUMN failure_class TEXT",
         "failure_reason": "ALTER TABLE semantic_attempts ADD COLUMN failure_reason TEXT",
     }
+    cost_known_added = "cost_known" not in attempt_columns
     for name, statement in attempt_migrations.items():
         if name not in attempt_columns:
             conn.execute(statement)
     # Rows written before cost_known existed used COST_UNKNOWN itself as the
-    # uncertainty marker. Preserve that truth when upgrading the ledger rather
-    # than accepting the new column's default-true value.
-    conn.execute(
-        "UPDATE semantic_attempts SET cost_known=0 WHERE status='COST_UNKNOWN'"
-    )
+    # uncertainty marker. Backfill exactly once when the column is introduced;
+    # ordinary connections must not rewrite historical rows.
+    if cost_known_added:
+        conn.execute(
+            "UPDATE semantic_attempts SET cost_known=0 WHERE status='COST_UNKNOWN'"
+        )
     conn.commit()
     return conn
 
