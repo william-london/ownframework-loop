@@ -83,7 +83,7 @@ def _claude_cli_version(executable: str) -> tuple[int, int, int] | None:
         return None
     if proc.returncode != 0:
         return None
-    match = re.search(r"(?<!\\d)(\\d+)\\.(\\d+)\\.(\\d+)(?!\\d)", proc.stdout or "")
+    match = re.search(r"(?<!\d)(\d+)\.(\d+)\.(\d+)(?!\d)", proc.stdout or "")
     if not match:
         return None
     return tuple(int(part) for part in match.groups())
