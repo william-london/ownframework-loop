@@ -218,6 +218,87 @@ assert_contains "$IOUT" "rollback=restored_previous_service" "T8 previous superv
 [[ "$(cat "$IPROV")" == "OLD-PROVENANCE" ]] || fail "T8 provenance rollback failed"
 pass "T8 supervisor replacement rolls back on bootstrap failure"
 
+# T8b proves the macOS installer plist captures the operator's auth
+# env when Claude is commissioned, AND captures the adapter auth-read
+# home, so a launchd-managed supervisor can drive a sandboxed worker
+# against the same model the operator already trusts.
+S2SHIMS="$TMP/s2-shims"; mkdir -p "$S2SHIMS"
+cat > "$S2SHIMS/uname" <<'SH'
+#!/bin/sh
+echo Darwin
+SH
+cat > "$S2SHIMS/launchctl" <<'SH'
+#!/bin/bash
+exit 0
+SH
+chmod +x "$S2SHIMS/uname" "$S2SHIMS/launchctl"
+S2HOME="$TMP/s2-home"; S2XDG="$TMP/s2-xdg"
+rm -rf "$S2HOME" "$S2XDG"
+mkdir -p "$S2HOME/Library/LaunchAgents" "$S2XDG/ownframework-loop"
+S2PLIST="$S2HOME/Library/LaunchAgents/com.ownframework.loop-supervisor.plist"
+S2FAKECLAUDE="$TMP/fake-claude-2.1.251"
+cat > "$S2FAKECLAUDE" <<'SH'
+#!/bin/sh
+echo "2.1.251 (Claude Code)"
+SH
+chmod +x "$S2FAKECLAUDE"
+mkdir -p "$S2HOME/.claude"
+HOME="$S2HOME" XDG_STATE_HOME="$S2XDG" PATH="$S2SHIMS:$PATH" \
+  OFLOOP_BIN="$ROOT_DIR/bin/ofloop" \
+  CLAUDE_BIN="$S2FAKECLAUDE" \
+  ANTHROPIC_AUTH_TOKEN="sk-test-auth-token-capture" \
+  ANTHROPIC_BASE_URL="https://api.example.invalid/anthropic" \
+  ANTHROPIC_MODEL="claude-test-model" \
+  bash "$ROOT_DIR/install-supervisor-macos.sh" >/dev/null 2>&1 \
+  || fail "T8b macOS supervisor install failed"
+[[ -f "$S2PLIST" ]] || fail "T8b plist not written"
+PLIST_ENV="$(/usr/bin/plutil -extract EnvironmentVariables xml1 -o - "$S2PLIST" 2>/dev/null || true)"
+assert_contains "$PLIST_ENV" "OFLOOP_ADAPTER_AUTH_READ_PATHS" "T8b plist captures adapter auth-read home"
+assert_contains "$PLIST_ENV" "$S2HOME/.claude" "T8b plist adapter auth-read points at adapter home"
+assert_contains "$PLIST_ENV" "ANTHROPIC_AUTH_TOKEN" "T8b plist captures ANTHROPIC_AUTH_TOKEN"
+assert_contains "$PLIST_ENV" "sk-test-auth-token-capture" "T8b plist preserves auth token value"
+assert_contains "$PLIST_ENV" "ANTHROPIC_BASE_URL" "T8b plist captures ANTHROPIC_BASE_URL"
+assert_contains "$PLIST_ENV" "ANTHROPIC_MODEL" "T8b plist captures ANTHROPIC_MODEL"
+# Negative control: a NON-Claude install must NOT capture auth vars.
+NCSHIMS="$TMP/nc-shims"; mkdir -p "$NCSHIMS"
+cat > "$NCSHIMS/uname" <<'SH'
+#!/bin/sh
+echo Darwin
+SH
+cat > "$NCSHIMS/launchctl" <<'SH'
+#!/bin/bash
+exit 0
+SH
+chmod +x "$NCSHIMS/uname" "$NCSHIMS/launchctl"
+# Idle-only install path: use a minimal PATH that has no `claude` binary
+# at all, so the installer's `command -v claude` returns empty and the
+# run stays idle-only (no OFLOOP_CLAUDE_BIN, no OFLOOP_ADAPTER_AUTH_*,
+# no ANTHROPIC_* capture — even though the test process happens to
+# inherit the operator's shell env that contains ANTHROPIC_AUTH_TOKEN).
+MINIMAL_PATH="/usr/bin:/bin"
+NCHOME="$TMP/nc-home"; NCXDG="$TMP/nc-xdg"
+rm -rf "$NCHOME" "$NCXDG"
+mkdir -p "$NCHOME/Library/LaunchAgents" "$NCXDG/ownframework-loop"
+NCPLIST="$NCHOME/Library/LaunchAgents/com.ownframework.loop-supervisor.plist"
+HOME="$NCHOME" XDG_STATE_HOME="$NCXDG" PATH="$MINIMAL_PATH:$NCSHIMS" \
+  OFLOOP_BIN="$ROOT_DIR/bin/ofloop" \
+  ANTHROPIC_AUTH_TOKEN="sk-leaked" \
+  bash "$ROOT_DIR/install-supervisor-macos.sh" >/dev/null 2>&1 \
+  || fail "T8b idle-only macOS supervisor install failed"
+[[ -f "$NCPLIST" ]] || fail "T8b idle-only plist not written"
+NCPLIST_ENV="$(/usr/bin/plutil -extract EnvironmentVariables xml1 -o - "$NCPLIST" 2>/dev/null || true)"
+assert_contains "$NCPLIST_ENV" "OFLOOP_BIN" "T8b idle-only plist still has OFLOOP_BIN"
+if printf '%s' "$NCPLIST_ENV" | grep -Fq "ANTHROPIC_AUTH_TOKEN"; then
+  fail "T8b idle-only plist leaked ANTHROPIC_AUTH_TOKEN: $NCPLIST_ENV"
+fi
+if printf '%s' "$NCPLIST_ENV" | grep -Fq "OFLOOP_CLAUDE_BIN"; then
+  fail "T8b idle-only plist leaked OFLOOP_CLAUDE_BIN: $NCPLIST_ENV"
+fi
+if printf '%s' "$NCPLIST_ENV" | grep -Fq "OFLOOP_ADAPTER_AUTH_READ_PATHS"; then
+  fail "T8b idle-only plist leaked OFLOOP_ADAPTER_AUTH_READ_PATHS: $NCPLIST_ENV"
+fi
+pass "T8b commissioned installer captures adapter auth env; idle-only does not"
+
 USHIMS="$TMP/uninstall-shims"; mkdir -p "$USHIMS"
 cat > "$USHIMS/uname" <<'SH'
 #!/bin/sh

@@ -268,6 +268,27 @@ if claude_bin:
     adapter_auth = str(Path.home() / ".claude")
     if Path(adapter_auth).is_dir():
         env_vars["OFLOOP_ADAPTER_AUTH_READ_PATHS"] = adapter_auth
+    # Launchd does not inherit the operator's interactive shell env, so
+    # ANTHROPIC_* / CLAUDE_CODE_* auth + endpoint + model aliases never
+    # reach the supervisor — and therefore never reach the worker. The
+    # CLI authenticates against ANTHROPIC_BASE_URL with
+    # ANTHROPIC_AUTH_TOKEN; without those it returns "Not logged in"
+    # from inside the sandbox even though `claude auth status` works
+    # in the operator's shell. Capture the operator-supplied auth env
+    # at install time and re-emit it in the plist so the durable
+    # service can drive semantic passes against the same model the
+    # operator already trusts.
+    for auth_var in (
+        "ANTHROPIC_AUTH_TOKEN",
+        "ANTHROPIC_BASE_URL",
+        "ANTHROPIC_MODEL",
+        "ANTHROPIC_DEFAULT_OPUS_MODEL",
+        "ANTHROPIC_DEFAULT_SONNET_MODEL",
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+    ):
+        value = os.environ.get(auth_var)
+        if value:
+            env_vars[auth_var] = value
 
 payload = {
     "Label": label,
