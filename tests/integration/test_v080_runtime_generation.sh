@@ -184,10 +184,12 @@ add_job "$S6" "run-done" "DONE" "$OTHER_GENERATION"
 set +e
 OUT6="$(run_installer "$S6")"; RC6=$?
 set -e
-assert_not_contains "$OUT6" "SUPERVISOR_INSTALL=REFUSED" "T6 terminal DONE job never blocks a normal install"
-# Hermetic end: the shim launchctl terminates the pass path harmlessly.
-[[ "$RC6" -ne 11 && "$RC6" -ne 13 ]] || fail "T6 unexpected refusal rc=$RC6"
-pass "T6 install proceeds past the guard for terminal-only ledgers"
+assert_not_contains "$OUT6" "reason=active_semantic_work" "T6 terminal DONE job is not an active-work dependency"
+assert_not_contains "$OUT6" "reason=runtime_generation_dependency" "T6 terminal DONE job is not a generation dependency"
+# The hermetic host may stop later at macos_required or the disabled launchctl;
+# this proof is specifically about getting past the runtime-dependency guards.
+[[ "$RC6" -ne 11 && "$RC6" -ne 13 ]] || fail "T6 unexpected dependency refusal rc=$RC6 out=$OUT6"
+pass "T6 terminal-only ledger proceeds past runtime dependency guards"
 
 # ---------------------------------------------------------------------------
 # T7: same-generation refresh is allowed (QUEUED bound to incoming).
@@ -198,8 +200,9 @@ add_job "$S7" "run-same" "QUEUED" "$INCOMING_GENERATION"
 set +e
 OUT7="$(run_installer "$S7")"; RC7=$?
 set -e
-assert_not_contains "$OUT7" "SUPERVISOR_INSTALL=REFUSED" "T7 same-generation refresh is not refused"
-pass "T7 same-generation refresh proceeds (rc=$RC7 via hermetic shim)"
+assert_not_contains "$OUT7" "reason=runtime_generation_dependency" "T7 same-generation refresh is not a generation dependency"
+[[ "$RC7" -ne 13 ]] || fail "T7 same-generation refresh unexpectedly hit generation guard: $OUT7"
+pass "T7 same-generation refresh proceeds past generation guard (rc=$RC7 hermetic tail)"
 
 # ---------------------------------------------------------------------------
 # T8: explicit migration override bypasses the generation guard (unsafe,
@@ -211,8 +214,9 @@ add_job "$S8" "run-migrate" "QUEUED" "$OTHER_GENERATION"
 set +e
 OUT8="$(run_installer "$S8" OFLOOP_ALLOW_RUNTIME_GENERATION_MIGRATION=1)"; RC8=$?
 set -e
-assert_not_contains "$OUT8" "SUPERVISOR_INSTALL=REFUSED" "T8 explicit migration override bypasses the guard"
-pass "T8 OFLOOP_ALLOW_RUNTIME_GENERATION_MIGRATION=1 is the explicit unsafe path"
+assert_not_contains "$OUT8" "reason=runtime_generation_dependency" "T8 explicit migration override bypasses generation guard"
+[[ "$RC8" -ne 13 ]] || fail "T8 explicit migration override unexpectedly hit generation guard: $OUT8"
+pass "T8 OFLOOP_ALLOW_RUNTIME_GENERATION_MIGRATION=1 bypasses generation dependency guard"
 
 # ---------------------------------------------------------------------------
 # T9: supervisor execution contract — binding, mismatch fail-closed, adoption
