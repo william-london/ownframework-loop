@@ -1682,7 +1682,11 @@ class ClaudeCodeRunner:
             "--no-session-persistence",
             "--strict-mcp-config",
             "--mcp-config",
-            "{}",
+            # Claude 2.1.251+ rejects the bare ``{}`` form: ``--strict-mcp-config``
+            # requires a ``mcpServers`` record. Declare an explicitly empty
+            # one to keep the inherited-MCP surface empty without tripping
+            # Claude's MCP-config validator.
+            json.dumps({"mcpServers": {}}, separators=(",", ":"), sort_keys=True),
             "--plugin-dir",
             str(_source_root()),
             *extra,
