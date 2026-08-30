@@ -86,7 +86,12 @@ toolset = set(supervisor.CLAUDE_BUILDER_TOOLS.split(","))
 assert toolset == {"Read","Edit","Write","NotebookEdit","Bash","Glob","Grep"}, toolset
 assert not toolset.intersection({"WebSearch","WebFetch","Agent","Task","Skill"}), toolset
 assert "--strict-mcp-config" in cmd, cmd
-assert cmd[cmd.index("--mcp-config") + 1] == "{}", cmd
+# Claude 2.1.251+ requires ``--mcp-config`` to declare a ``mcpServers``
+# record (the bare ``{}`` form is rejected). Verify the architecturally
+# required empty ``mcpServers`` is the actual emitted value.
+mcp_config = cmd[cmd.index("--mcp-config") + 1]
+mcp_payload = json.loads(mcp_config)
+assert mcp_payload == {"mcpServers": {}}, mcp_payload
 assert "--no-chrome" in cmd, cmd
 assert "--no-session-persistence" in cmd, cmd
 assert "--setting-sources" not in cmd, cmd
