@@ -43,6 +43,17 @@ chmod +x "$FAKEBIN/claude"
 # Existing commissioning signal must refresh to CACHE/bin/ofloop.
 mkdir -p "$HOME_EXISTING/Library/LaunchAgents"
 echo existing > "$HOME_EXISTING/Library/LaunchAgents/com.ownframework.loop-supervisor.plist"
+# v0.8.2 lifecycle safety: a commissioned service without its ledger is
+# intentionally unverifiable and fails closed. Model a legitimate existing
+# commissioning with an intact empty ledger (no unfinished runtime dependencies).
+PYTHONPATH="$SRC/lib" python3 -B - "$HOME_EXISTING" <<'PY'
+import sys
+from pathlib import Path
+from ownframework_loop import supervisor
+db = Path(sys.argv[1]) / ".local" / "state" / "ownframework-loop" / "supervisor.sqlite3"
+with supervisor._connect(db):
+    pass
+PY
 OUT="$TMP/refresh.out"
 env HOME="$HOME_EXISTING" PATH="$FAKEBIN:/usr/local/bin:/usr/bin:/bin" \
   "$CACHE/scripts/refresh-existing-supervisor-macos.sh" "$CACHE" "$SRC" >"$OUT" 2>&1
