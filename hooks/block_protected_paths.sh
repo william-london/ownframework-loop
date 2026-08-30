@@ -61,8 +61,7 @@ fi
 
 tool_name="$(printf '%s' "$parsed" | python3 -B -c 'import sys,json; print(json.loads(sys.stdin.read()).get("tool_name",""))' 2>/dev/null || true)"
 case "$tool_name" in Write|Edit|MultiEdit|NotebookEdit) ;; *) exit 0 ;; esac
-file_path="$(printf '%s' "$parsed" | python3 -B -c 'import sys,json; print(json.loads(sys.stdin.read()).get("tool_input",{}).get("file_path",""))' 2>/dev/null || true)"
-[[ -n "$file_path" ]] || exit 0
+file_path="$(printf '%s' "$parsed" | python3 -B -c 'import sys,json; i=json.loads(sys.stdin.read()).get("tool_input",{}) or {}; print(i.get("file_path") or i.get("notebook_path") or "")' 2>/dev/null || true)"
 cwd="$(printf '%s' "$parsed" | python3 -B -c 'import sys,json; print(json.loads(sys.stdin.read()).get("cwd",""))' 2>/dev/null || true)"
 [[ -n "$cwd" ]] || cwd="$(pwd 2>/dev/null || true)"
 
@@ -162,6 +161,12 @@ if [[ "$status" != "active" ]]; then
   exit 0
 fi
 
+context_run_id="$(printf '%s' "$context" | python3 -B -c 'import json,sys; print(json.loads(sys.stdin.read()).get("run_id",""))' 2>/dev/null || true)"
+if [[ -z "$abs_path" ]]; then
+  emit_block "PROTECTED_PATH" "OwnFramework Loop: active semantic write tool supplied no file_path/notebook_path; refusing fail-closed."
+  exit 0
+fi
+
 canonical_repo="$(printf '%s' "$context" | python3 -B -c 'import json,sys; print(json.loads(sys.stdin.read()).get("canonical_repo",""))' 2>/dev/null || true)"
 if [[ -z "$canonical_repo" || ! -d "$canonical_repo" ]]; then
   emit_block "PROTECTED_PATH" "OwnFramework Loop: active semantic context has no resolvable canonical repository; refusing for safety."
@@ -186,15 +191,8 @@ for rid in "${RUN_IDS[@]}"; do
     target_run_id="$rid"; break
   fi
 done
-active_run_id=""
-for rid in "${RUN_IDS[@]}"; do
-  if [[ "$abs_cwd" == "$run_root/$rid" || "$abs_cwd" == "$run_root/$rid/"* ||
-        "$abs_cwd" == "$wt_root/$rid/builder" || "$abs_cwd" == "$wt_root/$rid/builder/"* ||
-        "$abs_cwd" == "$wt_root/$rid/reviewer" || "$abs_cwd" == "$wt_root/$rid/reviewer/"* ]]; then
-    active_run_id="$rid"; break
-  fi
-done
-if [[ -n "$target_run_id" && -n "$active_run_id" && "$target_run_id" != "$active_run_id" ]]; then
+active_run_id="$context_run_id"
+if [[ -n "$target_run_id" && "$target_run_id" != "$active_run_id" ]]; then
   emit_block "CROSS_RUN_WRITE" "Cross-run write refused: active run=$active_run_id, target run=$target_run_id"
   exit 0
 fi
@@ -256,8 +254,8 @@ fi
 # Builder worktree: allow any path inside it.
 is_builder_wt=0
 is_reviewer_wt=0
-if [[ "$abs_path" == "$wt_root"/*/builder || "$abs_path" == "$wt_root"/*/builder/* ]]; then is_builder_wt=1; fi
-if [[ "$abs_path" == "$wt_root"/*/reviewer || "$abs_path" == "$wt_root"/*/reviewer/* ]]; then is_reviewer_wt=1; fi
+if [[ -n "$active_run_id" && ( "$abs_path" == "$wt_root/$active_run_id/builder" || "$abs_path" == "$wt_root/$active_run_id/builder/"* ) ]]; then is_builder_wt=1; fi
+if [[ -n "$active_run_id" && ( "$abs_path" == "$wt_root/$active_run_id/reviewer" || "$abs_path" == "$wt_root/$active_run_id/reviewer/"* ) ]]; then is_reviewer_wt=1; fi
 
 if [[ "$abs_path" == "$canonical_repo"/* && "$abs_path" != "$run_root"/* && "$abs_path" != "$wt_root"/* ]]; then
   for rid in "${RUN_IDS[@]}"; do

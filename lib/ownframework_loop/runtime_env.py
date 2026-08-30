@@ -110,9 +110,14 @@ def hermetic_subprocess_env(
     # IMPORTANT: do NOT set --rootdir or --confcutdir; that would redirect
     # pytest's rootdir away from the caller's cwd, breaking test collection
     # and import resolution for the caller's project layout.
-    env["PYTEST_ADDOPTS"] = (
+    existing_addopts = env.get("PYTEST_ADDOPTS", "").strip()
+    guard_addopts = (
         f"-p no:cacheprovider "
         f"--override-ini=cache_dir={pytest_cache}"
+    )
+    env["PYTEST_ADDOPTS"] = (
+        f"{existing_addopts} {guard_addopts}".strip()
+        if existing_addopts else guard_addopts
     )
     existing_plugins = env.get("PYTEST_PLUGINS", "").strip()
     of_plugin = "ownframework_loop._pytest_plugins.of_disable_cache"

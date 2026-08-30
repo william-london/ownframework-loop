@@ -24,7 +24,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import dispatch as dispatch_mod, packet as packet_mod, runtime_env, state as state_mod, util
+from . import dispatch as dispatch_mod, packet as packet_mod, runtime_env, state as state_mod, util, runtime_identity
 
 SCHEMA = "ownframework-loop-supervisor/v1"
 # Per-pass runaway fuse fallback. A semantic worker that neither declared a
@@ -75,37 +75,11 @@ ACTIVE = {"QUEUED", "BACKOFF", "RUNNING"}
 TERMINAL = {"DONE", "QUARANTINED"}
 
 
-def _git_head(root: Path) -> str:
-    """Return the git HEAD of ``root`` or '' when it is not a git checkout."""
-    r = util.run_subprocess(
-        ["git", "-C", str(root), "rev-parse", "HEAD"], timeout=5
-    )
-    if r.returncode != 0:
-        return ""
-    return r.stdout.strip()
-
-
 def runtime_generation() -> str:
-    """Deterministic runtime-generation identity of THIS supervisor process.
-
-    Format: ``ofloop-<version>@<source-head16>`` for git-backed installs
-    (developer checkouts) or ``ofloop-<version>@cache-<sha16(root)>`` for
-    installed caches. The installer computes the incoming label with the
-    exact same rule from the payload it is about to commission.
-
-    Contract: a job row binds the generation that enrolled it. Execution
-    under a DIFFERENT generation fails closed toward quarantine; only an
-    explicit operator act (re-enqueue or resume) migrates a run to a new
-    generation. A sealed unfinished PROGRAM can therefore never silently
-    ride a runtime-generation change between passes.
-    """
+    """Deterministic identity of the exact runtime bytes serving this process."""
     from . import __version__
     root = Path(__file__).resolve().parents[2]
-    head = _git_head(root)
-    if head:
-        return f"ofloop-{__version__}@{head[:16]}"
-    digest = util.sha256_text(str(root))[:16]
-    return f"ofloop-{__version__}@cache-{digest}"
+    return runtime_identity.runtime_generation_for_root(root, __version__)
 
 
 # Alias so enqueue() can compute the default binding even though its
@@ -159,36 +133,27 @@ def worker_log_paths(
     )
 
 
-# Ledger data-version. Bumped when a one-time data migration must run.
-#   0/1 (historical): jobs rows may carry retired DDL-default ceilings
-#       ($25 cost / 8h wall) materialized by old schema defaults.
-#   2: retired defaults removed from DDL and migrations; rows carrying the
-#       exact legacy-default fingerprint are normalized to disabled-by-
-#       default. Explicitly configured values do not match the fingerprint
-#       and are preserved.
-SCHEMA_DATA_VERSION = 2
-_LEGACY_BUDGET_DEFAULT_FINGERPRINT = (25.0, 0, 28800)  # cost, tokens, wall
+# Ledger data-version. Existing resource ceilings are durable operator state.
+# Historical rows may carry the old $25 / unlimited-token / 8h fingerprint,
+# but that tuple is indistinguishable from an operator explicitly selecting it.
+# Preserve it and mark ambiguity rather than inventing intent.
+SCHEMA_DATA_VERSION = 3
+_LEGACY_BUDGET_DEFAULT_FINGERPRINT = (25.0, 0, 28800)
 
 
 def _apply_data_migrations(conn: sqlite3.Connection) -> None:
-    """Versioned one-time data migrations (idempotent via PRAGMA user_version)."""
+    """Versioned migrations; ambiguous historical limits are never rewritten."""
     version = int(conn.execute("PRAGMA user_version").fetchone()[0])
-    if version < 2:
-        # Reset only rows that the OLD DDL defaults materialized: the exact
-        # triple ($25 cost ceiling, 0 token ceiling, 8h wall ceiling)
-        # together. Any row whose values differ from that fingerprint was
-        # deliberately configured (packet envelope / operator flag) and is
-        # left untouched.
+    if version < 3:
         conn.execute(
             """UPDATE jobs
-               SET max_total_cost_usd=0, max_wall_seconds=0
+               SET legacy_budget_ambiguous=1
                WHERE max_total_cost_usd=? AND max_total_tokens=?
                  AND max_wall_seconds=?""",
             _LEGACY_BUDGET_DEFAULT_FINGERPRINT,
         )
         conn.execute(f"PRAGMA user_version = {SCHEMA_DATA_VERSION}")
         conn.commit()
-
 
 def _connect(path: Path) -> sqlite3.Connection:
     path = Path(path).expanduser().resolve(strict=False)
@@ -232,6 +197,7 @@ def _connect(path: Path) -> sqlite3.Connection:
           worker_stdout_path TEXT,
           worker_stderr_path TEXT,
           runtime_generation TEXT NOT NULL DEFAULT '',
+          legacy_budget_ambiguous INTEGER NOT NULL DEFAULT 0,
           UNIQUE(repo, run_id)
         );
         CREATE TABLE IF NOT EXISTS cost_attempts (
@@ -298,6 +264,7 @@ def _connect(path: Path) -> sqlite3.Connection:
         "last_failure_class": "ALTER TABLE jobs ADD COLUMN last_failure_class TEXT",
         "last_failure_reason": "ALTER TABLE jobs ADD COLUMN last_failure_reason TEXT",
         "runtime_generation": "ALTER TABLE jobs ADD COLUMN runtime_generation TEXT NOT NULL DEFAULT ''",
+        "legacy_budget_ambiguous": "ALTER TABLE jobs ADD COLUMN legacy_budget_ambiguous INTEGER NOT NULL DEFAULT 0",
     }
     for name, statement in migrations.items():
         if name not in columns:
@@ -321,6 +288,16 @@ def _connect(path: Path) -> sqlite3.Connection:
         if name not in attempt_columns:
             conn.execute(statement)
     conn.commit()
+    return conn
+
+
+def _connect_readonly(path: Path) -> sqlite3.Connection:
+    """Open an existing supervisor ledger without schema/data mutation."""
+    p = Path(path).expanduser().resolve(strict=False)
+    if not p.is_file():
+        raise FileNotFoundError(str(p))
+    conn = sqlite3.connect(f"file:{p}?mode=ro", uri=True, timeout=5)
+    conn.row_factory = sqlite3.Row
     return conn
 
 
@@ -771,6 +748,13 @@ def enqueue(
             eff_cost = _keep("max_total_cost_usd", max_total_cost_usd, 0.0)
             eff_tokens = _keep("max_total_tokens", max_total_tokens, 0)
             eff_wall = _keep("max_wall_seconds", max_wall_seconds, 0)
+            eff_legacy_ambiguous = int(existing["legacy_budget_ambiguous"] or 0)
+            if (
+                max_total_cost_usd is not None
+                and max_total_tokens is not None
+                and max_wall_seconds is not None
+            ):
+                eff_legacy_ambiguous = 0
         else:
             eff_infra = max_infra_failures if max_infra_failures is not None else 3
             eff_transient = max_transient_failures if max_transient_failures is not None else 8
@@ -781,6 +765,7 @@ def enqueue(
             eff_cost = max_total_cost_usd if max_total_cost_usd is not None else 0.0
             eff_tokens = max_total_tokens if max_total_tokens is not None else 0
             eff_wall = max_wall_seconds if max_wall_seconds is not None else 0
+            eff_legacy_ambiguous = 0
         conn.execute(
             """
             INSERT INTO jobs
@@ -789,8 +774,8 @@ def enqueue(
                transient_recovery_cycles, max_transient_recovery_cycles,
                total_cost_usd, next_attempt_at,
                max_total_cost_usd, max_total_tokens, max_wall_seconds,
-               runtime_generation, created_at, updated_at)
-            VALUES (?, ?, ?, 'QUEUED', 0, ?, 0, ?, 0, ?, 0, 0, ?, ?, ?, ?, ?, ?)
+               runtime_generation, legacy_budget_ambiguous, created_at, updated_at)
+            VALUES (?, ?, ?, 'QUEUED', 0, ?, 0, ?, 0, ?, 0, 0, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(repo, run_id) DO UPDATE SET
               runner=excluded.runner,
               max_infra_failures=excluded.max_infra_failures,
@@ -800,6 +785,7 @@ def enqueue(
               max_total_tokens=excluded.max_total_tokens,
               max_wall_seconds=excluded.max_wall_seconds,
               runtime_generation=excluded.runtime_generation,
+              legacy_budget_ambiguous=excluded.legacy_budget_ambiguous,
               updated_at=excluded.updated_at
             """,
             (
@@ -813,6 +799,7 @@ def enqueue(
                 int(eff_tokens),
                 int(eff_wall),
                 str(eff_generation),
+                int(eff_legacy_ambiguous),
                 now,
                 now,
             ),
@@ -832,10 +819,24 @@ def status(
     state_mod.validate_run_id(run_id)
     repo = str(Path(canonical_repo).resolve(strict=False))
     db = db_path or default_db_path()
-    with _connect(db) as conn:
-        row = conn.execute(
-            "SELECT * FROM jobs WHERE repo=? AND run_id=?", (repo, run_id)
-        ).fetchone()
+    if not Path(db).expanduser().is_file():
+        row = None
+    else:
+        try:
+            with _connect_readonly(db) as conn:
+                row = conn.execute(
+                    "SELECT * FROM jobs WHERE repo=? AND run_id=?", (repo, run_id)
+                ).fetchone()
+        except sqlite3.Error as exc:
+            return {
+                "schema": SCHEMA,
+                "ok": False,
+                "repo": repo,
+                "run_id": run_id,
+                "status": "LEDGER_UNREADABLE",
+                "db_path": str(db),
+                "error": type(exc).__name__,
+            }
     if row is None:
         return {
             "schema": SCHEMA,
@@ -1145,7 +1146,7 @@ def _job_dict(row: sqlite3.Row, db: Path) -> dict[str, Any]:
     d["attempt_history"] = []
     try:
         if latest_id:
-            with sqlite3.connect(db, timeout=5) as attempt_conn:
+            with _connect_readonly(db) as attempt_conn:
                 attempt_conn.row_factory = sqlite3.Row
                 ar = attempt_conn.execute(
                     "SELECT * FROM semantic_attempts WHERE attempt_id=?",
@@ -1153,7 +1154,7 @@ def _job_dict(row: sqlite3.Row, db: Path) -> dict[str, Any]:
                 ).fetchone()
             if ar is not None:
                 d["latest_attempt"] = dict(ar)
-        with sqlite3.connect(db, timeout=5) as history_conn:
+        with _connect_readonly(db) as history_conn:
             history_conn.row_factory = sqlite3.Row
             history = history_conn.execute(
                 """SELECT attempt_id, role, status, started_at, completed_at,
@@ -1170,6 +1171,11 @@ def _job_dict(row: sqlite3.Row, db: Path) -> dict[str, Any]:
         d["attempt_history"] = [dict(item) for item in history]
     except sqlite3.Error as exc:
         d["attempt_snapshot_error"] = type(exc).__name__
+    if int(d.get("legacy_budget_ambiguous") or 0):
+        d["legacy_budget_warning"] = (
+            "historical $25/8h resource tuple is ambiguous; preserved until "
+            "the operator explicitly re-registers all three resource ceilings"
+        )
     d["observed_total_tokens"] = (
         int(d.get("total_input_tokens") or 0)
         + int(d.get("total_output_tokens") or 0)
@@ -1981,11 +1987,28 @@ def run_one(*, db_path: Path | None = None, timeout_seconds: int = 0) -> dict[st
                 "serving_runtime_generation": serving_generation,
             }
         if not bound_generation:
-            conn.execute(
-                "UPDATE jobs SET runtime_generation=?, updated_at=? WHERE id=?",
-                (serving_generation, time.time(), int(job["id"])),
+            _update_job(
+                conn,
+                job["id"],
+                status_value="QUARANTINED",
+                last_error=(
+                    "runtime generation is unbound for an unfinished legacy job; "
+                    "refusing implicit adoption under a new serving runtime — "
+                    "operator re-enqueue/resume is required"
+                ),
+                last_failure_class="runtime_generation_unbound",
+                last_failure_reason="runtime_generation_unbound",
+                next_attempt_at=0,
             )
-            conn.commit()
+            return {
+                "schema": SCHEMA,
+                "ok": False,
+                "action": "QUARANTINED",
+                "job_id": job["id"],
+                "reason": "runtime_generation_unbound",
+                "bound_runtime_generation": "",
+                "serving_runtime_generation": serving_generation,
+            }
 
         try:
             work_order = dispatch_mod.claim_next(
@@ -2535,6 +2558,12 @@ def resume(
     if max_wall_seconds is not None:
         sets.append("max_wall_seconds=?")
         params.append(int(max_wall_seconds))
+    if (
+        max_total_cost_usd is not None
+        and max_total_tokens is not None
+        and max_wall_seconds is not None
+    ):
+        sets.append("legacy_budget_ambiguous=0")
     if reset_execution_started_at:
         sets.append("execution_started_at=?")
         params.append(now)

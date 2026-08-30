@@ -12,6 +12,7 @@
 #   MARKETPLACE_NAME - override the marketplace name (default: ownframework)
 
 set -euo pipefail
+HERE="$(cd "$(dirname "$0")" && pwd)"
 SCOPE="${SCOPE:-user}"
 PLUGIN_ID="${PLUGIN_ID:-of-loop@ownframework}"
 MARKETPLACE_NAME="${MARKETPLACE_NAME:-ownframework}"
@@ -19,6 +20,18 @@ MARKETPLACE_NAME="${MARKETPLACE_NAME:-ownframework}"
 if ! command -v claude >/dev/null 2>&1; then
     echo "[uninstall] claude CLI not on PATH; cannot run managed uninstall"
     exit 2
+fi
+
+if [[ "$(uname -s)" == "Darwin" ]]; then
+    SUP_PLIST="$HOME/Library/LaunchAgents/com.ownframework.loop-supervisor.plist"
+    SUP_PROV="${XDG_STATE_HOME:-$HOME/.local/state}/ownframework-loop/runtime-provenance.json"
+    if [[ -f "$SUP_PLIST" || -f "$SUP_PROV" ]]; then
+        echo "[uninstall] commissioned supervisor detected; stopping it before plugin removal"
+        if ! bash "$HERE/uninstall-supervisor-macos.sh"; then
+            echo "[uninstall] refusing plugin removal while supervisor shutdown is unsafe" >&2
+            exit 11
+        fi
+    fi
 fi
 
 echo "[uninstall] running: claude plugin uninstall ${PLUGIN_ID} --scope ${SCOPE}"

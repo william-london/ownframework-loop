@@ -74,6 +74,43 @@ if [[ "$SOURCE_DIRTY" != "0" ]]; then
     exit 6
 fi
 
+# Before plugin-manager mutation, refuse to replace cache bytes relied on by
+# any unfinished commissioned run. This protects old/unbound ledgers too.
+if [[ "$(uname -s)" == "Darwin" ]]; then
+    PRE_STATE_ROOT="${XDG_STATE_HOME:-$HOME/.local/state}/ownframework-loop"
+    PRE_DB="$PRE_STATE_ROOT/supervisor.sqlite3"
+    PRE_PLIST="$HOME/Library/LaunchAgents/com.ownframework.loop-supervisor.plist"
+    PRE_PROV="$PRE_STATE_ROOT/runtime-provenance.json"
+    if [[ ( -f "$PRE_PLIST" || -f "$PRE_PROV" ) && -f "$PRE_DB" ]]; then
+        PRE_REPORT="$(python3 -B - "$PRE_DB" <<'PY'
+import sqlite3, sys
+try:
+    c=sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True)
+    rows=c.execute("SELECT run_id,status FROM jobs WHERE status != 'DONE' ORDER BY id").fetchall()
+except sqlite3.Error:
+    print("ledger_probe_failed")
+    raise SystemExit(0)
+print(";".join(f"{r[0]}:{r[1]}" for r in rows[:8]))
+PY
+        )" || PRE_REPORT="ledger_probe_failed"
+        if [[ "$PRE_REPORT" == "ledger_probe_failed" ]]; then
+            log "managed install REFUSED: commissioned supervisor ledger unreadable"
+            exit 13
+        fi
+        if [[ -n "$PRE_REPORT" ]]; then
+            if [[ "$PRE_REPORT" == *":RUNNING"* && "${OFLOOP_ALLOW_SUPERVISOR_SWAP_WITH_ACTIVE_WORK:-0}" != "1" ]]; then
+                log "managed install REFUSED: RUNNING supervisor work exists ($PRE_REPORT)"
+                exit 11
+            fi
+            if [[ "${OFLOOP_ALLOW_RUNTIME_GENERATION_MIGRATION:-0}" != "1" ]]; then
+                log "managed install REFUSED: unfinished supervisor jobs depend on commissioned runtime ($PRE_REPORT)"
+                log "finish/stop them first, or explicitly migrate with OFLOOP_ALLOW_RUNTIME_GENERATION_MIGRATION=1"
+                exit 13
+            fi
+        fi
+    fi
+fi
+
 # Record provenance (does not affect the managed install)
 PROVENANCE="$SOURCE_ROOT/.install.provenance"
 {
@@ -132,6 +169,8 @@ PAYLOAD_FILES="$( ( cd "$EXPECTED_CACHE" && find . -type f \
   -not -path "./.git/*" \
   -not -path "./.ownframework-loop/*" \
   -not -path "*/__pycache__/*" \
+  -not -name ".payload.manifest" \
+  -not -name ".payload.manifest.tmp" \
   -not -name "*.pyc" \
   -not -name "*.pyo" \
   -not -name "*.pyd" \

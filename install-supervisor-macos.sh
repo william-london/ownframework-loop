@@ -121,9 +121,7 @@ RUNTIME_PROVENANCE="$STATE_ROOT/runtime-provenance.json"
 #     After a deliberate migration, bound runs fail closed on the generation
 #     mismatch at serve time; `supervisor resume` is the explicit rebind.
 
-# Incoming runtime generation — the exact same rule the supervisor uses:
-#   ofloop-<version>@<source-head16>     (git-backed install root)
-#   ofloop-<version>@cache-<sha16(root)> (installed cache)
+# Incoming runtime generation is computed by the exact installed identity code.
 INSTALL_ROOT="$("$PYTHON_BIN" - "$OFLOOP_BIN" <<'PY'
 import sys
 from pathlib import Path
@@ -139,25 +137,11 @@ if [[ -z "$INSTALL_VERSION" ]]; then
   echo "SUPERVISOR_INSTALL=REFUSED reason=runtime_version_undetermined install_root=$INSTALL_ROOT" >&2
   exit 12
 fi
-RUNTIME_GENERATION="$(INSTALL_ROOT="$INSTALL_ROOT" INSTALL_VERSION="$INSTALL_VERSION" "$PYTHON_BIN" - <<'PY'
-import hashlib, os, subprocess
-root = os.environ["INSTALL_ROOT"]
-version = os.environ["INSTALL_VERSION"]
-head = ""
-try:
-    r = subprocess.run(
-        ["git", "-C", root, "rev-parse", "HEAD"],
-        capture_output=True, text=True, timeout=5,
-    )
-    if r.returncode == 0:
-        head = r.stdout.strip()
-except Exception:
-    head = ""
-if head:
-    print(f"ofloop-{version}@{head[:16]}")
-else:
-    digest = hashlib.sha256(root.encode("utf-8")).hexdigest()[:16]
-    print(f"ofloop-{version}@cache-{digest}")
+RUNTIME_GENERATION="$(PYTHONPATH="$INSTALL_ROOT/lib" INSTALL_ROOT="$INSTALL_ROOT" INSTALL_VERSION="$INSTALL_VERSION" "$PYTHON_BIN" -B - <<'PY'
+import os
+from pathlib import Path
+from ownframework_loop.runtime_identity import runtime_generation_for_root
+print(runtime_generation_for_root(Path(os.environ["INSTALL_ROOT"]), os.environ["INSTALL_VERSION"]))
 PY
 )" || RUNTIME_GENERATION=""
 if [[ -z "$RUNTIME_GENERATION" ]]; then
@@ -240,16 +224,18 @@ except sqlite3.Error:
 conn.row_factory = sqlite3.Row
 problems = []
 try:
-    # Every NON-terminal enrolled job (QUEUED/BACKOFF/RUNNING/QUARANTINED)
-    # bound to a different generation depends on its recorded runtime.
-    # DONE jobs never block; unbound legacy rows carry no provable
-    # dependency (they adopt the serving generation at first contact).
+    # Every NON-terminal enrolled job depends on its recorded runtime.
+    # Unbound legacy rows are ambiguous unfinished executions and fail closed.
     for row in conn.execute(
         "SELECT run_id, status, runtime_generation FROM jobs "
         "WHERE status != 'DONE'"
     ):
         gen = str(row["runtime_generation"] or "")
-        if gen and gen != incoming:
+        if not gen:
+            problems.append(
+                f"generation_dependency={row['run_id']}:{row['status']}:UNBOUND"
+            )
+        elif gen != incoming:
             problems.append(
                 f"generation_dependency={row['run_id']}:{row['status']}:{gen}"
             )
@@ -279,6 +265,13 @@ if [[ "$(uname -s)" != "Darwin" ]]; then
 fi
 
 mkdir -p "$HOME/Library/LaunchAgents" "$STATE_ROOT"
+
+OLD_PLIST_BACKUP="$STATE_ROOT/.supervisor.plist.preinstall.$"
+OLD_PROVENANCE_BACKUP="$STATE_ROOT/.runtime-provenance.preinstall.$"
+HAD_OLD_PLIST=0
+HAD_OLD_PROVENANCE=0
+if [[ -f "$PLIST" ]]; then cp "$PLIST" "$OLD_PLIST_BACKUP"; HAD_OLD_PLIST=1; fi
+if [[ -f "$RUNTIME_PROVENANCE" ]]; then cp "$RUNTIME_PROVENANCE" "$OLD_PROVENANCE_BACKUP"; HAD_OLD_PROVENANCE=1; fi
 
 # 6. Generate plist + provenance atomically. The python block is the
 #    sole owner of both artifacts; STATE_ROOT, CLAUDE_BIN, OFLOOP_BIN,
@@ -376,8 +369,30 @@ PY
 
 DOMAIN="gui/$UID"
 launchctl bootout "$DOMAIN" "$PLIST" >/dev/null 2>&1 || true
-launchctl bootstrap "$DOMAIN" "$PLIST"
+if ! launchctl bootstrap "$DOMAIN" "$PLIST"; then
+  rollback="none"
+  if [[ "$HAD_OLD_PLIST" == "1" ]]; then
+    cp "$OLD_PLIST_BACKUP" "$PLIST"
+    if [[ "$HAD_OLD_PROVENANCE" == "1" ]]; then
+      cp "$OLD_PROVENANCE_BACKUP" "$RUNTIME_PROVENANCE"
+    else
+      rm -f "$RUNTIME_PROVENANCE"
+    fi
+    if launchctl bootstrap "$DOMAIN" "$PLIST" >/dev/null 2>&1; then
+      rollback="restored_previous_service"
+    else
+      rollback="previous_service_restore_failed"
+    fi
+  else
+    rm -f "$PLIST" "$RUNTIME_PROVENANCE"
+    rollback="removed_failed_new_service"
+  fi
+  rm -f "$OLD_PLIST_BACKUP" "$OLD_PROVENANCE_BACKUP"
+  echo "SUPERVISOR_INSTALL=REFUSED reason=bootstrap_failed rollback=$rollback" >&2
+  exit 14
+fi
 launchctl enable "$DOMAIN/$LABEL" >/dev/null 2>&1 || true
+rm -f "$OLD_PLIST_BACKUP" "$OLD_PROVENANCE_BACKUP"
 
 echo "SUPERVISOR_INSTALL=PASS"
 echo "LABEL=$LABEL"

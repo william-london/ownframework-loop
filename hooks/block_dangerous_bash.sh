@@ -93,10 +93,6 @@ fi
 
 command="$(printf '%s' "$parsed" | python3 -B -c 'import sys, json; print(json.loads(sys.stdin.read()).get("tool_input", {}).get("command", ""))' 2>/dev/null || true)"
 
-if [[ -z "$command" ]]; then
-  exit 0
-fi
-
 cwd="$(printf '%s' "$parsed" | python3 -B -c 'import sys, json; print(json.loads(sys.stdin.read()).get("cwd", ""))' 2>/dev/null || true)"
 if [[ -z "$cwd" ]]; then
   cwd="$(pwd 2>/dev/null || true)"
@@ -235,6 +231,24 @@ fi
 
 if [[ "$status" != "active" ]]; then
   # No semantic context: NO-OP. General Claude/native permission model applies.
+  exit 0
+fi
+
+if [[ -z "$command" ]]; then
+  reason="[OF_LOOP_BASH_FORBIDDEN] OwnFramework Loop: active semantic Bash call supplied no command; refusing fail-closed."
+  reasons_b64="$(printf '%s' "$reason" | base64)"
+  reasons_b64="$reasons_b64" python3 -B - <<'PY'
+import json, base64, os
+print(json.dumps({
+    "decision": "block",
+    "reason": base64.b64decode(os.environ["reasons_b64"]).decode("utf-8"),
+    "hookSpecificOutput": {
+        "hookEventName": "PreToolUse",
+        "permissionDecision": "deny",
+        "permissionDecisionReason": "OF_LOOP_BASH_FORBIDDEN"
+    }
+}))
+PY
   exit 0
 fi
 

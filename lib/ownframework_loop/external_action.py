@@ -188,7 +188,7 @@ def _classify(*, tool_name: str, tool_input: dict[str, Any]) -> str:
 def _classify_bash(tool_input: dict[str, Any]) -> str:
     cmd = (tool_input.get("command") or "").strip()
     if not cmd:
-        return "ALLOW"
+        return "BLOCK:OF_LOOP_EXTERNAL_UNKNOWN\\nempty Bash command during active run"
     # Layered normalization:
     #   1. Strip shell quotes.
     #   2. Normalize Python-subprocess argv literals: ['git','push'] → git push
