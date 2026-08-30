@@ -222,6 +222,13 @@ pass "T8 supervisor replacement rolls back on bootstrap failure"
 # env when Claude is commissioned, AND captures the adapter auth-read
 # home, so a launchd-managed supervisor can drive a sandboxed worker
 # against the same model the operator already trusts.
+# install-supervisor-macos.sh is macOS-only by design (launchd plist,
+# /Library/LaunchAgents layout, macOS plistlib contract). The test
+# gates on a Darwin host and skips on Linux so the matrix stays green.
+if [[ "$(uname -s)" != "Darwin" ]]; then
+  pass "T8b commissioned installer captures adapter auth env (skipped on non-Darwin)"
+  exit 0
+fi
 S2SHIMS="$TMP/s2-shims"; mkdir -p "$S2SHIMS"
 cat > "$S2SHIMS/uname" <<'SH'
 #!/bin/sh
