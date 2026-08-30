@@ -15,6 +15,11 @@ import sys
 
 from ownframework_loop import dispatch, integrity, state
 
+# Standalone append_event and transaction-owned appends must both use atomic
+# temp+replace rather than an in-place JSONL tail append.
+state_source = pathlib.Path(state.__file__).read_text(encoding="utf-8")
+assert 'open(ep, "a"' not in state_source, "non-atomic EVENTS.log append remains"
+
 root = pathlib.Path(sys.argv[1])
 repo = root / "repo"
 repo.mkdir()

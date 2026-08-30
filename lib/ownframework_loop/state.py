@@ -469,13 +469,15 @@ def _append_event_locked(
     line = _json_dumps(record)
 
     ep.parent.mkdir(parents=True, exist_ok=True)
-    with open(ep, "a", encoding="utf-8") as f:
-        f.write(line + "\n")
+    existing = ep.read_bytes() if ep.exists() else b""
+    tmp = ep.parent / f".{ep.name}.append.tmp"
+    with open(tmp, "wb") as f:
+        f.write(existing)
+        f.write((line + "\n").encode("utf-8"))
         f.flush()
-        try:
-            os.fsync(f.fileno())
-        except OSError:
-            pass
+        os.fsync(f.fileno())
+    ensure_mode(tmp, 0o600)
+    os.replace(tmp, ep)
     ensure_mode(ep, 0o600)
     try:
         fsync_dir(ep.parent)
