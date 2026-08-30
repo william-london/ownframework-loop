@@ -109,6 +109,28 @@ def state_txn_path(canonical_repo: Path, run_id: str) -> Path:
     return run_dir(canonical_repo, run_id) / "STATE_TXN.json"
 
 
+def _event_append_tmp_path(canonical_repo: Path, run_id: str) -> Path:
+    """Non-authoritative temp used for atomic EVENTS.log replacement."""
+    return run_dir(canonical_repo, run_id) / ".EVENTS.log.append.tmp"
+
+
+def _cleanup_stale_event_append_tmp_locked(
+    canonical_repo: Path,
+    run_id: str,
+) -> bool:
+    """Remove append temp left by a dead writer while caller holds run flock."""
+    tmp = _event_append_tmp_path(canonical_repo, run_id)
+    try:
+        tmp.unlink()
+    except FileNotFoundError:
+        return False
+    try:
+        fsync_dir(tmp.parent)
+    except OSError:
+        pass
+    return True
+
+
 def _state_payload_sha(payload: dict[str, Any]) -> str:
     """SHA of the exact bytes atomic_write_json() persists for state."""
     raw = json.dumps(payload, indent=2, sort_keys=True).encode("utf-8")
@@ -139,6 +161,7 @@ def _recover_pending_state_txn_locked(
     closed; this mechanism only heals a transaction that this runtime durably
     declared before the crash.
     """
+    _cleanup_stale_event_append_tmp_locked(canonical_repo, run_id)
     tp = state_txn_path(canonical_repo, run_id)
     if not tp.exists():
         return None
@@ -504,7 +527,7 @@ def _append_event_locked(
 
     ep.parent.mkdir(parents=True, exist_ok=True)
     existing = ep.read_bytes() if ep.exists() else b""
-    tmp = ep.parent / f".{ep.name}.append.tmp"
+    tmp = _event_append_tmp_path(canonical_repo, run_id)
     with open(tmp, "wb") as f:
         f.write(existing)
         f.write((line + "\n").encode("utf-8"))
@@ -704,9 +727,8 @@ def program_transition(
 ) -> dict[str, Any]:
     """Atomic PROGRAM-mode state transition + event append under one flock.
 
-    v0.3.5 (A1-001/A1-004/A1-005): the program-mode orchestrator no
-    longer bypasses the FSM via state_mod.save(). Every orchestrator-
-    initiated state transition goes through this function, which:
+    PROGRAM-mode transitions never bypass the FSM via raw state writes.
+    Every deterministic program transition goes through this function, which:
 
       1. Acquires the per-run flock.
       2. Reads STATE.json.

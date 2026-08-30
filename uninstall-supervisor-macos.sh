@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 # Remove the per-user OwnFramework Loop macOS supervisor service.
 set -euo pipefail
+ROOT="$(cd "$(dirname "$0")" && pwd)"
 
 LABEL="com.ownframework.loop-supervisor"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 STATE_ROOT="${XDG_STATE_HOME:-$HOME/.local/state}/ownframework-loop"
 SUPERVISOR_DB="$STATE_ROOT/supervisor.sqlite3"
+RUNTIME_PROVENANCE="$STATE_ROOT/runtime-provenance.json"
 
 if [[ "$(uname -s)" != "Darwin" ]]; then
   echo "SUPERVISOR_UNINSTALL=REFUSED reason=macos_required" >&2
@@ -18,26 +20,20 @@ if [[ ! -f "$SUPERVISOR_DB" && -f "$PLIST" && "${OFLOOP_ALLOW_SUPERVISOR_SWAP_WI
   exit 11
 fi
 if [[ -f "$SUPERVISOR_DB" && "${OFLOOP_ALLOW_SUPERVISOR_SWAP_WITH_ACTIVE_WORK:-0}" != "1" ]]; then
-  RUNNING_REPORT="$(python3 -B - "$SUPERVISOR_DB" <<'PY'
-import sqlite3,sys
-try:
-    c=sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True)
-    rows=c.execute("SELECT run_id FROM jobs WHERE status='RUNNING' ORDER BY id").fetchall()
-except sqlite3.Error:
-    print("ledger_probe_failed")
-    raise SystemExit(0)
-print(";".join(str(r[0]) for r in rows[:8]))
-PY
-  )" || RUNNING_REPORT="ledger_probe_failed"
-  if [[ -n "$RUNNING_REPORT" ]]; then
-    echo "SUPERVISOR_UNINSTALL=REFUSED reason=active_or_unverifiable_running_work detail=$RUNNING_REPORT" >&2
-    exit 11
+  set +e
+  PROBE_OUT="$(PYTHONDONTWRITEBYTECODE=1 python3 -B "$ROOT/scripts/probe-supervisor-runtime-dependencies.py" "$SUPERVISOR_DB" uninstall --allow-generation-migration 2>&1)"
+  PROBE_RC=$?
+  set -e
+  if [[ "$PROBE_RC" -ne 0 ]]; then
+    echo "SUPERVISOR_UNINSTALL=REFUSED $PROBE_OUT" >&2
+    exit "$PROBE_RC"
   fi
 fi
-
 DOMAIN="gui/$UID"
 launchctl bootout "$DOMAIN" "$PLIST" >/dev/null 2>&1 || true
-rm -f "$PLIST"
+rm -f "$PLIST" "$RUNTIME_PROVENANCE"
 
 echo "SUPERVISOR_UNINSTALL=PASS"
+echo "SERVICE_MANAGER=launchd"
 echo "LABEL=$LABEL"
+echo "STATE_PRESERVED=yes"

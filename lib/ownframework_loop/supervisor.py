@@ -160,9 +160,10 @@ def _semantic_worker_settings(
     if role == "reviewer":
         filesystem["denyWrite"] = [str(worktree.resolve(strict=False))]
 
-    # No semantic pass needs host credentials or outbound network. Dependency
-    # provisioning/research is a pre-SPEC/bootstrap responsibility. These
-    # native credential rules keep common non-cloud tokens out of Bash even if
+    # Semantic passes never inherit broad host credentials. Outbound Bash
+    # reads are restricted to exact packet-frozen network_read_allowlist hosts
+    # (empty by default); these native credential rules keep common non-cloud
+    # tokens out of Bash even if
     # they exist in the supervisor's environment; the subprocess scrub env var
     # separately strips Anthropic/cloud-provider credentials.
     credential_vars = [
@@ -247,6 +248,51 @@ def default_worker_log_dir() -> Path:
     root = os.environ.get("XDG_STATE_HOME", "").strip()
     base = Path(root).expanduser() if root else Path.home() / ".local" / "state"
     return base / "ownframework-loop" / "worker-logs"
+
+
+def _runtime_cache_run_root(canonical_repo: Path, run_id: str) -> Path:
+    """Pure path for disposable semantic runtime cache for one run."""
+    return runtime_env.runtime_cache_path(canonical_repo, run_id, "builder").parent
+
+
+def _cleanup_terminal_runtime_cache(
+    canonical_repo: Path,
+    run_id: str,
+) -> dict[str, Any]:
+    """Best-effort GC for non-evidence cache after durable DONE."""
+    root = _runtime_cache_run_root(canonical_repo, run_id)
+    existed = root.exists()
+    error = ""
+    if existed:
+        try:
+            shutil.rmtree(root)
+            try:
+                root.parent.rmdir()
+            except OSError:
+                pass
+        except OSError as exc:
+            error = str(exc)
+    return {
+        "path": str(root),
+        "existed": existed,
+        "removed": existed and not root.exists(),
+        "error": error,
+    }
+
+
+def _cleanup_done_runtime_caches(db_path: Path | None = None) -> list[dict[str, Any]]:
+    """Retry disposable-cache GC for durable DONE jobs at supervisor startup."""
+    db = db_path or default_db_path()
+    if not db.exists():
+        return []
+    with _connect_readonly(db) as conn:
+        rows = conn.execute(
+            "SELECT repo,run_id FROM jobs WHERE status='DONE' ORDER BY id"
+        ).fetchall()
+    return [
+        _cleanup_terminal_runtime_cache(Path(row["repo"]), str(row["run_id"]))
+        for row in rows
+    ]
 
 
 def _slug_repo(canonical_repo: Path) -> str:
@@ -2328,12 +2374,16 @@ def run_one(*, db_path: Path | None = None, timeout_seconds: int = 0) -> dict[st
             decision = str(work_order.get("decision") or "")
             if decision == "TERMINAL":
                 _update_job(conn, job["id"], status_value="DONE", last_error=None)
+                cache_cleanup = _cleanup_terminal_runtime_cache(
+                    Path(job["repo"]), str(job["run_id"])
+                )
                 return {
                     "schema": SCHEMA,
                     "ok": True,
                     "action": "TERMINAL",
                     "job_id": job["id"],
                     "work_order": work_order,
+                    "runtime_cache_cleanup": cache_cleanup,
                 }
             if decision == "WAIT":
                 # Bounded next-attempt delay so a recurring WAIT cannot
@@ -2761,6 +2811,7 @@ def serve(
     once: bool = False,
 ) -> dict[str, Any] | None:
     """Run the durable execution clock. Idle iterations make zero model calls."""
+    _cleanup_done_runtime_caches(db_path)
     last_emit: float = 0.0
     idle_log_interval = max(60.0, float(poll_seconds) * 30)
     while True:

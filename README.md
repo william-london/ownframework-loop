@@ -1,347 +1,287 @@
 # OwnFramework Loop
 
-> Deterministic, execution-sealed engineering loops for AI coding agents.
+OwnFramework Loop is a vendor-neutral, execution-sealed engineering runtime for
+autonomous coding agents.
 
-OwnFramework Loop turns a bounded engineering mission into a repeatable
-build/review protocol. It seals the exact work packet and source baseline when
-execution starts, lets a builder work inside deterministic scope and budgets,
-reviews the exact resulting Git SHA, bounds repair cycles, and stops before
-promotion or external effects.
+A human defines the SPEC and owns final promotion. Between those boundaries, a
+durable supervisor can drive bounded BUILD, REVIEW, repair, and PROGRAM
+checkpoint advancement without routine permission prompts or terminal
+babysitting.
 
-**Born on Claude Code. Not locked to Claude Code.**
+The deterministic core owns packet authority, source identity, worktrees,
+state, exact candidate SHA, evidence, retry/repair budgets, runtime-generation
+binding, and promotion boundaries. Agent hosts are adapters.
 
-## The operator experience
-
-SPEC remains human-originated. After a valid packet exists, normal execution
-has no approval ceremony.
-
-### Unattended / background
+## Canonical operating model
 
 ```text
-/of-loop:spec <mission>
-        ↓
-ofloop supervisor enqueue <repo> <run-id>
-ofloop supervisor serve
-        ↓
-fresh builder only when BUILD is actionable
-fresh reviewer only when REVIEW is actionable
-        ↓
+human SPEC
+   |
+   v
+sealed WORK_PACKET
+   |
+   v
+ofloop supervisor enqueue
+   |
+   v
+durable supervisor
+   |
+   +--> BUILD semantic pass
+   |       |
+   |       v
+   |    deterministic finalize
+   |       |
+   +<-- REVIEW exact SHA
+   |       |
+   |       v
+   |    deterministic verdict/finalize
+   |       |
+   +<-- bounded repair / next PROGRAM checkpoint
+   |
+   v
 APPROVED | BLOCKED | STOPPED
-        ↓
-operator decides promotion outside Loop
+   |
+   v
+human merge / promotion
 ```
 
-The supervisor is a durable execution clock, not a second engineering state
-machine. While idle it makes zero model calls. It asks the deterministic
-dispatch boundary for one typed BUILD / REVIEW / WAIT / TERMINAL decision and
-launches a fresh agent process only for semantic work.
+The supervisor is the canonical execution clock. Interactive agent commands are
+optional foreground/debug adapters; they are not the scheduler.
 
-### Interactive / foreground
+## Install
 
-Claude Code users may still run:
+### 1. Install the core
 
-```text
-/loop /of-loop:build <run-id>
-/loop /of-loop:review <run-id>
-```
-
-Those commands remain useful foreground/debug UX over the same core; `/loop`
-is not the canonical overnight scheduler.
-
-There is **no mandatory approval command, confirmation token, `program init`,
-manual claim/finalize ceremony, or manual checkpoint advancement**.
-
-The first legitimate build start is the authorization to perform the exact
-bounded local engineering mission. At that moment the deterministic core
-creates an immutable execution seal that binds:
-
-- exact `WORK_PACKET.md` bytes / SHA-256;
-- canonical repository identity;
-- spec-time baseline branch and exact baseline SHA;
-- deterministic candidate branch;
-- packet schema, scope, and risk metadata;
-- PROGRAM graph provenance when PROGRAM mode is used.
-
-Starting a run does **not** grant push, merge, deploy, publish, payment,
-message-sending, remote mutation, or unrelated external-action authority.
-
-## Why it exists
-
-Coding agents are good at implementation. Long-running engineering work still
-needs machine-readable answers to different questions:
-
-- What exact mission and source baseline were sealed for execution?
-- What paths and budgets apply?
-- What immutable candidate SHA did the builder produce?
-- Did the reviewer inspect that exact SHA?
-- How many build/review/repair passes remain?
-- Did a crash leave durable evidence that can be reconciled safely?
-- Is the result merely protocol-approved, or actually promoted?
-
-OwnFramework Loop makes those boundaries deterministic.
-
-## Core protocol
-
-```text
-mission
-  ↓
-work packet
-  ↓
-execution seal (packet + source baseline + candidate branch)
-  ↓
-bounded builder
-  ↓
-exact candidate Git SHA + BUILD_RECEIPT
-  ↓
-exact-SHA reviewer + REVIEW_VERDICT
-  ↓
-APPROVED / CHANGES_REQUESTED / BLOCKED / STOPPED
-  ↓
-operator promotion outside the loop
-```
-
-Core invariants:
-
-1. First execution start seals exact packet/source identity once.
-2. Source movement between spec creation and first start is refused.
-3. Packet mutation after sealing is refused; changed scope requires a new run.
-4. Build/review claims are serialized and idempotent.
-5. Builders operate only inside bounded packet scope and budgets.
-6. Candidate identity is an exact Git SHA from a clean deterministic worktree.
-7. Review binds to that exact SHA, not arbitrary current filesystem state.
-8. Repair cycles and PROGRAM checkpoint budgets are finite.
-9. Crash reconciliation adopts only exact current-pass evidence.
-10. `APPROVED` never means permission to push, merge, deploy, publish, pay, send,
-    or mutate unrelated external systems.
-
-The historical `APPROVAL.json` filename and `tty_confirmation` method remain
-compatibility surfaces for old runs/users. For new runs the file is an
-**execution-binding artifact**, normally created with:
-
-```text
-approval_method=build_start
-binding_kind=execution_seal
-```
-
-The compatibility field names do not imply that a human typed a token.
-
-## Claude Code quickstart
-
-Claude Code is the stable/reference adapter.
-
-### Install
+From a Git checkout or source release:
 
 ```bash
-git clone https://github.com/william-london/ownframework-loop.git
-cd ownframework-loop
 bash install.sh
 ```
 
-Verify:
+The core installs to a versioned user data directory and creates a managed
+`ofloop` launcher in `~/.local/bin` by default.
+
+The core install is independent of Claude Code, Codex, or any other agent host.
+
+### 2. Optional host adapter
+
+Claude Code:
 
 ```bash
-claude plugin list
+bash install-adapter.sh claude-code
 ```
 
-Then enter the repository you want to develop:
+Codex:
 
 ```bash
-cd /path/to/target-repository
-claude
+bash install-adapter.sh codex
 ```
 
-Create a run:
+Adapters provide host-specific UX only. Installing or removing an adapter does
+not own or remove the core runtime.
 
-```text
-/of-loop:spec <mission>
-```
-
-Open two Claude sessions in the same target repository and launch:
-
-```text
-/loop /of-loop:build <run-id>
-/loop /of-loop:review <run-id>
-```
-
-The builder owns first-start sealing. The reviewer waits until review is
-claimable. In PROGRAM mode those same two lanes advance checkpoint by
-checkpoint without operator protocol babysitting.
-
-### Session-local evaluation
-
-Without persistent installation:
+### 3. Commission the durable supervisor
 
 ```bash
-git clone https://github.com/william-london/ownframework-loop.git /path/to/ownframework-loop
-cd /path/to/target-repository
-claude --plugin-dir /path/to/ownframework-loop
+bash install-supervisor.sh
 ```
 
-## PROGRAM mode
+Platform selection is automatic:
 
-A v3 packet can contain a finite dependency-ordered checkpoint graph. The core
-freezes that graph at execution start and owns:
+- macOS: per-user launchd service.
+- Linux: per-user systemd service.
+- WSL2: Linux path when systemd user services are available.
+- native Windows: not currently a commissioned-supervisor target.
 
-- dependency-ready checkpoint selection;
-- checkpoint-local build/review/repair counters;
-- cumulative packet envelopes;
-- one candidate branch across the run;
-- exact checkpoint evidence;
-- automatic approved-checkpoint advancement;
-- fail-closed repair exhaustion;
-- terminal program result.
+A fresh core install never creates a background service implicitly. Once a
+service is deliberately commissioned, later core installs safely refresh that
+service to the new runtime generation.
 
-Normal PROGRAM operation requires no separate initialization command.
+## Normal workflow
 
-## Portability model
+Create/inspect the SPEC using your chosen adapter or the core surfaces. Then:
 
-OwnFramework Loop separates deterministic protocol authority from host UX.
-
-### 1. Deterministic core
-
-A host that can operate a Git checkout and invoke `ofloop` can participate.
-The core owns execution sealing, packet validation, lifecycle state, locks,
-budgets, candidate/worktree identity, receipts, exact-SHA verdicts, repair
-accounting, crash reconciliation, and terminal semantics.
-
-### 2. Portable Agent Skills
-
-Host-neutral semantic wrappers live under:
-
-```text
-.agents/skills/of-loop-spec/
-.agents/skills/of-loop-build/
-.agents/skills/of-loop-review/
-.agents/skills/of-loop-status/
+```bash
+ofloop supervisor enqueue <repo> <run-id>
+ofloop supervisor status <repo> <run-id>
 ```
 
-### 3. Native adapters
+If the durable service is commissioned, it consumes the queue automatically.
+For foreground operational debugging, `ofloop supervisor serve` runs the same
+execution clock in the current shell.
 
-Hosts may add plugins, commands, subagents, hooks, installation, or native loop
-UX without creating a second execution-binding/state/SHA/verdict system.
+Normal execution does not require a second approval ceremony after the bounded
+packet is ready. First legitimate BUILD start creates the immutable execution
+seal.
 
-| Agent host | Status | Surface |
-|---|---|---|
-| Claude Code | Stable / reference | Managed plugin, native skills/agents/hooks, `/loop` UX |
-| Generic CLI host | Portable baseline | Git checkout + local `ofloop` contract |
-| Codex | Experimental | Portable Agent Skills + adapter distribution; live lifecycle proof still required |
+Terminal `APPROVED` means eligible for human promotion. Loop never interprets
+APPROVED as authority to push, merge, deploy, publish, pay, send messages, or
+mutate unrelated external systems.
+
+## Agent adapters
+
+The core is canonical. Current adapters are:
+
+| Adapter | Status | Role |
+| --- | --- | --- |
+| Claude Code | stable, live-verified, hardened | first production semantic runner; optional interactive plugin UX |
+| Generic CLI | portable contract | vendor-neutral host floor |
+| Codex | experimental | portable Agent Skills; live lifecycle hardening not yet claimed |
+
+Claude Code is the first production-hardened runner, not the identity of
+OwnFramework Loop.
+
+The supervisor already selects semantic runners through a runner registry.
+Adding another live runner must not fork the deterministic dispatch/state
+machine.
 
 See:
 
-- [`docs/architecture/CORE_INVARIANTS.md`](docs/architecture/CORE_INVARIANTS.md)
-- [`docs/architecture/ADAPTER_CONTRACT.md`](docs/architecture/ADAPTER_CONTRACT.md)
-- [`docs/architecture/PORTABILITY_MODEL.md`](docs/architecture/PORTABILITY_MODEL.md)
-- [`docs/architecture/CAPABILITY_MATRIX.md`](docs/architecture/CAPABILITY_MATRIX.md)
-- [`docs/architecture/AGENT_SKILLS.md`](docs/architecture/AGENT_SKILLS.md)
-- [`docs/architecture/SUPERVISOR_MODEL.md`](docs/architecture/SUPERVISOR_MODEL.md)
-- [`docs/ADAPTER_DEVELOPMENT.md`](docs/ADAPTER_DEVELOPMENT.md)
+- `adapters/README.md`
+- `docs/architecture/ADAPTER_CONTRACT.md`
+- `docs/architecture/PORTABILITY_MODEL.md`
+- `docs/ADAPTER_DEVELOPMENT.md`
 
-## Generic CLI contract
+## Claude Code runner
 
-A generic host should consume deterministic outputs rather than reconstructing
-paths or branches from prose. Typical build sequence:
+The commissioned Claude runner currently requires Claude Code **2.1.248 or
+newer**. Newer compatible versions are supported; this is a minimum capability
+floor, not a pin.
+
+Commissioned BUILD/REVIEW passes use Claude-native controls:
+
+- `--restricted`;
+- `--permission-mode dontAsk`;
+- exact pre-approved role-specific tools;
+- fail-closed sandboxing;
+- no unsandboxed-command escape;
+- strict MCP isolation;
+- no browser/web/subagent surface;
+- credential scrubbing;
+- packet-bound network read allowlist.
+
+Builder tools:
 
 ```text
-ofloop build claim <repo> <run-id>
-ofloop build prepare <repo> <run-id>
-ofloop build agent-skeleton <repo> <run-id>
-# host fills the exact pass-scoped agent_result_path returned by preparation
-ofloop build finalize <repo> <run-id> <agent_result_path>
+Read,Edit,Write,NotebookEdit,Bash,Glob,Grep
 ```
 
-The model/host does not choose baseline SHA, candidate branch, worktree,
-checkpoint identity, or pass-scoped result path.
+Reviewer tools:
 
-## Security boundary
+```text
+Read,Bash,Glob,Grep
+```
 
-OwnFramework Loop does not claim universal OS containment for arbitrary
-same-user code. The commissioned unattended Claude supervisor does own a
-narrower execution boundary for each semantic BUILD/REVIEW pass:
+The reviewer therefore has no Edit/Write/NotebookEdit source surface.
 
-- Claude Bash sandbox enabled fail-closed;
-- strict packet-bound Bash network allowlist (empty by default);
-- unsandboxed Bash escape disabled;
-- Claude-native `--restricted` mode: user/project/local settings excluded and built-in file tools confined to the pass working directory;
-- inherited MCP servers disabled with strict empty MCP configuration;
-- browser, WebSearch/WebFetch, nested Agent/Task, Skill, and other non-local
-  built-in surfaces absent from `--tools`;
-- role-specific native tool sets (reviewer has no Edit/Write/NotebookEdit) plus Bash filesystem boundaries, including reviewer worktree deny-write;
-- `dontAsk` + pre-approved sealed tools means no routine permission prompts;
-- Bash sees only SPEC-approved read domains (or no egress), no unsandboxed escape, a home-directory read deny with narrow pass re-opens, and scrubbed host credentials;
-- authority-sensitive runner flags cannot be replaced through `OFLOOP_CLAUDE_EXTRA_ARGS`.
+On Linux/WSL2, Claude's native sandbox requires `bubblewrap` and `socat`.
+Supervisor commissioning checks those prerequisites and refuses early if the
+sandbox cannot arm. On macOS the native Claude sandbox uses the platform
+sandbox implementation.
 
-Mechanical hooks remain defense in depth, and deterministic exact-SHA/source/
-effect checks remain authority after the worker exits. Interactive/foreground
-Claude sessions are not automatically equivalent to this commissioned
-supervisor envelope.
+Claude plugin commands such as `/of-loop:build` and `/of-loop:review` remain
+available for foreground/debug work after installing the Claude adapter. They
+are not the canonical unattended scheduling mechanism.
 
-The strongest practical safety properties come from layered boundaries:
+## Network authority
 
-- no loop-owned external-action authority;
-- packet/source execution binding;
-- protected-path guards;
-- clean exact-SHA build/review finalization;
-- finite state/budget transitions;
-- local-only packets and zero remotes when that is the target contract;
-- operator-owned promotion.
+`network_read_allowlist` is optional frozen SPEC authority for sandboxed
+semantic Bash.
 
-See [`SECURITY.md`](SECURITY.md) and
-[`docs/SECURITY_MODEL.md`](docs/SECURITY_MODEL.md).
+Example:
+
+```json
+{
+  "network_read_allowlist": [
+    "registry.npmjs.org",
+    "pypi.org",
+    "files.pythonhosted.org"
+  ]
+}
+```
+
+Only exact lowercase hostnames are accepted. No scheme, port, path, or wildcard
+is allowed. Empty/omitted means zero outbound network.
+
+The list is mapped directly into the semantic runner's native network sandbox.
+It is intended for dependency/download reads, not search, publishing,
+deployment, push, or remote mutation.
+
+## Runtime and crash safety
+
+The durable supervisor provides:
+
+- exact runtime-generation binding to serving payload bytes;
+- fail-closed cross-generation replacement guards for unfinished work;
+- non-destructive RETIRED supervisor enrollment for preserved historical runs;
+- exact semantic-attempt ledger and worker logs;
+- bounded infrastructure/transient recovery;
+- write-ahead STATE/EVENTS recovery;
+- verified authority-bearing state reads;
+- exact-SHA reviewer preparation;
+- no duplicate semantic-worker ownership;
+- disposable runtime-cache cleanup after durable DONE.
+
+Runtime refresh/uninstall safety is shared across macOS and Linux rather than
+implemented separately by each service manager.
+
+## Repository layout
+
+```text
+bin/                         deterministic CLI entrypoint
+lib/ownframework_loop/       core protocol + supervisor + runner registry
+schemas/                     packet/state/receipt/verdict contracts
+templates/                   packet and semantic-result templates
+docs/architecture/           vendor-neutral architecture
+adapters/                    host adapter contracts/docs
+.agents/skills/              portable Agent Skills
+.claude-plugin/              optional Claude Code adapter manifest
+skills/ agents/ hooks/       Claude adapter surfaces
+install.sh                   vendor-neutral core installer
+install-adapter.sh           optional host-adapter installer
+install-supervisor.sh        platform-neutral service commissioning
+install-supervisor-macos.sh  launchd implementation
+install-supervisor-linux.sh  systemd-user implementation
+tests/                       canonical + adapter/platform regressions
+```
 
 ## Validation
 
-Canonical source validation:
+Source tree:
 
 ```bash
-./validate.sh
-./release_gate.sh
+bash validate.sh
+bash release_gate.sh
 ```
 
-Adapter conformance:
+Installed core:
 
 ```bash
-bash tests/run_adapter_conformance.sh
-bash tests/integration/test_adapter_portability.sh
-bash tests/integration/test_adapter_cli.sh
-bash tests/integration/test_codex_adapter_install.sh
+bash validate.sh --installed
 ```
 
-GitHub Actions runs the canonical suite on Linux and macOS across supported
-Python versions, release gates, adapter conformance, real Claude plugin
-validation/install proof, Codex distribution proof, and secret scanning.
+Adapter inspection:
 
-## Requirements
+```bash
+ofloop adapter list
+ofloop adapter doctor generic-cli
+ofloop adapter doctor claude-code
+ofloop adapter doctor codex --allow-unverified
+```
 
-Core/runtime:
+GitHub Actions runs the canonical gates on Ubuntu and macOS with Python 3.12
+and 3.13, plus release gates, security checks, Claude adapter validation, and
+Codex static distribution proof.
 
-- Python 3.12+
-- Git
-- Bash / POSIX-style environment
-- macOS or Linux for the current lock/worktree runtime
+## Compatibility principle
 
-Claude reference adapter:
+Compatibility data required to read historical Loop artifacts remains.
+Deprecated executable paths that can misroute current agents do not.
 
-- Claude Code 2.1+ for ordinary interactive adapter use
-- Claude Code 2.1.248+ for the commissioned unattended supervisor
-  (`--restricted` is the native shared-machine boundary)
-
-## Project status
-
-Current release line: **0.8.4**.
-
-This remains an early public project. Correctness depends on the target
-repository, mission, validation supplied by the packet, agent host, and local
-environment. The project makes narrow deterministic claims about its own
-protocol; it does not claim universal AI-agent safety or OS-level containment.
-
-See [`CHANGELOG.md`](CHANGELOG.md) for release history.
-
-## Contributing
-
-Contributions are welcome. See [`CONTRIBUTING.md`](CONTRIBUTING.md) and
-[`docs/ADAPTER_DEVELOPMENT.md`](docs/ADAPTER_DEVELOPMENT.md).
+Current product behavior is defined by the deterministic core, active
+architecture docs, canonical tests, and current adapter contracts—not by old
+conversation patterns or historical plugin-era workflows.
 
 ## License
 
-Apache License 2.0. See [`LICENSE`](LICENSE) and
-[`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
+See `LICENSE`.

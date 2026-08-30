@@ -10,7 +10,7 @@ OwnFramework Loop is a deterministic engineering protocol for AI coding agents.
 The normal operator experience is deliberately low-friction:
 
 ```text
-spec → builder lane + reviewer lane → terminal result → operator promotion
+spec → supervisor enqueue → autonomous build/review/repair → terminal result → operator promotion
 ```
 
 There is no mandatory approval ceremony, confirmation token, manual PROGRAM
@@ -47,13 +47,16 @@ The deterministic core owns:
 - crash reconciliation and terminal semantics;
 - the boundary before operator promotion.
 
-Adapters may provide host-specific skills, agents, hooks, installers, discovery,
-and loop UX. They must not create a parallel execution-seal, state, repair,
-candidate, verdict, or promotion truth.
+Adapters may provide host-specific skills, agents, hooks, discovery, and
+foreground/debug UX. Platform service installers and the core runtime remain
+OwnFramework Loop-owned. Adapters must not create a parallel execution-seal,
+state, repair, candidate, verdict, runtime-generation, scheduler, or promotion
+truth.
 
-Claude Code is the stable/reference adapter. `generic-cli` is the portability
-floor. Codex remains experimental until live host evidence justifies stronger
-claims.
+The core and durable supervisor are vendor-neutral. Claude Code is currently
+the first stable/live/hardened semantic runner and optional interactive adapter;
+`generic-cli` is the portability floor. Codex remains experimental until live
+host evidence justifies stronger claims.
 
 ## Authority boundaries
 

@@ -1,37 +1,30 @@
 #!/usr/bin/env bash
-# Refresh an already-commissioned macOS Loop supervisor to an installed core payload.
-# This helper never creates a supervisor implicitly. It is safe to call after
-# every core install: non-macOS and never-commissioned hosts are NOOP.
+# Refresh an already-commissioned Linux systemd-user supervisor to core payload.
 set -euo pipefail
-
 CORE_ROOT="${1:?installed core root required}"
 SOURCE_ROOT="${2:?source root required}"
-LABEL="com.ownframework.loop-supervisor"
 STATE_ROOT="${XDG_STATE_HOME:-$HOME/.local/state}/ownframework-loop"
-PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
+UNIT_DIR="${OFLOOP_SYSTEMD_USER_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user}"
+UNIT="$UNIT_DIR/ownframework-loop-supervisor.service"
 PROVENANCE="$STATE_ROOT/runtime-provenance.json"
 
 if [[ "${OFLOOP_SKIP_SUPERVISOR_REFRESH:-0}" == "1" ]]; then
   echo "SUPERVISOR_REFRESH=SKIPPED reason=operator_opt_out"
   exit 0
 fi
-
-if [[ "$(uname -s)" != "Darwin" ]]; then
-  echo "SUPERVISOR_REFRESH=NOOP reason=non_macos"
+if [[ "$(uname -s)" != "Linux" ]]; then
+  echo "SUPERVISOR_REFRESH=NOOP reason=non_linux"
   exit 0
 fi
-
-if [[ ! -f "$PLIST" && ! -f "$PROVENANCE" ]]; then
+if [[ ! -f "$UNIT" && ! -f "$PROVENANCE" ]]; then
   echo "SUPERVISOR_REFRESH=NOOP reason=not_commissioned"
   exit 0
 fi
-
-INSTALLER="$CORE_ROOT/install-supervisor-macos.sh"
+INSTALLER="$CORE_ROOT/install-supervisor-linux.sh"
 OFLOOP="$CORE_ROOT/bin/ofloop"
-if [[ ! -x "$INSTALLER" || ! -x "$OFLOOP" ]]; then
+[[ -x "$INSTALLER" && -x "$OFLOOP" ]] || {
   echo "SUPERVISOR_REFRESH=REFUSED reason=installed_payload_incomplete" >&2
   exit 9
-fi
-
+}
 SOURCE_ROOT_OVERRIDE="$SOURCE_ROOT" OFLOOP_BIN="$OFLOOP" bash "$INSTALLER"
 echo "SUPERVISOR_REFRESH=PASS"

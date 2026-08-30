@@ -1,23 +1,19 @@
-# Adapter architecture
+# Architecture Index
 
-OwnFramework Loop separates a deterministic, agent-neutral engineering protocol
-from agent-host adapters.
+OwnFramework Loop's architecture is vendor-neutral. The deterministic core and
+durable supervisor are canonical; agent hosts integrate through adapters and a
+semantic-runner registry.
 
-- [`CORE_INVARIANTS.md`](CORE_INVARIANTS.md) — non-negotiable execution-binding,
-  source/SHA, repair, state, crash-recovery, and promotion guarantees.
-- [`ADAPTER_CONTRACT.md`](ADAPTER_CONTRACT.md) — core versus adapter
-  responsibilities and capability model.
-- [`CAPABILITY_MATRIX.md`](CAPABILITY_MATRIX.md) — current adapter maturity and
-  host-enforcement differences.
-- [`AGENT_SKILLS.md`](AGENT_SKILLS.md) — portable Agent Skills layout and shared
-  SPEC/BUILD/REVIEW/STATUS semantics.
-- [`PORTABILITY_MODEL.md`](PORTABILITY_MODEL.md) — deterministic core, portable
-  skills, and native-adapter layers.
+Read:
 
-Claude Code is the stable/reference adapter. Additional adapters must reuse the
-same execution-start, packet/source binding, lifecycle state, exact-SHA review,
-repair/checkpoint budgets, crash reconciliation, and operator-promotion
-boundary.
+- [../ARCHITECTURE.md](../ARCHITECTURE.md) — product-level architecture.
+- [CORE_INVARIANTS.md](CORE_INVARIANTS.md) — deterministic authority.
+- [SUPERVISOR_MODEL.md](SUPERVISOR_MODEL.md) — durable queue/process/runtime generation.
+- [ADAPTER_CONTRACT.md](ADAPTER_CONTRACT.md) — host/runner boundary.
+- [PORTABILITY_MODEL.md](PORTABILITY_MODEL.md) — cross-host/platform portability.
+- [CAPABILITY_MATRIX.md](CAPABILITY_MATRIX.md) — current adapter evidence.
+- [AGENT_SKILLS.md](AGENT_SKILLS.md) — optional skill surfaces.
 
-Normal operation has no mandatory approval ceremony. Adapter convenience must
-never reintroduce a second approval/state/PROGRAM truth.
+Claude Code is currently the first production-hardened/live semantic runner.
+That fact does not make Claude the product identity or the owner of core state,
+installation, scheduling, or promotion.

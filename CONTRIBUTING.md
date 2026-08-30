@@ -1,7 +1,7 @@
 # Contributing to OwnFramework Loop
 
 Thanks for your interest in OwnFramework Loop. This project is a focused,
-human-gated engineering protocol for AI coding agents, and the most useful
+vendor-neutral execution-sealed engineering runtime for AI coding agents, and the most useful
 contributions are tightly scoped and evidence-backed.
 
 ## Supported contribution flow
@@ -15,10 +15,13 @@ contributions are tightly scoped and evidence-backed.
 3. **Prove the change.** Run `./validate.sh` and the focused test
    suite for any boundary your change touches. Include the output in
    the PR description or attach it as a comment.
-4. **Use canonical scripts and commands.** `install.sh`,
-   `uninstall.sh`, `rollback.sh`, `validate.sh`, `release_gate.sh`,
-   and the helpers under `bin/`, `lib/`, `scripts/`, and `hooks/` are
-   the canonical local surfaces. Prefer them over ad-hoc shell.
+4. **Use canonical scripts and commands.** `install.sh` /
+   `uninstall.sh` own the vendor-neutral core, `install-adapter.sh` /
+   `uninstall-adapter.sh` own optional host adapters, and
+   `install-supervisor.sh` / `uninstall-supervisor.sh` own the durable
+   platform service. `validate.sh`, `release_gate.sh`, and supported helpers
+   under `bin/`, `lib/`, `scripts/`, and `hooks/` are canonical local
+   surfaces. Prefer them over ad-hoc shell.
 5. **Keep the public surface coherent.** Public-surface files include
    `README.md`, `AGENTS.md`, `CONTRIBUTING.md`, `SECURITY.md`,
    `CHANGELOG.md`, `LICENSE`, `THIRD_PARTY_NOTICES.md`, adapter and

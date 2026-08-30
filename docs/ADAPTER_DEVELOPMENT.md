@@ -1,110 +1,61 @@
-# Developing an OwnFramework Loop adapter
+# Developing an OwnFramework Loop Adapter or Runner
 
-OwnFramework Loop separates deterministic protocol authority from agent-host UX.
-An adapter should be thin: teach a host how to participate while reusing the
-same packet, execution-binding, state, Git-SHA, repair, receipt, and verdict
-machinery.
+## Start from the core contract
 
-Read:
+Do not copy Claude-specific implementation unless the target host genuinely has
+the same primitive.
 
-- [`architecture/ADAPTER_CONTRACT.md`](architecture/ADAPTER_CONTRACT.md)
-- [`architecture/PORTABILITY_MODEL.md`](architecture/PORTABILITY_MODEL.md)
-- [`architecture/CORE_INVARIANTS.md`](architecture/CORE_INVARIANTS.md)
+First prove the target can consume OwnFramework Loop's deterministic work order
+and semantic-result contract without reimplementing state or promotion.
 
-## Start from the generic portability floor
+## Adapter versus runner
 
-Before copying Claude- or Codex-specific integration code, prove the host can:
+An **adapter** adds host UX/distribution: plugin, skills, hooks, commands,
+discovery.
 
-1. operate in a Git checkout;
-2. invoke local `ofloop` commands;
-3. use core-selected builder/reviewer surfaces;
-4. produce/inspect exact Git SHAs;
-5. fill semantic result artifacts at exact paths returned by preparation.
+A **runner** is the supervisor-executable semantic process implementation.
 
-If those conditions hold, the host can be protocol-compatible without native
-Agent Skills, hooks, subagents, marketplace support, or a built-in loop command.
+A host may have one, both, or neither.
 
-## What the core owns
+## Never reimplement
 
-- packet parsing/validation;
-- spec-time baseline snapshot;
-- first-start execution sealing;
-- lifecycle transitions and locks;
-- scope/runtime/repair/checkpoint budgets;
-- candidate branch/worktree identity;
-- exact-SHA receipts/verdicts;
-- crash reconciliation;
-- terminal semantics and promotion boundary.
+Adapters/runners must not own:
 
-## What adapters may provide
+- packet validation;
+- execution sealing;
+- state transitions;
+- worktree/candidate selection;
+- exact-SHA verdict identity;
+- repair/checkpoint counters;
+- runtime generation;
+- promotion.
 
-- discoverable Agent Skills or host-native commands;
-- host-specific agents/subagents;
-- host-specific hooks/command interception;
-- installer/discovery helpers;
-- adapter-specific doctor checks;
-- native loop/retry/session UX.
+## Evidence levels
 
-## What adapters must never reimplement
+- `experimental`: static/distribution or partial host evidence.
+- `portable`: abstract vendor-neutral contract.
+- `stable`: documented host integration.
+- `live_verified`: real supported-host lifecycle observed.
+- `hardened`: unattended security/authority boundary mechanically proven.
 
-Do not implement a second execution-seal mechanism, lifecycle state machine,
-packet hash store, repair counter, candidate identity store, verdict identity
-store, crash-recovery truth, or promotion mechanism.
+Do not inherit a stronger label from another adapter.
 
-A native host loop may repeatedly invoke the shared core, but it must not become
-a second lifecycle authority.
+## Required checks
 
-## Normal start contract
+Run:
 
-Normal adapters do not ask for a separate approval/token step.
-
-```text
-SPEC → first BUILD claim auto-seals → BUILD/REVIEW lifecycle
+```bash
+bash tests/test_run_adapter_conformance.sh
+bash validate.sh
+bash release_gate.sh
 ```
 
-The historical TTY pre-seal may remain compatibility-only. An adapter must not
-make it mandatory or give it a parallel PROGRAM initialization/state path.
+Add focused adapter/runner tests and a real disposable lifecycle before claiming
+live support.
 
-## Exact preparation contract
+A useful change should answer:
 
-Do not derive worktree/branch/checkpoint/result paths from examples. Consume
-`ofloop build prepare` / review preparation outputs exactly. Pass-scoped semantic
-result paths are authoritative outputs, not naming conventions for adapters to
-reconstruct.
-
-## Capability declaration
-
-Add a named adapter only when there is concrete integration evidence.
-
-- `protocol_compatible`: participates in the shared core protocol.
-- `hardened`: named host exposes extra deterministic enforcement for declared
-  rails; this is not an OS-sandbox claim.
-- `live_verified`: named adapter has been exercised in a real supported host.
-
-The abstract `generic-cli` entry represents a portability floor and therefore
-has no named-host live claim.
-
-## Conformance
-
-A new adapter must prove that it:
-
-- uses the shared execution-start path;
-- never directly authors protected run state/evidence;
-- uses exact candidate/review SHAs;
-- leaves repair/terminal semantics to the core;
-- gains no push/merge/deploy/external-effect authority from Loop state;
-- does not reconstruct deterministic paths/identity from prose.
-
-Run `tests/run_adapter_conformance.sh` plus the full repository gates.
-
-## Contribution questions
-
-A useful adapter change should answer:
-
-- Which host/version was tested?
-- Does it work at the generic CLI layer first?
-- Which native features are added beyond the portability floor?
-- Which rails are mechanical versus instruction-only?
-- Can the host discover portable skills directly?
-- What evidence justifies `live_verified=true`?
-- Which capability remains weaker than the Claude reference adapter?
+- Which generic core contract does it consume?
+- Which host-native primitive does it use?
+- What authority remains deterministic-core-owned?
+- What evidence justifies the advertised maturity?

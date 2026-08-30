@@ -1,115 +1,125 @@
 #!/usr/bin/env bash
+# Install one optional OwnFramework Loop agent-host adapter.
+# Core runtime ownership remains with install.sh.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ADAPTER="${1:-}"
+case "$ADAPTER" in
+  claude-code|codex) ;;
+  *)
+    echo "ADAPTER_INSTALL=REFUSED reason=unknown_adapter adapter=$ADAPTER" >&2
+    echo "Usage: bash install-adapter.sh {claude-code|codex}" >&2
+    exit 2
+    ;;
+esac
 
-if [[ "$ADAPTER" != "codex" ]]; then
-  echo "Usage: bash install-adapter.sh codex" >&2
-  echo "Claude Code users should continue using: bash install.sh" >&2
-  exit 2
-fi
+# One canonical core install, independent of adapter host. Adapter installation
+# is allowed to ensure it exists because the operation is idempotent.
+CORE_OUT="$(OFLOOP_SKIP_SUPERVISOR_REFRESH="${OFLOOP_SKIP_SUPERVISOR_REFRESH:-0}" bash "$ROOT/install.sh")"
+printf '%s\n' "$CORE_OUT"
+CORE_ROOT="$(printf '%s\n' "$CORE_OUT" | sed -n 's/^CORE_ROOT=//p' | tail -n1)"
+VERSION="$(printf '%s\n' "$CORE_OUT" | sed -n 's/^VERSION=//p' | tail -n1)"
+[[ -n "$CORE_ROOT" && -n "$VERSION" ]] || {
+  echo "ADAPTER_INSTALL=REFUSED reason=core_install_identity_missing" >&2
+  exit 3
+}
 
-command -v git >/dev/null 2>&1 || { echo "ERROR: git is required" >&2; exit 1; }
-command -v python3 >/dev/null 2>&1 || { echo "ERROR: python3 is required" >&2; exit 1; }
-command -v tar >/dev/null 2>&1 || { echo "ERROR: tar is required" >&2; exit 1; }
-
-VERSION="$(PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$ROOT/lib" python3 - <<'PY'
-from ownframework_loop import __version__
-print(__version__)
+if [[ "$ADAPTER" == "claude-code" ]]; then
+  command -v claude >/dev/null 2>&1 || {
+    echo "ADAPTER_INSTALL=REFUSED reason=claude_cli_missing adapter=claude-code" >&2
+    exit 4
+  }
+  [[ -f "$ROOT/.claude-plugin/plugin.json" && -f "$ROOT/.claude-plugin/marketplace.json" ]] || {
+    echo "ADAPTER_INSTALL=REFUSED reason=claude_adapter_manifest_missing" >&2
+    exit 4
+  }
+  PLUGIN_VERSION="$(python3 -B - "$ROOT/.claude-plugin/plugin.json" <<'PY'
+import json,sys
+print(json.load(open(sys.argv[1], encoding="utf-8"))["version"])
 PY
 )"
-
-DATA_BASE="${OFLOOP_DATA_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/ownframework-loop}"
-INSTALL_ROOT="$DATA_BASE/$VERSION"
-BIN_DIR="${OFLOOP_BIN_DIR:-$HOME/.local/bin}"
-SKILLS_ROOT="${OFLOOP_AGENT_SKILLS_DIR:-$HOME/.agents/skills}"
-LAUNCHER="$BIN_DIR/ofloop"
-ROOT_MARKER="$INSTALL_ROOT/.ownframework-loop-managed"
-SKILLS=(of-loop-spec of-loop-build of-loop-review of-loop-status)
-
-# Validate every possible conflict before mutating user state.
-if [[ -e "$INSTALL_ROOT" && ! -f "$ROOT_MARKER" ]]; then
-  echo "ERROR: refusing to replace unmanaged install root: $INSTALL_ROOT" >&2
-  exit 1
-fi
-
-if [[ -e "$LAUNCHER" || -L "$LAUNCHER" ]]; then
-  if ! grep -q 'OWNFRAMEWORK_LOOP_MANAGED_LAUNCHER' "$LAUNCHER" 2>/dev/null; then
-    echo "ERROR: refusing to replace unmanaged launcher: $LAUNCHER" >&2
-    exit 1
+  MARKET_VERSION="$(python3 -B - "$ROOT/.claude-plugin/marketplace.json" <<'PY'
+import json,sys
+print(json.load(open(sys.argv[1], encoding="utf-8"))["plugins"][0]["version"])
+PY
+)"
+  if [[ "$PLUGIN_VERSION" != "$VERSION" || "$MARKET_VERSION" != "$VERSION" ]]; then
+    echo "ADAPTER_INSTALL=REFUSED reason=version_mismatch core=$VERSION plugin=$PLUGIN_VERSION marketplace=$MARKET_VERSION" >&2
+    exit 4
   fi
-fi
 
-for skill in "${SKILLS[@]}"; do
-  dest="$SKILLS_ROOT/$skill"
-  if [[ -e "$dest" && ! -f "$dest/.ownframework-loop-managed" ]]; then
-    echo "ERROR: refusing to replace unmanaged Agent Skill: $dest" >&2
-    exit 1
-  fi
-done
+  SCOPE="${SCOPE:-user}"
+  PLUGIN_ID="${PLUGIN_ID:-of-loop@ownframework}"
+  MARKETPLACE_NAME="${MARKETPLACE_NAME:-ownframework}"
 
-mkdir -p "$DATA_BASE" "$BIN_DIR" "$SKILLS_ROOT"
-STAGE="$(mktemp -d "$DATA_BASE/.stage-$VERSION-XXXXXX")"
-cleanup() { rm -rf "$STAGE"; }
-trap cleanup EXIT INT TERM HUP
+  # Replace adapter registration so an old checkout/marketplace path can never
+  # remain the source of a fresh adapter install. The plugin cache is not core.
+  claude plugin uninstall "$PLUGIN_ID" --scope "$SCOPE" >/dev/null 2>&1 || true
+  claude plugin marketplace remove "$MARKETPLACE_NAME" >/dev/null 2>&1 || true
+  claude plugin marketplace add "$ROOT" >/dev/null
+  claude plugin install "$PLUGIN_ID" --scope "$SCOPE" >/dev/null
 
-# Install the exact committed source tree, not ignored/runtime state.
-git -C "$ROOT" archive HEAD | tar -x -C "$STAGE"
-printf 'adapter=codex\nversion=%s\n' "$VERSION" > "$STAGE/.ownframework-loop-managed"
-
-# Validate the staged payload before replacing the current managed install.
-[[ -x "$STAGE/bin/ofloop" ]] || { echo "ERROR: staged ofloop launcher missing" >&2; exit 1; }
-for skill in "${SKILLS[@]}"; do
-  [[ -f "$STAGE/.agents/skills/$skill/SKILL.md" ]] || {
-    echo "ERROR: staged Agent Skill missing: $skill" >&2
-    exit 1
+  claude plugin list | grep -F "$PLUGIN_ID" >/dev/null || {
+    echo "ADAPTER_INSTALL=REFUSED reason=claude_plugin_not_visible_after_install" >&2
+    exit 4
   }
-done
 
-if [[ -e "$INSTALL_ROOT" ]]; then
-  rm -rf "$INSTALL_ROOT"
+  cat <<EOF
+ADAPTER_INSTALL=PASS
+ADAPTER=claude-code
+VERSION=$VERSION
+CORE_ROOT=$CORE_ROOT
+PLUGIN_ID=$PLUGIN_ID
+SCOPE=$SCOPE
+CORE_OWNERSHIP=independent
+EOF
+  exit 0
 fi
-mv "$STAGE" "$INSTALL_ROOT"
-trap - EXIT INT TERM HUP
+
+# Codex Agent Skills adapter.
+SKILLS_ROOT="${OFLOOP_AGENT_SKILLS_DIR:-$HOME/.agents/skills}"
+SKILLS=(of-loop-spec of-loop-build of-loop-review of-loop-status)
+mkdir -p "$SKILLS_ROOT"
 
 for skill in "${SKILLS[@]}"; do
-  src="$INSTALL_ROOT/.agents/skills/$skill"
+  src="$CORE_ROOT/.agents/skills/$skill"
+  dest="$SKILLS_ROOT/$skill"
+  [[ -f "$src/SKILL.md" ]] || {
+    echo "ADAPTER_INSTALL=REFUSED reason=core_skill_missing skill=$skill" >&2
+    exit 5
+  }
+  if [[ -e "$dest" && ! -f "$dest/.ownframework-loop-managed" ]]; then
+    echo "ADAPTER_INSTALL=REFUSED reason=unmanaged_agent_skill path=$dest" >&2
+    exit 5
+  fi
+done
+
+for skill in "${SKILLS[@]}"; do
+  src="$CORE_ROOT/.agents/skills/$skill"
   dest="$SKILLS_ROOT/$skill"
   [[ -e "$dest" ]] && rm -rf "$dest"
   mkdir -p "$dest"
   cp -R "$src/." "$dest/"
-  printf 'adapter=codex\nversion=%s\n' "$VERSION" > "$dest/.ownframework-loop-managed"
+  cat > "$dest/.ownframework-loop-managed" <<EOF
+adapter=codex
+version=$VERSION
+core_root=$CORE_ROOT
+EOF
 done
 
-cat > "$LAUNCHER" <<EOF
-#!/usr/bin/env bash
-# OWNFRAMEWORK_LOOP_MANAGED_LAUNCHER
-exec "$INSTALL_ROOT/bin/ofloop" "\$@"
-EOF
-chmod 0755 "$LAUNCHER"
-
-"$LAUNCHER" adapter show codex >/dev/null
-
+"$CORE_ROOT/bin/ofloop" adapter show codex >/dev/null
 cat <<EOF
 ADAPTER_INSTALL=PASS
 ADAPTER=codex
 VERSION=$VERSION
-CORE_ROOT=$INSTALL_ROOT
-OFLOOP_LAUNCHER=$LAUNCHER
+CORE_ROOT=$CORE_ROOT
 AGENT_SKILLS_ROOT=$SKILLS_ROOT
 SKILLS=${SKILLS[*]}
+CORE_OWNERSHIP=independent
 EOF
-
-case ":$PATH:" in
-  *":$BIN_DIR:"*) ;;
-  *) echo "PATH_NOTE=Add $BIN_DIR to PATH to invoke 'ofloop' directly." ;;
-esac
-
 if command -v codex >/dev/null 2>&1; then
-  echo "CODEX_VERSION=$(codex --version 2>/dev/null | head -n 1)"
-  echo "CODEX_RESTART_NOTE=Restart Codex after installation so skill discovery refreshes."
+  echo "CODEX_VERSION=$(codex --version 2>/dev/null | head -n1)"
 else
   echo "CODEX_VERSION=not-installed"
-  echo "CODEX_NOTE=Install/authenticate Codex separately; this script installs only the OwnFramework Loop adapter."
 fi

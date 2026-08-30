@@ -26,7 +26,7 @@ No WebSearch/WebFetch, Agent/Task, Skill, browser, promotion, deployment, or rem
 
 ## Settings and MCP
 
-`--restricted` excludes user/project/local settings. The Loop plugin and pass settings are supplied explicitly.
+`--restricted` excludes user/project/local settings. Pass settings and role instructions are supplied explicitly by the installed core. Optional interactive host adapters do not widen the commissioned runner.
 
 MCP discovery uses `--strict-mcp-config --mcp-config {}`, because `--tools` does not govern MCP tools.
 

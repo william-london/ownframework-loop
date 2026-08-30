@@ -1,6 +1,6 @@
 {
   "name": "ownframework",
-  "description": "OwnFramework Loop for Claude Code — stable reference adapter for a deterministic execution-sealed engineering protocol.",
+  "description": "Claude Code adapter distribution for the vendor-neutral OwnFramework Loop autonomous engineering runtime.",
   "owner": {
     "name": "OwnFramework"
   },
@@ -9,7 +9,7 @@
       "name": "of-loop",
       "version": "0.8.4",
       "source": "./",
-      "description": "Claude Code reference adapter for OwnFramework Loop: execution-sealed work packets, bounded build/review cycles, exact-SHA verification, and operator-owned promotion."
+      "description": "Stable Claude Code adapter for OwnFramework Loop: execution-sealed work packets, autonomous supervisor-driven build/review cycles, exact-SHA verification, and operator-owned promotion."
     }
   ]
 }

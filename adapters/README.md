@@ -1,23 +1,29 @@
-# Agent adapters
+# Agent Host Adapters
 
-Adapters connect coding-agent hosts to the same OwnFramework Loop deterministic
-protocol.
+OwnFramework Loop core, installed runtime, and durable supervisor are
+vendor-neutral. Adapters add optional host-specific UX.
 
-- [`claude-code/`](claude-code/) — stable/reference adapter with native plugin,
-  skills, agents, and tool-surface hooks.
-- [`generic-cli/`](generic-cli/) — vendor-neutral portability floor.
-- [`codex/`](codex/) — experimental Agent Skills adapter; live lifecycle proof
-  remains separate evidence.
+Current adapters:
+
+- [claude-code](claude-code/) — stable/live/hardened Claude integration and the
+  first production semantic runner.
+- [generic-cli](generic-cli/) — vendor-neutral portability contract.
+- [codex](codex/) — experimental Agent Skills integration.
 
 Adapters do not own execution sealing, lifecycle state, repair/checkpoint
-counters, baseline/candidate/worktree identity, exact-SHA verdict identity,
-crash reconciliation, or promotion.
+counters, exact candidate SHA, verdict finalization, runtime generation, or
+promotion.
 
-Normal lifecycle semantics are shared:
+Install core first (or let the adapter installer idempotently ensure it):
 
-```text
-SPEC → first BUILD start auto-seals → BUILD/REVIEW → terminal result
+```bash
+bash install.sh
+bash install-adapter.sh claude-code
+# or
+bash install-adapter.sh codex
 ```
 
-See [`docs/architecture/ADAPTER_CONTRACT.md`](../docs/architecture/ADAPTER_CONTRACT.md)
-and [`docs/ADAPTER_DEVELOPMENT.md`](../docs/ADAPTER_DEVELOPMENT.md).
+Removing an adapter preserves the core runtime.
+
+See `docs/architecture/ADAPTER_CONTRACT.md` and
+`docs/ADAPTER_DEVELOPMENT.md`.

@@ -47,11 +47,11 @@ No raw worktree creation or removal; no direct state/receipt/verdict writes;
 no scope/budget widening; no push, merge, deploy, publish, remote creation,
 or external effect.
 
-## Canonical scheduling UX
+## Scheduling
 
-```
-/loop /of-loop:review <run-id>
-```
+Canonical unattended scheduling is `ofloop supervisor enqueue <repo> <run-id>`.
+This skill represents one pass and may be invoked through a host adapter for
+foreground/debug work. It is not the durable execution clock.
 
 The operator supplies no cadence, claim, preparation, assessment-skeleton,
 finalizer, or approval commands.

@@ -15,7 +15,7 @@ Every supervisor-spawned BUILD/REVIEW pass requires Claude Code 2.1.248+ and sta
 - Chrome disabled;
 - session persistence disabled.
 
-Restricted mode excludes user/project/local settings and confines built-in file tools to the pass working directory. Loop supplies only the pass-specific CLI settings and its explicit plugin.
+Restricted mode excludes user/project/local settings and confines built-in file tools to the pass working directory. Loop supplies only pass-specific runtime settings and role instructions; the optional interactive Claude plugin is not the owner of the commissioned core runtime.
 
 ## Zero routine prompts
 
@@ -52,3 +52,13 @@ Semantic BUILD/REVIEW passes have no broad internet. Sandboxed Bash may reach on
 ## Scope
 
 This is the commissioned unattended worker contract. Interactive Claude sessions are not equivalent evidence.
+
+## Platform prerequisites
+
+- macOS: Claude's native sandbox uses the platform sandbox implementation.
+- Linux/WSL2: commissioned Claude execution requires `bubblewrap` and `socat`.
+  The Linux service installer also performs a real bubblewrap usability probe
+  and refuses commissioning when the native boundary cannot arm.
+
+A missing Linux sandbox prerequisite is an installation/configuration defect,
+not a reason to fall back to unsandboxed unattended execution.

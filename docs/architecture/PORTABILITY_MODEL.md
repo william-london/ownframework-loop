@@ -1,107 +1,55 @@
-# Portability model
+# Portability Model
 
-OwnFramework Loop separates deterministic engineering authority from the UX of
-any one coding-agent host.
+## Product portability
 
-Claude Code remains the stable/reference adapter because its plugin, skills,
-agents, hooks, and loop-oriented UX provide the richest native experience. The
-core itself does not require Claude-specific capabilities.
+OwnFramework Loop is portable when the deterministic core, installed runtime,
+durable supervisor lifecycle, and packet/evidence contracts remain independent
+of any one model host.
 
-## Three compatibility layers
+Current supported core/service platforms:
 
-### 1. Deterministic protocol core
+- macOS: core + launchd user supervisor.
+- Linux: core + systemd-user supervisor.
+- WSL2: Linux model when systemd user services are available.
+- native Windows: not currently a commissioned-supervisor target.
 
-This is the portability floor. A host that can operate a Git checkout and invoke
-`ofloop` can participate.
+Core CI runs on Ubuntu and macOS across supported Python versions.
 
-The core owns:
+## Host portability
 
-- packet validation;
-- spec-time baseline capture;
-- automatic first-start execution sealing;
-- lifecycle state and locking;
-- bounded build/review/repair/checkpoint counters;
-- candidate branch/worktree identity;
-- exact candidate Git SHA and build receipt;
-- exact-SHA review/verdict identity;
-- crash reconciliation and terminal semantics;
-- the boundary before operator promotion.
+A semantic host does not need a native plugin API. At the portability floor it
+must be able to:
 
-No mandatory confirmation token, approval ceremony, or PROGRAM-init ceremony is
-part of the normal portable contract.
+1. consume one deterministic work order;
+2. inspect/edit the supplied BUILD worktree or read the REVIEW worktree;
+3. execute local validation inside declared authority;
+4. write the exact pass-scoped semantic artifact;
+5. return control to deterministic finalize.
 
-### 2. Portable Agent Skills
+Native plugin/skills/hooks are UX and defense-in-depth features, not protocol
+truth.
 
-Hosts that understand Agent Skills / `SKILL.md` may consume:
+## Current host maturity
 
-```text
-.agents/skills/of-loop-spec/
-.agents/skills/of-loop-build/
-.agents/skills/of-loop-review/
-.agents/skills/of-loop-status/
-```
+Claude Code is the first hardened live runner because its native restricted
+execution/sandbox is integrated and proven.
 
-Those files describe SPEC/BUILD/REVIEW/STATUS while delegating all authoritative
-state and identity to the deterministic core. They are a presentation layer, not
-a second execution engine.
+Codex remains experimental. Generic CLI describes the contract, not a claim
+that an unspecified host is automatically safe for unattended production.
 
-### 3. Native host adapters
+## Installation portability
 
-A named adapter may add host-specific UX/enforcement without changing protocol
-authority.
+`install.sh` installs core only.
 
-Examples:
+`install-adapter.sh <adapter>` installs host integration only.
 
-- Claude Code: managed plugin, native skills/agents/hooks, command interception,
-  `/loop`-oriented UX.
-- Codex: portable Agent Skills and adapter distribution; currently experimental.
+`install-supervisor.sh` selects the platform service manager.
 
-Native features may make an adapter easier to install, more automated, or more
-hardened. They do not get their own execution seal, lifecycle state, candidate
-identity, or verdict machinery.
+No adapter cache is an OwnFramework Loop runtime root.
 
-## Compatibility levels
+## Compatibility policy
 
-- **portable** — vendor-neutral CLI contract is available.
-- **experimental** — named adapter exists, but some live/hard-enforcement claims
-  remain incomplete.
-- **stable** — named adapter has documented UX, deterministic conformance, live
-  host proof, and maintained compatibility.
-
-`protocol_compatible=true` means the adapter reuses the shared
-packet/execution-binding/state/SHA/verdict protocol.
-
-`hardened=true` is a stronger host-specific claim about mechanical rails. It
-never means arbitrary same-user code is OS-contained.
-
-`live_verified=true` applies only to named hosts exercised in a real supported
-environment. The abstract `generic-cli` portability floor intentionally has no
-named-host live claim.
-
-## Generic host rule
-
-Start from `generic-cli`, not Claude/Codex internals.
-
-A generic host should:
-
-1. create/validate a spec using supported CLI/core surfaces;
-2. call build claim (which may auto-seal first start);
-3. consume `build prepare` output exactly;
-4. use the returned worktree/branch/checkpoint/result-path identity verbatim;
-5. commit the bounded candidate;
-6. finalize build deterministically;
-7. review the exact candidate SHA;
-8. return semantic review data at the supported path;
-9. leave promotion outside Loop.
-
-Do not reconstruct pass-scoped scratch paths or branch/worktree names from
-examples or documentation text.
-
-## What portability does not promise
-
-OwnFramework Loop does not claim every coding-agent host has identical command
-interception, security boundaries, authentication, model quality, context
-limits, or loop primitives.
-
-The compatibility promise is a shared deterministic engineering protocol—not
-identical vendor behavior.
+Historical artifact fields required for deterministic audit remain readable.
+Retired executable commands, old plugin-install assumptions, and misleading
+scheduler paths are removed from active surfaces instead of preserved as
+runtime choices.

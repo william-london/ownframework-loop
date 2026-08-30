@@ -122,8 +122,9 @@ final checkpoint approval yields terminal program `APPROVED`.
 
 ### 7. Commissioned semantic-worker isolation
 
-The durable supervisor launches each BUILD/REVIEW pass with Claude Code
-2.1.248+ in native `--restricted` mode. Built-in file tools are confined to
+The durable supervisor currently launches each production BUILD/REVIEW pass
+through the registered Claude runner with Claude Code 2.1.248+ in native
+`--restricted` mode. The supervisor/dispatch FSM itself is vendor-neutral. Built-in file tools are confined to
 the pass working directory; user/project/local settings are not loaded.
 Builder and reviewer receive different built-in tool sets, with reviewers
 structurally lacking Edit/Write/NotebookEdit.
@@ -224,9 +225,10 @@ commissioned unattended supervisor intentionally does not: it uses Claude's
 native restricted mode and role-specific local tools so SPEC approval can be
 followed by unattended BUILD/REVIEW/repair without permission babysitting.
 
-Research, dependency provisioning, and external integrations happen before the
-sealed PROGRAM is minted. Promotion remains after terminal APPROVED and
-human-owned.
+Research and external-service setup happen before the sealed PROGRAM is minted.
+Dependency/download reads may occur during BUILD/REVIEW only to exact hostnames
+frozen in the packet's `network_read_allowlist`; no runtime widening prompt is
+available. Promotion remains after terminal APPROVED and human-owned.
 
 Authority still comes from deterministic packet/source/worktree/SHA/state/
 finalizer boundaries; the native sandbox limits what a compromised semantic

@@ -50,8 +50,8 @@ This skill is a host adapter over the deterministic ofloop core.
    * canonical unattended enqueue: ofloop supervisor enqueue <repo> <run-id>
    * canonical status: ofloop supervisor status <repo> <run-id>
    * execution clock when not already running as a service: ofloop supervisor serve
-   * optional FOREGROUND / DEBUG builder: /loop /of-loop:build <run-id>
-   * optional FOREGROUND / DEBUG reviewer: /loop /of-loop:review <run-id>
+   * Claude adapter foreground/debug only: /of-loop:build <run-id>
+   * Claude adapter foreground/debug only: /of-loop:review <run-id>
 
 9. STOP. Normal background operation is supervisor-first. Enqueue the run; an
    already commissioned supervisor service consumes it, or `ofloop supervisor
@@ -94,8 +94,9 @@ Before a v3 PROGRAM is considered ready:
 - use acceptance_criterion_ids on checkpoints; never emit checkpoint
   acceptance_criteria;
 - derive the smallest `network_read_allowlist` needed by the declared
-  toolchain. This is frozen SPEC authority and maps directly to Claude's native
-  sandbox network allowlist; the default is no outbound network;
+  toolchain. This is frozen SPEC authority and maps to the selected runner's
+  strict network-read boundary; the current Claude runner uses its native
+  sandbox allowlist. The default is no outbound network;
 - validate packet budgets against executable ceilings before first execution;
 - treat top-level build/review/repair values as cumulative PROGRAM envelopes;
 - unless intentionally throttling the whole PROGRAM, fund those global

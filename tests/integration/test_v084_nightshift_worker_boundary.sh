@@ -11,11 +11,15 @@ TESTS_DIR="$(cd "$(dirname "$0")" && pwd)"
 . "$TESTS_DIR/../_helpers.sh"
 export PYTHONPATH="$ROOT_DIR/lib"
 
-grep -Fq "status NOT IN ('DONE','RETIRED')" "$ROOT_DIR/install.sh" \
-  || fail "managed install must exclude RETIRED from runtime dependencies"
-grep -Fq "status NOT IN ('DONE','RETIRED')" "$ROOT_DIR/uninstall.sh" \
-  || fail "managed uninstall must exclude RETIRED from runtime dependencies"
-pass "managed install/uninstall agree that DONE + RETIRED are non-runtime-dependent"
+grep -Fq "WHERE status NOT IN ('DONE','RETIRED')" "$ROOT_DIR/scripts/probe-supervisor-runtime-dependencies.py" \
+  || fail "shared runtime dependency probe must exclude DONE + RETIRED"
+grep -Fq 'probe-supervisor-runtime-dependencies.py' "$ROOT_DIR/install.sh" \
+  || fail "core installer must use shared runtime dependency probe"
+grep -Fq 'probe-supervisor-runtime-dependencies.py' "$ROOT_DIR/install-supervisor-macos.sh" \
+  || fail "macOS supervisor installer must use shared runtime dependency probe"
+grep -Fq 'probe-supervisor-runtime-dependencies.py' "$ROOT_DIR/install-supervisor-linux.sh" \
+  || fail "Linux supervisor installer must use shared runtime dependency probe"
+pass "core + platform installers share one DONE/RETIRED runtime-dependency contract"
 
 TMP="$(mktemp -d -t ofloop_v084_worker.XXXXXX)"
 trap 'rm -rf "$TMP"' EXIT
@@ -237,6 +241,44 @@ retired = supervisor.retire(
 )
 assert retired.get("retired") is True, retired
 assert retired["runtime_generation_preserved"] == "ofloop-0.8.4@test", retired
+
+# DONE runtime cache is disposable; QUARANTINED cache is recovery material.
+gc_repo = root / "gc-repo"
+gc_repo.mkdir()
+gc_db = root / "gc.sqlite3"
+done_run = "run-gc-done"
+quarantine_run = "run-gc-quarantine"
+for rid in (done_run, quarantine_run):
+    enq = supervisor.enqueue(
+        canonical_repo=gc_repo,
+        run_id=rid,
+        db_path=gc_db,
+        runtime_generation="ofloop-0.8.4@test",
+    )
+    assert enq["status"] == "QUEUED", enq
+with supervisor._connect(gc_db) as conn:
+    conn.execute("UPDATE jobs SET status='DONE' WHERE run_id=?", (done_run,))
+    conn.execute("UPDATE jobs SET status='QUARANTINED' WHERE run_id=?", (quarantine_run,))
+done_cache = runtime_env.runtime_cache_dir(gc_repo, done_run, "builder")
+(done_cache / "junk.txt").write_text("ephemeral", encoding="utf-8")
+quarantine_cache = runtime_env.runtime_cache_dir(gc_repo, quarantine_run, "builder")
+(quarantine_cache / "keep.txt").write_text("resumable", encoding="utf-8")
+gc_results = supervisor._cleanup_done_runtime_caches(gc_db)
+assert any(item["removed"] for item in gc_results), gc_results
+assert not supervisor._runtime_cache_run_root(gc_repo, done_run).exists()
+assert supervisor._runtime_cache_run_root(gc_repo, quarantine_run).exists()
+
+# Retired parser/module surfaces are actually absent, not runnable warning stubs.
+source_root = pathlib.Path(supervisor.__file__).resolve().parents[2]
+cli_source = (source_root / "lib" / "ownframework_loop" / "cli.py").read_text(encoding="utf-8")
+assert "cmd_loop_run" not in cli_source
+assert "cmd_build_write_receipt" not in cli_source
+assert "cmd_review_write_verdict" not in cli_source
+assert "add_parser('loop'" not in cli_source
+assert 'add_parser("write-receipt"' not in cli_source
+assert 'add_parser("write-verdict"' not in cli_source
+assert not (source_root / "lib" / "ownframework_loop" / "orchestrator.py").exists()
+assert not (source_root / "rollback.sh").exists()
 
 print("V084_NIGHTSHIFT_WORKER_BOUNDARY=PASS")
 PY

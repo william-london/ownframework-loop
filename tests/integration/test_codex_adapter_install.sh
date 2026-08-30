@@ -11,7 +11,8 @@ export HOME="$TMP/home"
 export XDG_DATA_HOME="$TMP/data"
 export OFLOOP_BIN_DIR="$TMP/bin"
 export OFLOOP_AGENT_SKILLS_DIR="$TMP/skills"
-mkdir -p "$HOME" "$OFLOOP_BIN_DIR" "$OFLOOP_AGENT_SKILLS_DIR"
+export XDG_STATE_HOME="$TMP/state"
+mkdir -p "$HOME" "$OFLOOP_BIN_DIR" "$OFLOOP_AGENT_SKILLS_DIR" "$XDG_STATE_HOME"
 
 bash install-adapter.sh codex | tee "$TMP/install.txt"
 grep -F 'ADAPTER_INSTALL=PASS' "$TMP/install.txt" >/dev/null
@@ -45,14 +46,30 @@ grep -F 'refusing to replace unmanaged Agent Skill' "$TMP/conflict.txt" >/dev/nu
 grep -F 'user-owned' "$OFLOOP_AGENT_SKILLS_DIR/of-loop-spec/SKILL.md" >/dev/null
 rm -rf "$OFLOOP_AGENT_SKILLS_DIR/of-loop-spec"
 
-# Clean install/uninstall round trip.
+# Clean adapter install/uninstall round trip. Core ownership is independent:
+# removing Codex skills must not remove the shared ofloop runtime/launcher.
 bash install-adapter.sh codex >/dev/null
+CORE_ROOT="$(PYTHONDONTWRITEBYTECODE=1 python3 -B - "$OFLOOP_BIN_DIR/ofloop" <<'PY'
+import sys
+from pathlib import Path
+print(Path(sys.argv[1]).resolve(strict=False).parent.parent)
+PY
+)"
+test -d "$CORE_ROOT"
 bash uninstall-adapter.sh codex | tee "$TMP/uninstall.txt"
 grep -F 'ADAPTER_UNINSTALL=PASS' "$TMP/uninstall.txt" >/dev/null
+grep -F 'CORE_PRESERVED=yes' "$TMP/uninstall.txt" >/dev/null
 
-test ! -e "$OFLOOP_BIN_DIR/ofloop"
+test -x "$OFLOOP_BIN_DIR/ofloop"
+test -d "$CORE_ROOT"
+"$OFLOOP_BIN_DIR/ofloop" adapter show generic-cli >/dev/null
 for skill in of-loop-spec of-loop-build of-loop-review of-loop-status; do
   test ! -e "$OFLOOP_AGENT_SKILLS_DIR/$skill"
 done
+
+# Core removal is a separate explicit operation.
+bash uninstall.sh >/dev/null
+test ! -e "$OFLOOP_BIN_DIR/ofloop"
+test ! -e "$CORE_ROOT"
 
 echo 'CODEX_ADAPTER_INSTALL_TEST=PASS'

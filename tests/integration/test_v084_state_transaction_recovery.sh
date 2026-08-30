@@ -31,6 +31,16 @@ rd.mkdir(parents=True)
 state.save(repo, run_id, state.initial_state(run_id))
 assert state.load_verified(repo, run_id)["state"] == "AWAITING_APPROVAL"
 
+# A dead atomic writer may leave its append temp behind. It is not authority
+# and verified recovery removes it under the same run flock without touching
+# the valid state/event pair.
+stale_tmp = state._event_append_tmp_path(repo, run_id)
+stale_tmp.write_bytes(b"dead-writer-temp")
+events_before_stale_cleanup = state.events_path(repo, run_id).read_bytes()
+assert state.load_verified(repo, run_id)["state"] == "AWAITING_APPROVAL"
+assert not stale_tmp.exists(), "stale event append temp survived recovery"
+assert state.events_path(repo, run_id).read_bytes() == events_before_stale_cleanup
+
 # Diagnostic extras are never allowed to replace protocol identity/integrity
 # fields or spoof the transaction recovery marker.
 event_bytes = state.events_path(repo, run_id).read_bytes()

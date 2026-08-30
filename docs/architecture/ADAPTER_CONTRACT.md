@@ -1,99 +1,63 @@
-# OwnFramework Loop adapter contract
+# OwnFramework Loop Adapter and Runner Contract
 
-OwnFramework Loop is an execution-sealed engineering protocol. An adapter gives
-a coding-agent host a native way to participate; it does not own protocol
-authority.
+## Core rule
 
-Claude Code remains the stable/reference adapter. `generic-cli` defines the
-portable floor. Codex remains experimental until live host evidence closes its
-host-specific claims.
+OwnFramework Loop core is canonical. A host adapter or semantic runner may
+participate in a run; it may not reimplement protocol authority.
 
-## Core authority
+## Semantic runner contract
 
-The deterministic core owns:
+The durable supervisor selects a registered runner by ID.
 
-- work-packet parsing and validation;
-- spec-time source baseline capture;
-- first-start execution sealing;
-- lifecycle transitions and locks;
-- scope/runtime/repair/checkpoint budgets;
-- candidate branch/worktree identity;
-- exact candidate Git SHA and build receipt;
-- exact-SHA review/verdict binding;
-- crash reconciliation;
-- terminal semantics and the promotion boundary.
+A runner receives one deterministic BUILD or REVIEW work order containing exact
+repo/run/worktree/pass identity and the pass-scoped semantic artifact path.
 
-Adapters and unattended runners call supported `ofloop` surfaces. They must
-not directly author or patch `STATE.json`, the compatibility-named execution binding
-(`APPROVAL.json`), `BUILD_RECEIPT.json`, `REVIEW_VERDICT.json`, locks, or event
-logs in real runs.
+It may:
 
-## Adapter operations
+- inspect the exact prepared context;
+- perform the semantic implementation/review permitted by its role;
+- write the supplied semantic result;
+- return operational usage/result evidence.
 
-- **SPEC** — turn a mission into a bounded validated packet and return a run ID
-  plus the canonical builder/reviewer launch commands.
-- **BUILD** — invoke the shared build-claim/preparation/finalization path. First
-  build start may create the execution seal.
-- **REVIEW** — wait until review is claimable, inspect the exact candidate SHA,
-  and return semantic review input through the supported deterministic path.
-- **STATUS** — display core-owned state/evidence without mutating it.
+It may not choose or mutate:
 
-There is no adapter-specific approval capability in normal operation. The
-historical TTY pre-seal is compatibility-only and may not become a parallel
-start/state/PROGRAM initialization path.
+- canonical repository/baseline;
+- worktree/branch identity;
+- execution seal;
+- lifecycle state;
+- candidate SHA;
+- pass/repair/checkpoint counters;
+- deterministic receipt/verdict;
+- promotion authority.
 
-## Minimum host contract
+Adding a runner must not require a provider-specific fork of dispatch or the
+supervisor FSM.
 
-A host does not need native plugins, hooks, Agent Skills, subagents, or a built-
-in loop command. The portability floor requires only that it can:
+## Host adapter contract
 
-1. operate in a Git checkout;
-2. invoke supported local `ofloop` commands;
-3. use the core-selected builder/reviewer surfaces;
-4. produce/inspect exact Git SHAs;
-5. fill semantic result artifacts at exact paths returned by deterministic
-   preparation.
+Adapters may provide:
 
-The host must not reconstruct baseline SHA, candidate branch, worktree,
-checkpoint identity, or pass-scoped result paths from prose.
+- plugins/extensions;
+- Agent Skills;
+- custom agents;
+- hooks;
+- host discovery/install;
+- foreground/debug commands.
 
-## Capability declaration
+Adapters consume supported `ofloop` surfaces. They do not become the durable
+execution clock.
 
-Adapters declare capabilities such as maturity, Agent Skills, native hooks,
-subagents, command interception, installation mode, protocol compatibility,
-hardening, and live verification.
+## Current adapters/runners
 
-- `protocol_compatible=true` means the adapter participates in the shared
-  execution-seal/state/SHA/verdict protocol.
-- `hardened=true` means the named host provides additional deterministic
-  enforcement for its declared hard rails. It does not mean OS sandboxing.
-- `live_verified=true` requires real evidence in that named host.
+- `claude-code`: stable, live-verified, hardened; first production semantic
+  runner and optional interactive plugin adapter.
+- `generic-cli`: vendor-neutral portability floor.
+- `codex`: experimental Agent Skills adapter; static/distribution evidence
+  only until real lifecycle proof exists.
 
-## Maturity
+## Promotion
 
-- **portable** — vendor-neutral CLI compatibility floor.
-- **experimental** — named adapter exists, but live/hard-enforcement evidence is
-  incomplete.
-- **stable** — documented native UX, deterministic conformance, maintained
-  compatibility, and live host proof.
-- **planned** — design intent only.
+No adapter/runner receives push, merge, deploy, publish, payment, messaging, or
+unrelated remote mutation authority from an executable packet.
 
-## Durable runner contract
-
-Unattended execution uses the same core through `dispatch.py`. A runner
-receives one already-claimed/prepared work order, launches one fresh semantic
-agent process, writes only the exact semantic artifact, and exits. The durable
-supervisor owns queue/process/retry concerns only; it never chooses the next
-engineering state.
-
-Claude Code is the first live runner. Other hosts may implement the same runner
-contract without changing packet, state, SHA, or verdict authority.
-
-## Non-negotiable adapter rule
-
-Adapt the host to the core. Do not fork the core into host-specific execution
-sealing, lifecycle state, repair counters, candidate identity, verdict identity,
-or promotion authority.
-
-See [`PORTABILITY_MODEL.md`](PORTABILITY_MODEL.md) and
-[`CAPABILITY_MATRIX.md`](CAPABILITY_MATRIX.md).
+Terminal APPROVED remains a human promotion gate.

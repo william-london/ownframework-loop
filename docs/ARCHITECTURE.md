@@ -1,259 +1,225 @@
-# Architecture — OwnFramework Loop
+# OwnFramework Loop Architecture
 
-## 0. CLI invocation contract
+## Product identity
 
-The CLI shim `bin/ofloop` is a Python script (shebang `#!/usr/bin/env python3`).
-The supported invocations are exactly:
+OwnFramework Loop is a vendor-neutral deterministic engineering runtime.
 
-```bash
-./bin/ofloop                       # executable-bit + shebang (preferred)
-python3 bin/ofloop                 # explicit interpreter
-ofloop                             # when bin/ is on PATH
-```
+It is not a Claude Code plugin with portability added later. Claude Code is one
+host adapter and currently the first production-hardened semantic runner.
 
-The following form is **NOT supported** and is an outright mistake:
+The architecture has four layers:
 
 ```text
-NOT SUPPORTED — would produce SyntaxError: bash runs Python source as bash
+SPEC / human authority
+        |
+deterministic core
+        |
+durable supervisor + runner registry
+        |
+host semantic runner / optional UX adapter
 ```
 
-Rationale: `bin/ofloop` is a Python source file. Invoking it through a
-Bash interpreter produces a `SyntaxError`. A test in
-`tests/unit/test_ofloop_invocation.sh` proves that the broken form fails
-(non-zero exit) while every documented form succeeds.
+Only the bottom layer is vendor-specific.
 
-The README, runbooks, and templates use `./bin/ofloop` and `python3 bin/ofloop`
-only. If you find a reference to `bash bin/ofloop` in the source tree or docs,
-it is a bug.
+## 1. Deterministic core
 
-## 1. Purpose
+`lib/ownframework_loop/` owns engineering authority and durable truth:
 
-A reusable Claude Code plugin that provides a strong, affordable, generic
-two-loop engineering system for OwnFramework. Approved missions cover new
-repositories, new systems, features, bugs, debugging, hardening, refactoring,
-tests, documentation, CI repair, bounded runtime-sensitive candidate work,
-and implementation of tracked contracts.
+- WORK_PACKET parsing/validation;
+- repository identity and spec-time baseline;
+- immutable first-start execution seal;
+- lifecycle state and event evidence;
+- PROGRAM checkpoint graph;
+- pass/repair/source/runtime budgets;
+- deterministic builder/reviewer worktree preparation;
+- exact candidate SHA;
+- build receipt and review verdict finalization;
+- scope/protected-path/secret/external-action enforcement;
+- write-ahead state/event recovery;
+- runtime-generation identity;
+- promotion boundary.
 
-## 2. Components
+A semantic model may provide implementation or review judgment. It cannot
+authoritatively choose the repo, baseline, worktree, candidate SHA, lifecycle
+transition, budget expansion, or promotion.
 
-```
-.claude-plugin/plugin.json     # plugin manifest (name: of-loop)
-skills/spec/SKILL.md           # /of-loop:spec — interactive packet + approval
-skills/build/SKILL.md          # /of-loop:build — one bounded build pass
-skills/review/SKILL.md         # /of-loop:review — one exact-SHA review pass
-agents/of-builder.md           # builder agent (writes source)
-agents/of-reviewer.md          # reviewer agent (read-only against source)
-hooks/hooks.json               # PreToolUse + PostToolUse hooks
-hooks/*.sh                     # hook implementations (Python-backed)
-bin/ofloop                     # CLI shim around lib/ownframework_loop
-lib/ownframework_loop/         # Python core, stdlib only
-schemas/                       # JSON Schema for all structured artifacts
-templates/                     # packet, policy, per-repo loop.yaml
-examples/                      # example packets
-docs/                          # operator + architecture docs
-tests/                         # deterministic fixture + integration tests
-install.sh                     # atomic copy installer with backup
-uninstall.sh / rollback.sh     # removal + recovery
-validate.sh                    # local preflight
-release_gate.sh                # end-to-end PASS/FAIL
-```
+## 2. Durable supervisor
 
-## 3. Runtime shape
+`supervisor.py` owns operational continuity, not engineering truth.
 
-Per-run state lives inside the canonical repo:
+Responsibilities:
 
-```
-<canonical-repo>/
-├── .ownframework-loop/<run-id>/
-│   ├── WORK_PACKET.md       # approved mission
-│   ├── STATE.json           # current state (one of 9)
-│   ├── BUILD_RECEIPT.json   # {candidate_sha, ...}
-│   ├── REVIEW_VERDICT.json  # {verdict, findings, ...}
-│   ├── EVENTS.log           # append-only JSON Lines
-│   ├── STOP                 # optional stop marker
-│   └── LOCK                 # flock target
-└── .worktrees/ownframework-loop/<run-id>/
-    ├── builder/             # branch: factory/candidate/<run-id>
-    └── reviewer/            # detached HEAD at candidate_sha
-```
+- persistent queue;
+- one claimed semantic worker at a time;
+- runner selection through the runner registry;
+- exact runtime-generation binding;
+- semantic-attempt ledger;
+- process ownership;
+- bounded retry/backoff;
+- cost/token telemetry;
+- wall-clock enforcement;
+- RUNNER_WAIT when a commissioned runner is unavailable;
+- quarantine/retirement enrollment lifecycle;
+- live read-only status.
 
-`.ownframework-loop/` and `.worktrees/ownframework-loop/` are excluded from
-Git through `git/info/exclude` (added by the skill at run creation; never
-modifies the repo's tracked `.gitignore`).
+The supervisor asks deterministic dispatch what action is next. It does not
+invent BUILD/REVIEW transitions itself.
 
-## 4. State machine
+Canonical unattended sequence:
 
-Nine states; transitions enforced in `lib/ownframework_loop/transitions.py`.
-
-```
-AWAITING_APPROVAL -> READY_TO_BUILD | BLOCKED | STOPPED
-READY_TO_BUILD    -> BUILDING | BLOCKED | STOPPED
-BUILDING          -> READY_FOR_REVIEW | BLOCKED | STOPPED
-READY_FOR_REVIEW  -> REVIEWING | BLOCKED | STOPPED
-REVIEWING         -> APPROVED | CHANGES_REQUESTED | BLOCKED | STOPPED
-                   | READY_FOR_REVIEW  (candidate changed during review)
-CHANGES_REQUESTED -> READY_TO_BUILD | BLOCKED | STOPPED
-APPROVED          -> (terminal)
-BLOCKED           -> (terminal)
-STOPPED           -> (terminal)
+```text
+supervisor
+  -> dispatch claim
+  -> deterministic prepare/skeleton
+  -> one fresh semantic runner
+  -> deterministic finalize
+  -> dispatch next
+  -> ...
+  -> terminal
 ```
 
-All transitions are atomic under `fcntl.flock`. Any transition not listed
-is rejected with `InvalidTransitionError`.
+## 3. Runner registry
 
-## 5. Skill flow
+Semantic execution is selected by runner ID. The registry is vendor-neutral;
+dispatch and the supervisor FSM do not import provider state machines.
 
-### `/of-loop:spec`
+Current live production runner:
 
-1. Investigate target repository (layout, conventions, expectations).
-2. Ask minimum required product questions (via `AskUserQuestion`).
-3. Draft `WORK_PACKET.md` with a JSON metadata block in a triple-backtick
-   fence (no YAML dependency).
-4. Print the packet path and request explicit approval.
-
-### `/of-loop:spec approve <run-id>`
-
-1. Re-validate packet.
-2. Stamp `human_approved: true`, `approved_packet_sha256`, `approved_at`,
-   `approved_actor`.
-3. Rewrite the packet atomically.
-4. Transition `AWAITING_APPROVAL -> READY_TO_BUILD`.
-
-### `/of-loop:build <run-id>`
-
-1. Validate state, packet, baseline identity.
-2. Claim (`READY_TO_BUILD | CHANGES_REQUESTED -> BUILDING`).
-3. Create or reuse the builder worktree at
-   `.worktrees/ownframework-loop/<run-id>/builder` on branch
-   `factory/candidate/<run-id>`.
-4. Invoke a fresh `of-builder` agent via the Agent tool.
-5. Validate the resulting candidate (SHA exists, diff within budget,
-   no protected-path edits, no secret-shaped content).
-6. Write `BUILD_RECEIPT.json` through `ofloop build write-receipt`.
-7. Transition to `READY_FOR_REVIEW | BLOCKED | STOPPED`.
-8. Emit the operator marker.
-
-### `/of-loop:review <run-id>`
-
-1. Validate state, packet, receipt.
-2. Pin the candidate SHA. Create or refresh the reviewer detached worktree.
-3. Transition `READY_FOR_REVIEW -> REVIEWING`.
-4. Invoke a fresh `of-reviewer` agent via the Agent tool.
-5. Verify reviewer did not mutate tracked source.
-6. Write `REVIEW_VERDICT.json` through `ofloop review write-verdict`.
-7. Transition to `APPROVED | CHANGES_REQUESTED | BLOCKED | READY_FOR_REVIEW`.
-8. Emit the operator marker.
-
-## 6. Deterministic enforcement
-
-- **File locking**: `STATE.json` writes under `fcntl.flock` (POSIX advisory
-  lock) on `.ownframework-loop/<run-id>/LOCK`.
-- **Atomic JSON writes**: temp file, `fsync`, then `os.replace`.
-- **Hook layer**:
-  - `PreToolUse` on Bash refuses forbidden commands
-    (`git push`, `git merge`, `git reset --hard`, `git clean`,
-    `git remote add`, `systemctl`, `docker compose up|down`, `ssh production-host-1`,
-    `ssh production-host-2`, <operator-blocked-executable>).
-  - `PreToolUse` on Write|Edit|MultiEdit|NotebookEdit refuses protected
-    paths when an OwnFramework Loop run is active in the current cwd.
-  - `PostToolUse` on Bash scans command output for secret patterns.
-- **Reviewer read-only**: `disallowedTools: WebFetch, WebSearch, Edit,
-  Write, NotebookEdit`. Bash tool is restricted to a read-only allowlist
-  (see `lib/ownframework_loop/guards.py`).
-
-## 7. Cost control
-
-- Per-pass model budget tracked by the parent `/loop` session.
-- Per-pass hard timeout enforced by the CLI: `max_pass_runtime_seconds`.
-- Hard cap `MAX_DIFF_LINES=400`, `MAX_FILES_CHANGED=12` enforced
-  by the build skill before writing the receipt.
-- Hard cap `MAX_REPAIR_ROUNDS=3` enforced by the build skill before
-  claiming a packet.
-
-## 8. Failure modes (selected)
-
-- Packet SHA drift after approval -> `BLOCKED_PACKET_CHANGED_AFTER_APPROVAL`
-  (transition to `AWAITING_APPROVAL`, both loops stop).
-- Reviewer mutation of tracked source -> verdict is `BLOCKED` with
-  changed paths recorded; no auto-cleanup beyond the reviewer worktree.
-- Reviewer SHA drift during review -> `STALE_CANDIDATE`, transition to
-  `READY_FOR_REVIEW` so the loop re-pins.
-- Forbidden command attempted -> hook blocks at the tool boundary;
-  no opportunity for the model to suppress.
-- Dirty unattributed baseline -> build refuses with `WRONG_REPOSITORY`.
-
-## 9. Why this design
-
-- **Three visible skills**: smallest inspectable surface.
-- **Two visible loops**: one builder tab, one reviewer tab per repo.
-- **Two fresh agents per pass**: builder and reviewer never share context.
-- **`fcntl.flock` over STATE.json**: zero external dependencies.
-- **Deterministic hooks over prompt-time instructions**: instructions can
-  be ignored; hooks cannot.
-- **Exact-SHA reviewer**: prevents approving a candidate the reviewer did
-  not actually review.
-- **Human merge and deploy**: no autonomous external action.
-
-
-## 10. PROGRAM mode (v0.3.0)
-
-For missions that span multiple bounded checkpoints, v3 work packets declare
-`execution_mode: program` plus a `checkpoint_graph`. Each checkpoint (CP-N)
-has its own `risk_budget` (max 1-8 build passes, 1-8 review passes, 1-3 repair
-rounds) and explicit `depends_on` edges forming a DAG.
-
-State schema v2 carries a `program` object alongside the existing single-run
-fields:
-
-```
-STATE.json
-├── program (v2 only, present iff packet is v3)
-│   ├── execution_mode: "program"
-│   ├── checkpoint_graph_sha256   # frozen at init; widening post-init refused
-│   ├── promotion_policy: "human_gate"   # v0.6: only human_gate is executable
-│   ├── current_checkpoints: [CP-N, ...]   # ready-to-build now
-│   ├── finalized_checkpoints: [CP-N, ...]
-│   ├── cumulative_counters: {build_pass_count, review_pass_count, repair_round_count, ...}
-│   ├── cumulative_ceilings: {build_pass_count, ..., source churn caps}
-│   ├── checkpoints: { CP-N: {state, counters, finalized_at, terminal_state, evidence_manifest} }
-│   ├── blocked: [CP-N, ...]
-│   └── source_sha_provenance: { initial_baseline_sha, last_completed_checkpoint_sha, ... }
-└── (single-run fields, all still authoritative)
+```text
+claude-code
 ```
 
-Global source ceilings apply to the union of all checkpoints:
+Additional runners may be registered only when they can consume the same
+deterministic work order and return the same pass-scoped semantic artifact
+without reimplementing core authority.
 
-- 500 unique changed files across the whole program
-- 30,000 baseline->final diff lines across the whole program
+The default runner can remain `claude-code` while it is the only hardened live
+runner. That default is operational policy, not product identity.
 
-Each checkpoint's per-pass caps are bounded by packet's `risk_budget`; the
-cumulative caps are the sum of approved-checkpoint exact caps. Promotion
-is always `human_gate` under current execution: even when a program is
-terminal and all caps are met, no merge, push, or deploy is fired from
-inside Loop.
+## 4. Host adapters
 
-Frozen graph SHA at init prevents post-approval widening: re-running
-`ofloop program init` for an existing program refuses if the packet's
-`checkpoint_graph_sha256` differs from the recorded one.
+Adapters provide host UX/distribution features such as:
 
-CLI surface (v0.6 supervisor architecture):
+- plugins/extensions;
+- Agent Skills;
+- custom agents;
+- hooks;
+- host-specific install/discovery;
+- interactive SPEC/build/review commands.
 
-- `ofloop dispatch claim <repo> <run-id>` — return one BUILD, REVIEW,
-  WAIT, or TERMINAL work order.
-- `ofloop dispatch finalize <repo> <run-id> <decision> <semantic-path>` —
-  finalize one completed semantic pass.
-- `ofloop supervisor enqueue <repo> <run-id>` — register a run with the
-  durable supervisor (operational state only).
-- `ofloop supervisor serve` — run the durable execution clock.
-- `ofloop supervisor status <repo> <run-id>` — read-only operational
-  snapshot.
-- `ofloop supervisor resume <repo> <run-id>` — clear operational
-  quarantine and reset operational counters; never alters engineering
-  state, candidate SHA, or review verdict.
+Adapters never own:
 
-The legacy `ofloop loop run` orchestrator is intentionally retired and
-returns `legacy_unattended_orchestrator_retired_use_supervisor`. Use the
-dispatch boundary for unattended execution. `/loop /of-loop:build` and
-`/loop /of-loop:review` remain valid interactive adapter UX. PROGRAM
-mode is product-agnostic — no domain-specific knowledge of any target
-system is encoded in the engine.
+- execution seal;
+- lifecycle state;
+- candidate identity;
+- repair counters;
+- runtime-generation contract;
+- final verdict authority;
+- merge/deploy/promotion.
+
+### Claude Code
+
+Claude adapter surfaces live under:
+
+- `.claude-plugin/`;
+- `skills/`;
+- `agents/`;
+- `hooks/`;
+- `adapters/claude-code/`.
+
+Interactive `/of-loop:build` and `/of-loop:review` are foreground/debug
+coordinators. They are not the durable scheduler.
+
+The commissioned Claude runner is intentionally narrower than the interactive
+plugin surface.
+
+### Portable Agent Skills / Codex
+
+`.agents/skills/` carries portable skills. Codex consumes those skills through
+its experimental adapter.
+
+### Generic CLI
+
+`generic-cli` is the vendor-neutral portability floor: a host that can invoke
+the deterministic CLI, edit a prepared worktree, run validation, and write the
+one supplied semantic result can participate without native plugin APIs.
+
+## Installation architecture
+
+Installation ownership is intentionally separated:
+
+```text
+install.sh
+  -> versioned OwnFramework Loop core
+  -> managed ofloop launcher
+
+install-adapter.sh <host>
+  -> optional host integration only
+
+install-supervisor.sh
+  -> platform service manager
+  -> exact installed core
+```
+
+The core runtime never lives inside an adapter/plugin cache.
+
+### macOS
+
+`install-supervisor-macos.sh` creates a per-user launchd service.
+
+### Linux
+
+`install-supervisor-linux.sh` creates a per-user systemd service.
+
+Both use the same read-only runtime dependency probe before replacement or
+uninstall. Service-manager code therefore cannot define different generation
+semantics.
+
+## Runtime generation
+
+A supervisor job binds the exact generation that enrolled it:
+
+- clean Git payload: version + exact HEAD;
+- dirty Git payload: version + digest of HEAD/diff/untracked bytes;
+- installed/non-Git payload: version + deterministic payload-tree digest.
+
+Unfinished QUEUED/BACKOFF/RUNNING/QUARANTINED enrollment cannot silently cross
+generations. DONE and explicitly RETIRED historical enrollment do not block
+ordinary refresh.
+
+Unsafe migration remains an explicit operator recovery action, never routine
+installation behavior.
+
+## Semantic worker boundary
+
+A commissioned Claude pass uses native restricted execution with exact
+role-specific tools and no routine permission prompts.
+
+Builder may modify only its prepared source worktree and pass result artifact.
+Reviewer has no built-in source editing tools and its exact-SHA worktree is
+deny-write at the Bash sandbox layer.
+
+Packet `network_read_allowlist` is the only post-SPEC outbound read authority
+for semantic Bash. Remote mutation remains outside Loop.
+
+## State and crash consistency
+
+STATE.json and EVENTS.log are a coupled authoritative history.
+
+State mutation uses write-ahead `STATE_TXN.json`; verified reads recover only a
+proven declared transaction and otherwise fail closed on integrity mismatch.
+
+Atomic append temp files are non-authoritative and disposable. Runtime cache is
+also non-evidence; durable worker logs and semantic-attempt rows are evidence.
+
+## Human boundaries
+
+Normal workflow has two intended human authority boundaries:
+
+1. define/inspect the SPEC before execution;
+2. merge/promote after terminal APPROVED.
+
+Everything between them is designed to run unattended.
+
+APPROVED never grants push, merge, deploy, publish, payment, messaging, or
+unrelated external-system mutation authority.

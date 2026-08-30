@@ -88,8 +88,8 @@ budget, then quarantines the job without inventing a protocol verdict.
 
 ## Interactive compatibility
 
-`/loop /of-loop:build <run-id>` and
-`/loop /of-loop:review <run-id>` remain useful foreground/debug UX.
+`/of-loop:build <run-id>` and
+`/of-loop:review <run-id>` remain useful foreground/debug UX.
 
 The old `ofloop loop run` implementation is retired because it drove
 finalizers without a real semantic builder/reviewer process. It is not an
@@ -141,10 +141,13 @@ After supervisor restart:
 Timeout first sends SIGTERM to the process group, waits briefly, then uses
 SIGKILL only when needed.
 
-## macOS service
+## Platform service
 
-The repository ships `install-supervisor-macos.sh`, which installs a per-user
-`launchd` agent named `com.ownframework.loop-supervisor`. The generated
+The canonical `install-supervisor.sh` wrapper commissions the durable service
+from the installed vendor-neutral core.
+
+On macOS, `install-supervisor-macos.sh` installs a per-user `launchd` agent
+named `com.ownframework.loop-supervisor`. The generated
 service uses the exact `ofloop` executable path selected at installation and
 runs `ofloop supervisor serve` independently of any terminal working
 directory.
@@ -175,7 +178,13 @@ fresh/missing schema fields. Existing rows are never silently reinterpreted:
 the historical exact $25 / unlimited-token / 8-hour tuple is ambiguous and is
 preserved with an operator-visible warning until explicitly re-registered.
 
-Use `uninstall-supervisor-macos.sh` to remove the launch agent.
+On Linux, `install-supervisor-linux.sh` installs a per-user systemd unit named
+`ownframework-loop-supervisor.service`. Both platform implementations persist
+the same runtime-generation/provenance contract and call the same shared
+runtime-dependency probe.
+
+Use `uninstall-supervisor.sh` to remove the commissioned platform service.
+Durable supervisor state/evidence is preserved.
 
 ## Semantic-pass context, delegation, and timing
 
@@ -227,7 +236,7 @@ diff summary.
 There is no deliberate delay between an actionable BUILD finalization and the
 next REVIEW dispatch, or between a review-driven repair and the next BUILD.
 The serve loop sleeps only while IDLE or while explicit backoff policy applies.
-Foreground `/loop` self-pacing markers follow the same rule: whenever the next
+Foreground host-adapter pass markers follow the same rule: whenever the next
 semantic action is available, the cross-role ready state reschedules with zero
 delay; a pre-start run is STARTABLE for the builder lane and WAIT for the
 reviewer lane, never STOP.

@@ -14,10 +14,8 @@ Usage:
 
   ofloop build claim <repo> <run-id> [--actor <name>]
   ofloop build transition <repo> <run-id> --to <state> [--reason <r>] [--actor <name>] [--commit-sha <sha>]
-  ofloop build write-receipt <repo> <run-id> <receipt.json>
   ofloop build marker <repo> <run-id>
 
-  ofloop review write-verdict <repo> <run-id> <verdict.json>
   ofloop review marker <repo> <run-id>
 
   ofloop doctor <repo> [--run-id <id>]
@@ -146,8 +144,7 @@ def cmd_spec_new(args: argparse.Namespace) -> None:
         "state": "AWAITING_APPROVAL",
         "next_step": (
             f"draft and validate packet at {state_mod.run_dir(repo, run_id) / 'WORK_PACKET.md'}, "
-            f"then start with: ofloop dispatch claim {repo} {run_id} "
-            f"or interactive /loop /of-loop:build {run_id}"
+            f"then enqueue with: ofloop supervisor enqueue {repo} {run_id}"
         ),
     })
 
@@ -953,23 +950,6 @@ def cmd_build_transition(args: argparse.Namespace) -> None:
     _emit({"ok": True, "run_id": args.run_id, "state": args.to})
 
 
-def cmd_build_write_receipt(args: argparse.Namespace) -> None:
-    """DEPRECATED V1 path — kept for backward compatibility.
-
-    The V2 finalizer is the only entity that writes the authoritative
-    build receipt. ``ofloop build finalize`` performs the full
-    deterministic verification and writes the receipt itself.
-    This command refuses on V2 pipelines and emits a warning.
-    """
-    repo = _repo_path(args.repo)
-    _emit_error(
-        "ofloop build write-receipt is deprecated by V2. Use "
-        "`ofloop build finalize <repo> <run-id> [agent-result.json]` instead.",
-        exit_code=2,
-        classification="OF_LOOP_WRITE_RECEIPT_DEPRECATED",
-    )
-
-
 def cmd_build_cleanup(args: argparse.Namespace) -> None:
     """Remove the per-run builder worktree (idempotent; safe to re-run)."""
     repo = _repo_path(args.repo)
@@ -1123,22 +1103,6 @@ def cmd_build_marker(args: argparse.Namespace) -> None:
 
 
 # --- review subcommands ----------------------------------------------------
-
-def cmd_review_write_verdict(args: argparse.Namespace) -> None:
-    """DEPRECATED V1 path — kept for backward compatibility.
-
-    The V2 finalizer is the only entity that writes the authoritative
-    review verdict. ``ofloop review finalize`` performs the full
-    deterministic verification and writes the verdict itself.
-    """
-    repo = _repo_path(args.repo)
-    _emit_error(
-        "ofloop review write-verdict is deprecated by V2. Use "
-        "`ofloop review finalize <repo> <run-id> <assessment.json>` instead.",
-        exit_code=2,
-        classification="OF_LOOP_WRITE_VERDICT_DEPRECATED",
-    )
-
 
 def cmd_review_finalize(args: argparse.Namespace) -> None:
     """Deterministic review finalizer.
@@ -1587,11 +1551,6 @@ def _build_parser() -> argparse.ArgumentParser:
     b_trans.add_argument("--commit-sha", default=None,
                           help="candidate SHA to record as last_candidate_sha on this transition")
     b_trans.set_defaults(func=cmd_build_transition)
-    b_rec = bld_sub.add_parser("write-receipt", help="DEPRECATED — use build finalize")
-    b_rec.add_argument("repo")
-    b_rec.add_argument("run_id")
-    b_rec.add_argument("receipt")
-    b_rec.set_defaults(func=cmd_build_write_receipt)
     b_cln = bld_sub.add_parser("cleanup", help="remove per-run builder worktree (idempotent)")
     b_cln.add_argument("repo")
     b_cln.add_argument("run_id")
@@ -1633,11 +1592,6 @@ def _build_parser() -> argparse.ArgumentParser:
     # review
     rev = sub.add_parser("review", help="review subcommands")
     rev_sub = rev.add_subparsers(dest="review_cmd", required=True)
-    r_wv = rev_sub.add_parser("write-verdict", help="DEPRECATED — use review finalize")
-    r_wv.add_argument("repo")
-    r_wv.add_argument("run_id")
-    r_wv.add_argument("verdict")
-    r_wv.set_defaults(func=cmd_review_write_verdict)
     r_claim = rev_sub.add_parser("claim", help="claim a review pass")
     r_claim.add_argument("repo")
     r_claim.add_argument("run_id")
@@ -1673,30 +1627,6 @@ def _build_parser() -> argparse.ArgumentParser:
     r_skel.add_argument("--overwrite", action="store_true",
                        help="overwrite an existing REVIEW_AGENT_ASSESSMENT.json")
     r_skel.set_defaults(func=cmd_review_assessment_skeleton)
-
-    # loop run — single-mode unattended orchestrator
-    from . import orchestrator as orch_mod
-    def cmd_loop_run(args: argparse.Namespace) -> None:
-        repo = _repo_path(args.repo)
-        out = orch_mod.dispatch_run_mode(
-            canonical_repo=repo,
-            run_id=args.run_id,
-            mission=args.mission or '',
-            max_repair_rounds=int(args.max_repair_rounds) if args.max_repair_rounds is not None else None,
-        )
-        ok = bool(out.get("ok")) if isinstance(out, dict) else False
-        _emit(out, exit_code=0 if ok else 1)
-
-    lp = sub.add_parser('loop', help='unattended loop orchestration')
-    l_sub = lp.add_subparsers(dest='loop_cmd', required=True)
-    l_run = l_sub.add_parser('run', help='unattended loop orchestration (single OR program mode)')
-    l_run.add_argument('repo')
-    l_run.add_argument('--run-id', default=None,
-                       help='target run id (defaults to most recent)')
-    l_run.add_argument('mission', nargs='?')
-    l_run.add_argument('--max-repair-rounds', type=int, default=None,
-                       help='override packet.risk_budget.max_repair_rounds')
-    l_run.set_defaults(func=cmd_loop_run)
 
     # dispatch — one deterministic work-order owner for interactive or durable hosts.
     def cmd_dispatch_claim(args: argparse.Namespace) -> None:

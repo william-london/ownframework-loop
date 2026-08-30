@@ -54,7 +54,7 @@ sandbox enabled and fail-closed. The runtime supplies
 
 The supervisor uses `--permission-mode dontAsk` together with an explicit pre-approved sealed tool set and sandbox auto-allow. Inside the authorized pass there are no routine human permission prompts; anything outside the sealed capability set is denied rather than escalated. Bash is additionally denied reads of the operator home except for the current worktree, semantic artifact, runtime cache, Git metadata, and trusted Loop payload. `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1` plus sandbox credential denies keep host credentials out of Bash children.
 
-The minimum commissioned-runner version is Claude Code 2.1.248 because `--restricted` is part of the boundary. If the version cannot be proven, is older, or the sandbox cannot arm, the supervisor fails closed before/at semantic execution.
+The minimum commissioned-runner version is Claude Code 2.1.248 because `--restricted` is part of the boundary. Newer compatible versions are accepted. On Linux/WSL2, supervisor commissioning also proves `bubblewrap`, `socat`, and a usable bubblewrap sandbox before enabling the service. If the version/prerequisites cannot be proven or the sandbox cannot arm, semantic execution fails closed.
 
 Adapter hooks remain a second boundary for direct/normalized command forms, and
 the deterministic core re-proves exact source/candidate identity before
