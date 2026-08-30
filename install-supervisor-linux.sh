@@ -302,7 +302,7 @@ lines=[
     ]),
     "Restart=always",
     "RestartSec=2",
-    f"WorkingDirectory={q(str(Path.home()))}",
+    f"WorkingDirectory={str(Path.home())}",
 ]
 for k,v in sorted(env.items()):
     lines.append(f"Environment={q(k+'='+v)}")
