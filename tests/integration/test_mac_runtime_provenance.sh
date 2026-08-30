@@ -208,7 +208,9 @@ echo "ENV_SUPPLIED"
 exit 0
 P2
 chmod +x "$PROBE_DIR/supplied-claude"
-# Drive ClaudeCodeRunner.run indirectly via subprocess.Popen mock.
+# Drive ClaudeCodeRunner.run indirectly via subprocess.Popen mock. The
+# process born by Popen is intentionally the persist-before-exec Python release
+# gate; prove the provider argv behind that gate is the commissioned binary.
 RESULT="$(PYTHONPATH="$LIB" python3 - <<PY
 import os, sys
 os.environ["OFLOOP_CLAUDE_BIN"] = "$PROBE_DIR/supplied-claude"
@@ -235,12 +237,16 @@ try:
     supervisor.ClaudeCodeRunner().run(wo, timeout_seconds=1)
 except SystemExit:
     pass
-print(captured.get("cmd", ["NONE"])[0])
+cmd=captured.get("cmd") or []
+assert len(cmd) >= 5, cmd
+assert cmd[0] == sys.executable, cmd
+assert cmd[1] == "-c" and cmd[2] == supervisor._WORKER_RELEASE_GATE_CODE, cmd
+print(cmd[4])
 PY
 )"
 [[ "$RESULT" == "$PROBE_DIR/supplied-claude" ]] \
-  && pass "T2: ClaudeCodeRunner uses OFLOOP_CLAUDE_BIN, not PATH" \
-  || fail "T2: runner resolved to $RESULT, expected $PROBE_DIR/supplied-claude"
+  && pass "T2: release gate execs OFLOOP_CLAUDE_BIN, not PATH claude" \
+  || fail "T2: gated provider resolved to $RESULT, expected $PROBE_DIR/supplied-claude"
 
 # =====================================================================
 # T3: non-executable CLAUDE_BIN supplied → install REFUSED
