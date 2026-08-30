@@ -69,7 +69,7 @@ from ownframework_loop import dispatch, supervisor
 
 repo = pathlib.Path(sys.argv[1])
 run_id = sys.argv[2]
-order = dispatch.next_work_order(repo, run_id)
+order = dispatch.claim_next(canonical_repo=repo, run_id=run_id)
 assert order["decision"] == "BUILD", order
 assert order["network_read_allowlist"] == [
     "files.pythonhosted.org",
