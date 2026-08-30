@@ -1934,6 +1934,9 @@ class ClaudeCodeRunner:
     """One fresh non-interactive Claude Code process per semantic pass."""
 
     runner_id = "claude-code"
+    # Only runners that actually implement the persist-before-exec release
+    # handshake may claim gate-v1 recovery semantics.
+    launch_gate_version = 1
 
     def preflight(self) -> RunnerReadiness:
         """Check executable availability without starting a semantic attempt."""
@@ -2589,13 +2592,20 @@ def _reserve_semantic_attempt(
         attempt_id,
     )
     now = time.time()
+    runner_impl = _runner(str(job["runner"]))
+    launch_gate_version = int(
+        getattr(runner_impl, "launch_gate_version", 0) or 0
+    )
     conn.execute(
         """INSERT INTO semantic_attempts
            (attempt_id, job_id, role, status, started_at, stdout_path, stderr_path,
             launch_gate_version)
-           VALUES (?, ?, ?, 'RESERVED', ?, ?, ?, 1)""",
-        (attempt_id, int(job["id"]), role, now,
-         str(durable_files[0]), str(durable_files[1])),
+           VALUES (?, ?, ?, 'RESERVED', ?, ?, ?, ?)""",
+        (
+            attempt_id, int(job["id"]), role, now,
+            str(durable_files[0]), str(durable_files[1]),
+            launch_gate_version,
+        ),
     )
     cur = conn.execute(
         """UPDATE jobs SET worker_attempt_id=?, latest_attempt_id=?,
