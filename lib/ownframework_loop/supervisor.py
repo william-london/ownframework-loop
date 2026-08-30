@@ -557,6 +557,7 @@ def _connect(path: Path) -> sqlite3.Connection:
           worker_started_at REAL,
           worker_pgid INTEGER,
           worker_deadline_at REAL,
+          worker_start_identity TEXT,
           worker_role TEXT,
           max_total_cost_usd REAL NOT NULL DEFAULT 0,
           max_total_tokens INTEGER NOT NULL DEFAULT 0,
@@ -585,6 +586,7 @@ def _connect(path: Path) -> sqlite3.Connection:
           worker_pid INTEGER,
           worker_pgid INTEGER,
           deadline_at REAL,
+          worker_start_identity TEXT,
           stdout_path TEXT NOT NULL,
           stderr_path TEXT NOT NULL,
           returncode INTEGER,
@@ -613,6 +615,7 @@ def _connect(path: Path) -> sqlite3.Connection:
         "worker_started_at": "ALTER TABLE jobs ADD COLUMN worker_started_at REAL",
         "worker_pgid": "ALTER TABLE jobs ADD COLUMN worker_pgid INTEGER",
         "worker_deadline_at": "ALTER TABLE jobs ADD COLUMN worker_deadline_at REAL",
+        "worker_start_identity": "ALTER TABLE jobs ADD COLUMN worker_start_identity TEXT",
         "worker_role": "ALTER TABLE jobs ADD COLUMN worker_role TEXT",
         # New columns migrate DISABLED. Existing values are preserved;
         # the ambiguous historical $25 / unlimited-token / 8-hour tuple is
@@ -650,6 +653,7 @@ def _connect(path: Path) -> sqlite3.Connection:
     attempt_migrations = {
         "worker_pgid": "ALTER TABLE semantic_attempts ADD COLUMN worker_pgid INTEGER",
         "deadline_at": "ALTER TABLE semantic_attempts ADD COLUMN deadline_at REAL",
+        "worker_start_identity": "ALTER TABLE semantic_attempts ADD COLUMN worker_start_identity TEXT",
         "cost_known": "ALTER TABLE semantic_attempts ADD COLUMN cost_known INTEGER NOT NULL DEFAULT 1",
         "launch_gate_version": "ALTER TABLE semantic_attempts ADD COLUMN launch_gate_version INTEGER NOT NULL DEFAULT 0",
         "input_tokens": "ALTER TABLE semantic_attempts ADD COLUMN input_tokens INTEGER NOT NULL DEFAULT 0",
@@ -710,31 +714,62 @@ def _pid_alive(pid: int | None, worker_started_at: float | None = None) -> bool:
     return True
 
 
-def _pid_identity_proven(pid: int | None, worker_started_at: float | None) -> bool:
-    """Strict process identity proof used before signalling an orphan."""
-    if not pid or int(pid) <= 0 or not worker_started_at or worker_started_at <= 0:
+def _read_pid_start_identity(pid: int) -> str | None:
+    """Return an exact-enough kernel/process start identity for safe signalling.
+
+    Linux uses /proc start ticks, which are exact for one boot. macOS uses the
+    process lstart record; equality is required, so inability to observe it
+    simply disables replacement-supervisor killing rather than weakening to a
+    bare PID.
+    """
+    try:
+        if sys.platform == "linux":
+            with open(f"/proc/{int(pid)}/stat", encoding="utf-8") as f:
+                content = f.read()
+            rp = content.rfind(")")
+            if rp < 0:
+                return None
+            fields = content[rp + 1:].split()
+            if len(fields) < 20:
+                return None
+            return f"linux-startticks:{int(fields[19])}"
+        if sys.platform == "darwin":
+            r = subprocess.run(
+                ["ps", "-o", "lstart=", "-p", str(int(pid))],
+                capture_output=True, text=True, check=False, timeout=2,
+            )
+            raw = (r.stdout or "").strip()
+            if r.returncode != 0 or not raw:
+                return None
+            return "darwin-lstart:" + " ".join(raw.split())
+    except Exception:
+        return None
+    return None
+
+
+def _pid_identity_proven(pid: int | None, expected_identity: str | None) -> bool:
+    """Strict identity proof used before signalling a recovered orphan."""
+    if not pid or int(pid) <= 0 or not expected_identity:
         return False
     pid = int(pid)
     try:
         os.kill(pid, 0)
     except (ProcessLookupError, PermissionError):
         return False
-    try:
-        start_ts = _read_pid_start_time(pid)
-    except Exception:
-        return False
-    return start_ts is not None and abs(float(start_ts) - float(worker_started_at)) <= 10
+    observed = _read_pid_start_identity(pid)
+    return observed is not None and observed == str(expected_identity)
 
 
 def _terminate_owned_process_group(
     pid: int,
     pgid: int | None,
+    expected_identity: str | None,
     worker_started_at: float | None,
 ) -> bool:
-    """Terminate only a process group whose leader identity is proven."""
+    """Terminate only a process group whose exact leader identity is proven."""
     if not pgid or int(pgid) != int(pid):
         return False
-    if not _pid_identity_proven(pid, worker_started_at):
+    if not _pid_identity_proven(pid, expected_identity):
         return False
     try:
         os.killpg(int(pgid), signal.SIGTERM)
@@ -745,7 +780,7 @@ def _terminate_owned_process_group(
         if not _pid_alive(pid, worker_started_at):
             return True
         time.sleep(0.05)
-    if not _pid_identity_proven(pid, worker_started_at):
+    if not _pid_identity_proven(pid, expected_identity):
         return not _pid_alive(pid, worker_started_at)
     try:
         os.killpg(int(pgid), signal.SIGKILL)
@@ -1039,12 +1074,15 @@ def _recover_stale_running(conn: sqlite3.Connection) -> int:
         pid = row["worker_pid"]
         started_at = float(row["worker_started_at"]) if row["worker_started_at"] else None
         deadline_at = float(row["worker_deadline_at"]) if row["worker_deadline_at"] else None
+        start_identity = str(row["worker_start_identity"] or "")
         recovery_reason = "recovered stale RUNNING job after supervisor/worker exit"
         if _pid_alive(pid, started_at):
             if deadline_at is None or time.time() < deadline_at:
                 continue
             pgid = int(row["worker_pgid"]) if row["worker_pgid"] else None
-            if not _terminate_owned_process_group(int(pid), pgid, started_at):
+            if not _terminate_owned_process_group(
+                int(pid), pgid, start_identity or None, started_at
+            ):
                 conn.execute(
                     """UPDATE jobs SET last_error=?, updated_at=? WHERE id=?""",
                     (
@@ -1176,6 +1214,7 @@ def _recover_stale_running(conn: sqlite3.Connection) -> int:
               worker_started_at=NULL,
               worker_pgid=NULL,
               worker_deadline_at=NULL,
+              worker_start_identity=NULL,
               worker_role=NULL,
               worker_attempt_id=NULL,
               last_error=?,
@@ -2544,7 +2583,7 @@ def _set_worker_pid(
     cur = conn.execute(
         """
         UPDATE jobs SET worker_pid=?, worker_started_at=?, worker_pgid=?,
-          worker_deadline_at=?, worker_role=?,
+          worker_deadline_at=?, worker_start_identity=?, worker_role=?,
           worker_stdout_path=?, worker_stderr_path=?,
           worker_attempt_id=COALESCE(?, worker_attempt_id), updated_at=?
         WHERE id=? AND status='RUNNING'
@@ -2554,6 +2593,7 @@ def _set_worker_pid(
             started,
             int(pid),
             float(deadline_at) if deadline_at is not None else None,
+            _read_pid_start_identity(int(pid)),
             role,
             str(out_path) if out_path else None,
             str(err_path) if err_path else None,
@@ -2568,11 +2608,12 @@ def _set_worker_pid(
     if attempt_id:
         a = conn.execute(
             """UPDATE semantic_attempts SET status='RUNNING', worker_pid=?,
-               worker_pgid=?, deadline_at=?, started_at=?
+               worker_pgid=?, deadline_at=?, worker_start_identity=?, started_at=?
                WHERE attempt_id=? AND job_id=?""",
             (
                 int(pid), int(pid),
                 float(deadline_at) if deadline_at is not None else None,
+                _read_pid_start_identity(int(pid)),
                 started, attempt_id, int(job_id),
             ),
         )
@@ -2615,6 +2656,7 @@ def _update_job(
           worker_started_at=NULL,
           worker_pgid=NULL,
           worker_deadline_at=NULL,
+          worker_start_identity=NULL,
           worker_role=NULL,
           worker_attempt_id=NULL,
           updated_at=?
@@ -3363,6 +3405,7 @@ def resume(
         "worker_started_at=NULL",
         "worker_pgid=NULL",
         "worker_deadline_at=NULL",
+        "worker_start_identity=NULL",
         "worker_role=NULL",
         "updated_at=?",
     ]
