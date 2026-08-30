@@ -83,11 +83,12 @@ if git -C "$SOURCE_ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   SOURCE_HEAD="$(git -C "$SOURCE_ROOT" rev-parse HEAD 2>/dev/null || true)"
 fi
 
-# 3. Derive ofloop version from the canonical machine source so the
-#    provenance carries the same string the running interpreter exposes.
-OFLOOP_VERSION=""
+# 3. Record source-tree version separately from the installed runtime version.
+#    The runtime provenance field ofloop_version is populated from INSTALL_ROOT
+#    below; SOURCE_ROOT_OVERRIDE must never make installed-version truth lie.
+SOURCE_VERSION=""
 if PYTHONPATH="$SOURCE_ROOT/lib" "$PYTHON_BIN" -c "from ownframework_loop import __version__; print(__version__)" >/dev/null 2>&1; then
-  OFLOOP_VERSION="$(PYTHONPATH="$SOURCE_ROOT/lib" "$PYTHON_BIN" -c "from ownframework_loop import __version__; print(__version__)")"
+  SOURCE_VERSION="$(PYTHONPATH="$SOURCE_ROOT/lib" "$PYTHON_BIN" -c "from ownframework_loop import __version__; print(__version__)")"
 fi
 
 LABEL="com.ownframework.loop-supervisor"
@@ -137,6 +138,7 @@ if [[ -z "$INSTALL_VERSION" ]]; then
   echo "SUPERVISOR_INSTALL=REFUSED reason=runtime_version_undetermined install_root=$INSTALL_ROOT" >&2
   exit 12
 fi
+OFLOOP_VERSION="$INSTALL_VERSION"
 RUNTIME_GENERATION="$(PYTHONPATH="$INSTALL_ROOT/lib" INSTALL_ROOT="$INSTALL_ROOT" INSTALL_VERSION="$INSTALL_VERSION" "$PYTHON_BIN" -B - <<'PY'
 import os
 from pathlib import Path
@@ -266,8 +268,8 @@ fi
 
 mkdir -p "$HOME/Library/LaunchAgents" "$STATE_ROOT"
 
-OLD_PLIST_BACKUP="$STATE_ROOT/.supervisor.plist.preinstall.$"
-OLD_PROVENANCE_BACKUP="$STATE_ROOT/.runtime-provenance.preinstall.$"
+OLD_PLIST_BACKUP="$STATE_ROOT/.supervisor.plist.preinstall.${BASHPID}"
+OLD_PROVENANCE_BACKUP="$STATE_ROOT/.runtime-provenance.preinstall.${BASHPID}"
 HAD_OLD_PLIST=0
 HAD_OLD_PROVENANCE=0
 if [[ -f "$PLIST" ]]; then cp "$PLIST" "$OLD_PLIST_BACKUP"; HAD_OLD_PLIST=1; fi
@@ -289,6 +291,7 @@ SERVICE_PATH="$SERVICE_PATH" \
 SOURCE_ROOT="$SOURCE_ROOT" \
 SOURCE_HEAD="$SOURCE_HEAD" \
 OFLOOP_VERSION="$OFLOOP_VERSION" \
+SOURCE_VERSION="$SOURCE_VERSION" \
 RUNTIME_GENERATION="$RUNTIME_GENERATION" \
 LABEL="$LABEL" \
 "$PYTHON_BIN" - <<'PY'
@@ -307,6 +310,7 @@ service_path = os.environ["SERVICE_PATH"]
 source_root = os.environ.get("SOURCE_ROOT") or None
 source_head = os.environ.get("SOURCE_HEAD") or None
 ofloop_version = os.environ.get("OFLOOP_VERSION") or None
+source_version = os.environ.get("SOURCE_VERSION") or None
 runtime_generation = os.environ.get("RUNTIME_GENERATION") or None
 label = os.environ["LABEL"]
 
@@ -360,6 +364,7 @@ provenance = {
     "stderr_log": stderr_log,
     "source_root": source_root,
     "source_head": source_head,
+    "source_version": source_version,
     "ofloop_version": ofloop_version,
     "runtime_generation": runtime_generation,
 }

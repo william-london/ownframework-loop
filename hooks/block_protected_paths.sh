@@ -162,6 +162,7 @@ if [[ "$status" != "active" ]]; then
 fi
 
 context_run_id="$(printf '%s' "$context" | python3 -B -c 'import json,sys; print(json.loads(sys.stdin.read()).get("run_id",""))' 2>/dev/null || true)"
+context_role="$(printf '%s' "$context" | python3 -B -c 'import json,sys; print(json.loads(sys.stdin.read()).get("role",""))' 2>/dev/null || true)"
 if [[ -z "$abs_path" ]]; then
   emit_block "PROTECTED_PATH" "OwnFramework Loop: active semantic write tool supplied no file_path/notebook_path; refusing fail-closed."
   exit 0
@@ -213,13 +214,18 @@ esac
 # Loop-owned non-source scratch: the supervisor runtime-cache root (hermetic
 # validation env externalizes caches/TMPDIR here) and ordinary system scratch
 # directories. These never carry candidate source.
-runtime_cache_root="$(CLAUDE_PLUGIN_ROOT="$PLUGIN_ROOT" python3 -B -c '
+active_runtime_cache="$(CLAUDE_PLUGIN_ROOT="$PLUGIN_ROOT" CANONICAL_REPO="$canonical_repo" ACTIVE_RUN="$active_run_id" ACTIVE_ROLE="$context_role" python3 -B -c '
 import os, sys
 sys.path.insert(0, os.path.join(os.environ.get("CLAUDE_PLUGIN_ROOT", ""), "lib"))
+from pathlib import Path
 from ownframework_loop import runtime_env
-print(str(runtime_env.default_runtime_cache_root()))
+print(str(runtime_env.runtime_cache_path(
+    Path(os.environ["CANONICAL_REPO"]),
+    os.environ["ACTIVE_RUN"],
+    os.environ["ACTIVE_ROLE"],
+)))
 ' 2>/dev/null || true)"
-if [[ -n "$runtime_cache_root" && "$abs_path" == "$runtime_cache_root"/* ]]; then
+if [[ -n "$active_runtime_cache" && ( "$abs_path" == "$active_runtime_cache" || "$abs_path" == "$active_runtime_cache/"* ) ]]; then
   exit 0
 fi
 case "$abs_path" in

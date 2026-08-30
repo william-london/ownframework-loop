@@ -23,8 +23,28 @@ if ! command -v claude >/dev/null 2>&1; then
 fi
 
 if [[ "$(uname -s)" == "Darwin" ]]; then
+    SUP_STATE="${XDG_STATE_HOME:-$HOME/.local/state}/ownframework-loop"
+    SUP_DB="$SUP_STATE/supervisor.sqlite3"
     SUP_PLIST="$HOME/Library/LaunchAgents/com.ownframework.loop-supervisor.plist"
-    SUP_PROV="${XDG_STATE_HOME:-$HOME/.local/state}/ownframework-loop/runtime-provenance.json"
+    SUP_PROV="$SUP_STATE/runtime-provenance.json"
+    if [[ ( -f "$SUP_PLIST" || -f "$SUP_PROV" ) && -f "$SUP_DB" && "${OFLOOP_ALLOW_RUNTIME_GENERATION_MIGRATION:-0}" != "1" ]]; then
+        UNFINISHED="$(python3 -B - "$SUP_DB" <<'PY'
+import sqlite3,sys
+try:
+    c=sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True)
+    rows=c.execute("SELECT run_id,status FROM jobs WHERE status != 'DONE' ORDER BY id").fetchall()
+except sqlite3.Error:
+    print("ledger_probe_failed")
+    raise SystemExit(0)
+print(";".join(f"{r[0]}:{r[1]}" for r in rows[:8]))
+PY
+        )" || UNFINISHED="ledger_probe_failed"
+        if [[ -n "$UNFINISHED" ]]; then
+            echo "[uninstall] refusing to remove runtime bytes required by unfinished jobs: $UNFINISHED" >&2
+            echo "[uninstall] explicit destructive migration override: OFLOOP_ALLOW_RUNTIME_GENERATION_MIGRATION=1" >&2
+            exit 13
+        fi
+    fi
     if [[ -f "$SUP_PLIST" || -f "$SUP_PROV" ]]; then
         echo "[uninstall] commissioned supervisor detected; stopping it before plugin removal"
         if ! bash "$HERE/uninstall-supervisor-macos.sh"; then

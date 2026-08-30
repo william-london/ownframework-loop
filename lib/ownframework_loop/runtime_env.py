@@ -40,14 +40,23 @@ def _repo_key(canonical_repo: Path) -> str:
     return hashlib.sha256(resolved.encode("utf-8")).hexdigest()[:24]
 
 
+def runtime_cache_path(
+    canonical_repo: Path,
+    run_id: str,
+    role: str,
+) -> Path:
+    """Pure path derivation for one run/role cache (does not create it)."""
+    safe_role = "builder" if role not in ("builder", "reviewer", "validation") else role
+    return default_runtime_cache_root() / _repo_key(canonical_repo) / _slug(run_id) / safe_role
+
+
 def runtime_cache_dir(
     canonical_repo: Path,
     run_id: str,
     role: str,
 ) -> Path:
     """Per (repo, run, role) deterministic directory for externalized cache."""
-    safe_role = "builder" if role not in ("builder", "reviewer", "validation") else role
-    d = default_runtime_cache_root() / _repo_key(canonical_repo) / _slug(run_id) / safe_role
+    d = runtime_cache_path(canonical_repo, run_id, role)
     d.mkdir(parents=True, exist_ok=True)
     return d
 
@@ -156,4 +165,5 @@ __all__ = [
     "default_runtime_cache_root",
     "hermetic_subprocess_env",
     "runtime_cache_dir",
+    "runtime_cache_path",
 ]

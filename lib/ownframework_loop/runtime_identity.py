@@ -14,7 +14,7 @@ import subprocess
 from pathlib import Path
 
 IGNORED_DIR_NAMES = {".git", "logs", ".ownframework-loop", "__pycache__"}
-IGNORED_FILE_NAMES = {".payload.manifest", ".payload.manifest.tmp"}
+IGNORED_FILE_NAMES = {\n    ".payload.manifest", ".payload.manifest.tmp", ".install.provenance",\n    ".install.log", ".uninstall.log", ".supervisor-refresh.log", ".DS_Store",\n}
 IGNORED_FILE_SUFFIXES = (".pyc", ".pyo", ".pyd")
 
 
@@ -48,8 +48,17 @@ def _hash_path_entry(path: Path) -> bytes:
 def _iter_payload_files(root: Path) -> list[Path]:
     out: list[Path] = []
     for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
-        dirnames[:] = sorted(d for d in dirnames if d not in IGNORED_DIR_NAMES)
         base = Path(dirpath)
+        descend: list[str] = []
+        for name in sorted(dirnames):
+            if name in IGNORED_DIR_NAMES:
+                continue
+            p = base / name
+            if p.is_symlink():
+                out.append(p)
+            else:
+                descend.append(name)
+        dirnames[:] = descend
         for name in sorted(filenames):
             if name in IGNORED_FILE_NAMES or name.endswith(IGNORED_FILE_SUFFIXES):
                 continue
@@ -133,9 +142,9 @@ def runtime_generation_for_root(root: Path, version: str) -> str:
         if status_probe.returncode != 0:
             raise RuntimeIdentityError("git status identity probe returned non-zero")
         if not status_probe.stdout.strip():
-            return f"ofloop-{version}@{head[:16]}"
-        return f"ofloop-{version}@dirty-{_dirty_git_digest(root, head)[:24]}"
-    return f"ofloop-{version}@payload-{payload_tree_digest(root)[:24]}"
+            return f"ofloop-{version}@git-{head}"
+        return f"ofloop-{version}@dirty-{_dirty_git_digest(root, head)}"
+    return f"ofloop-{version}@payload-{payload_tree_digest(root)}"
 
 
 __all__ = ["RuntimeIdentityError", "payload_tree_digest", "runtime_generation_for_root"]

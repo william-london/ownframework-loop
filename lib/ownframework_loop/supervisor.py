@@ -738,6 +738,16 @@ def enqueue(
             "SELECT * FROM jobs WHERE repo=? AND run_id=?", (repo, run_id)
         ).fetchone()
         if existing is not None:
+            if str(existing["status"] or "") == "RUNNING":
+                out = dict(existing)
+                out.update({
+                    "schema": SCHEMA,
+                    "ok": False,
+                    "db_path": str(db),
+                    "enqueue_refused": True,
+                    "reason": "cannot_reenqueue_running_job",
+                })
+                return out
             def _keep(field: str, supplied: Any, default: Any) -> Any:
                 return supplied if supplied is not None else existing[field]
             eff_infra = _keep("max_infra_failures", max_infra_failures, 3)
@@ -1960,7 +1970,29 @@ def run_one(*, db_path: Path | None = None, timeout_seconds: int = 0) -> dict[st
         # initial binding, never a mid-lifecycle switch. Migration to a
         # new generation is an explicit operator act: re-enqueue or resume.
         bound_generation = str(job["runtime_generation"] or "")
-        serving_generation = _current_runtime_generation()
+        try:
+            serving_generation = _current_runtime_generation()
+        except Exception as exc:
+            _update_job(
+                conn,
+                job["id"],
+                status_value="QUARANTINED",
+                last_error=(
+                    "serving runtime generation could not be proven; refusing "
+                    f"semantic execution: {type(exc).__name__}: {exc}"
+                ),
+                last_failure_class="runtime_generation_unavailable",
+                last_failure_reason="runtime_generation_unavailable",
+                next_attempt_at=0,
+            )
+            return {
+                "schema": SCHEMA,
+                "ok": False,
+                "action": "QUARANTINED",
+                "job_id": job["id"],
+                "reason": "runtime_generation_unavailable",
+                "bound_runtime_generation": bound_generation,
+            }
         if bound_generation and bound_generation != serving_generation:
             _update_job(
                 conn,
