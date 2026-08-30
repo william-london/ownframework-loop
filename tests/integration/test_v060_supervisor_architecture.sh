@@ -123,10 +123,16 @@ assert_eq "$(printf '%s' "$OUT2" | jq -r '.replayed')" "true" "re-dispatch is re
 assert_eq "$(jq -r '.build_pass_count' "$T/.ownframework-loop/$RID/STATE.json")" "1" "re-dispatch consumes one pass"
 
 # 6. Packet-supplied validation commands are mechanically classified before execution.
-grep -Fq 'required_validation command refused by deterministic guard' "$ROOT/lib/ownframework_loop/build_finalize.py" \
-  || fail "build finalizer missing required-validation guard"
-grep -Fq 'required_validation command refused by deterministic guard' "$ROOT/lib/ownframework_loop/review_finalize.py" \
-  || fail "review finalizer missing required-validation guard"
+# v0.8.2 centralizes the layered structural + external-action decision in one
+# deterministic policy module consumed by both finalizers.
+grep -Fq 'validation_policy.classify_required_validation' "$ROOT/lib/ownframework_loop/build_finalize.py" \
+  || fail "build finalizer missing required-validation authority policy"
+grep -Fq 'validation_policy.classify_required_validation' "$ROOT/lib/ownframework_loop/review_finalize.py" \
+  || fail "review finalizer missing required-validation authority policy"
+grep -Fq 'external_action.classify_tool_call' "$ROOT/lib/ownframework_loop/validation_policy.py" \
+  || fail "required-validation policy missing external-action classifier"
+grep -Fq 'guards.classify_bash_command' "$ROOT/lib/ownframework_loop/validation_policy.py" \
+  || fail "required-validation policy missing structural Bash classifier"
 pass "required-validation shell authority is mechanically guarded"
 
 # 7. Supervisor contains no engineering-state transition table.
