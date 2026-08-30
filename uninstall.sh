@@ -40,13 +40,20 @@ fi
 if [[ -L "$LAUNCHER" || -f "$LAUNCHER" ]]; then
   MANAGED=0
   if [[ -L "$LAUNCHER" ]]; then
-    TARGET="$(python3 -B - "$LAUNCHER" <<'PY'
+    # Resolve both the symlink target and the expected core launcher
+    # through the same path resolver so platform-specific normalization
+    # (e.g. macOS /var -> /private/var) does not make an obviously-managed
+    # launcher look unmanaged.
+    TARGET="$(python3 -B - "$LAUNCHER" "$INSTALL_ROOT/bin/ofloop" <<'PY'
 import sys
 from pathlib import Path
 print(Path(sys.argv[1]).resolve(strict=False))
+print(Path(sys.argv[2]).resolve(strict=False))
 PY
 )"
-    [[ "$TARGET" == "$INSTALL_ROOT/bin/ofloop" ]] && MANAGED=1
+    EXPECTED="$(printf '%s\n' "$TARGET" | tail -n1)"
+    ACTUAL="$(printf '%s\n' "$TARGET" | head -n1)"
+    [[ "$ACTUAL" == "$EXPECTED" ]] && MANAGED=1
   elif grep -q 'OWNFRAMEWORK_LOOP_MANAGED_LAUNCHER' "$LAUNCHER" 2>/dev/null; then
     MANAGED=1
   fi

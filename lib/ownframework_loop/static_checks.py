@@ -1,8 +1,43 @@
 """Deterministic executable-edge checks for the release hierarchy.
-v0.3.5 (A6-F06): scan covers tests/, hooks/, skills/, agents/, bin/,
-release_gate.sh, validate.sh, install.sh. Only scripts in the
-explicit allow-list may invoke the release hierarchy by literal
-command invocation (not by path-string reference).
+
+v0.8.4 (release-recursion model correction):
+
+  The release recursion hierarchy is the SET of scripts that, if invoked
+  recursively from a test, would form a structural cycle the gate cannot
+  safely reason about. That hierarchy is:
+
+      release_gate.sh
+          -> validate.sh
+              -> tests/run_all.sh
+
+  Anything OUTSIDE that strict release-hierarchy chain is NOT a release
+  orchestrator. Specifically:
+
+  * ``install.sh`` is a public core lifecycle operation (vendor-neutral
+    core install/uninstall). Tests MUST be able to exercise the real
+    installer without being classified as reverse orchestrator
+    dependencies. ``install.sh`` is therefore NOT in the release
+    hierarchy.
+
+  * ``uninstall.sh`` is a public core lifecycle operation (paired with
+    ``install.sh``) and is similarly NOT a release orchestrator.
+
+  * ``validate.sh --installed <core-root> --skip-tests`` is structural
+    validation that cannot recurse into the test suite (it is given an
+    explicit installed core root and is told to skip tests). Tests MAY
+    legitimately invoke that form. The static analyzer recognizes the
+    ``--installed ... --skip-tests`` form and does not classify it as a
+    release orchestrator dependency.
+
+  * ``install-adapter.sh`` (and any other adapter-side installer) are
+    adapter surfaces, not core release orchestrators, and are not in the
+    hierarchy.
+
+  Real reverse orchestrator recursion (a test calling
+  ``release_gate.sh`` or ``validate.sh`` without ``--skip-tests``) still
+  fails closed. The gate protects the structural integrity of the
+  release-recursion chain; it does not police ordinary installer
+  invocations.
 """
 from __future__ import annotations
 
@@ -10,14 +45,21 @@ import ast
 import re
 from pathlib import Path
 
-# Scripts allowed to invoke the release hierarchy by literal basename.
-RELEASE_HIERARCHY_BASENAMES = ("release_gate.sh", "validate.sh", "install.sh", "run_all.sh")
+# Strict release-recursion hierarchy: the chain release_gate -> validate ->
+# tests/run_all. ``install.sh`` is intentionally NOT in this hierarchy because
+# it is a public core lifecycle operation that canonical tests MUST be able
+# to exercise directly without being classified as reverse orchestrator
+# dependencies. ``uninstall.sh`` is the paired lifecycle operation and is
+# equally excluded.
+RELEASE_HIERARCHY_BASENAMES = ("release_gate.sh", "validate.sh", "run_all.sh")
 
-# Scripts that legitimately orchestrate these (allow-list).
+# Scripts that legitimately orchestrate the release hierarchy by literal
+# invocation. A test that legitimately runs a release-hierarchy script MUST
+# either name-match a release-hierarchy test stem OR call ``validate.sh`` in
+# the explicit non-recursive ``--installed <core-root> --skip-tests`` form.
 ORCHESTRATOR_ALLOWLIST = {
     "release_gate.sh",
     "validate.sh",
-    "install.sh",
     "tests/run_all.sh",
 }
 
@@ -57,7 +99,8 @@ _VAR_RE = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]*)=(?:[\"']?([^\"' ;]+))")
 def shell_edges(path: Path) -> list[tuple[str, str]]:
     edges: list[tuple[str, str]] = []
     variables: dict[str, str] = {}
-    for raw in path.read_text(encoding="utf-8", errors="replace").splitlines():
+    raw_lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    for raw in raw_lines:
         line = _active_shell(raw)
         if not line:
             continue
@@ -68,7 +111,18 @@ def shell_edges(path: Path) -> list[tuple[str, str]]:
             edges.append((str(path), "unsafe-orchestration"))
         if not command:
             continue
+        # ``validate.sh --installed <core-root> --skip-tests`` is a
+        # non-recursive structural validation that canonical core-install
+        # portability and adapter portability tests legitimately invoke.
+        # It does NOT count as a release orchestrator dependency because
+        # it explicitly cannot recurse into the test suite.
+        if "validate.sh" in raw and "--installed" in raw and "--skip-tests" in raw:
+            non_recursive = True
+        else:
+            non_recursive = False
         for basename in RELEASE_HIERARCHY_BASENAMES:
+            if basename == "validate.sh" and non_recursive:
+                continue
             pat = re.compile(
                 r"\b(?:bash|sh|source|\.)\b\s+(?:\S*/)?" + re.escape(basename) + r"\b|"
                 r"\./" + re.escape(basename) + r"\b|"
@@ -109,7 +163,6 @@ SCAN_SHELL_GLOBS = (
     "bin/*",
     "release_gate.sh",
     "validate.sh",
-    "install.sh",
 )
 
 SCAN_PYTHON_GLOBS = (

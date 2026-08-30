@@ -23,21 +23,32 @@ test -f "$CORE_ROOT/.ownframework-loop-managed"
 grep -F 'kind=core' "$CORE_ROOT/.ownframework-loop-managed" >/dev/null
 test -f "$CORE_ROOT/.payload.manifest"
 test -L "$OFLOOP_BIN_DIR/ofloop"
-test "$(python3 -B - "$OFLOOP_BIN_DIR/ofloop" <<'PY'
+test "$(python3 -B - "$OFLOOP_BIN_DIR/ofloop" "$CORE_ROOT/bin/ofloop" <<'PY'
 import sys
 from pathlib import Path
-print(Path(sys.argv[1]).resolve(strict=False))
+# Resolve both sides via the same resolve(strict=False) so platform-
+# specific symlink normalization (e.g. macOS /var -> /private/var) does not
+# make the literal CORE_ROOT and the resolved symlink target appear to
+# disagree.
+left = Path(sys.argv[1]).resolve(strict=False)
+right = Path(sys.argv[2]).resolve(strict=False)
+assert left == right, f"launcher resolves to {left}, expected {right}"
+print("OK")
 PY
-)" = "$CORE_ROOT/bin/ofloop"
+)" = "OK"
 "$OFLOOP_BIN_DIR/ofloop" adapter doctor generic-cli | grep -F '"doctor": "PASS"' >/dev/null
 
 # Bare installed validation discovers core through PATH, never a plugin registry.
 PATH="$OFLOOP_BIN_DIR:$PATH" bash "$ROOT_DIR/validate.sh" --installed --skip-tests | tee "$TMP/validate.out"
 grep -F 'validate (INSTALLED CORE)' "$TMP/validate.out" >/dev/null
-grep -F "discovered active core: $CORE_ROOT" "$TMP/validate.out" >/dev/null
+# validate.sh reports the resolved core root, so resolve CORE_ROOT too.
+RESOLVED_CORE_ROOT="$(python3 -B -c 'from pathlib import Path; print(Path("'"$CORE_ROOT"'").resolve(strict=False))')"
+grep -F "discovered active core: $RESOLVED_CORE_ROOT" "$TMP/validate.out" >/dev/null
 
 # Idempotent reinstall keeps the same versioned core root.
 bash "$ROOT_DIR/install.sh" >"$TMP/reinstall.out"
+# install.sh emits the raw (unresolved) CORE_ROOT string, so compare
+# against the same raw form.
 grep -F "CORE_ROOT=$CORE_ROOT" "$TMP/reinstall.out" >/dev/null
 
 # Unmanaged launcher is never replaced.
