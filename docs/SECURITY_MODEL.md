@@ -223,8 +223,8 @@ concurrency or security property unless the test exercises the behavioral path.
 
 Interactive Claude sessions may use the broader plugin/agent surface. The
 commissioned unattended supervisor intentionally does not: it uses Claude's
-native restricted mode and role-specific local tools so SPEC approval can be
-followed by unattended BUILD/REVIEW/repair without permission babysitting.
+native restricted mode and role-specific local tools so a human-originated
+sealed SPEC can be followed by unattended BUILD/REVIEW/repair without permission babysitting.
 
 Research and external-service setup happen before the sealed PROGRAM is minted.
 Dependency/download reads may occur during BUILD/REVIEW only to exact hostnames
@@ -253,3 +253,19 @@ ambient umask:
 This is a same-user process boundary, not protection from a fully compromised
 operator account. It prevents other local users and prompt-injected semantic
 Bash from gaining broad access through ordinary filesystem permissions.
+
+
+## Network read host semantics
+
+`network_read_allowlist` freezes which external hosts sandboxed semantic Bash
+may reach. Claude's native domain control constrains host reachability; it does
+not convert an allowlisted host into a protocol-level read-only endpoint.
+
+Loop therefore layers deterministic external-action hooks over the native
+sandbox for direct and normalized mutation forms (curl/wget, common explicit
+Python/Node HTTP mutation, push/publish/deploy/remote-shell surfaces). Local
+loopback mutation remains available for ordinary engineering. The textual hook
+is intentionally not described as a parser for arbitrary programming
+languages. Full generic prevention of mutation to an otherwise allowlisted host
+must be proven/enforced by a method-aware commissioned network boundary or an
+equivalent trusted mechanism.

@@ -8,7 +8,9 @@ or OS-level containment of arbitrary same-user code.
 
 ## Supported release posture
 
-- The currently supported release line is **0.8.4**.
+- The source/master supported line in this repository is **0.8.4**.
+- The latest published GitHub Release is **v0.6.0**; the 0.8.x source line is
+  intentionally not yet tagged/published.
 - Earlier 0.2.x/0.3.x/0.4.x/0.5.0-0.5.4 behavior remains in Git history for
   compatibility/audit context but is not the current product contract.
 
@@ -60,7 +62,17 @@ The minimum commissioned-runner version is Claude Code 2.1.248 because `--restri
 
 Adapter hooks remain a second boundary for direct/normalized command forms, and
 the deterministic core re-proves exact source/candidate identity before
-accepting evidence. Interactive/foreground Claude sessions do not automatically
+accepting evidence.
+
+The native `allowedDomains` sandbox is a **host-reachability** boundary; it is
+not, by itself, an HTTP-method authorization system. Loop's external-action
+hook refuses direct curl/wget and common explicit Python/Node mutation forms,
+while preserving loopback mutation for local engineering. That textual layer is
+defense in depth, not a claim to parse arbitrary generated programs. A generic
+proof that an arbitrary Bash child can never mutate an allowlisted host
+requires the commissioned runtime/network boundary to provide method-aware
+read-only egress (or equivalent enforcement); until then that stronger claim
+remains commissioned-canary/integration work rather than ordinary-CI proof. Interactive/foreground Claude sessions do not automatically
 inherit this exact commissioned envelope.
 
 `hardened=true` describes these deterministic host/runtime rails for the

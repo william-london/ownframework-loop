@@ -68,9 +68,10 @@ except Exception as e:
 # 4. README.md
 try:
     text = open(os.path.join(ROOT, "README.md")).read()
-    m = re.search(r"Current release line:\s*\*\*([0-9]+\.[0-9]+\.[0-9]+)\*\*", text)
+    m = re.search(r"Source/master release line:\s*\*\*([0-9]+\.[0-9]+\.[0-9]+)\*\*", text)
     readme_ver = m.group(1) if m else ""
-    check("README current release line", readme_ver == EXPECTED, f"= {readme_ver!r}, expected {EXPECTED!r}")
+    check("README source/master release line", readme_ver == EXPECTED, f"= {readme_ver!r}, expected {EXPECTED!r}")
+    check("README distinguishes published release", "Latest published GitHub Release:" in text and "not yet" in text and "tagged or published" in text)
 except Exception as e:
     check("README readable", False, f"({e})")
     readme_ver = ""
@@ -78,9 +79,10 @@ except Exception as e:
 # 5. SECURITY.md
 try:
     text = open(os.path.join(ROOT, "SECURITY.md")).read()
-    m = re.search(r"supported release line is\s*\*\*([0-9]+\.[0-9]+\.[0-9]+)\*\*", text)
+    m = re.search(r"source/master supported line in this repository is\s*\*\*([0-9]+\.[0-9]+\.[0-9]+)\*\*", text)
     sec_ver = m.group(1) if m else ""
-    check("SECURITY supported release line", sec_ver == EXPECTED, f"= {sec_ver!r}, expected {EXPECTED!r}")
+    check("SECURITY source/master supported line", sec_ver == EXPECTED, f"= {sec_ver!r}, expected {EXPECTED!r}")
+    check("SECURITY distinguishes published release", "latest published GitHub Release is" in text and "not yet tagged/published" in text)
 except Exception as e:
     check("SECURITY readable", False, f"({e})")
     sec_ver = ""
@@ -99,5 +101,5 @@ print()
 if failures:
     print(f"  VERSION_TRUTH=FAIL ({len(failures)} mismatch(es))")
     sys.exit(1)
-print(f"  VERSION_TRUTH=PASS (all 6 surfaces = {EXPECTED})")
+print(f"  VERSION_TRUTH=PASS (all 6 source/master surfaces = {EXPECTED}; published release is separately identified)")
 PYEOF

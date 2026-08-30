@@ -77,15 +77,60 @@ print('OK')
 # === Fault 7: worktrees uses flock_exclusive ===
 grep -q "flock_exclusive" "$ROOT/lib/ownframework_loop/worktrees.py" && pass "fault 7: worktrees uses flock_exclusive" || fail "fault 7: worktrees flock missing"
 
-# === Fault 8: append_event reads state_sha inside flock ===
-python3 -B -c "
-import ast
-src = open('$ROOT/lib/ownframework_loop/state.py').read()
-tree = ast.parse(src)
-# Just check the file parses and has the function
-assert any(isinstance(n, ast.FunctionDef) and n.name == 'append_event' for n in ast.walk(tree)), 'append_event missing'
-print('OK')
-" >/dev/null 2>&1 && pass "fault 8: state.append_event present" || fail "fault 8: append_event missing"
+# === Fault 8: append_event verifies authority after acquiring the run flock ===
+python3 -B - "$LIB" <<'PY' >/dev/null 2>&1 && pass "fault 8: append_event authority verification is serialized under run flock" || fail "fault 8: append_event lock/authority ordering regression"
+import fcntl, os, subprocess, sys, tempfile, time
+from pathlib import Path
+
+sys.path.insert(0, sys.argv[1])
+from ownframework_loop import integrity, state, util
+
+repo = Path(tempfile.mkdtemp(prefix="ofloop-fault8-"))
+rid = "run-fault8"
+state.run_dir(repo, rid).mkdir(parents=True)
+state.save(repo, rid, state.initial_state(rid))
+events_before = state.events_path(repo, rid).read_bytes()
+marker = repo / "child-ready"
+
+lock_fh = state.lock_path(repo, rid).open("a+")
+fcntl.flock(lock_fh.fileno(), fcntl.LOCK_EX)
+
+child_code = r"""
+import sys
+from pathlib import Path
+from ownframework_loop import integrity, state
+repo=Path(sys.argv[1]); rid=sys.argv[2]; marker=Path(sys.argv[3])
+marker.write_text("ready")
+try:
+    state.append_event(repo, rid, event_type="fault8-child", old_state=None,
+                       new_state=None, actor="fault8")
+except integrity.TamperingDetected:
+    raise SystemExit(23)
+raise SystemExit(0)
+"""
+env = dict(os.environ)
+env["PYTHONPATH"] = sys.argv[1]
+child = subprocess.Popen(
+    [sys.executable, "-B", "-c", child_code, str(repo), rid, str(marker)],
+    env=env,
+)
+deadline = time.time() + 5
+while not marker.exists() and time.time() < deadline:
+    time.sleep(0.01)
+assert marker.exists(), "child did not reach append_event"
+time.sleep(0.05)
+assert child.poll() is None, "append_event did not block on held run flock"
+
+tampered = state.load(repo, rid)
+tampered["state"] = "APPROVED"
+util.atomic_write_json(state.state_path(repo, rid), tampered, mode=0o600)
+fcntl.flock(lock_fh.fileno(), fcntl.LOCK_UN)
+lock_fh.close()
+
+rc = child.wait(timeout=5)
+assert rc == 23, f"append_event failed to detect tampering after lock acquisition: rc={rc}"
+assert state.events_path(repo, rid).read_bytes() == events_before, "tampering was laundered into event chain"
+PY
 
 # === Fault 9: ALLOWED_APPROVAL_METHODS is restricted ===
 python3 -B -c "

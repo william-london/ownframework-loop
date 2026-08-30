@@ -1,22 +1,41 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://ownframework.local/schemas/state.schema.json",
-  "title": "OwnFramework Loop State",
+  "title": "OwnFramework Loop State (single-run)",
+  "description": "Current single-run STATE.json contract. The historical AWAITING_APPROVAL state name means READY_TO_START; first legitimate execution creates the execution seal and advances to READY_TO_BUILD.",
   "type": "object",
   "additionalProperties": false,
   "required": [
-    "schema", "run_id", "state", "state_history", "transitions_count",
-    "build_pass_count", "review_pass_count", "repair_round", "no_progress_streak"
+    "schema",
+    "run_id",
+    "state",
+    "state_history",
+    "transitions_count",
+    "build_pass_count",
+    "review_pass_count",
+    "repair_round",
+    "no_progress_streak"
   ],
   "properties": {
-    "schema": { "const": "ownframework-loop-state/v1" },
-    "run_id": { "type": "string", "minLength": 1, "maxLength": 64 },
+    "schema": {
+      "const": "ownframework-loop-state/v1"
+    },
+    "run_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+    },
     "state": {
       "type": "string",
       "enum": [
-        "AWAITING_APPROVAL", "READY_TO_BUILD", "BUILDING",
-        "READY_FOR_REVIEW", "REVIEWING", "CHANGES_REQUESTED",
-        "APPROVED", "BLOCKED", "STOPPED"
+        "AWAITING_APPROVAL",
+        "READY_TO_BUILD",
+        "BUILDING",
+        "READY_FOR_REVIEW",
+        "REVIEWING",
+        "CHANGES_REQUESTED",
+        "APPROVED",
+        "BLOCKED",
+        "STOPPED"
       ]
     },
     "state_history": {
@@ -24,25 +43,122 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["from", "to", "at", "actor"],
+        "required": [
+          "from",
+          "to",
+          "at",
+          "actor"
+        ],
         "properties": {
-          "from": { "type": ["string", "null"] },
-          "to": { "type": "string" },
-          "at": { "type": "string", "format": "date-time" },
-          "actor": { "type": "string" },
-          "reason": { "type": "string" }
+          "from": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "to": {
+            "type": "string"
+          },
+          "at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "actor": {
+            "type": "string"
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
         }
       }
     },
-    "transitions_count": { "type": "integer", "minimum": 0 },
-    "build_pass_count": { "type": "integer", "minimum": 0 },
-    "review_pass_count": { "type": "integer", "minimum": 0 },
-    "repair_round": { "type": "integer", "minimum": 0 },
-    "no_progress_streak": { "type": "integer", "minimum": 0 },
-    "started_at": { "type": "string", "format": "date-time" },
-    "updated_at": { "type": "string", "format": "date-time" },
-    "last_actor": { "type": "string" },
-    "terminal_reason": { "type": ["string", "null"] },
-    "last_candidate_sha": { "type": ["string", "null"], "pattern": "^[a-f0-9]{7,64}$" }
+    "transitions_count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "build_pass_count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "review_pass_count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "repair_round": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "no_progress_streak": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "started_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "updated_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "last_actor": {
+      "type": "string"
+    },
+    "terminal_reason": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "last_candidate_sha": {
+      "anyOf": [
+        {
+          "const": ""
+        },
+        {
+          "type": "string",
+          "pattern": "^[a-f0-9]{7,64}$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "spec_baseline_branch": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "spec_baseline_sha": {
+      "anyOf": [
+        {
+          "const": ""
+        },
+        {
+          "type": "string",
+          "pattern": "^[a-f0-9]{7,64}$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "spec_snapshot_at": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "date-time"
+    },
+    "identical_finding_streak": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "last_must_fix_fingerprint": {
+      "type": "string"
+    }
   }
 }

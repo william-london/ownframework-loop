@@ -14,8 +14,8 @@ not listed in the allowed map is rejected by `lib/ownframework_loop/transitions.
 | `REVIEWING` | The reviewer has claimed this pass. Builder cannot claim. |
 | `CHANGES_REQUESTED` | The reviewer returned a verdict with must-fix findings. Builder will repair. |
 | `APPROVED` | Protocol-approved and eligible for operator promotion outside Loop. In PROGRAM mode, an approved checkpoint may advance the host run back to `READY_TO_BUILD` when more checkpoints are claimable. |
-| `BLOCKED` | Terminal (no outbound edges except to a fresh run via teardown). The human reads the events and decides. v0.3.7: BLOCKED cannot become APPROVED; program mode may resume to READY_TO_BUILD only. |
-| `STOPPED` | Terminal (no outbound edges except to a fresh run via teardown). The human explicitly stopped the loop. v0.3.7: STOPPED is absorbing at the FSM level; no single-mode or program-mode escape. |
+| `BLOCKED` | Terminal in single-run mode. In PROGRAM mode it may return only to `READY_TO_BUILD` when unfinished checkpoint work remains; it can never jump to `APPROVED`. |
+| `STOPPED` | Terminal and absorbing in every mode. The operator explicitly stopped the loop; no single-run or PROGRAM escape is permitted. |
 
 ## Allowed transitions
 
@@ -47,16 +47,14 @@ CHANGES_REQUESTED -> BLOCKED
 CHANGES_REQUESTED -> STOPPED
 ```
 
-`APPROVED`, `BLOCKED`, and `STOPPED` are terminal. Reopening a terminal
-state is not in V2 and would require explicit operator action plus an
-auditable event.
+`APPROVED` and `BLOCKED` are terminal in single-run mode. PROGRAM continuation is a narrow extension: when unfinished checkpoint work remains, the host run may continue to `READY_TO_BUILD` through `state.program_transition()`. `STOPPED` is always absorbing. Once a PROGRAM has no claimable checkpoint, terminal host states have no outbound edge.
 
 ## Concurrency
 
 Every transition acquires an exclusive `fcntl.flock` on
 `.ownframework-loop/<run-id>/LOCK` before reading or writing `STATE.json`.
 Concurrent state mutations are serialized; the loser of the race retries on
-the next supervisor dispatch tick or foreground `/loop` tick.
+the next supervisor dispatch tick or a deliberate foreground supervisor/dispatch invocation.
 
 ## Event log
 
@@ -98,45 +96,43 @@ post-pass validation.
 - Budget or runtime limit.
 
 
-## v0.3.0 PROGRAM mode
+## PROGRAM mode
 
-When a packet declares `execution_mode: program`, the state schema is v2
-and the canonical state machine remains the same nine states, but each
-checkpoint inside `program.checkpoints` carries its own per-checkpoint
-state field with the same vocabulary. The orchestrator drives one
-checkpoint per pass; transitions between checkpoints do NOT go through
-the host FSM (the host FSM still governs the overall run state, but
-checkpoint internal state is set via `state.save()` directly to avoid
-bouncing through CHANGES_REQUESTED/APPROVED gates).
+When a packet declares `execution_mode: program`, the host run still uses the
+same nine top-level states. `STATE.json` changes to
+`ownframework-loop-state/v2` by adding a frozen `program` object to the
+normal host state shape; PROGRAM initialization does not replace the host
+history/counter model.
 
-Per-checkpoint state is one of:
+A checkpoint is **not** a second nested copy of the host FSM. Each entry in
+`program.checkpoints` carries its id, build/review/repair counters,
+no-progress counter, candidate/receipt/verdict evidence hashes, an optional
+last-evidence replay binding, and one terminal marker (empty, `APPROVED`,
+`BLOCKED`, or `STOPPED`).
 
-- `READY_TO_BUILD` — current checkpoint, ready to claim
-- `BUILDING` — checkpoint builder has claimed this pass
-- `READY_FOR_REVIEW` — checkpoint produced a candidate SHA
-- `REVIEWING` — checkpoint reviewer has claimed this pass
-- `APPROVED` — checkpoint terminal (good)
-- `BLOCKED` — checkpoint terminal (needs human)
-- `CHANGES_REQUESTED` — checkpoint reviewer returned must-fix findings
+`program.current_checkpoints` identifies the claimable checkpoint and
+`program.finalized_checkpoints` records immutable terminal evidence.
+Cumulative counters and packet-derived ceilings remain inside the same frozen
+PROGRAM object.
 
-The orchestrator guarantees invariants on the per-checkpoint lifecycle:
+PROGRAM review approval is owned by
+`program.advance_after_review_approval()`. It finalizes the current
+checkpoint, selects the next dependency-ready checkpoint, then performs the
+host transition atomically through `state.program_transition()`. Normal
+checkpoint continuation therefore does **not** mutate a second FSM through
+`state.save()`.
 
-1. A checkpoint that is `APPROVED` MUST have at least one build pass and
-   at least one review pass recorded in `program.checkpoints[CP-N].counters`
-   before finalize. Otherwise `nonterminal_cp_approval_refused` is raised.
-2. The checkpoint graph materializes and freezes automatically through normal
-   first-start execution. Any later initialization/adoption that presents a
-   different graph SHA is refused (`program_graph_sha_drift`).
-3. The source-tree accounting (unique changed files, diff lines) is computed
-   baseline->final per checkpoint AND cumulatively across the program.
-   Cumulative caps come from the sum of approved-checkpoint exact caps.
+PROGRAM invariants include:
 
+1. A checkpoint cannot finalize `APPROVED` without at least one build and one
+   review pass.
+2. The checkpoint graph SHA, baseline SHA, and candidate branch are frozen at
+   first-start materialization and later drift is refused.
+3. Source accounting is absolute baseline-to-current-candidate evidence and is
+   checked against PROGRAM cumulative ceilings.
+4. The exact reviewed candidate SHA must match the candidate bound in host
+   state before checkpoint advancement.
 
-## v0.3.5: program-mode transitions
+## PROGRAM continuation transitions
 
-In program-mode, the orchestrator may legitimately transition
-`APPROVED` → `READY_TO_BUILD` when another checkpoint is claimable.
-This extension is invoked only by `state.program_transition()` and
-requires `has_more_checkpoints=True` to be passed. Once the program is
-fully terminated (no more checkpoints), the run is terminal and the
-transition is refused.
+In PROGRAM mode, `state.program_transition()` is the only host-FSM extension. With more claimable checkpoints it permits review advancement (including `REVIEWING` → `READY_TO_BUILD`) and the narrow `APPROVED`/`BLOCKED` → `READY_TO_BUILD` continuation cases. `BLOCKED` can never jump to `APPROVED`, and `STOPPED` can never escape. When no checkpoint remains claimable, terminality is enforced exactly as in single-run mode.

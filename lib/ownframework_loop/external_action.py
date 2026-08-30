@@ -237,6 +237,8 @@ def _classify_bash(tool_input: dict[str, Any]) -> str:
             if pattern.search(seg):
                 return "BLOCK:" + code + "\n" + desc + " refused in active run"
         http_violation = _http_mutation_violation(seg)
+        if not http_violation:
+            http_violation = _interpreter_http_mutation_violation(seg)
         if http_violation:
             return (
                 "BLOCK:OF_LOOP_EXTERNAL_UNKNOWN\n"
@@ -353,7 +355,19 @@ _WGET_MUTATING = re.compile(
     r"(?:--post-data|--post-file|--body-data|--method[=\s](?:POST|PUT|DELETE|PATCH))",
     re.IGNORECASE,
 )
+# Common explicit interpreter HTTP mutation forms. This is defense in depth,
+# not a claim to parse arbitrary programming languages. Opaque/generated code
+# remains owned by the commissioned network boundary and canary proof.
+_INTERPRETER_HTTP_MUTATING = (
+    re.compile(r"\brequests\.(?:post|put|patch|delete)\s*\(", re.IGNORECASE),
+    re.compile(r"\brequests\.request\s*\(\s*(?:POST|PUT|PATCH|DELETE)\b", re.IGNORECASE),
+    re.compile(r"\b(?:urllib\.request\.)?Request\s*\([^;\n]*(?:\bdata\s*=|\bmethod\s*=\s*(?:POST|PUT|PATCH|DELETE)\b)", re.IGNORECASE),
+    re.compile(r"\.request\s*\(\s*(?:POST|PUT|PATCH|DELETE)\b", re.IGNORECASE),
+    re.compile(r"\.request\s*\([^;\n]*\bmethod\s*[:=]\s*(?:POST|PUT|PATCH|DELETE)\b", re.IGNORECASE),
+    re.compile(r"\bfetch\s*\([^;\n]*\bmethod\s*[:=]\s*(?:POST|PUT|PATCH|DELETE)\b", re.IGNORECASE),
+)
 _URL_HOST = re.compile(r"https?://([^/:?\s]+)", re.IGNORECASE)
+_LOOPBACK_LITERAL = re.compile(r"(?:localhost(?:\.localdomain)?|127(?:\.\d{1,3}){3}|\[?::1\]?)", re.IGNORECASE)
 _LOOPBACK_HOSTS = frozenset({
     "localhost", "127.0.0.1", "::1", "0.0.0.0", "ip6-localhost",
 })
@@ -380,12 +394,12 @@ def _http_mutation_violation(seg: str) -> str:
     reference still present here is unresolved; an unresolved or absent
     destination cannot be proven loopback and fails closed.
     """
-    first = seg.split()[0] if seg.split() else ""
-    base = first.rsplit("/", 1)[-1].lower()
-    if base == "curl":
+    curl_seen = re.search(r"(?:^|[\s$(])(?:[^\s$()]*/)?curl\b", seg, re.IGNORECASE)
+    wget_seen = re.search(r"(?:^|[\s$(])(?:[^\s$()]*/)?wget\b", seg, re.IGNORECASE)
+    if curl_seen:
         if not _CURL_MUTATING.search(seg):
             return ""
-    elif base == "wget":
+    elif wget_seen:
         if not _WGET_MUTATING.search(seg):
             return ""
     else:
@@ -407,6 +421,32 @@ def _http_mutation_violation(seg: str) -> str:
     return (
         "mutating HTTP request with no visible destination; "
         "cannot prove loopback"
+    )
+
+
+def _interpreter_http_mutation_violation(seg: str) -> str:
+    """Refuse common explicit interpreter-side HTTP mutations unless loopback.
+
+    This deliberately recognizes bounded, obvious Python/Node forms only.
+    Parsing arbitrary program text would be unsound and would create false
+    security. The native network boundary remains responsible for generic
+    egress containment.
+    """
+    if not any(pattern.search(seg) for pattern in _INTERPRETER_HTTP_MUTATING):
+        return ""
+    hosts = _URL_HOST.findall(seg)
+    if hosts:
+        external = [host for host in hosts if not _host_is_loopback(host)]
+        if external:
+            return (
+                "interpreter HTTP mutation toward non-loopback host(s) "
+                + ", ".join(sorted(set(external)))
+            )
+        return ""
+    if _LOOPBACK_LITERAL.search(seg):
+        return ""
+    return (
+        "interpreter HTTP mutation with no provably loopback literal destination"
     )
 
 
@@ -454,6 +494,12 @@ def _normalize_python_argv(cmd: str) -> str:
         s = _re.sub(
             r"\[\s*([A-Za-z][A-Za-z0-9_\-.]+)\s*,\s*([A-Za-z][A-Za-z0-9_\-.]+)\s*,\s*([A-Za-z][A-Za-z0-9_\-.]+)\s*\]",
             lambda m: f"{m.group(1)} {m.group(2)} {m.group(3)}", s)
+        # 4-element unquoted argv literal. The quote-strip pass above turns
+        # subprocess.run(['curl','-X','POST','https://host/path']) into this
+        # bounded form before classification.
+        s = _re.sub(
+            r"\[\s*([A-Za-z][A-Za-z0-9_\-./:]*)\s*,\s*([^,\]\s]+)\s*,\s*([^,\]\s]+)\s*,\s*([^,\]\s]+)\s*\]",
+            lambda m: f"{m.group(1)} {m.group(2)} {m.group(3)} {m.group(4)}", s)
         # subprocess.run("git push") → git push
         s = _re.sub(
             r'subprocess\.\w+\(\s*[\'"](\S[^\'"]*)[\'"]\s*\)',

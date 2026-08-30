@@ -1,19 +1,21 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "$id": "https://ownframework.local/schemas/loop-state-v2.schema.json",
-  "title": "OwnFramework Loop State (v2) \u2014 program-mode",
-  "description": "v2 state superset: single-mode readers consume this file but tolerate absence of `program`. Program mode additionally tracks a per-checkpoint program object with checkpoint-local counters, packet-derived ceilings, and finalized checkpoints.",
+  "$id": "https://ownframework.local/schemas/state-v2.schema.json",
+  "title": "OwnFramework Loop State (PROGRAM v2)",
+  "description": "Current PROGRAM STATE.json contract. It is the normal host-state shape plus a frozen program object; initialization changes the schema marker and adds program without replacing state history or host counters.",
   "type": "object",
   "additionalProperties": false,
   "required": [
     "schema",
     "run_id",
-    "packet_schema",
-    "packet_sha256",
     "state",
-    "created_at",
-    "updated_at",
-    "history"
+    "state_history",
+    "transitions_count",
+    "build_pass_count",
+    "review_pass_count",
+    "repair_round",
+    "no_progress_streak",
+    "program"
   ],
   "properties": {
     "schema": {
@@ -21,19 +23,7 @@
     },
     "run_id": {
       "type": "string",
-      "pattern": "^run-[0-9T]+Z-[0-9a-f]+$"
-    },
-    "packet_schema": {
-      "type": "string",
-      "enum": [
-        "ownframework-work-packet/v1",
-        "ownframework-work-packet/v2",
-        "ownframework-work-packet/v3"
-      ]
-    },
-    "packet_sha256": {
-      "type": "string",
-      "pattern": "^[a-f0-9]{64}$"
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
     },
     "state": {
       "type": "string",
@@ -49,21 +39,46 @@
         "STOPPED"
       ]
     },
-    "created_at": {
-      "type": "string",
-      "format": "date-time"
+    "state_history": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "from",
+          "to",
+          "at",
+          "actor"
+        ],
+        "properties": {
+          "from": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "to": {
+            "type": "string"
+          },
+          "at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "actor": {
+            "type": "string"
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      }
     },
-    "updated_at": {
-      "type": "string",
-      "format": "date-time"
-    },
-    "approval_marker_sha256": {
-      "type": "string",
-      "pattern": "^[a-f0-9]{64}$"
-    },
-    "baseline_sha": {
-      "type": "string",
-      "pattern": "^[a-f0-9]{7,64}$"
+    "transitions_count": {
+      "type": "integer",
+      "minimum": 0
     },
     "build_pass_count": {
       "type": "integer",
@@ -73,7 +88,7 @@
       "type": "integer",
       "minimum": 0
     },
-    "repair_round_count": {
+    "repair_round": {
       "type": "integer",
       "minimum": 0
     },
@@ -81,65 +96,83 @@
       "type": "integer",
       "minimum": 0
     },
-    "build_receipt_sha256": {
+    "started_at": {
       "type": "string",
-      "pattern": "^[a-f0-9]{64}$"
+      "format": "date-time"
     },
-    "candidate_sha": {
+    "updated_at": {
       "type": "string",
-      "pattern": "^[a-f0-9]{7,64}$"
+      "format": "date-time"
     },
-    "review_verdict_sha256": {
-      "type": "string",
-      "pattern": "^[a-f0-9]{64}$"
+    "last_actor": {
+      "type": "string"
     },
-    "event_chain_sha256": {
-      "type": "string",
-      "pattern": "^[a-f0-9]{64}$"
+    "terminal_reason": {
+      "type": [
+        "string",
+        "null"
+      ]
     },
-    "history": {
-      "type": "array",
-      "items": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": [
-          "at",
-          "actor",
-          "from",
-          "to",
-          "reason"
-        ],
-        "properties": {
-          "at": {
-            "type": "string",
-            "format": "date-time"
-          },
-          "actor": {
-            "type": "string"
-          },
-          "from": {
-            "type": "string"
-          },
-          "to": {
-            "type": "string"
-          },
-          "reason": {
-            "type": "string"
-          }
+    "last_candidate_sha": {
+      "anyOf": [
+        {
+          "const": ""
+        },
+        {
+          "type": "string",
+          "pattern": "^[a-f0-9]{7,64}$"
+        },
+        {
+          "type": "null"
         }
-      }
+      ]
+    },
+    "spec_baseline_branch": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "spec_baseline_sha": {
+      "anyOf": [
+        {
+          "const": ""
+        },
+        {
+          "type": "string",
+          "pattern": "^[a-f0-9]{7,64}$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "spec_snapshot_at": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "date-time"
+    },
+    "identical_finding_streak": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "last_must_fix_fingerprint": {
+      "type": "string"
     },
     "program": {
       "type": "object",
-      "description": "Required for v3 program-mode packets; absent for single-mode (v1/v2) packets. The engine refuses to read a v3 packet whose state lacks a `program` key.",
       "additionalProperties": false,
       "required": [
         "execution_mode",
         "checkpoint_graph_sha256",
+        "promotion_policy",
         "current_checkpoints",
         "finalized_checkpoints",
         "cumulative_counters",
         "cumulative_ceilings",
+        "checkpoints",
         "blocked",
         "source_sha_provenance"
       ],
@@ -149,8 +182,7 @@
         },
         "checkpoint_graph_sha256": {
           "type": "string",
-          "pattern": "^[a-f0-9]{64}$",
-          "description": "Frozen at packet approval time. Re-approved packet mutations that change the graph are rejected by readers."
+          "pattern": "^[a-f0-9]{64}$"
         },
         "promotion_policy": {
           "type": "string",
@@ -164,8 +196,7 @@
           "items": {
             "type": "string",
             "pattern": "^CP-[0-9]+$"
-          },
-          "description": "Checkpoints currently claimable. Empty iff all checkpoints finalized."
+          }
         },
         "finalized_checkpoints": {
           "type": "array",
@@ -197,8 +228,7 @@
               },
               "evidence_sha256": {
                 "type": "string",
-                "pattern": "^[a-f0-9]{64}$",
-                "description": "sha256 over the canonicalized final-assembly evidence manifest for this checkpoint."
+                "pattern": "^[a-f0-9]{64}$"
               }
             }
           }
@@ -281,6 +311,10 @@
               "build_pass_count",
               "review_pass_count",
               "repair_round_count",
+              "no_progress_streak",
+              "candidate_sha",
+              "build_receipt_sha256",
+              "verdict_sha256",
               "terminal"
             ],
             "properties": {
@@ -305,15 +339,24 @@
                 "minimum": 0
               },
               "candidate_sha": {
-                "type": ["string", "null"],
+                "type": [
+                  "string",
+                  "null"
+                ],
                 "pattern": "^[a-f0-9]{7,64}$"
               },
               "build_receipt_sha256": {
-                "type": ["string", "null"],
+                "type": [
+                  "string",
+                  "null"
+                ],
                 "pattern": "^[a-f0-9]{64}$"
               },
               "verdict_sha256": {
-                "type": ["string", "null"],
+                "type": [
+                  "string",
+                  "null"
+                ],
                 "pattern": "^[a-f0-9]{64}$"
               },
               "terminal": {
@@ -324,6 +367,21 @@
                   "BLOCKED",
                   "STOPPED"
                 ]
+              },
+              "last_evidence_sha_by_counter": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "build_pass_count": {
+                    "type": "string"
+                  },
+                  "review_pass_count": {
+                    "type": "string"
+                  },
+                  "repair_round_count": {
+                    "type": "string"
+                  }
+                }
               }
             }
           }
@@ -336,12 +394,14 @@
         },
         "source_sha_provenance": {
           "type": "object",
-          "description": "Frozen at program start. Tracks the baseline SHA used by every checkpoint so post-approval widening is detectable.",
           "additionalProperties": false,
           "required": [
             "baseline_sha",
             "candidate_branch",
-            "captured_at"
+            "captured_at",
+            "envelope_source",
+            "packet_global_cap",
+            "checkpoint_sum_cap"
           ],
           "properties": {
             "baseline_sha": {
@@ -349,11 +409,61 @@
               "pattern": "^[a-f0-9]{7,64}$"
             },
             "candidate_branch": {
-              "type": "string"
+              "type": "string",
+              "minLength": 1
             },
             "captured_at": {
               "type": "string",
               "format": "date-time"
+            },
+            "envelope_source": {
+              "type": "string"
+            },
+            "packet_global_cap": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "max_build_passes",
+                "max_review_passes",
+                "max_repair_rounds"
+              ],
+              "properties": {
+                "max_build_passes": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "max_review_passes": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "max_repair_rounds": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              }
+            },
+            "checkpoint_sum_cap": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "max_build_passes",
+                "max_review_passes",
+                "max_repair_rounds"
+              ],
+              "properties": {
+                "max_build_passes": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "max_review_passes": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "max_repair_rounds": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
             }
           }
         }

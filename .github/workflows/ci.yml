@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - master
+      - 'hardening/**'
   pull_request:
     branches:
       - master
@@ -11,6 +12,12 @@ on:
 
 permissions:
   contents: read
+
+env:
+  # Push/manual prove github.sha; PR jobs intentionally prove the immutable PR
+  # head SHA rather than GitHub's synthetic merge commit.
+  OFLOOP_CI_EXPECTED_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+  OFLOOP_CI_EXPECTED_BRANCH: ${{ github.head_ref || github.ref_name }}
 
 jobs:
   core:
@@ -25,8 +32,10 @@ jobs:
       - uses: actions/checkout@v6
         with:
           repository: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
-          ref: ${{ github.head_ref || github.ref_name }}
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 0
+      - name: Exact event SHA
+        run: bash tests/ci/assert_exact_sha.sh
       - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python }}
@@ -64,8 +73,10 @@ jobs:
       - uses: actions/checkout@v6
         with:
           repository: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
-          ref: ${{ github.head_ref || github.ref_name }}
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 0
+      - name: Exact event SHA
+        run: bash tests/ci/assert_exact_sha.sh
       - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python }}
@@ -81,7 +92,9 @@ jobs:
       - uses: actions/checkout@v6
         with:
           repository: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
-          ref: ${{ github.head_ref || github.ref_name }}
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Exact event SHA
+        run: bash tests/ci/assert_exact_sha.sh
       - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
@@ -109,7 +122,9 @@ jobs:
       - uses: actions/checkout@v6
         with:
           repository: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
-          ref: ${{ github.head_ref || github.ref_name }}
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Exact event SHA
+        run: bash tests/ci/assert_exact_sha.sh
       - uses: actions/setup-node@v6
         with:
           node-version: '22'
@@ -120,6 +135,8 @@ jobs:
           claude --version
       - name: Strict Claude plugin validation
         run: claude plugin validate . --strict
+      - name: Current Claude invocation surface
+        run: bash tests/external_runtime/claude_cli_surface.sh
       - name: Isolated managed install and uninstall
         run: |
           export HOME="$RUNNER_TEMP/claude-home"
@@ -141,7 +158,9 @@ jobs:
       - uses: actions/checkout@v6
         with:
           repository: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
-          ref: ${{ github.head_ref || github.ref_name }}
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Exact event SHA
+        run: bash tests/ci/assert_exact_sha.sh
       - uses: actions/setup-node@v6
         with:
           node-version: '22'
@@ -175,8 +194,10 @@ jobs:
       - uses: actions/checkout@v6
         with:
           repository: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
-          ref: ${{ github.head_ref || github.ref_name }}
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 0
+      - name: Exact event SHA
+        run: bash tests/ci/assert_exact_sha.sh
       - name: Gitleaks
         uses: gitleaks/gitleaks-action@v2
         env:

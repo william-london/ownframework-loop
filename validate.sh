@@ -120,6 +120,7 @@ for f in \
   lib/ownframework_loop/adapters.py \
   schemas/work-packet.schema.json \
   schemas/work-packet-v3.schema.json \
+  schemas/approval.schema.json \
   schemas/state.schema.json \
   schemas/state-v2.schema.json \
   schemas/build-receipt.schema.json \
@@ -170,13 +171,19 @@ if [[ "$INSTALLED_MODE" -eq 1 ]]; then
   ok "installed core layout: managed real directory, no .git, manifest intact"
 fi
 
-# 4. JSON schemas parse.
-PYTHONDONTWRITEBYTECODE=1 python3 -B - "$ROOT" <<'PY'
+# 4. Current machine-schema inventory is complete and every schema parses.
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$ROOT/lib" python3 -B - "$ROOT" <<'PY'
 import json, sys
-root = sys.argv[1]
-for s in ["work-packet.schema.json", "work-packet-v3.schema.json", "state.schema.json", "state-v2.schema.json", "build-receipt.schema.json", "review-verdict.schema.json"]:
-    json.load(open(f"{root}/schemas/{s}"))
-print("  PASS: all 6 schemas parse as JSON")
+from pathlib import Path
+from ownframework_loop import schema_validate
+root = Path(sys.argv[1])
+expected = set(schema_validate.CURRENT_SCHEMA_FILES)
+actual = {p.name for p in (root / "schemas").glob("*.schema.json")}
+if actual != expected:
+    raise SystemExit("current schema inventory mismatch: " f"missing={sorted(expected-actual)} undeclared={sorted(actual-expected)}")
+for name in sorted(expected):
+    json.loads((root / "schemas" / name).read_text(encoding="utf-8"))
+print(f"  PASS: all {len(expected)} current schemas are inventoried and parse as JSON")
 PY
 
 # 5. Python library imports.
@@ -187,7 +194,7 @@ sys.path.insert(0, '$LIB_DIR')
 from ownframework_loop import (
     cli, packet, state, transitions, worktrees, git_checks,
     guards, receipts, verdicts, scheduling, locking, util,
-    integrity, limits, program, reconcile,
+    integrity, limits, program, reconcile, schema_validate,
 )
 print('  PASS: Python core library imports cleanly')
 "

@@ -1,28 +1,73 @@
-# Semantic canary harness
+# Semantic canary harnesses
 
-Disposable, fully isolated end-to-end canary for a future REAL
-model-driven proof of the sealed loop (builder → exact-SHA reviewer →
-repair → next checkpoint) against this source checkout.
+This directory intentionally contains two different proof levels.
 
-`prepare_canary.sh` is PREPARE-ONLY: it creates a throwaway canonical
-repo, a sealed run, and an enqueued supervisor job under an isolated
-`XDG_STATE_HOME` + explicit `--db`. It never starts a supervisor, never
-calls a model, and never touches the live commissioned supervisor or any
-live run (those live under the default state root, which this harness
-does not reference).
+## 1. Isolated source smoke canary
 
-Run the preparation:
+`prepare_canary.sh` is a disposable **single-run v2 source-lane smoke
+harness**. It creates an isolated repository and isolated supervisor ledger and
+prints a deliberate foreground `supervisor serve --once` command. It is useful
+for checking one semantic BUILD/REVIEW/repair flow without touching a
+commissioned service.
 
-```
+It does **not** prove PROGRAM checkpoint continuation, service restart/recovery,
+installed-payload provenance, or terminal PROGRAM approval.
+
+Preparation is model-free:
+
+```bash
 bash tests/canary/prepare_canary.sh
 ```
 
-It prints `CANARY_READY` plus the exact deliberate command a human can
-execute later to drive one supervisor pass with a real model, and the
-command to destroy the canary without residue.
+## 2. Final commissioned PROGRAM canary
 
-Safety contract of this directory:
+`commissioned_program_canary.sh` is the final commissioning harness. It
+refuses source-checkout runtimes and requires an installed managed core,
+runtime-provenance record, supervisor ledger, and active launchd/systemd-user
+service.
 
-- no `serve` / `serve --once` inside this script;
-- no writes outside the canary root;
-- the live runtime stays pinned to its commissioned installation.
+Its `prepare` command is **PREPARE-ONLY**: it does not enqueue work and does
+not call a model. It creates a local-only v3 PROGRAM with two checkpoints and
+an empty network allowlist.
+
+CP-1 is deliberately staged to require one genuine
+`CHANGES_REQUESTED -> repair -> APPROVED` cycle. The first builder is also
+asked to execute a harmless `.invalid` HTTP mutation negative-control that
+must be refused; final verification requires the trusted Loop hook diagnostic
+for that run. CP-2 proves continuation after a controlled supervisor restart.
+
+Run later, after integration and commissioning:
+
+```bash
+# Model-free preparation.
+bash tests/canary/commissioned_program_canary.sh prepare
+
+# In a second terminal, arm the checkpoint-boundary restart watcher using the
+# CANARY_ROOT printed above. This is control-plane recovery testing, not
+# semantic intervention.
+bash tests/canary/commissioned_program_canary.sh arm-restart <CANARY_ROOT>
+
+# Deliberate paid-model start. This enrolls the prepared run into the already
+# commissioned service.
+bash tests/canary/commissioned_program_canary.sh start <CANARY_ROOT>
+
+# Observe or verify.
+bash tests/canary/commissioned_program_canary.sh status <CANARY_ROOT>
+bash tests/canary/commissioned_program_canary.sh verify <CANARY_ROOT>
+```
+
+Lifecycle markers are exact:
+
+- `CANARY_STATE=PREPARED` — setup succeeded; **not a pass**.
+- `CANARY_STATE=STARTED` — real commissioned work was enrolled.
+- `CANARY_STATE=IN_PROGRESS` — nonterminal work remains.
+- `CANARY_STATE=TERMINAL_PASS` — every final evidence assertion passed.
+- `CANARY_STATE=TERMINAL_FAIL` — a terminal state or evidence assertion failed.
+
+A terminal pass requires zero duplicate/lost semantic attempts, zero wrong-SHA
+reviews, exact repair/checkpoint accounting, stable runtime generation, valid
+STATE/EVENT chain, coherent SQLite attempts, zero packet-authorized external
+effects (empty network authority, no remote, external authority `none`), an
+observed trusted-hook refusal, and final PROGRAM `APPROVED`.
+
+The harness never publishes, pushes, merges, deploys, tags, or releases.

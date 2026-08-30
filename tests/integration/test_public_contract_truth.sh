@@ -9,7 +9,11 @@ ACTIVE_FILES=(
   README.md
   AGENTS.md
   SECURITY.md
+  docs/ARCHITECTURE.md
+  docs/STATE_MACHINE.md
   docs/SECURITY_MODEL.md
+  docs/PERMISSIONS.md
+  docs/SANDBOX.md
   docs/OPERATOR_RUNBOOK.md
   docs/WORK_PACKET_FORMAT.md
   docs/ADAPTER_DEVELOPMENT.md
@@ -29,6 +33,14 @@ ACTIVE_FILES=(
   .agents/skills/of-loop-build/SKILL.md
   .agents/skills/of-loop-review/SKILL.md
   .agents/skills/of-loop-status/SKILL.md
+  schemas/approval.schema.json
+  schemas/work-packet.schema.json
+  schemas/work-packet-v3.schema.json
+  schemas/state.schema.json
+  schemas/state-v2.schema.json
+  schemas/build-receipt.schema.json
+  schemas/review-verdict.schema.json
+  tests/canary/README.md
 )
 
 for f in "${ACTIVE_FILES[@]}"; do
@@ -47,6 +59,7 @@ FORBIDDEN=(
   "surface the human approval command"
   "The human performs approval from an interactive terminal"
   "interactive approval and packet-hash binding"
+  "SPEC approval"
 )
 
 for phrase in "${FORBIDDEN[@]}"; do
@@ -57,6 +70,30 @@ for phrase in "${FORBIDDEN[@]}"; do
   done
 done
 pass "active public contracts contain no stale mandatory-approval doctrine"
+
+# Retired /loop was an execution clock. /of-loop:* remains a current adapter UX,
+# so reject only the standalone /loop token across active current surfaces.
+for f in "${ACTIVE_FILES[@]}"; do
+  if grep -Eq '(^|[^A-Za-z0-9_-])/loop([[:space:]]|$)' "$ROOT_DIR/$f"; then
+    fail "active public contract advertises retired standalone /loop scheduler: $f"
+  fi
+done
+pass "active current contracts contain no retired standalone /loop scheduler"
+
+STATE_DOC="$ROOT_DIR/docs/STATE_MACHINE.md"
+grep -Fq 'state.program_transition()' "$STATE_DOC" || fail "state-machine doctrine omits atomic PROGRAM host transition owner"
+grep -Fq 'not** mutate a second FSM' "$STATE_DOC" || fail "state-machine doctrine does not reject obsolete nested-FSM model"
+if grep -Fq 'checkpoint internal state is set via `state.save()` directly' "$STATE_DOC"; then
+  fail "state-machine doctrine still describes obsolete checkpoint state.save lifecycle"
+fi
+pass "state-machine doctrine matches current host-FSM + PROGRAM-object model"
+
+APPROVAL_SCHEMA="$ROOT_DIR/schemas/approval.schema.json"
+grep -Fq '"build_start"' "$APPROVAL_SCHEMA" || fail "approval schema omits current build_start execution binding"
+if grep -Fq '"operator_marker"' "$APPROVAL_SCHEMA"; then
+  fail "approval schema still admits retired operator_marker binding"
+fi
+pass "active execution-binding schema matches current first-start authority"
 
 # The obsolete fixed builder semantic-result path must not be advertised by
 # active generic adapter docs.
@@ -101,10 +138,5 @@ fi
 if grep -Fq 'claude plugin list --json' "$ROOT_DIR/README.md"; then
   fail "README still derives core installation from Claude plugin registry"
 fi
-for f in "$ROOT_DIR/README.md" "$ROOT_DIR/docs/ARCHITECTURE.md" "$ROOT_DIR/docs/OPERATOR_RUNBOOK.md"; do
-  if grep -Fq '/loop /of-loop:' "$f"; then
-    fail "active public contract advertises retired /loop scheduler: $f"
-  fi
-done
 pass "active product identity is core/supervisor/adapter, not plugin-era /loop"
 echo "PUBLIC_CONTRACT_TRUTH=PASS"

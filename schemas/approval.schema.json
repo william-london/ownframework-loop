@@ -1,8 +1,8 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://ownframework.local/schemas/approval.schema.json",
-  "title": "OwnFramework Loop APPROVAL",
-  "description": "Separate, deterministic, external approval artifact. The WORK_PACKET.md bytes are authenticator; the approval binds them to a human terminal action and a specific canonical repository, baseline branch, and baseline SHA. Packet bytes remain unchanged after approval.",
+  "title": "OwnFramework Loop Execution Binding",
+  "description": "Current execution-binding contract stored at the historical APPROVAL.json path. Normal runs use approval_method=build_start with binding_kind=execution_seal; tty_confirmation remains a compatibility pre-seal. The artifact binds exact packet bytes, canonical repository, baseline branch/SHA, and candidate branch. Packet bytes are immutable after the binding is created.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -16,25 +16,121 @@
     "baseline_sha",
     "packet_schema",
     "approval_method",
-    "confirmation_token"
+    "confirmation_token",
+    "candidate_branch"
   ],
   "properties": {
-    "schema": { "const": "ownframework-loop-approval/v1" },
-    "run_id": { "type": "string", "pattern": "^[a-zA-Z0-9_-]+$", "minLength": 1, "maxLength": 64 },
-    "packet_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
-    "approved_at": { "type": "string", "format": "date-time" },
-    "approved_actor": { "type": "string", "minLength": 1, "maxLength": 64 },
-    "canonical_repo": { "type": "string", "minLength": 1 },
-    "baseline_branch": { "type": "string", "minLength": 1 },
-    "baseline_sha": { "type": "string", "pattern": "^[a-f0-9]{7,64}$" },
-    "packet_schema": { "type": "string", "minLength": 1 },
-    "approval_method": { "type": "string", "enum": ["tty_confirmation", "operator_marker"] },
-    "confirmation_token": { "type": "string", "minLength": 6, "maxLength": 64 },
-    "operator_note": { "type": "string", "maxLength": 1000 },
-    "packet_work_class": { "type": "string" },
-    "packet_risk_class": { "type": "string" },
-    "packet_title": { "type": "string" },
-    "sensitive_paths_in_scope": { "type": "array", "items": { "type": "string" } },
-    "elevated_paths_in_scope": { "type": "array", "items": { "type": "string" } }
+    "schema": {
+      "const": "ownframework-loop-approval/v1"
+    },
+    "run_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+    },
+    "packet_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "approved_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "approved_actor": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64
+    },
+    "canonical_repo": {
+      "type": "string",
+      "minLength": 1
+    },
+    "baseline_branch": {
+      "type": "string",
+      "minLength": 1
+    },
+    "baseline_sha": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{7,64}$"
+    },
+    "packet_schema": {
+      "type": "string",
+      "enum": [
+        "ownframework-work-packet/v1",
+        "ownframework-work-packet/v2",
+        "ownframework-work-packet/v3"
+      ]
+    },
+    "approval_method": {
+      "type": "string",
+      "enum": [
+        "build_start",
+        "tty_confirmation"
+      ]
+    },
+    "binding_kind": {
+      "type": "string",
+      "enum": [
+        "execution_seal",
+        "legacy_preseal"
+      ]
+    },
+    "confirmation_token": {
+      "type": "string",
+      "minLength": 6,
+      "maxLength": 64
+    },
+    "operator_note": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "maxLength": 1000
+    },
+    "packet_work_class": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "packet_risk_class": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "packet_title": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "sensitive_paths_in_scope": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "elevated_paths_in_scope": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "candidate_branch": {
+      "type": "string",
+      "minLength": 1
+    },
+    "spec_baseline_branch": {
+      "type": "string",
+      "minLength": 1
+    },
+    "spec_baseline_sha": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{7,64}$"
+    },
+    "spec_snapshot_at": {
+      "type": "string",
+      "format": "date-time"
+    }
   }
 }

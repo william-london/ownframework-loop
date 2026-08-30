@@ -1,6 +1,11 @@
 # Changelog
 
-All notable current-release changes to OwnFramework Loop are documented here.
+All notable source/master release-line changes to OwnFramework Loop are documented here.
+
+**Publication status:** 0.8.4 is the current source/master line but is not yet a
+published GitHub Release/tag. **v0.6.0** remains the latest published GitHub
+Release until integration, exact-head hosted CI, and the commissioned PROGRAM
+canary close.
 The complete historical changelog through 0.5.2 is preserved at
 [`docs/history/CHANGELOG-through-0.5.2.md`](docs/history/CHANGELOG-through-0.5.2.md).
 

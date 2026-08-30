@@ -5,29 +5,69 @@
   "type": "object",
   "additionalProperties": false,
   "required": [
-    "schema", "run_id", "packet_sha256", "candidate_sha_reviewed",
-    "baseline_sha", "review_pass_number", "verdict",
-    "acceptance_results", "non_goal_results", "findings",
-    "tracked_mutation_check", "stale_sha_check", "reviewer_identity",
-    "timestamp", "recommended_next_state",
-    "approval_sha256", "integrity_check", "protected_path_check",
-    "scope_check", "secret_scan_check", "sensitive_path_assessment",
-    "escalation_recommended", "failure_reason"
+    "schema",
+    "run_id",
+    "packet_sha256",
+    "candidate_sha_reviewed",
+    "baseline_sha",
+    "review_pass_number",
+    "verdict",
+    "acceptance_results",
+    "non_goal_results",
+    "findings",
+    "tracked_mutation_check",
+    "stale_sha_check",
+    "reviewer_identity",
+    "timestamp",
+    "recommended_next_state",
+    "approval_sha256",
+    "integrity_check",
+    "protected_path_check",
+    "scope_check",
+    "secret_scan_check",
+    "sensitive_path_assessment",
+    "escalation_recommended",
+    "failure_reason"
   ],
   "properties": {
-    "schema": { "const": "ownframework-loop-review-verdict/v2" },
-    "run_id": { "type": "string" },
-    "packet_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
-    "approval_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
-    "candidate_sha_reviewed": { "type": "string", "pattern": "^[a-f0-9]{7,64}$" },
-    "baseline_sha": { "type": "string", "pattern": "^[a-f0-9]{7,64}$" },
-    "review_pass_number": { "type": "integer", "minimum": 1 },
-    "builder_pass_number_ref": { "type": "integer", "minimum": 0 },
+    "schema": {
+      "const": "ownframework-loop-review-verdict/v2"
+    },
+    "run_id": {
+      "type": "string"
+    },
+    "packet_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "approval_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "candidate_sha_reviewed": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{7,64}$"
+    },
+    "baseline_sha": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{7,64}$"
+    },
+    "review_pass_number": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "builder_pass_number_ref": {
+      "type": "integer",
+      "minimum": 0
+    },
     "verdict": {
       "type": "string",
       "enum": [
-        "APPROVED", "CHANGES_REQUESTED", "BLOCKED",
-        "HUMAN_REVIEW_REQUIRED", "STALE_CANDIDATE"
+        "APPROVED",
+        "CHANGES_REQUESTED",
+        "BLOCKED",
+        "HUMAN_REVIEW_REQUIRED",
+        "STALE_CANDIDATE"
       ]
     },
     "acceptance_results": {
@@ -35,11 +75,26 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["id", "result"],
+        "required": [
+          "id",
+          "result"
+        ],
         "properties": {
-          "id": { "type": "string", "pattern": "^AC-[0-9]+$" },
-          "result": { "type": "string", "enum": ["pass", "fail", "inconclusive"] },
-          "evidence": { "type": "string" }
+          "id": {
+            "type": "string",
+            "pattern": "^AC-[0-9]+$"
+          },
+          "result": {
+            "type": "string",
+            "enum": [
+              "pass",
+              "fail",
+              "inconclusive"
+            ]
+          },
+          "evidence": {
+            "type": "string"
+          }
         }
       }
     },
@@ -48,11 +103,26 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["id", "result"],
+        "required": [
+          "id",
+          "result"
+        ],
         "properties": {
-          "id": { "type": "string", "pattern": "^NG-[0-9]+$" },
-          "result": { "type": "string", "enum": ["preserved", "violated", "inconclusive"] },
-          "evidence": { "type": "string" }
+          "id": {
+            "type": "string",
+            "pattern": "^NG-[0-9]+$"
+          },
+          "result": {
+            "type": "string",
+            "enum": [
+              "preserved",
+              "violated",
+              "inconclusive"
+            ]
+          },
+          "evidence": {
+            "type": "string"
+          }
         }
       }
     },
@@ -61,100 +131,289 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["finding_id", "severity", "classification", "title", "description"],
+        "required": [
+          "finding_id",
+          "severity",
+          "classification",
+          "title",
+          "description"
+        ],
         "properties": {
-          "finding_id": { "type": "string", "pattern": "^F-[a-zA-Z0-9_-]+$" },
-          "severity": { "type": "string", "enum": ["critical", "high", "medium", "low", "info"] },
-          "classification": { "type": "string", "enum": ["must_fix", "advisory"] },
-          "title": { "type": "string" },
-          "description": { "type": "string" },
-          "file": { "type": "string" },
-          "line": { "type": "integer", "minimum": 1 }
+          "finding_id": {
+            "type": "string",
+            "pattern": "^F-[a-zA-Z0-9_-]+$"
+          },
+          "severity": {
+            "type": "string",
+            "enum": [
+              "critical",
+              "high",
+              "medium",
+              "low",
+              "info"
+            ]
+          },
+          "classification": {
+            "type": "string",
+            "enum": [
+              "must_fix",
+              "advisory"
+            ]
+          },
+          "title": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "file": {
+            "type": "string"
+          },
+          "line": {
+            "type": "integer",
+            "minimum": 1
+          }
         }
       }
     },
-    "commands_executed": { "type": "array", "items": { "type": "string" } },
+    "commands_executed": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
     "validation_results": {
       "type": "array",
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["name", "command", "exit_code"],
+        "required": [
+          "name",
+          "command",
+          "exit_code"
+        ],
         "properties": {
-          "name": { "type": "string" },
-          "command": { "type": "string" },
-          "kind": { "type": "string" },
-          "exit_code": { "type": "integer" },
-          "duration_seconds": { "type": "number", "minimum": 0 },
-          "expected_exit_code": { "type": "integer" },
-          "passed": { "type": "boolean" },
-          "timed_out": { "type": "boolean" }
+          "name": {
+            "type": "string"
+          },
+          "command": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "exit_code": {
+            "type": "integer"
+          },
+          "duration_seconds": {
+            "type": "number",
+            "minimum": 0
+          },
+          "expected_exit_code": {
+            "type": "integer"
+          },
+          "passed": {
+            "type": "boolean"
+          },
+          "timed_out": {
+            "type": "boolean"
+          }
         }
       }
     },
     "tracked_mutation_check": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["detected", "before_sha", "after_sha"],
+      "required": [
+        "detected",
+        "before_sha",
+        "after_sha"
+      ],
       "properties": {
-        "detected": { "type": "boolean" },
-        "before_sha": { "type": ["string", "null"] },
-        "after_sha": { "type": ["string", "null"] },
-        "changed_paths": { "type": "array", "items": { "type": "string" } }
+        "detected": {
+          "type": "boolean"
+        },
+        "before_sha": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "after_sha": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "changed_paths": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "pre_review_porcelain_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "post_review_porcelain_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "post_review_changed_paths": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "head_drifted": {
+          "type": "boolean"
+        }
       }
     },
     "stale_sha_check": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["sha_match", "receipt_match", "packet_hash_match", "branch_contains_sha"],
+      "required": [
+        "sha_match",
+        "receipt_match",
+        "packet_hash_match",
+        "branch_contains_sha"
+      ],
       "properties": {
-        "sha_match": { "type": "boolean" },
-        "receipt_match": { "type": "boolean" },
-        "packet_hash_match": { "type": "boolean" },
-        "branch_contains_sha": { "type": "boolean" }
+        "sha_match": {
+          "type": "boolean"
+        },
+        "receipt_match": {
+          "type": "boolean"
+        },
+        "packet_hash_match": {
+          "type": "boolean"
+        },
+        "branch_contains_sha": {
+          "type": "boolean"
+        }
       }
     },
     "integrity_check": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["packet_sha_match", "approval_present", "approval_sha_stable", "candidate_sha_present"],
+      "required": [
+        "packet_sha_match",
+        "approval_present",
+        "approval_sha_stable",
+        "candidate_sha_present"
+      ],
       "properties": {
-        "packet_sha_match": { "type": "boolean" },
-        "approval_present": { "type": "boolean" },
-        "approval_sha_stable": { "type": "boolean" },
-        "receipt_sha_stable": { "type": "boolean" },
-        "candidate_sha_present": { "type": "boolean" }
+        "packet_sha_match": {
+          "type": "boolean"
+        },
+        "approval_present": {
+          "type": "boolean"
+        },
+        "approval_sha_stable": {
+          "type": "boolean"
+        },
+        "receipt_sha_stable": {
+          "type": "boolean"
+        },
+        "candidate_sha_present": {
+          "type": "boolean"
+        },
+        "acceptance_coverage_complete": {
+          "type": "boolean"
+        },
+        "expected_acceptance_criterion_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "non_goal_coverage_complete": {
+          "type": "boolean"
+        },
+        "semantic_identity_errors": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
       }
     },
     "protected_path_check": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["result"],
+      "required": [
+        "result"
+      ],
       "properties": {
-        "result": { "type": "string", "enum": ["pass", "fail"] },
-        "offending_paths": { "type": "array", "items": { "type": "string" } }
+        "result": {
+          "type": "string",
+          "enum": [
+            "pass",
+            "fail"
+          ]
+        },
+        "offending_paths": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
       }
     },
     "secret_scan_check": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["result"],
+      "required": [
+        "result"
+      ],
       "properties": {
-        "result": { "type": "string", "enum": ["pass", "fail"] },
+        "result": {
+          "type": "string",
+          "enum": [
+            "pass",
+            "fail"
+          ]
+        },
         "findings": {
           "type": "array",
           "items": {
             "type": "object",
             "additionalProperties": false,
-            "required": ["path", "pattern_id", "severity"],
+            "required": [
+              "path",
+              "pattern_id",
+              "severity"
+            ],
             "properties": {
-              "path": { "type": "string" },
-              "pattern_id": { "type": "string" },
-              "severity": { "type": "string", "enum": ["hard", "soft", "informational"] },
-              "sha256": { "type": "string" },
-              "redacted_prefix": { "type": "string" },
-              "line": { "type": "integer", "minimum": 1 },
-              "count": { "type": "integer", "minimum": 1 }
+              "path": {
+                "type": "string"
+              },
+              "pattern_id": {
+                "type": "string"
+              },
+              "severity": {
+                "type": "string",
+                "enum": [
+                  "hard",
+                  "soft",
+                  "informational"
+                ]
+              },
+              "sha256": {
+                "type": "string"
+              },
+              "redacted_prefix": {
+                "type": "string"
+              },
+              "line": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "count": {
+                "type": "integer",
+                "minimum": 1
+              }
             }
           }
         }
@@ -163,17 +422,29 @@
     "scope_check": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["result"],
+      "required": [
+        "result"
+      ],
       "properties": {
-        "result": { "type": "string", "enum": ["pass", "fail"] },
+        "result": {
+          "type": "string",
+          "enum": [
+            "pass",
+            "fail"
+          ]
+        },
         "findings": {
           "type": "array",
           "items": {
             "type": "object",
             "additionalProperties": false,
-            "required": ["path"],
+            "required": [
+              "path"
+            ],
             "properties": {
-              "path": { "type": "string" }
+              "path": {
+                "type": "string"
+              }
             }
           }
         }
@@ -182,23 +453,88 @@
     "sensitive_path_assessment": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["result"],
+      "required": [
+        "result"
+      ],
       "properties": {
-        "result": { "type": "string", "enum": ["none", "elevated"] },
-        "paths": { "type": "array", "items": { "type": "string" } }
+        "result": {
+          "type": "string",
+          "enum": [
+            "none",
+            "elevated"
+          ]
+        },
+        "paths": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
       }
     },
-    "reviewer_identity": { "type": "string" },
-    "timestamp": { "type": "string", "format": "date-time" },
+    "reviewer_identity": {
+      "type": "string"
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time"
+    },
     "recommended_next_state": {
       "type": "string",
       "enum": [
-        "APPROVED", "CHANGES_REQUESTED", "BLOCKED",
-        "READY_FOR_REVIEW", "STOPPED"
+        "APPROVED",
+        "CHANGES_REQUESTED",
+        "BLOCKED",
+        "READY_FOR_REVIEW",
+        "STOPPED"
       ]
     },
-    "failure_reason": { "type": "string" },
-    "escalation_recommended": { "type": "boolean" },
-    "escalation_reason": { "type": "string" }
+    "failure_reason": {
+      "type": "string"
+    },
+    "escalation_recommended": {
+      "type": "boolean"
+    },
+    "escalation_reason": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "checkpoint_id": {
+      "type": "string"
+    },
+    "expected_acceptance_criterion_ids": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "identical_finding_check": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "streak",
+        "cap",
+        "fingerprint",
+        "exhausted"
+      ],
+      "properties": {
+        "streak": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "cap": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "fingerprint": {
+          "type": "string"
+        },
+        "exhausted": {
+          "type": "boolean"
+        }
+      }
+    }
   }
 }
