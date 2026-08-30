@@ -78,6 +78,11 @@ FORBIDDEN_PATTERNS: list[tuple[re.Pattern[str], str, str]] = [
     (re.compile(r"\byarn\s+publish\b"), "yarn publish is prohibited", "subcommand"),
     (re.compile(r"\bcargo\s+publish\b"), "cargo publish is prohibited", "subcommand"),
     (re.compile(r"\btwine\s+upload\b"), "twine upload is prohibited", "subcommand"),
+    (re.compile(r"\b(?:ssh|scp|sftp)\b"), "remote shell/file transfer is prohibited in semantic lanes", "subcommand"),
+    (re.compile(r"\bterraform\s+(?:apply|destroy|import|taint|untaint)\b"), "terraform remote/state mutation is prohibited", "subcommand"),
+    (re.compile(r"\bgh\s+workflow\s+run\b"), "remote workflow dispatch is prohibited", "subcommand"),
+    (re.compile(r"\bgh\s+run\s+(?:cancel|delete|rerun)\b"), "remote workflow-run mutation is prohibited", "subcommand"),
+    (re.compile(r"\bgh\s+(?:secret|variable)\s+(?:set|delete)\b"), "remote secret/variable mutation is prohibited", "subcommand"),
     # remote shell to operator-configured protected production hosts.
     # Targets are loaded from $OFLOOP_BLOCKED_SSH_TARGETS (whitespace- or
     # comma-separated). Empty/unset means no ssh-target blocks (universal

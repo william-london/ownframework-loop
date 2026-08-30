@@ -59,6 +59,8 @@ _MUTATING_MCP_VERBS: frozenset[str] = frozenset({
     "refund", "bill", "submit", "execute", "start", "stop", "restart",
     "kill", "approve", "reject", "invite", "assign", "unassign", "move",
     "rename", "archive", "close", "reopen", "reply", "comment", "apply",
+    "mark", "trash", "forward", "cancel", "revoke", "enable", "disable",
+    "trigger", "rerun", "retry",
 })
 
 
@@ -83,6 +85,14 @@ _BLOCKED_BASH_PATTERNS: list[tuple[re.Pattern[str], str, str]] = [
     (re.compile(r"\bgh\s+repo\s+(create|delete|edit|rename|archive)\b"), "OF_LOOP_EXTERNAL_REMOTE", "gh repo mutation"),
     (re.compile(r"\bgh\s+gist\s+(create|edit|delete)\b"), "OF_LOOP_EXTERNAL_PUBLISH", "gh gist mutation"),
     (re.compile(r"\bgh\s+issue\s+(create|close|reopen|edit|delete|transfer)\b"), "OF_LOOP_EXTERNAL_PR", "gh issue mutation"),
+    (re.compile(r"\bgh\s+issue\s+comment\b"), "OF_LOOP_EXTERNAL_PR", "gh issue comment"),
+    (re.compile(r"\bgh\s+repo\s+fork\b"), "OF_LOOP_EXTERNAL_REMOTE", "gh repo fork"),
+    (re.compile(r"\bgh\s+workflow\s+run\b"), "OF_LOOP_EXTERNAL_PROD_MUTATION", "gh workflow run"),
+    (re.compile(r"\bgh\s+run\s+(cancel|delete|rerun)\b"), "OF_LOOP_EXTERNAL_PROD_MUTATION", "gh run mutation"),
+    (re.compile(r"\bgh\s+(secret|variable)\s+(set|delete)\b"), "OF_LOOP_EXTERNAL_PROD_MUTATION", "gh secret/variable mutation"),
+    (re.compile(r"\bgh\s+api\b[^|;&]*(?:--method\s+|--method=)(POST|PUT|PATCH|DELETE)\b", re.IGNORECASE), "OF_LOOP_EXTERNAL_PR", "gh api mutation"),
+    (re.compile(r"\b(?:ssh|scp|sftp)\b"), "OF_LOOP_EXTERNAL_REMOTE", "remote shell/file-transfer command"),
+    (re.compile(r"\brsync\b[^|;&]*(?:[^\s:@]+@[^\s:]+:|[^\s:]+:[^\s])"), "OF_LOOP_EXTERNAL_REMOTE", "remote rsync"),
     # Registry publish / image push (external distribution effects). These are
     # refused here as well as in guards.FORBIDDEN_PATTERNS (defense in depth).
     (re.compile(r"\bnpm\s+publish\b"), "OF_LOOP_EXTERNAL_PUBLISH", "npm publish"),
@@ -105,7 +115,14 @@ _BLOCKED_BASH_PATTERNS: list[tuple[re.Pattern[str], str, str]] = [
     (re.compile(r"\bkubectl\s+(apply|delete|rollout)\b"), "OF_LOOP_EXTERNAL_DEPLOY", "kubectl apply"),
     (re.compile(r"\bknative\b"), "OF_LOOP_EXTERNAL_DEPLOY", "knative"),
     (re.compile(r"\bgcloud\b.*--?deploy\b"), "OF_LOOP_EXTERNAL_DEPLOY", "gcloud deploy"),
-    (re.compile(r"\bterraform\s+apply\b"), "OF_LOOP_EXTERNAL_PROD_MUTATION", "terraform apply"),
+    (re.compile(r"\bterraform\s+(apply|destroy|import|taint|untaint)\b"), "OF_LOOP_EXTERNAL_PROD_MUTATION", "terraform mutation"),
+    (re.compile(r"\baws\s+s3\s+(cp|mv|sync|rm|mb|rb)\b"), "OF_LOOP_EXTERNAL_PROD_MUTATION", "aws s3 mutation"),
+    (re.compile(r"\baws\s+s3api\s+(?:put|delete|create|restore|upload)[-a-z0-9]*\b"), "OF_LOOP_EXTERNAL_PROD_MUTATION", "aws s3api mutation"),
+    (re.compile(r"\bkubectl\s+(create|replace|patch|edit|scale|set|cordon|uncordon|drain|taint|label|annotate)\b"), "OF_LOOP_EXTERNAL_DEPLOY", "kubectl mutation"),
+    (re.compile(r"\bgcloud\b[^|;&]*\b(deploy|create|delete|update|patch|replace|submit)\b"), "OF_LOOP_EXTERNAL_PROD_MUTATION", "gcloud mutation"),
+    (re.compile(r"\baz\b[^|;&]*\b(create|delete|update|set|deploy|restart|start|stop)\b"), "OF_LOOP_EXTERNAL_PROD_MUTATION", "azure mutation"),
+    (re.compile(r"\b(?:vercel|netlify)\s+deploy\b"), "OF_LOOP_EXTERNAL_DEPLOY", "hosting deploy"),
+    (re.compile(r"\bfly(?:ctl)?\s+deploy\b"), "OF_LOOP_EXTERNAL_DEPLOY", "fly deploy"),
     (re.compile(r"\bansible-playbook\b"), "OF_LOOP_EXTERNAL_PROD_MUTATION", "ansible"),
     (re.compile(r"\bhelm\s+(install|upgrade)\b"), "OF_LOOP_EXTERNAL_DEPLOY", "helm install"),
     (re.compile(r"\bsupabase\b.*--?deploy\b"), "OF_LOOP_EXTERNAL_DEPLOY", "supabase deploy"),

@@ -47,6 +47,10 @@ the 0.8.1 runtime-generation closure.
   repo/run/role cache;
 - hermetic validation preserves project-supplied PYTEST_ADDOPTS while appending
   Loop cache-isolation controls.
+- common direct remote-effect surfaces are additionally fenced (SSH/SCP/SFTP,
+  workflow dispatch/mutation, Terraform destructive/state mutation, cloud
+  object/control-plane mutations, and mixed-token MCP mutations) while the
+  documented same-user arbitrary-code/OS-sandbox limitation remains explicit;
 - deterministic build/review validation now applies the external-action authority
   classifier before executing packet-declared shell, closing a core-path bypass
   for mutating remote HTTP outside Claude hooks.

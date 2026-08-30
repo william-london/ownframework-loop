@@ -296,4 +296,33 @@ finally:
 PY
 pass "T14 deterministic finalization is timeout-bounded when wall budget is funded"
 
+# T15: common direct remote-effect surfaces are mechanically refused.
+python3 -B <<'PY'
+from ownframework_loop import external_action, guards
+blocked = [
+    "ssh deploy@example.com uptime",
+    "scp build.tar deploy@example.com:/srv/",
+    "terraform destroy -auto-approve",
+    "gh workflow run deploy.yml",
+    "gh issue comment 42 --body shipped",
+    "aws s3 cp artifact s3://prod-bucket/artifact",
+    "kubectl patch deployment app -p '{}'",
+    "gcloud run deploy app --image=x",
+    "az webapp restart --name app --resource-group prod",
+]
+for cmd in blocked:
+    decision=external_action.classify_tool_call(
+        tool_name="Bash", tool_input={"command":cmd}, active_run="run-prod"
+    )
+    assert decision.startswith("BLOCK:"), (cmd, decision)
+for cmd in ("ssh deploy@example.com uptime", "terraform destroy -auto-approve", "gh workflow run deploy.yml"):
+    assert guards.classify_bash_command(cmd)["severity"] == "forbidden", cmd
+
+# A mutating MCP name containing a read token must not be misclassified read-only.
+assert external_action._classify_mcp("mcp__mail__mark_read").startswith("BLOCK:")
+assert external_action._classify_mcp("mcp__mail__forward_message").startswith("BLOCK:")
+assert external_action._classify_mcp("mcp__jobs__retry_get_status").startswith("BLOCK:")
+PY
+pass "T15 common direct remote mutation surfaces and mixed-token MCP mutations fail closed"
+
 echo "V082_PRODUCTION_HARDENING=PASS"
