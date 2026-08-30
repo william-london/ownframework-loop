@@ -69,9 +69,11 @@ def run_install_probe(home: Path, *, fake_claude: Path, fake_launchctl: Path) ->
     env["HOME"] = str(home)
     env["PATH"] = f"{fake_claude.parent}:/usr/bin:/bin"
     env["PYTHONPATH"] = str(src / "lib")
-    # The installer's source-path arguments
+    # Platform installers default to the installed core. This hermetic
+    # source-level regression opts into the source runtime explicitly.
+    env["OFLOOP_BIN"] = str(src / "bin" / "ofloop")
     proc = subprocess.run(
-        ["bash", str(installer), str(src / "bin" / "ofloop"), str(src)],
+        ["bash", str(installer)],
         capture_output=True, text=True, env=env, timeout=60,
     )
     return proc.returncode, proc.stdout + proc.stderr
@@ -79,7 +81,12 @@ def run_install_probe(home: Path, *, fake_claude: Path, fake_launchctl: Path) ->
 def fakebin(home: Path) -> Path:
     fb = home / "fakebin"
     fb.mkdir(parents=True, exist_ok=True)
-    (fb / "claude").write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+    (fb / "claude").write_text(
+        "#!/usr/bin/env bash\n"
+        "if [[ \"${1:-}\" == \"--version\" ]]; then echo \"2.1.251 (Claude Code)\"; fi\n"
+        "exit 0\n",
+        encoding="utf-8",
+    )
     (fb / "launchctl").write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
     (fb / "uname").write_text("#!/usr/bin/env bash\n[[ \"${1:-}\" == \"-s\" ]] && echo Darwin || /usr/bin/uname \"$@\"\n", encoding="utf-8")
     for f in (fb / "claude", fb / "launchctl", fb / "uname"):

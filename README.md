@@ -1,5 +1,7 @@
 # OwnFramework Loop
 
+Current release line: **0.8.4**
+
 OwnFramework Loop is a vendor-neutral, execution-sealed engineering runtime for
 autonomous coding agents.
 

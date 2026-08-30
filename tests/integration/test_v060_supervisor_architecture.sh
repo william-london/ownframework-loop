@@ -7,15 +7,17 @@ TESTS_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$ROOT_DIR"
 OFLOOP="$OFLOOP_BIN"
 
-# 1. Legacy unattended orchestrator is retired, not silently approving.
+# 1. Retired unattended orchestrator is absent from the active product.
+[[ ! -e "$ROOT/lib/ownframework_loop/orchestrator.py" ]] \
+  || fail "retired orchestrator module still exists"
 set +e
 LEGACY_OUT="$($OFLOOP loop run /tmp --run-id ghost 2>&1)"
 LEGACY_RC=$?
 set -e
-[[ "$LEGACY_RC" -ne 0 ]] || fail "legacy loop run unexpectedly succeeded"
-echo "$LEGACY_OUT" | grep -Fq 'legacy_unattended_orchestrator_retired_use_supervisor' \
-  || fail "legacy loop run did not surface retirement reason"
-pass "legacy unattended orchestrator is retired"
+[[ "$LEGACY_RC" -ne 0 ]] || fail "retired loop run unexpectedly succeeded"
+echo "$LEGACY_OUT" | grep -Eq 'invalid choice|unrecognized arguments|usage:' \
+  || fail "retired loop run parser unexpectedly remains active: $LEGACY_OUT"
+pass "retired unattended orchestrator/parser are absent"
 
 # 2. Supervisor store is durable/idempotent operational state only.
 DB="$(mktemp -t ofloop-supervisor.XXXXXX.sqlite3)"
@@ -143,12 +145,26 @@ grep -Fq 'dispatch_mod.claim_next' "$ROOT/lib/ownframework_loop/supervisor.py" \
   || fail "supervisor does not consume dispatch owner"
 pass "supervisor is execution clock, not second engineering state machine"
 
-# 8. macOS service packaging is syntax-valid and launchd-owned.
-bash -n "$ROOT/install-supervisor-macos.sh"
-bash -n "$ROOT/uninstall-supervisor-macos.sh"
+# 8. Platform service packaging is syntax-valid and service-manager-specific.
+for script in \
+  install-supervisor.sh uninstall-supervisor.sh \
+  install-supervisor-macos.sh uninstall-supervisor-macos.sh \
+  install-supervisor-linux.sh uninstall-supervisor-linux.sh \
+  scripts/refresh-existing-supervisor.sh \
+  scripts/refresh-existing-supervisor-macos.sh \
+  scripts/refresh-existing-supervisor-linux.sh
+do
+  bash -n "$ROOT/$script"
+done
 grep -Fq 'launchctl bootstrap' "$ROOT/install-supervisor-macos.sh" \
   || fail "macOS supervisor installer does not bootstrap launchd"
-pass "macOS supervisor service packaging is present"
+grep -Fq 'systemctl' "$ROOT/install-supervisor-linux.sh" \
+  || fail "Linux supervisor installer does not use systemd-user"
+grep -Fq 'Darwin)' "$ROOT/install-supervisor.sh" \
+  || fail "platform wrapper missing macOS path"
+grep -Fq 'Linux)' "$ROOT/install-supervisor.sh" \
+  || fail "platform wrapper missing Linux path"
+pass "macOS/Linux supervisor service packaging is present"
 
 # 9. Deterministic finalizers themselves require semantic evidence.
 grep -Fq 'semantic BUILD_AGENT_RESULT.json is required' "$ROOT/lib/ownframework_loop/build_finalize.py" \
@@ -157,38 +173,20 @@ grep -Fq 'semantic REVIEW_AGENT_ASSESSMENT.json is required' "$ROOT/lib/ownframe
   || fail "review finalizer still permits missing semantic reviewer result"
 pass "finalizer authority cannot approve without semantic passes"
 
-# 9. Folded from legacy test_orchestrator.sh: Python shim + constants.
-echo "TEST 9: Python run_single_mode is a refusal shim"
-R_SHIM="$(make_tmp_repo)"
-"$OFLOOP" spec new "$R_SHIM" "shim-test" >/dev/null
-RID_SHIM="$(ls -1t "$R_SHIM/.ownframework-loop" | head -n1)"
-PYTHONPATH="$LIB_DIR" python3 - "$R_SHIM" "$RID_SHIM" <<'PY'
-import sys
-from pathlib import Path
-sys.path.insert(0, "${OFLOOP_LIB:-$LIB_DIR}")
-from ownframework_loop import orchestrator
-out = orchestrator.run_single_mode(
-    canonical_repo=Path(sys.argv[1]),
-    run_id=sys.argv[2],
-)
-assert out["ok"] is False, out
-assert out["reason"] == "legacy_unattended_orchestrator_retired_use_supervisor", out
-print("RETIRED_SHIM_OK")
-PY
-assert_contains "RETIRED_SHIM_OK" "RETIRED_SHIM_OK" "orchestrator.run_single_mode refuses with retirement reason"
-
-echo "TEST 10: orchestrator constants remain for compatibility reads"
+# 10. Runner selection stays behind the vendor-neutral registry.
 PYTHONPATH="$LIB_DIR" python3 - <<'PY'
-import sys
-sys.path.insert(0, "${OFLOOP_LIB:-$LIB_DIR}")
-from ownframework_loop import orchestrator
-assert "APPROVED" in orchestrator.TERMINAL_STATES
-assert "BLOCKED" in orchestrator.TERMINAL_STATES
-assert "STOPPED" in orchestrator.TERMINAL_STATES
-assert orchestrator.MAX_REPAIR_ROUNDS_DEFAULT >= 1
-assert orchestrator.RETIREMENT_REASON == "legacy_unattended_orchestrator_retired_use_supervisor"
-print("CONSTANTS_OK")
+from ownframework_loop import supervisor
+assert "claude-code" in supervisor._RUNNER_REGISTRY
+runner = supervisor._runner("claude-code")
+assert getattr(runner, "runner_id", "") == "claude-code"
+try:
+    supervisor._runner("missing-runner")
+except RuntimeError as exc:
+    assert "not registered" in str(exc)
+else:
+    raise AssertionError("unknown runner did not fail closed")
+print("RUNNER_REGISTRY_OK")
 PY
-assert_contains "CONSTANTS_OK" "CONSTANTS_OK" "orchestrator constants remain readable"
+pass "supervisor runner registry is vendor-neutral and fail-closed"
 
 echo "V060_SUPERVISOR_ARCHITECTURE=PASS"
