@@ -159,11 +159,12 @@ def main() -> int:
     # Unfinished non-terminal enrollments (QUEUED, BACKOFF, QUARANTINED,
     # RUNNING) must not be silently destroyed by an uninstall. The
     # active-work check above is intentionally narrow (RUNNING + live
-    # attempt) because install can safely coexist with a QUEUED row. An
-    # uninstall cannot coexist with anything non-terminal: refusing on
-    # every non-DONE / non-RETIRED row protects the operator from
-    # destroying evidence that the new runtime has not yet finalized.
-    if "status" in jobs_columns:
+    # attempt) because install can safely coexist with a QUEUED row.
+    # The intent label distinguishes install (2nd positional arg is the
+    # incoming runtime generation) from uninstall (2nd positional arg is
+    # the literal string "uninstall"). Only enforce the broad
+    # non-terminal check for uninstall.
+    if args.incoming_generation == "uninstall" and "status" in jobs_columns:
         try:
             problems = [
                 f"unfinished_job={row['run_id']}:{row['status']}"
