@@ -73,9 +73,16 @@ cleanup(){ rm -rf "$STAGE"; }
 trap cleanup EXIT INT TERM HUP
 
 # Prefer immutable Git HEAD from a checkout. Release/source tarballs without
-# .git fall back to their on-disk payload with transient paths excluded.
-if git -C "$ROOT" rev-parse --show-toplevel >/dev/null 2>&1 &&
-   [[ "$(cd "$(git -C "$ROOT" rev-parse --show-toplevel)" && pwd)" == "$ROOT" ]]; then
+# .git fall back to their on-disk payload with transient paths excluded. Compare
+# physical paths so macOS /var -> /private/var aliases do not misclassify a real
+# checkout as an ordinary source tree and accidentally stage dirty working bytes.
+GIT_TOP="$(git -C "$ROOT" rev-parse --show-toplevel 2>/dev/null || true)"
+ROOT_PHYSICAL="$(cd "$ROOT" && pwd -P)"
+GIT_TOP_PHYSICAL=""
+if [[ -n "$GIT_TOP" && -d "$GIT_TOP" ]]; then
+  GIT_TOP_PHYSICAL="$(cd "$GIT_TOP" && pwd -P)"
+fi
+if [[ -n "$GIT_TOP_PHYSICAL" && "$GIT_TOP_PHYSICAL" == "$ROOT_PHYSICAL" ]]; then
   git -C "$ROOT" archive HEAD | tar -x -C "$STAGE"
   SOURCE_KIND="git-head"
   SOURCE_HEAD="$(git -C "$ROOT" rev-parse HEAD)"
