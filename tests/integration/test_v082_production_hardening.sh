@@ -223,8 +223,7 @@ pass "T8 supervisor replacement rolls back on bootstrap failure"
 # macOS OAuth credentials are Keychain-backed, so ~/.claude is not reopened.
 if [[ "$(uname -s)" != "Darwin" ]]; then
   pass "T8b private service auth material (skipped on non-Darwin)"
-  exit 0
-fi
+else
 S2SHIMS="$TMP/s2-shims"; mkdir -p "$S2SHIMS"
 cat > "$S2SHIMS/uname" <<'SH'
 #!/bin/sh
@@ -320,6 +319,7 @@ assert json.loads(p.read_text(encoding="utf-8")) == {}
 assert stat.S_IMODE(p.stat().st_mode)==0o600
 PY
 pass "T8b commissioned auth is private-at-rest; idle-only service captures none"
+fi
 
 USHIMS="$TMP/uninstall-shims"; mkdir -p "$USHIMS"
 cat > "$USHIMS/uname" <<'SH'
@@ -359,20 +359,41 @@ T10_DATA="$TMP_MANIFEST/data"
 T10_STATE="$TMP_MANIFEST/state"
 T10_BINDIR="$TMP_MANIFEST/bin"
 mkdir -p "$T10_HOME" "$T10_BINDIR"
+set +e
 HOME="$T10_HOME" XDG_DATA_HOME="$T10_DATA" \
   XDG_STATE_HOME="$T10_STATE" OFLOOP_BIN_DIR="$T10_BINDIR" \
-  bash "$ROOT_DIR/install.sh" >/dev/null 2>&1 || true
-# Locate the staged manifest inside the most recent core root.
+  bash "$ROOT_DIR/install.sh" >/dev/null 2>&1
+T10_INSTALL_RC=$?
+set -e
+[[ "$T10_INSTALL_RC" -eq 0 ]] || fail "T10 core install failed rc=$T10_INSTALL_RC"
+
 MANIFEST_FILE="$(find "$T10_DATA" -name '.payload.manifest' -type f 2>/dev/null | head -n1)"
-if [[ -n "$MANIFEST_FILE" ]]; then
-  if grep -Fq '/.payload.manifest\b' "$MANIFEST_FILE"; then
-    fail "T10 install manifest must not list .payload.manifest"
+[[ -n "$MANIFEST_FILE" && -f "$MANIFEST_FILE" ]] || fail "T10 install succeeded without payload manifest"
+
+assert_manifest_self_exclusion() {
+  local manifest="$1"
+  [[ -f "$manifest" ]] || return 2
+  if awk '$1=="sha256" && ($3==".payload.manifest" || $3==".payload.manifest.tmp"){bad=1} END{exit bad?0:1}' "$manifest"; then
+    return 3
   fi
-  if grep -Fq '/.payload.manifest.tmp' "$MANIFEST_FILE"; then
-    fail "T10 install manifest must not list .payload.manifest.tmp"
-  fi
+  return 0
+}
+assert_install_manifest_contract() {
+  local install_rc="$1" manifest="$2"
+  [[ "$install_rc" -eq 0 ]] || return 4
+  assert_manifest_self_exclusion "$manifest"
+}
+assert_install_manifest_contract "$T10_INSTALL_RC" "$MANIFEST_FILE" ||   fail "T10 successful install/manifest contract did not hold"
+
+# Negative regressions: neither a failed installer nor absence of the subject
+# artifact may satisfy the proof.
+if assert_install_manifest_contract 17 "$MANIFEST_FILE"; then
+  fail "T10 nonzero installer status incorrectly satisfied manifest proof"
 fi
-pass "T10 payload manifest generation excludes self artifacts"
+if assert_install_manifest_contract 0 "$TMP/definitely-missing-manifest"; then
+  fail "T10 missing manifest incorrectly satisfied self-exclusion proof"
+fi
+pass "T10 install succeeded, manifest exists, self artifacts are excluded, and failure/missing-manifest cases fail closed"
 
 python3 -B <<'PY'
 from ownframework_loop.validation_policy import classify_required_validation
@@ -412,7 +433,7 @@ MDB_OUT="$(HOME="$MDB_HOME" XDG_STATE_HOME="$MDB_XDG" PATH="$MDB_SHIMS:$PATH" ba
 MDB_RC=$?
 set -e
 [[ "$MDB_RC" -eq 13 ]] || fail "T12 missing-ledger uninstall must refuse rc13: rc=$MDB_RC out=$MDB_OUT"
-assert_contains "$MDB_OUT" "ledger is missing" "T12 missing dependency ledger fails closed"
+assert_contains "$MDB_OUT" "ledger_missing" "T12 missing dependency ledger fails closed"
 pass "T12 commissioned runtime lifecycle refuses unverifiable missing ledger"
 
 # T13: reviewer elevated/sensitive scope matcher uses the same dir/** semantics.

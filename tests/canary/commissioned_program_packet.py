@@ -127,7 +127,7 @@ def main() -> int:
     out=Path(sys.argv[2])
     packet=packet_for(repo)
     fence = chr(96) * 3
-    out.write_text(fence+"json\\n"+json.dumps(packet, indent=2, sort_keys=True)+"\\n"+fence+"\\n", encoding="utf-8")
+    out.write_text(fence+"json\n"+json.dumps(packet, indent=2, sort_keys=True)+"\n"+fence+"\n", encoding="utf-8")
     return 0
 
 if __name__ == "__main__":

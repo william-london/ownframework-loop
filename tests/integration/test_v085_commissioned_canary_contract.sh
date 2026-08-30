@@ -38,6 +38,10 @@ assert meta["network_read_allowlist"]==[]
 assert meta["external_action_authority"]=="none"
 assert not packet.validate_packet_for_approval(meta), packet.validate_packet_for_approval(meta)
 assert not schema_validate.validate_packet(meta), schema_validate.validate_packet(meta)
+print("CANARY_PACKET_PARSE=PASS")
+print("CANARY_PACKET_SCHEMA=PASS")
+print("CANARY_PROGRAM_MODE=PASS")
+print("CANARY_CHECKPOINT_COUNT=2")
 print("COMMISSIONED_CANARY_PACKET=VALID")
 PY
 

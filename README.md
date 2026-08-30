@@ -95,8 +95,13 @@ bash install-supervisor.sh
 Platform selection is automatic:
 
 - macOS: per-user launchd service.
-- Linux: per-user systemd service.
-- WSL2: Linux path when systemd user services are available.
+- Linux: per-user systemd service. A successful commission proves the user
+  service is active now; post-logout/boot persistence is reported diagnostically
+  and is not implied unless the host is already configured for user-service
+  persistence. Loop does not silently enable privileged linger configuration.
+- WSL2: Linux path when systemd user services are available. The Loop user
+  service may run while the WSL instance exists; it does not keep the WSL VM
+  alive by itself.
 - native Windows: not currently a commissioned-supervisor target.
 
 A fresh core install never creates a background service implicitly. Once a
