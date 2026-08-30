@@ -591,6 +591,7 @@ def _connect(path: Path) -> sqlite3.Connection:
           cost_usd REAL NOT NULL DEFAULT 0,
           cost_accounted INTEGER NOT NULL DEFAULT 0,
           cost_known INTEGER NOT NULL DEFAULT 1,
+          launch_gate_version INTEGER NOT NULL DEFAULT 0,
           input_tokens INTEGER NOT NULL DEFAULT 0,
           output_tokens INTEGER NOT NULL DEFAULT 0,
           cache_read_tokens INTEGER NOT NULL DEFAULT 0,
@@ -650,6 +651,7 @@ def _connect(path: Path) -> sqlite3.Connection:
         "worker_pgid": "ALTER TABLE semantic_attempts ADD COLUMN worker_pgid INTEGER",
         "deadline_at": "ALTER TABLE semantic_attempts ADD COLUMN deadline_at REAL",
         "cost_known": "ALTER TABLE semantic_attempts ADD COLUMN cost_known INTEGER NOT NULL DEFAULT 1",
+        "launch_gate_version": "ALTER TABLE semantic_attempts ADD COLUMN launch_gate_version INTEGER NOT NULL DEFAULT 0",
         "input_tokens": "ALTER TABLE semantic_attempts ADD COLUMN input_tokens INTEGER NOT NULL DEFAULT 0",
         "output_tokens": "ALTER TABLE semantic_attempts ADD COLUMN output_tokens INTEGER NOT NULL DEFAULT 0",
         "cache_read_tokens": "ALTER TABLE semantic_attempts ADD COLUMN cache_read_tokens INTEGER NOT NULL DEFAULT 0",
@@ -1072,7 +1074,30 @@ def _recover_stale_running(conn: sqlite3.Connection) -> int:
                 )
                 conn.commit()
                 continue
-            if not bool(int(attempt["cost_accounted"] or 0)):
+            # Only gate-v1 reservations are provably pre-provider here.
+            # Historical rows default to launch_gate_version=0 and remain
+            # ambiguous because old runtimes had a post-spawn/pre-PID window.
+            if (
+                str(attempt["status"] or "") == "RESERVED"
+                and not attempt["worker_pid"]
+                and int(attempt["launch_gate_version"] or 0) >= 1
+            ):
+                conn.execute(
+                    """UPDATE semantic_attempts SET
+                         status='FAILED', completed_at=?, returncode=NULL,
+                         cost_usd=0, cost_accounted=1, cost_known=1,
+                         input_tokens=0, output_tokens=0, cache_read_tokens=0,
+                         cache_creation_tokens=0, tokens_known=1,
+                         failure_class='supervisor',
+                         failure_reason='worker_ownership_not_published'
+                       WHERE attempt_id=? AND job_id=?""",
+                    (time.time(), attempt_id, int(row["id"])),
+                )
+                recovery_reason = (
+                    "recovered unpublished gated semantic reservation; "
+                    "provider was never released"
+                )
+            elif not bool(int(attempt["cost_accounted"] or 0)):
                 recovered_cost = _parse_cost_from_durable_stdout(attempt["stdout_path"])
                 if recovered_cost is None:
                     # Cost telemetry could not be recovered. With an active
@@ -2484,8 +2509,9 @@ def _reserve_semantic_attempt(
     now = time.time()
     conn.execute(
         """INSERT INTO semantic_attempts
-           (attempt_id, job_id, role, status, started_at, stdout_path, stderr_path)
-           VALUES (?, ?, ?, 'RESERVED', ?, ?, ?)""",
+           (attempt_id, job_id, role, status, started_at, stdout_path, stderr_path,
+            launch_gate_version)
+           VALUES (?, ?, ?, 'RESERVED', ?, ?, ?, 1)""",
         (attempt_id, int(job["id"]), role, now,
          str(durable_files[0]), str(durable_files[1])),
     )
@@ -3335,6 +3361,8 @@ def resume(
         "last_failure_reason=NULL",
         "worker_pid=NULL",
         "worker_started_at=NULL",
+        "worker_pgid=NULL",
+        "worker_deadline_at=NULL",
         "worker_role=NULL",
         "updated_at=?",
     ]
