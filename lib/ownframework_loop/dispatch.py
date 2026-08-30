@@ -225,13 +225,24 @@ def _ofloop_bin() -> str:
     return str(sibling) if sibling.exists() else "ofloop"
 
 
-def _run_cli(args: list[str]) -> dict[str, Any]:
-    proc = subprocess.run(
-        [_ofloop_bin(), *args],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+def _run_cli(
+    args: list[str],
+    *,
+    timeout_seconds: int | None = None,
+) -> dict[str, Any]:
+    try:
+        proc = subprocess.run(
+            [_ofloop_bin(), *args],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=(int(timeout_seconds) if timeout_seconds and timeout_seconds > 0 else None),
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise DispatchError(
+            f"ofloop {' '.join(args)} exceeded finalization wall budget "
+            f"({int(timeout_seconds or 0)}s)"
+        ) from exc
     if proc.returncode != 0:
         raise DispatchError(
             f"ofloop {' '.join(args)} failed rc={proc.returncode}: "
@@ -570,7 +581,11 @@ def claim_next(*, canonical_repo: Path, run_id: str) -> dict[str, Any]:
         raise DispatchError(f"dispatch lock contention: {exc}") from exc
 
 
-def finalize_work_order(work_order: dict[str, Any]) -> dict[str, Any]:
+def finalize_work_order(
+    work_order: dict[str, Any],
+    *,
+    timeout_seconds: int | None = None,
+) -> dict[str, Any]:
     """Finalize one semantic BUILD or REVIEW result through core-owned CLI."""
     if work_order.get("schema") != SCHEMA:
         raise DispatchError("invalid work-order schema")
@@ -619,9 +634,9 @@ def finalize_work_order(work_order: dict[str, Any]) -> dict[str, Any]:
         )
 
     if decision == "BUILD":
-        result = _run_cli(["build", "finalize", repo, run_id, str(semantic)])
+        result = _run_cli(["build", "finalize", repo, run_id, str(semantic)], timeout_seconds=timeout_seconds)
     else:
-        result = _run_cli(["review", "finalize", repo, run_id, str(semantic)])
+        result = _run_cli(["review", "finalize", repo, run_id, str(semantic)], timeout_seconds=timeout_seconds)
     return {
         "schema": SCHEMA,
         "decision": decision,

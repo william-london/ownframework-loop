@@ -242,4 +242,58 @@ assert classify_required_validation(
 PY
 pass "T11 deterministic finalizers enforce external-action policy on required validation"
 
+# T12: commissioned lifecycle operations fail closed when the supervisor
+# ledger is missing and dependency state cannot be proven.
+MDB_HOME="$TMP/missingdb-home"; MDB_XDG="$TMP/missingdb-xdg"
+mkdir -p "$MDB_HOME/Library/LaunchAgents" "$MDB_XDG/ownframework-loop"
+touch "$MDB_HOME/Library/LaunchAgents/com.ownframework.loop-supervisor.plist"
+touch "$MDB_XDG/ownframework-loop/runtime-provenance.json"
+MDB_SHIMS="$TMP/missingdb-shims"; mkdir -p "$MDB_SHIMS"
+cat > "$MDB_SHIMS/uname" <<'SH'
+#!/bin/sh
+echo Darwin
+SH
+cat > "$MDB_SHIMS/claude" <<'SH'
+#!/bin/sh
+exit 99
+SH
+chmod +x "$MDB_SHIMS/uname" "$MDB_SHIMS/claude"
+set +e
+MDB_OUT="$(HOME="$MDB_HOME" XDG_STATE_HOME="$MDB_XDG" PATH="$MDB_SHIMS:$PATH" bash "$ROOT_DIR/uninstall.sh" 2>&1)"
+MDB_RC=$?
+set -e
+[[ "$MDB_RC" -eq 13 ]] || fail "T12 missing-ledger uninstall must refuse rc13: rc=$MDB_RC out=$MDB_OUT"
+assert_contains "$MDB_OUT" "ledger is missing" "T12 missing dependency ledger fails closed"
+pass "T12 commissioned runtime lifecycle refuses unverifiable missing ledger"
+
+# T13: reviewer elevated/sensitive scope matcher uses the same dir/** semantics.
+python3 -B <<'PY'
+from ownframework_loop import review_finalize
+assert review_finalize._path_in_list("apps/web/page.tsx", "apps/**")
+assert not review_finalize._path_in_list("application/page.tsx", "apps/**")
+PY
+pass "T13 reviewer scope semantics match packet prefix compatibility"
+
+# T14: dispatch finalizer subprocess supports a hard timeout.
+python3 -B - "$TMP" <<'PY'
+import os, stat, sys
+from pathlib import Path
+from ownframework_loop import dispatch
+tmp=Path(sys.argv[1]); fake=tmp/"slow-ofloop"
+fake.write_text("#!/bin/sh\nsleep 5\necho '{}'\n")
+fake.chmod(0o755)
+old=dispatch._ofloop_bin
+dispatch._ofloop_bin=lambda: str(fake)
+try:
+    try:
+        dispatch._run_cli(["fake"], timeout_seconds=1)
+    except dispatch.DispatchError as exc:
+        assert "finalization wall budget" in str(exc), exc
+    else:
+        raise AssertionError("expected finalizer timeout")
+finally:
+    dispatch._ofloop_bin=old
+PY
+pass "T14 deterministic finalization is timeout-bounded when wall budget is funded"
+
 echo "V082_PRODUCTION_HARDENING=PASS"

@@ -152,6 +152,11 @@ if [[ -z "$RUNTIME_GENERATION" ]]; then
 fi
 
 SUPERVISOR_DB="$STATE_ROOT/supervisor.sqlite3"
+if [[ ( -f "$PLIST" || -f "$RUNTIME_PROVENANCE" ) && ! -f "$SUPERVISOR_DB" && "${OFLOOP_ALLOW_RUNTIME_GENERATION_MIGRATION:-0}" != "1" ]]; then
+  echo "SUPERVISOR_INSTALL=REFUSED reason=runtime_dependency_ledger_missing" >&2
+  echo "hint: restore the ledger or use OFLOOP_ALLOW_RUNTIME_GENERATION_MIGRATION=1 for an explicit migration" >&2
+  exit 13
+fi
 if [[ -f "$SUPERVISOR_DB" ]]; then
   if [[ "${OFLOOP_ALLOW_SUPERVISOR_SWAP_WITH_ACTIVE_WORK:-0}" != "1" ]]; then
     ACTIVE_REPORT="$("$PYTHON_BIN" - "$SUPERVISOR_DB" <<'PY'

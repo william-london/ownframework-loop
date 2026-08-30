@@ -184,11 +184,9 @@ def _classify_path_against_packet(packet: dict[str, Any], path: str) -> str:
 
 
 def _path_in_list(path: str, prefix: str) -> bool:
-    fp = path.lstrip("./").lstrip("/")
-    p = prefix.rstrip("/").lstrip("./").lstrip("/")
-    if not p:
-        return False
-    return fp == p or fp.startswith(p + "/")
+    # Keep reviewer elevated/sensitive classification identical to packet
+    # allowed/protected semantics, including the supported dir/** spelling.
+    return packet_mod.path_matches_scope_entry(path, prefix)
 
 
 def _must_fix_fingerprint(must_fix: list[dict[str, Any]]) -> str:

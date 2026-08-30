@@ -12,6 +12,11 @@ if [[ "$(uname -s)" != "Darwin" ]]; then
   exit 2
 fi
 
+if [[ ! -f "$SUPERVISOR_DB" && -f "$PLIST" && "${OFLOOP_ALLOW_SUPERVISOR_SWAP_WITH_ACTIVE_WORK:-0}" != "1" ]]; then
+  echo "SUPERVISOR_UNINSTALL=REFUSED reason=ledger_missing_live_work_unverifiable" >&2
+  echo "unsafe recovery override: OFLOOP_ALLOW_SUPERVISOR_SWAP_WITH_ACTIVE_WORK=1" >&2
+  exit 11
+fi
 if [[ -f "$SUPERVISOR_DB" && "${OFLOOP_ALLOW_SUPERVISOR_SWAP_WITH_ACTIVE_WORK:-0}" != "1" ]]; then
   RUNNING_REPORT="$(python3 -B - "$SUPERVISOR_DB" <<'PY'
 import sqlite3,sys

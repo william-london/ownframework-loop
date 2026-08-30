@@ -2381,7 +2381,40 @@ def run_one(*, db_path: Path | None = None, timeout_seconds: int = 0) -> dict[st
                     **policy,
                 }
 
-            finalized = dispatch_mod.finalize_work_order(work_order)
+            finalizer_timeout: int | None = None
+            if max_wall > 0:
+                elapsed_after_worker = max(0.0, time.time() - started_at)
+                remaining_after_worker = int(max_wall - elapsed_after_worker)
+                if remaining_after_worker <= 0:
+                    _update_job(
+                        conn,
+                        job["id"],
+                        status_value="QUARANTINED",
+                        total_cost_usd=new_cost,
+                        last_error=(
+                            "operational wall-clock ceiling exhausted after semantic "
+                            "worker completed; semantic artifact preserved for "
+                            "zero-cost replay after explicit operator action"
+                        ),
+                        last_failure_class="usage_ceiling",
+                        last_failure_reason="wall_clock_ceiling_before_finalization",
+                        next_attempt_at=0,
+                    )
+                    return {
+                        "schema": SCHEMA,
+                        "ok": False,
+                        "action": "QUARANTINED",
+                        "job_id": job["id"],
+                        "reason": "wall_clock_ceiling_before_finalization",
+                        "elapsed_seconds": elapsed_after_worker,
+                        "max_wall_seconds": max_wall,
+                        "semantic_artifact_preserved": True,
+                    }
+                finalizer_timeout = remaining_after_worker
+
+            finalized = dispatch_mod.finalize_work_order(
+                work_order, timeout_seconds=finalizer_timeout
+            )
             _update_job(
                 conn,
                 job["id"],

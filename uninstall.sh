@@ -27,6 +27,11 @@ if [[ "$(uname -s)" == "Darwin" ]]; then
     SUP_DB="$SUP_STATE/supervisor.sqlite3"
     SUP_PLIST="$HOME/Library/LaunchAgents/com.ownframework.loop-supervisor.plist"
     SUP_PROV="$SUP_STATE/runtime-provenance.json"
+    if [[ ( -f "$SUP_PLIST" || -f "$SUP_PROV" ) && ! -f "$SUP_DB" && "${OFLOOP_ALLOW_RUNTIME_GENERATION_MIGRATION:-0}" != "1" ]]; then
+        echo "[uninstall] refusing to remove commissioned runtime: supervisor ledger is missing, so unfinished dependencies cannot be proven" >&2
+        echo "[uninstall] explicit destructive migration override: OFLOOP_ALLOW_RUNTIME_GENERATION_MIGRATION=1" >&2
+        exit 13
+    fi
     if [[ ( -f "$SUP_PLIST" || -f "$SUP_PROV" ) && -f "$SUP_DB" && "${OFLOOP_ALLOW_RUNTIME_GENERATION_MIGRATION:-0}" != "1" ]]; then
         UNFINISHED="$(python3 -B - "$SUP_DB" <<'PY'
 import sqlite3,sys

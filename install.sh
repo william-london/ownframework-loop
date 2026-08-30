@@ -81,6 +81,11 @@ if [[ "$(uname -s)" == "Darwin" ]]; then
     PRE_DB="$PRE_STATE_ROOT/supervisor.sqlite3"
     PRE_PLIST="$HOME/Library/LaunchAgents/com.ownframework.loop-supervisor.plist"
     PRE_PROV="$PRE_STATE_ROOT/runtime-provenance.json"
+    if [[ ( -f "$PRE_PLIST" || -f "$PRE_PROV" ) && ! -f "$PRE_DB" && "${OFLOOP_ALLOW_RUNTIME_GENERATION_MIGRATION:-0}" != "1" ]]; then
+        log "managed install REFUSED: commissioned supervisor exists but ledger is missing; runtime dependencies cannot be proven"
+        log "explicit migration override: OFLOOP_ALLOW_RUNTIME_GENERATION_MIGRATION=1"
+        exit 13
+    fi
     if [[ ( -f "$PRE_PLIST" || -f "$PRE_PROV" ) && -f "$PRE_DB" ]]; then
         PRE_REPORT="$(python3 -B - "$PRE_DB" <<'PY'
 import sqlite3, sys

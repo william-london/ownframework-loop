@@ -53,6 +53,11 @@ the 0.8.1 runtime-generation closure.
 
 ### Proof
 
+Additional production closure hardens commissioned-runtime lifecycle behavior when
+the supervisor ledger is missing/unverifiable, aligns reviewer `/**` scope
+classification with packet semantics, and ensures a funded whole-run wall budget
+also bounds deterministic finalization after a semantic worker returns.
+
 A new canonical production-hardening suite covers byte identity, dirty Git
 identity, read-only status, runtime-identity failure, live re-enqueue refusal,
 pytest-env compatibility, cross-run/NotebookEdit writes, empty Bash, launchd
