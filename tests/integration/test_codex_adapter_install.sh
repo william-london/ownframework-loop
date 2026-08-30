@@ -42,7 +42,7 @@ if bash install-adapter.sh codex >"$TMP/conflict.txt" 2>&1; then
   echo 'FAIL: installer replaced unmanaged Agent Skill' >&2
   exit 1
 fi
-grep -F 'refusing to replace unmanaged Agent Skill' "$TMP/conflict.txt" >/dev/null
+grep -F 'reason=unmanaged_agent_skill' "$TMP/conflict.txt" >/dev/null
 grep -F 'user-owned' "$OFLOOP_AGENT_SKILLS_DIR/of-loop-spec/SKILL.md" >/dev/null
 rm -rf "$OFLOOP_AGENT_SKILLS_DIR/of-loop-spec"
 

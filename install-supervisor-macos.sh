@@ -27,7 +27,7 @@ ROOT="$(cd "$(dirname "$0")" && pwd)"
 #    the install is intentionally idle-only and OFLOOP_CLAUDE_BIN is
 #    omitted from the plist.
 PYTHON_BIN_RAW="${PYTHON_BIN:-$(command -v python3 || true)}"
-OFLOOP_BIN_RAW="${OFLOOP_BIN:-$ROOT/bin/ofloop}"
+OFLOOP_BIN_RAW="${OFLOOP_BIN:-$(command -v ofloop || true)}"
 CLAUDE_BIN_RAW="${CLAUDE_BIN:-$(command -v claude || true)}"
 
 # Canonicalize paths via python3 (always available alongside this script).
@@ -45,6 +45,12 @@ p = Path(sys.argv[1]).expanduser().resolve(strict=False)
 print(str(p))
 PY
 }
+
+if [[ -z "$OFLOOP_BIN_RAW" ]]; then
+  echo "SUPERVISOR_INSTALL=REFUSED reason=core_not_installed" >&2
+  echo "hint: run 'bash install.sh' first or set OFLOOP_BIN explicitly for development/testing" >&2
+  exit 2
+fi
 
 if [[ -z "$PYTHON_BIN_RAW" ]]; then
   echo "SUPERVISOR_INSTALL=REFUSED reason=python3_missing" >&2

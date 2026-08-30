@@ -127,8 +127,12 @@ assert_contains "$LEGACY_OUT" '"ok": true' "legacy tty_confirmation binding rema
 
 # 8. Current active skill semantics are direct-start/no-ceremony.
 grep -Fq 'AWAITING_APPROVAL / READY_TO_START | STARTABLE' "$ROOT/skills/build/SKILL.md" || fail "build skill does not expose READY_TO_START"
-grep -Fq '/loop /of-loop:build <run-id>' "$ROOT/skills/spec/SKILL.md" || fail "spec skill missing builder handoff"
-grep -Fq '/loop /of-loop:review <run-id>' "$ROOT/skills/spec/SKILL.md" || fail "spec skill missing reviewer handoff"
+grep -Fq 'ofloop supervisor enqueue <repo> <run-id>' "$ROOT/skills/spec/SKILL.md" || fail "spec skill missing supervisor enqueue handoff"
+grep -Fq '/of-loop:build <run-id>' "$ROOT/skills/spec/SKILL.md" || fail "spec skill missing optional foreground builder handoff"
+grep -Fq '/of-loop:review <run-id>' "$ROOT/skills/spec/SKILL.md" || fail "spec skill missing optional foreground reviewer handoff"
+if grep -Fq '/loop /of-loop:' "$ROOT/skills/spec/SKILL.md"; then
+  fail "spec skill reintroduced retired /loop scheduler"
+fi
 grep -Fq 'AWAITING_APPROVAL / READY_TO_START | WAIT' "$ROOT/skills/review/SKILL.md" || fail "review skill does not wait before first start"
 pass "active skills expose direct start semantics"
 
