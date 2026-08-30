@@ -715,12 +715,12 @@ def _pid_alive(pid: int | None, worker_started_at: float | None = None) -> bool:
 
 
 def _read_pid_start_identity(pid: int) -> str | None:
-    """Return an exact-enough kernel/process start identity for safe signalling.
+    """Return a durable exact process-start identity for safe signalling.
 
-    Linux uses /proc start ticks, which are exact for one boot. macOS uses the
-    process lstart record; equality is required, so inability to observe it
-    simply disables replacement-supervisor killing rather than weakening to a
-    bare PID.
+    Linux binds kernel start ticks to /proc's boot_id, preventing a false match
+    after reboot. Darwin reads proc_bsdinfo's microsecond start timestamp via
+    libproc rather than relying on second-granularity ps output. Failure to
+    obtain either identity is fail-safe: replacement recovery will not signal.
     """
     try:
         if sys.platform == "linux":
@@ -732,16 +732,59 @@ def _read_pid_start_identity(pid: int) -> str | None:
             fields = content[rp + 1:].split()
             if len(fields) < 20:
                 return None
-            return f"linux-startticks:{int(fields[19])}"
-        if sys.platform == "darwin":
-            r = subprocess.run(
-                ["ps", "-o", "lstart=", "-p", str(int(pid))],
-                capture_output=True, text=True, check=False, timeout=2,
-            )
-            raw = (r.stdout or "").strip()
-            if r.returncode != 0 or not raw:
+            with open("/proc/sys/kernel/random/boot_id", encoding="utf-8") as f:
+                boot_id = f.read().strip()
+            if not boot_id:
                 return None
-            return "darwin-lstart:" + " ".join(raw.split())
+            return f"linux-boot:{boot_id}:startticks:{int(fields[19])}"
+        if sys.platform == "darwin":
+            import ctypes
+
+            class _ProcBsdInfo(ctypes.Structure):
+                _fields_ = [
+                    ("pbi_flags", ctypes.c_uint32),
+                    ("pbi_status", ctypes.c_uint32),
+                    ("pbi_xstatus", ctypes.c_uint32),
+                    ("pbi_pid", ctypes.c_uint32),
+                    ("pbi_ppid", ctypes.c_uint32),
+                    ("pbi_uid", ctypes.c_uint32),
+                    ("pbi_gid", ctypes.c_uint32),
+                    ("pbi_ruid", ctypes.c_uint32),
+                    ("pbi_rgid", ctypes.c_uint32),
+                    ("pbi_svuid", ctypes.c_uint32),
+                    ("pbi_svgid", ctypes.c_uint32),
+                    ("rfu_1", ctypes.c_uint32),
+                    ("pbi_comm", ctypes.c_char * 16),
+                    ("pbi_name", ctypes.c_char * 32),
+                    ("pbi_nfiles", ctypes.c_uint32),
+                    ("pbi_pgid", ctypes.c_uint32),
+                    ("pbi_pjobc", ctypes.c_uint32),
+                    ("e_tdev", ctypes.c_uint32),
+                    ("e_tpgid", ctypes.c_uint32),
+                    ("pbi_nice", ctypes.c_int32),
+                    ("pbi_start_tvsec", ctypes.c_uint64),
+                    ("pbi_start_tvusec", ctypes.c_uint64),
+                ]
+
+            libproc = ctypes.CDLL("/usr/lib/libproc.dylib")
+            proc_pidinfo = libproc.proc_pidinfo
+            proc_pidinfo.argtypes = [
+                ctypes.c_int, ctypes.c_int, ctypes.c_uint64,
+                ctypes.c_void_p, ctypes.c_int,
+            ]
+            proc_pidinfo.restype = ctypes.c_int
+            info = _ProcBsdInfo()
+            PROC_PIDTBSDINFO = 3
+            size = ctypes.sizeof(info)
+            rc = int(proc_pidinfo(
+                int(pid), PROC_PIDTBSDINFO, 0, ctypes.byref(info), size
+            ))
+            if rc != size or int(info.pbi_pid) != int(pid):
+                return None
+            return (
+                f"darwin-start:{int(info.pbi_start_tvsec)}:"
+                f"{int(info.pbi_start_tvusec)}"
+            )
     except Exception:
         return None
     return None
