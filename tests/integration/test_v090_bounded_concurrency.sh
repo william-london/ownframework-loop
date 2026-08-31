@@ -388,6 +388,87 @@ finally:
 assert done_second.get("ok", True), done_second
 print("DONE_ROW_NOT_ETERNAL_WORKSPACE_OWNER=PASS")
 reset(done_second)
+
+# Operator lifecycle APIs resolve one logical Git repository across linked worktrees.
+op_repo = repo("operator-alias")
+op_linked = tmp / "operator-linked"
+op_linked2 = tmp / "operator-linked-2"
+git(op_repo, "worktree", "add", "-q", str(op_linked), "-b", "operator-linked-branch")
+git(op_repo, "worktree", "add", "-q", str(op_linked2), "-b", "operator-linked-branch-2")
+op_job = supervisor.enqueue(
+    canonical_repo=op_repo, run_id="operator-alias-run", db_path=db,
+    runtime_generation="test-generation",
+)
+root_status = supervisor.status(canonical_repo=op_repo, run_id="operator-alias-run", db_path=db)
+linked_status = supervisor.status(canonical_repo=op_linked, run_id="operator-alias-run", db_path=db)
+assert root_status["id"] == linked_status["id"] == op_job["id"], (root_status, linked_status)
+assert linked_status["repo"] == str(op_repo.resolve()), linked_status
+print("STATUS_LINKED_WORKTREE_ALIAS_PARITY=PASS")
+
+with supervisor._connect(db) as c:
+    now = time.time()
+    c.execute(
+        """INSERT INTO dispatch_holds(
+               hold_id,job_id,repo,run_id,kind,previous_checkpoint_id,
+               next_checkpoint_id,state,armed_at,held_at,updated_at
+           ) VALUES (?,?,?,?,?,?,?,'HELD',?,?,?)""",
+        ("operator-hold", op_job["id"], str(op_repo.resolve()), "operator-alias-run",
+         supervisor.DISPATCH_HOLD_KIND, "CP-1", "CP-2", now, now, now),
+    )
+    c.commit()
+hold_view = supervisor.dispatch_hold_status(
+    canonical_repo=op_linked, run_id="operator-alias-run",
+    hold_id="operator-hold", db_path=db,
+)
+assert hold_view.get("ok") is True and hold_view["job_id"] == op_job["id"], hold_view
+released = supervisor.release_dispatch_hold(
+    canonical_repo=op_linked, run_id="operator-alias-run",
+    hold_id="operator-hold", db_path=db,
+)
+assert released.get("released") is True, released
+print("HOLD_ALIAS_PARITY=PASS")
+
+with supervisor._connect(db) as c:
+    c.execute("UPDATE jobs SET status='QUARANTINED' WHERE id=?", (op_job["id"],))
+    c.commit()
+resumed = supervisor.resume(canonical_repo=op_linked, run_id="operator-alias-run", db_path=db)
+assert resumed.get("resumed") is True and resumed["id"] == op_job["id"], resumed
+assert resumed["repo"] == str(op_repo.resolve()), resumed
+print("RESUME_ALIAS_PARITY=PASS")
+
+with supervisor._connect(db) as c:
+    c.execute("UPDATE jobs SET status='QUARANTINED' WHERE id=?", (op_job["id"],))
+    c.commit()
+retired = supervisor.retire(canonical_repo=op_linked2, run_id="operator-alias-run", db_path=db)
+assert retired.get("retired") is True and retired["id"] == op_job["id"], retired
+assert retired["repo"] == str(op_repo.resolve()), retired
+print("RETIRE_ALIAS_PARITY=PASS")
+
+amb_db = tmp / "operator-ambiguous.sqlite3"
+amb_repo = repo("operator-ambiguous")
+amb_linked1 = tmp / "amb-linked-1"; amb_linked2 = tmp / "amb-linked-2"
+git(amb_repo, "worktree", "add", "-q", str(amb_linked1), "-b", "amb-linked-1")
+git(amb_repo, "worktree", "add", "-q", str(amb_linked2), "-b", "amb-linked-2")
+amb = supervisor.enqueue(canonical_repo=amb_repo, run_id="ambiguous-run", db_path=amb_db, runtime_generation="test-generation")
+with supervisor._connect(amb_db) as c:
+    row = c.execute("SELECT * FROM jobs WHERE id=?", (amb["id"],)).fetchone()
+    now = time.time()
+    c.execute(
+        """INSERT INTO jobs(
+             repo,run_id,runner,status,created_at,updated_at,runtime_generation,
+             repository_scheduling_key,repository_identity_proven,candidate_branch,
+             workspace_scheduling_key,workspace_identity_proven,execution_mode
+           ) VALUES (?,?,'claude-code','QUEUED',?,?,?, ?,1,?,?,1,'SINGLE')""",
+        (str(amb_linked1.resolve()), "ambiguous-run", now, now, "test-generation",
+         row["repository_scheduling_key"], "factory/candidate/ambiguous-other",
+         row["workspace_scheduling_key"] + "-duplicate"),
+    )
+    c.commit()
+ambiguous = supervisor.status(canonical_repo=amb_linked2, run_id="ambiguous-run", db_path=amb_db)
+assert ambiguous["status"] == "LEDGER_AMBIGUOUS", ambiguous
+assert ambiguous["reason"] == "logical_job_ambiguous", ambiguous
+print("AMBIGUOUS_LOGICAL_JOB_FAILS_CLOSED=PASS")
+
 four = []
 for i in range(4):
     try:
