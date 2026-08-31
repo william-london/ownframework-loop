@@ -1972,8 +1972,11 @@ def enqueue(
                 now,
             ),
         )
+        # Fetch the authoritative row by the durable unique enrollment key.
+        # On first enrollment there is intentionally no pre-existing row, while
+        # ON CONFLICT re-enrollment preserves the same (repo, run_id) identity.
         row = conn.execute(
-            "SELECT * FROM jobs WHERE id=?", (int(existing["id"]),)
+            "SELECT * FROM jobs WHERE repo=? AND run_id=?", (repo, run_id)
         ).fetchone()
         hold = _hold_row(conn, int(row["id"])) if row is not None else None
         if dispatch_hold_kind is not None:
