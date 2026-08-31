@@ -21,6 +21,7 @@ import sqlite3
 import shutil
 import stat
 import subprocess
+import threading
 import time
 import uuid
 from contextlib import contextmanager
@@ -45,6 +46,32 @@ DEFAULT_SEMANTIC_TIMEOUT_SECONDS = 3600
 # source immutability is structural, not merely a prompt/hook convention.
 CLAUDE_BUILDER_TOOLS = "Read,Edit,Write,NotebookEdit,Bash,Glob,Grep"
 CLAUDE_REVIEWER_TOOLS = "Read,Bash,Glob,Grep"
+
+# A worker child can finish before its execution lane has durably accounted the
+# result and finalized the engineering artifact. During that handoff window
+# the child PID is necessarily dead, but the current supervisor still owns the
+# job. Keep this narrow process-local fence so another lane in this same
+# supervisor cannot perform stale recovery against the lane that is finishing.
+# A replacement supervisor has a different process and an empty registry, so
+# crash recovery remains durable/ledger-authoritative rather than depending on
+# this optimization.
+_LOCAL_EXECUTION_LOCK = threading.Lock()
+_LOCAL_EXECUTION_JOBS: dict[int, set[int]] = {}
+
+
+def _register_local_execution(job_id: int) -> None:
+    with _LOCAL_EXECUTION_LOCK:
+        _LOCAL_EXECUTION_JOBS.setdefault(threading.get_ident(), set()).add(int(job_id))
+
+
+def _local_execution_owned(job_id: int) -> bool:
+    with _LOCAL_EXECUTION_LOCK:
+        return any(int(job_id) in jobs for jobs in _LOCAL_EXECUTION_JOBS.values())
+
+
+def _clear_local_executions_for_thread() -> None:
+    with _LOCAL_EXECUTION_LOCK:
+        _LOCAL_EXECUTION_JOBS.pop(threading.get_ident(), None)
 
 
 # A commissioned service may need provider authentication/model aliases that a
@@ -818,6 +845,7 @@ def _managed_connect(path: Path):
             yield conn
     finally:
         conn.close()
+        _clear_local_executions_for_thread()
 
 
 def _connect_readonly(path: Path) -> sqlite3.Connection:
@@ -1279,6 +1307,12 @@ def _recover_stale_running(conn: sqlite3.Connection) -> int:
         "SELECT * FROM jobs WHERE status='RUNNING' ORDER BY id"
     ).fetchall()
     for row in rows:
+        if _local_execution_owned(int(row["id"])):
+            # The current supervisor still has an execution lane finishing
+            # this job. Its child may already be gone while the lane is
+            # accounting output and finalizing the engineering artifact;
+            # recovery here would duplicate that pass and steal ownership.
+            continue
         # A concurrent execution lane records the supervisor PID while it is
         # between the durable RUNNING claim and semantic-attempt reservation.
         # Other lanes in this same supervisor must not mistake that short
@@ -3383,6 +3417,8 @@ def run_one(*, db_path: Path | None = None, timeout_seconds: int = 0) -> dict[st
         job = _take_next_job(conn)
         if job is None:
             return {"schema": SCHEMA, "ok": True, "action": "IDLE", "db_path": str(db)}
+
+        _register_local_execution(int(job["id"]))
 
         # RUNTIME-GENERATION CONTRACT. A job binds the generation that
         # enrolled it; executing it under a different generation is a

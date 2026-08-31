@@ -49,6 +49,25 @@ with supervisor._connect_readonly(db) as c:
     assert c.execute("select count(*) from jobs where status='RUNNING'").fetchone()[0] == 4
 print("FOUR_WAY_ATOMIC_CLAIM=PASS")
 
+# A semantic child can finish while its current supervisor lane is still
+# accounting/finalizing. Same-process stale recovery must not steal that
+# ownership; a replacement supervisor (with no local fence) must still be
+# able to recover the row. This is the regression for the Stage C duplicate
+# finalization / lost-RUNNING-ownership failure.
+handoff = jobs[0]
+with supervisor._connect(db) as c:
+    c.execute("UPDATE jobs SET status='RUNNING', worker_pid=999999, worker_started_at=?, worker_role='builder', worker_attempt_id=NULL WHERE id=?", (time.time(), handoff["id"]))
+    c.commit()
+supervisor._register_local_execution(int(handoff["id"]))
+with supervisor._connect(db) as c:
+    assert supervisor._recover_stale_running(c) == 0
+    assert c.execute("select status from jobs where id=?", (handoff["id"],)).fetchone()[0] == "RUNNING"
+supervisor._clear_local_executions_for_thread()
+with supervisor._connect(db) as c:
+    assert supervisor._recover_stale_running(c) == 1
+    assert c.execute("select status from jobs where id=?", (handoff["id"],)).fetchone()[0] == "QUEUED"
+print("SAME_SUPERVISOR_COMPLETION_HANDOFF_RECOVERY_FENCE=PASS")
+
 for j in jobs: reset(j)
 alias_target = repo("alias-target"); alias = tmp / "alias-link"; alias.symlink_to(alias_target, target_is_directory=True)
 same_a = enqueue(alias_target, "run-a"); same_b = enqueue(alias, "run-b")
