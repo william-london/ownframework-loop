@@ -358,6 +358,62 @@ assert identity_proven is False and identity_key.startswith("unproven-git:"), (
 )
 print("REAL_GIT_IDENTITY_UNCERTAINTY_FAILS_CLOSED=PASS")
 
+# Identity uncertainty is rejected at enrollment rather than left silently
+# queued forever in a background service.
+orig_identity = supervisor._repository_scheduling_identity
+supervisor._repository_scheduling_identity = lambda _p: ("unproven", False)
+try:
+    refused_identity = supervisor.enqueue(
+        canonical_repo=identity_repo,
+        run_id="identity-enqueue-refusal",
+        db_path=db,
+        runtime_generation="test-generation",
+    )
+finally:
+    supervisor._repository_scheduling_identity = orig_identity
+assert refused_identity.get("enqueue_refused") is True, refused_identity
+assert refused_identity.get("reason") == "repository_identity_unproven", refused_identity
+print("UNPROVEN_IDENTITY_ENQUEUE_REFUSED=PASS")
+
+# The same logical run cannot be registered again through another linked
+# worktree path of the same Git common directory.
+logical_repo = repo("logical-duplicate")
+logical_linked = tmp / "logical-linked"
+git(logical_repo, "worktree", "add", "-q", str(logical_linked), "-b", "logical-linked-branch")
+logical_first = enqueue(logical_repo, "logical-run")
+logical_second = supervisor.enqueue(
+    canonical_repo=logical_linked,
+    run_id="logical-run",
+    db_path=db,
+    runtime_generation="test-generation",
+)
+assert logical_second.get("enqueue_refused") is True, logical_second
+assert logical_second.get("reason") == "logical_run_already_enrolled_via_other_worktree", logical_second
+print("LOGICAL_RUN_ALIAS_DUPLICATE_REFUSED=PASS")
+reset(logical_first)
+
+# Two different runs may not reuse one candidate branch. This catches a
+# configuration mistake before worktree creation or semantic spend.
+branch_repo = repo("branch-enrollment-collision")
+orig_branch = supervisor.branch_resolver_mod.resolve_candidate_branch
+supervisor.branch_resolver_mod.resolve_candidate_branch = lambda *_a, **_k: "factory/candidate/shared"
+try:
+    branch_first = supervisor.enqueue(
+        canonical_repo=branch_repo, run_id="branch-first", db_path=db,
+        runtime_generation="test-generation",
+    )
+    branch_second = supervisor.enqueue(
+        canonical_repo=branch_repo, run_id="branch-second", db_path=db,
+        runtime_generation="test-generation",
+    )
+finally:
+    supervisor.branch_resolver_mod.resolve_candidate_branch = orig_branch
+assert branch_first.get("ok", True) is True, branch_first
+assert branch_second.get("enqueue_refused") is True, branch_second
+assert branch_second.get("reason") == "candidate_branch_already_enrolled", branch_second
+print("CANDIDATE_BRANCH_DUPLICATE_ENROLLMENT_REFUSED=PASS")
+reset(branch_first)
+
 # Re-enqueue cannot rewrite repository scheduling identity while a job owns a
 # live RUNNING slot.
 identity_job = enqueue(repo("identity-running"), "identity-running", "SINGLE")
