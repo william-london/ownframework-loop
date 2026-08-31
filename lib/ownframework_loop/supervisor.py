@@ -4895,8 +4895,11 @@ def retire(
                 "reason": "retire_lost_quarantine_race",
             })
             return result
+        # Read back the exact logical enrollment we just retired. The
+        # operator may have addressed it through a symlink or linked worktree,
+        # so the caller's literal repo path is not durable row identity.
         row = conn.execute(
-            "SELECT * FROM jobs WHERE repo=? AND run_id=?", (repo, run_id)
+            "SELECT * FROM jobs WHERE id=?", (int(existing["id"]),)
         ).fetchone()
     if row is None:
         return {
