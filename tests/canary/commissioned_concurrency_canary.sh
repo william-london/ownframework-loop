@@ -49,24 +49,45 @@ prepare(){
   local base="$STATE_ROOT/canaries/concurrency-canary-$(python3 -c 'import secrets; print(secrets.token_hex(4))')"; mkdir -m 700 -p "$base"
   local repos=() runs=(); local i r rid
   if [[ "$stage" == C ]]; then
-    # Stage C deliberately proves same-repository branch concurrency:
-    # four isolated runs/workspaces across only two Git repositories.
-    local physical
-    for physical in 0 1; do
-      r="$base/repo-$physical"; make_repo "$r"
-      for i in 0 1; do
-        local lane=$((physical * 2 + i))
-        "$OFLOOP" spec new "$r" "v090 commissioned C lane $lane" >/dev/null
-        rid="$(ls -1t "$r/.ownframework-loop" | head -n1)"
-        repos+=("$r"); runs+=("$rid")
-        make_single_packet "$r" "$rid" "$lane"
-        PYTHONPATH="$ROOT/lib" python3 - "$r" "$rid" <<'PY'
+    # Final N=4 acceptance shape: three PROGRAMs plus one SINGLE across three
+    # physical repositories, with PROGRAM A and SINGLE D sharing repo A but
+    # owning distinct candidate workspaces.
+    r="$base/repo-0"; make_repo "$r"
+
+    "$OFLOOP" spec new "$r" "v090 commissioned C PROGRAM A" >/dev/null
+    rid="$(ls -1t "$r/.ownframework-loop" | head -n1)"
+    repos+=("$r"); runs+=("$rid")
+    python3 "$HERE/commissioned_program_packet.py" "$r" "$r/.ownframework-loop/$rid/WORK_PACKET.md"
+    PYTHONPATH="$ROOT/lib" python3 - "$r" "$rid" <<'PY'
 import sys
 from pathlib import Path
 from ownframework_loop import execution_start
 execution_start.ensure_executable(canonical_repo=Path(sys.argv[1]), run_id=sys.argv[2], actor="v090-canary-preparer", binding_method="build_start")
 PY
-      done
+
+    "$OFLOOP" spec new "$r" "v090 commissioned C SINGLE D" >/dev/null
+    rid="$(ls -1t "$r/.ownframework-loop" | head -n1)"
+    repos+=("$r"); runs+=("$rid")
+    make_single_packet "$r" "$rid" "D"
+    PYTHONPATH="$ROOT/lib" python3 - "$r" "$rid" <<'PY'
+import sys
+from pathlib import Path
+from ownframework_loop import execution_start
+execution_start.ensure_executable(canonical_repo=Path(sys.argv[1]), run_id=sys.argv[2], actor="v090-canary-preparer", binding_method="build_start")
+PY
+
+    for physical in 1 2; do
+      r="$base/repo-$physical"; make_repo "$r"
+      "$OFLOOP" spec new "$r" "v090 commissioned C PROGRAM $physical" >/dev/null
+      rid="$(ls -1t "$r/.ownframework-loop" | head -n1)"
+      repos+=("$r"); runs+=("$rid")
+      python3 "$HERE/commissioned_program_packet.py" "$r" "$r/.ownframework-loop/$rid/WORK_PACKET.md"
+      PYTHONPATH="$ROOT/lib" python3 - "$r" "$rid" <<'PY'
+import sys
+from pathlib import Path
+from ownframework_loop import execution_start
+execution_start.ensure_executable(canonical_repo=Path(sys.argv[1]), run_id=sys.argv[2], actor="v090-canary-preparer", binding_method="build_start")
+PY
     done
   else
     local n=2
@@ -211,7 +232,7 @@ verify(){
 import json, sqlite3, sys
 from collections import defaultdict
 from pathlib import Path
-from ownframework_loop import state as state_mod
+from ownframework_loop import integrity, state as state_mod
 
 control_path = Path(sys.argv[1])
 c = json.loads(control_path.read_text())
@@ -243,6 +264,38 @@ for repo_text, rid in zip(c['repos'], c['runs']):
     state_doc = state_mod.load_verified(repo, rid)
     assert isinstance(state_doc, dict), (repo, rid, 'state missing')
     assert state_doc.get('state') == 'APPROVED', state_doc
+
+    # Replay deterministic BUILD/REVIEW finalization identity. Every finalized
+    # review must bind the exact candidate produced by the immediately
+    # preceding finalized build; duplicate review finalization without a new
+    # build is therefore impossible to hide behind non-overlapping timings.
+    events = integrity.read_event_chain(
+        repo / '.ownframework-loop' / rid / 'EVENTS.log'
+    )
+    last_build_sha = None
+    review_event_count = 0
+    for event in events:
+        event_type = str(event.get('event_type') or '')
+        if event_type == 'build_finalized':
+            event_sha = str(event.get('commit_sha') or '')
+            assert event_sha, (rid, 'build_finalized_missing_sha', event)
+            assert event_sha != last_build_sha, (
+                rid, 'duplicate_build_finalized_same_sha', event_sha
+            )
+            last_build_sha = event_sha
+        elif event_type == 'review_finalized':
+            event_sha = str(event.get('commit_sha') or '')
+            assert event_sha, (rid, 'review_finalized_missing_sha', event)
+            assert last_build_sha is not None, (
+                rid, 'review_finalized_without_preceding_build', event
+            )
+            assert event_sha == last_build_sha, (
+                rid, 'review_sha_mismatch', last_build_sha, event_sha
+            )
+            review_event_count += 1
+            last_build_sha = None
+    assert review_event_count >= 1, (rid, 'no_review_finalized_event')
+    assert last_build_sha is None, (rid, 'unreviewed_finalized_build', last_build_sha)
 
     verdict_path = repo / '.ownframework-loop' / rid / 'REVIEW_VERDICT.json'
     assert verdict_path.is_file(), verdict_path
@@ -315,16 +368,19 @@ assert all(workspace_keys) and len(set(workspace_keys)) == len(workspace_keys), 
 assert all(int(j['workspace_identity_proven'] or 0) == 1 for j in jobs)
 assert cross_repo_mixups == 0, cross_repo_mixups
 assert wrong_sha == 0, wrong_sha
+assert failed_attempts == 0, failed_attempts
 
 stage = c['stage']
 required_peak = 4 if stage == 'C' else 2
 assert peak >= required_peak, (stage, peak, required_peak)
 if stage == 'C':
-    assert len(set(repo_keys)) == 2, repo_keys
+    assert len(set(repo_keys)) == 3, repo_keys
     grouped = defaultdict(list)
     for job in jobs:
         grouped[str(job['repository_scheduling_key'])].append(str(job['workspace_scheduling_key']))
-    assert sorted(len(v) for v in grouped.values()) == [2, 2], grouped
+    assert sorted(len(v) for v in grouped.values()) == [1, 1, 2], grouped
+    modes = [str(job['execution_mode']) for job in jobs]
+    assert modes.count('PROGRAM') == 3 and modes.count('SINGLE') == 1, modes
 
 if stage == 'B':
     assert c.get('supervisor_restart_proven') is True, c
@@ -345,12 +401,15 @@ print('DISTINCT_REPOSITORIES=' + str(len(set(repo_keys))))
 print('DUPLICATE_ACTIVE_ATTEMPTS=0')
 print('LOST_RUNS=0')
 print('WRONG_SHA_REVIEWS=0')
+print('FAILED_SEMANTIC_ATTEMPTS=0')
+print('REVIEW_EVENT_CHAIN_SHA_COHERENT=PASS')
 print('CROSS_REPO_ATTEMPT_MIXUPS=0')
 print('LEDGER_COHERENCE=PASS')
 if stage != 'C':
     print('PEAK_ACTIVE_REPOSITORIES=' + str(peak))
 if stage == 'C':
     print('SAME_REPOSITORY_MULTI_WORKSPACE_PROOF=PASS')
+    print('MIXED_PROGRAM_SINGLE_FLEET=PASS')
 if stage == 'B':
     print('MULTI_INFLIGHT_BEFORE_RESTART=' + str(c['multi_inflight_before_restart']))
     print('SUPERVISOR_RESTART_PROVEN=yes')
