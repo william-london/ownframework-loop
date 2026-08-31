@@ -531,7 +531,7 @@ def worker_log_paths(
 # Historical rows may carry the old $25 / unlimited-token / 8h fingerprint,
 # but that tuple is indistinguishable from an operator explicitly selecting it.
 # Preserve it and mark ambiguity rather than inventing intent.
-SCHEMA_DATA_VERSION = 5
+SCHEMA_DATA_VERSION = 6
 _LEGACY_BUDGET_DEFAULT_FINGERPRINT = (25.0, 0, 28800)
 DEFAULT_MAX_CONCURRENCY = 1
 IMPLEMENTATION_MAX_CONCURRENCY = 64
@@ -610,6 +610,39 @@ def _apply_data_migrations(conn: sqlite3.Connection) -> None:
         conn.execute("PRAGMA user_version = 3")
         version = 3
     if version < 5:
+        conn.execute("PRAGMA user_version = 5")
+        version = 5
+    if version < 6:
+        # v0.9 scheduler metadata is operational authority for unfinished jobs.
+        # Reconstruct it exactly once from local repository/packet truth instead
+        # of paying for Git identity probes on every SQLite connection.
+        rows = conn.execute(
+            """SELECT id, repo, run_id, status
+                 FROM jobs"""
+        ).fetchall()
+        for row in rows:
+            status_value = str(row["status"] or "")
+            if status_value in {"DONE", "RETIRED"}:
+                continue
+            repo = Path(str(row["repo"] or "")).expanduser().resolve(strict=False)
+            if not repo.exists():
+                # Unfinished work whose repository disappeared remains
+                # identity-unproven and therefore cannot be scheduled.
+                conn.execute(
+                    "UPDATE jobs SET repository_identity_proven=0 WHERE id=?",
+                    (int(row["id"]),),
+                )
+                continue
+            key, proven = _repository_scheduling_identity(repo)
+            mode = _packet_execution_mode(repo, str(row["run_id"]))
+            conn.execute(
+                """UPDATE jobs
+                      SET repository_scheduling_key=?,
+                          repository_identity_proven=?,
+                          execution_mode=?
+                    WHERE id=?""",
+                (key, int(proven), mode, int(row["id"])),
+            )
         conn.execute(f"PRAGMA user_version = {SCHEMA_DATA_VERSION}")
         conn.commit()
 
@@ -820,19 +853,6 @@ def _connect(path: Path) -> sqlite3.Connection:
         "INSERT OR IGNORE INTO scheduler_meta(id, dispatch_sequence, single_since_program, updated_at) VALUES (1, 0, 0, ?)",
         (now,),
     )
-    # Safe, deterministic backfill for rows that still have a live checkout.
-    # Terminal historical rows with unavailable paths remain inspectable.
-    for row in conn.execute(
-        "SELECT id, repo, repository_scheduling_key, repository_identity_proven FROM jobs"
-    ).fetchall():
-        if str(row[2] or "") and int(row[3] or 0):
-            continue
-        if str(row[1]) and Path(str(row[1])).exists():
-            key, proven = _repository_scheduling_identity(Path(str(row[1])))
-            conn.execute(
-                "UPDATE jobs SET repository_scheduling_key=?, repository_identity_proven=? WHERE id=?",
-                (key, int(proven), int(row[0])),
-            )
     conn.commit()
     return conn
 

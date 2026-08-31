@@ -284,7 +284,16 @@ def write_skeleton(
     canonical_repo = Path(canonical_repo).resolve(strict=False)
     target = assessment_path(canonical_repo, run_id or "")
     if target.exists() and not overwrite:
-        return target
+        try:
+            existing = json.loads(target.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            existing = None
+        if isinstance(existing, dict):
+            return target
+        # A provider may leave truncated/non-JSON bytes after an interrupted or
+        # malformed semantic pass. Re-materialize only this deterministic,
+        # non-authoritative scratch skeleton; state/evidence is untouched and
+        # the retry remains on the same claimed review pass.
     skel = build_skeleton(canonical_repo, run_id, source_root=source_root)
     target.parent.mkdir(parents=True, exist_ok=True)
     util.atomic_write_json(target, skel, mode=0o600)

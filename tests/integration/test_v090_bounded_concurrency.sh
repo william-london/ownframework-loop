@@ -339,6 +339,83 @@ assert supervisor._local_execution_owned(int(nested_job["id"])) is False
 print("NESTED_CONNECTION_PRESERVES_EXECUTION_OWNERSHIP_FENCE=PASS")
 reset(nested_job)
 
+# v0.8.4 unfinished PROGRAM rows must get exact v0.9 scheduling identity and
+# execution class once. Later connections must not re-run Git backfill.
+migration_repo = repo("migration-program")
+migration_run = "migration-program"
+migration_dir = migration_repo / ".ownframework-loop" / migration_run
+migration_dir.mkdir(parents=True)
+fence = chr(96) * 3
+(migration_dir / "WORK_PACKET.md").write_text(
+    fence + 'json\n{"execution_mode":"program"}\n' + fence + '\n'
+)
+migration_job = supervisor.enqueue(
+    canonical_repo=migration_repo,
+    run_id=migration_run,
+    db_path=db,
+    runtime_generation="test-generation",
+)
+with supervisor._connect(db) as c:
+    c.execute(
+        """UPDATE jobs
+              SET repository_scheduling_key='', repository_identity_proven=0,
+                  execution_mode='SINGLE', status='QUEUED'
+            WHERE id=?""",
+        (migration_job["id"],),
+    )
+    c.execute("PRAGMA user_version = 5")
+    c.commit()
+with supervisor._connect(db) as c:
+    migrated = c.execute(
+        "SELECT * FROM jobs WHERE id=?", (migration_job["id"],)
+    ).fetchone()
+    assert int(c.execute("PRAGMA user_version").fetchone()[0]) == supervisor.SCHEMA_DATA_VERSION
+assert int(migrated["repository_identity_proven"]) == 1, dict(migrated)
+assert str(migrated["repository_scheduling_key"]) == str((migration_repo / ".git").resolve()), dict(migrated)
+assert str(migrated["execution_mode"]) == "PROGRAM", dict(migrated)
+orig_identity = supervisor._repository_scheduling_identity
+supervisor._repository_scheduling_identity = lambda _p: (_ for _ in ()).throw(
+    AssertionError("identity backfill unexpectedly repeated")
+)
+try:
+    with supervisor._connect(db):
+        pass
+finally:
+    supervisor._repository_scheduling_identity = orig_identity
+print("V084_UNFINISHED_PROGRAM_MIGRATION_ONE_TIME=PASS")
+reset(migration_job)
+
+# A malformed reviewer scratch file is deterministic non-authoritative state:
+# rebuild its same-pass skeleton instead of carrying broken JSON into another
+# paid retry.
+from ownframework_loop import assessment as assessment_mod
+assessment_repo = repo("assessment-repair")
+assessment_run = "assessment-repair"
+target = tmp / "malformed-review-assessment.json"
+target.write_text('{"schema":')
+orig_path = assessment_mod.assessment_path
+orig_build = assessment_mod.build_skeleton
+assessment_mod.assessment_path = lambda *_a, **_k: target
+assessment_mod.build_skeleton = lambda *_a, **_k: {
+    "schema": assessment_mod.SCHEMA_AGENT_ASSESSMENT,
+    "run_id": assessment_run,
+    "candidate_sha_claimed": "a" * 40,
+    "acceptance_results": [{"id": "AC-2", "result": "", "evidence": ""}],
+    "non_goal_results": [],
+    "findings": [],
+    "recommended_verdict": "HUMAN_REVIEW_REQUIRED",
+}
+try:
+    repaired_path = assessment_mod.write_skeleton(
+        assessment_repo, assessment_run, source_root=tmp
+    )
+finally:
+    assessment_mod.assessment_path = orig_path
+    assessment_mod.build_skeleton = orig_build
+repaired = __import__("json").loads(repaired_path.read_text())
+assert repaired["acceptance_results"][0]["id"] == "AC-2", repaired
+print("MALFORMED_REVIEW_SCRATCH_REBUILT_SAME_PASS=PASS")
+
 print("MODEL_FREE_CONCURRENCY_FAILURES=0")
 PY
 pass "bounded concurrency, repository exclusion, fairness, draining, hold isolation, and fleet contract"
