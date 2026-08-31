@@ -29,6 +29,7 @@ import json
 import os
 import pathlib
 import stat
+import subprocess
 import sys
 
 from ownframework_loop import runtime_env, supervisor
@@ -40,15 +41,41 @@ semantic = repo / ".ownframework-loop" / "run-secure" / "scratch" / "builder" / 
 worktree.mkdir(parents=True)
 semantic.parent.mkdir(parents=True)
 semantic.write_text("{}", encoding="utf-8")
+# The canonical source is a real Git repository. v0.9 resolves the shared
+# common-dir before constructing the sandbox, so this fixture must prove that
+# path rather than relying on a synthetic .git pathname.
+subprocess.run(["git", "init", "-q", "-b", "master", str(repo)], check=True)
 
 captured = {}
+real_popen = supervisor.subprocess.Popen
 class FakePopen:
     def __init__(self, cmd, **kw):
+        if (
+            len(cmd) >= 5
+            and cmd[0] == "git"
+            and cmd[1] == "-C"
+            and cmd[-2:] == ["rev-parse", "--git-common-dir"]
+        ):
+            self._delegate = real_popen(cmd, **kw)
+            return
         captured["cmd"] = list(cmd)
         captured["env"] = dict(kw.get("env") or {})
         raise SystemExit(0)
 
-real_popen = supervisor.subprocess.Popen
+    def __enter__(self):
+        if hasattr(self, "_delegate"):
+            return self._delegate.__enter__()
+        return self
+
+    def __exit__(self, *args):
+        if hasattr(self, "_delegate"):
+            return self._delegate.__exit__(*args)
+        return False
+
+    def __getattr__(self, name):
+        if "_delegate" in self.__dict__:
+            return getattr(self._delegate, name)
+        raise AttributeError(name)
 supervisor.subprocess.Popen = FakePopen
 os.environ["OFLOOP_CLAUDE_BIN"] = "/bin/sh"
 # Historical env tuning must not widen the product-owned sealed tool surface.
