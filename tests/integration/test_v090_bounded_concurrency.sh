@@ -347,7 +347,47 @@ assert worktrees.is_registered_worktree(recover_repo, Path(second_wt["path"]))
 ok, _ = worktrees.cleanup_builder_worktree(recover_repo, recover_run)
 assert ok
 print("SURVIVING_CANDIDATE_BRANCH_REATTACH=PASS")
+print("SAME_RUN_SURVIVING_BRANCH_REATTACH=PASS")
 
+# A fresh run may never silently adopt an unrelated pre-existing branch.
+foreign_repo = repo("preexisting-candidate")
+foreign_head = subprocess.run(
+    ["git", "-C", str(foreign_repo), "rev-parse", "HEAD"],
+    check=True, capture_output=True, text=True,
+).stdout.strip()
+foreign_branch = "factory/candidate/preexisting"
+git(foreign_repo, "branch", foreign_branch, foreign_head)
+try:
+    worktrees.add_builder_worktree(
+        foreign_repo, "fresh-run", branch=foreign_branch, base_sha=foreign_head
+    )
+except worktrees.WorktreeError as exc:
+    assert "without exact same-run Loop ownership provenance" in str(exc), exc
+else:
+    raise AssertionError("fresh run adopted an unrelated pre-existing candidate branch")
+print("PREEXISTING_UNOWNED_CANDIDATE_BRANCH_REFUSED=PASS")
+print("NEW_RUN_NEVER_ADOPTS_OLD_BRANCH_TIP=PASS")
+
+# DONE is historical evidence, not eternal workspace ownership in the scheduler.
+done_repo = repo("done-workspace-release")
+orig_resolver = supervisor.branch_resolver_mod.resolve_candidate_branch
+supervisor.branch_resolver_mod.resolve_candidate_branch = lambda *_a, **_k: "factory/candidate/reusable-name"
+try:
+    done_first = supervisor.enqueue(
+        canonical_repo=done_repo, run_id="done-first", db_path=db,
+        runtime_generation="test-generation",
+    )
+    assert done_first.get("ok", True), done_first
+    reset(done_first, "DONE")
+    done_second = supervisor.enqueue(
+        canonical_repo=done_repo, run_id="done-second", db_path=db,
+        runtime_generation="test-generation",
+    )
+finally:
+    supervisor.branch_resolver_mod.resolve_candidate_branch = orig_resolver
+assert done_second.get("ok", True), done_second
+print("DONE_ROW_NOT_ETERNAL_WORKSPACE_OWNER=PASS")
+reset(done_second)
 four = []
 for i in range(4):
     try:
