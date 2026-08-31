@@ -131,10 +131,20 @@ def add_builder_worktree(
         if base_sha is None:
             raise WorktreeError("cannot create builder worktree: canonical repo has no HEAD")
 
-        cmd = [
-            "git", "-C", str(canonical_repo), "worktree", "add",
-            "-b", branch, str(wt), base_sha,
-        ]
+        # If the frozen candidate branch survived while only its disposable
+        # worktree disappeared, reattach that branch instead of trying to
+        # recreate it with -b. Git itself refuses if another worktree already
+        # owns the branch, preserving single-workspace ownership.
+        if branch_exists(canonical_repo, branch):
+            cmd = [
+                "git", "-C", str(canonical_repo), "worktree", "add",
+                str(wt), branch,
+            ]
+        else:
+            cmd = [
+                "git", "-C", str(canonical_repo), "worktree", "add",
+                "-b", branch, str(wt), base_sha,
+            ]
         with flock_exclusive(_worktree_admin_lock_path(canonical_repo)):
             r = run_subprocess(cmd, timeout=30)
         if r.returncode != 0:
