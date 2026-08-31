@@ -8,7 +8,7 @@ TMP_ROOT="$TMP" PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$LIB_DIR" python3 -B - <<'
 import os, subprocess, tempfile, threading, time
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
-from ownframework_loop import dispatch, supervisor, worktrees
+from ownframework_loop import dispatch, guards, supervisor, worktrees
 
 tmp = Path(os.environ["TMP_ROOT"]); db = tmp / "supervisor.sqlite3"
 def git(repo, *args):
@@ -300,6 +300,29 @@ custom_job = supervisor.enqueue(
 assert custom_job.get("candidate_branch") == "factory/candidate/custom-preapproval", custom_job
 assert "factory/candidate/custom-preapproval" in custom_job["workspace_scheduling_key"], custom_job
 print("PREAPPROVAL_CUSTOM_BRANCH_WORKSPACE_IDENTITY=PASS")
+
+# Builder keeps normal source Git operations but may not mutate shared repo topology.
+for allowed in (
+    "git status", "git diff", "git log -1", "git show HEAD",
+    "git add src/app.py", "git commit -m test", "git rm src/old.py",
+    "git mv src/a.py src/b.py", "git restore src/app.py",
+):
+    assert guards.classify_bash_command(allowed, role="builder")["severity"] == "allowed", allowed
+for blocked in (
+    "git switch other", "git checkout other", "git update-ref refs/heads/x HEAD",
+    "git symbolic-ref HEAD refs/heads/x", "git worktree add ../x x",
+    "git worktree remove ../x", "git branch new-branch", "git branch -m moved",
+    "git stash", "git tag v-test", "git fetch origin", "git pull",
+):
+    verdict = guards.classify_bash_command(blocked, role="builder")
+    assert verdict["severity"] == "forbidden", (blocked, verdict)
+print("BUILDER_COMMIT_ALLOWED=PASS")
+print("BUILDER_STATUS_ALLOWED=PASS")
+print("BUILDER_BRANCH_TOPOLOGY_MUTATION_REFUSED=PASS")
+print("BUILDER_WORKTREE_TOPOLOGY_MUTATION_REFUSED=PASS")
+print("BUILDER_UPDATE_REF_REFUSED=PASS")
+print("BUILDER_SWITCH_BRANCH_REFUSED=PASS")
+print("BUILDER_STASH_REFUSED=PASS")
 reset(custom_job)
 
 # Recover a vanished disposable worktree by reattaching its surviving frozen branch.
