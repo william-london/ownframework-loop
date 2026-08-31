@@ -213,9 +213,21 @@ after = str(db.execute(
     "select runtime_generation from jobs where run_id=?", (ids[0],)
 ).fetchone()[0] or '')
 db.close()
+pre_restart_attempts = [
+    {
+        'job_id': int(row['id']),
+        'attempt_id': str(row['attempt_id']),
+        'role': str(row['role']),
+        'worker_pid': int(row['worker_pid']) if row['worker_pid'] is not None else None,
+        'worker_pgid': int(row['worker_pgid']) if row['worker_pgid'] is not None else None,
+        'worker_start_identity': str(row['worker_start_identity'] or ''),
+    }
+    for row in active
+]
 control.update({
     'supervisor_restart_proven': True,
     'multi_inflight_before_restart': len(active),
+    'pre_restart_attempts': pre_restart_attempts,
     'runtime_generation_before_restart': before,
     'runtime_generation_after_restart': after,
     'restart_at': time.time(),
@@ -389,6 +401,26 @@ if stage == 'B':
     after = str(c.get('runtime_generation_after_restart') or '')
     assert before and before == after, (before, after)
 
+    pre_restart = list(c.get('pre_restart_attempts') or [])
+    assert len(pre_restart) >= 2, pre_restart
+    for snapshot in pre_restart:
+        rows = list(db.execute(
+            'select * from semantic_attempts where attempt_id=?',
+            (snapshot['attempt_id'],),
+        ))
+        assert len(rows) == 1, (snapshot, [dict(row) for row in rows])
+        row = rows[0]
+        assert int(row['job_id']) == int(snapshot['job_id']), (snapshot, dict(row))
+        assert str(row['role']) == str(snapshot['role']), (snapshot, dict(row))
+        assert row['status'] in terminal_attempt_statuses, (snapshot, dict(row))
+        if snapshot.get('worker_pid') is not None:
+            assert int(row['worker_pid']) == int(snapshot['worker_pid']), (snapshot, dict(row))
+        if snapshot.get('worker_pgid') is not None:
+            assert int(row['worker_pgid']) == int(snapshot['worker_pgid']), (snapshot, dict(row))
+        assert str(row['worker_start_identity'] or '') == str(
+            snapshot.get('worker_start_identity') or ''
+        ), (snapshot, dict(row))
+
 total_attempts = len(attempt_ids)
 db.close()
 
@@ -414,6 +446,7 @@ if stage == 'B':
     print('MULTI_INFLIGHT_BEFORE_RESTART=' + str(c['multi_inflight_before_restart']))
     print('SUPERVISOR_RESTART_PROVEN=yes')
     print('RUNTIME_GENERATION_STABLE=yes')
+    print('RESTART_ATTEMPT_RECONCILIATION=PASS')
 PY
 }
 destroy(){
