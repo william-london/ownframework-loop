@@ -29,7 +29,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import branch_resolver as branch_resolver_mod, dispatch as dispatch_mod, dispatch_hold as dispatch_hold_mod, packet as packet_mod, runtime_env, state as state_mod, util, runtime_identity
+from . import approval as approval_mod, branch_resolver as branch_resolver_mod, dispatch as dispatch_mod, dispatch_hold as dispatch_hold_mod, packet as packet_mod, runtime_env, state as state_mod, util, runtime_identity
 
 SCHEMA = "ownframework-loop-supervisor/v1"
 DISPATCH_HOLD_KIND = "PROGRAM_CHECKPOINT_BOUNDARY"
@@ -585,7 +585,17 @@ def _workspace_scheduling_identity(
     if not repository_proven or not repository_key:
         return "", "", False
     try:
-        branch = branch_resolver_mod.resolve_candidate_branch(repo, run_id)
+        approval_doc = approval_mod.load_approval(repo, run_id)
+        if isinstance(approval_doc, dict) and approval_doc.get("candidate_branch"):
+            branch = branch_resolver_mod.resolve_candidate_branch(repo, run_id)
+        else:
+            packet_path = state_mod.run_dir(repo, run_id) / "WORK_PACKET.md"
+            packet_meta = None
+            if packet_path.exists():
+                packet_meta, _ = packet_mod.parse_packet_file(packet_path)
+            branch = branch_resolver_mod.resolve_candidate_branch(
+                repo, run_id, packet=packet_meta
+            )
     except Exception:
         return "", "", False
     if not isinstance(branch, str) or not branch.strip():
