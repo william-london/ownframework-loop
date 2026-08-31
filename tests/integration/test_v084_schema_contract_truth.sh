@@ -214,19 +214,48 @@ BAD_PACKET_REPO="$(make_tmp_repo)"
 "$OFLOOP_BIN" spec new "$BAD_PACKET_REPO" "schema-preseal-rejection" >/dev/null
 BAD_PACKET_RID="$(ls -1t "$BAD_PACKET_REPO/.ownframework-loop" | head -n1)"
 BAD_PACKET_PATH="$BAD_PACKET_REPO/.ownframework-loop/$BAD_PACKET_RID/WORK_PACKET.md"
-python3 - "$BAD_PACKET_PATH" <<'PY'
+python3 - "$BAD_PACKET_PATH" "$BAD_PACKET_REPO" <<'PY'
 import json,sys
 from pathlib import Path
 from ownframework_loop import packet
-p=Path(sys.argv[1])
-meta,text=packet.parse_packet_file(p)
-meta["acceptance_criteria"][0]["id"]="AC-BAD"
+
+p=Path(sys.argv[1]); repo=str(Path(sys.argv[2]).resolve())
+valid={
+ "schema":"ownframework-work-packet/v3","packet_id":"schema-preseal-filesystem",
+ "created_at":"2026-08-30T00:00:00Z","work_class":"FEATURE","risk_class":"low",
+ "title":"filesystem schema preseal proof",
+ "target":{"repo":repo,"branch":"master","classification":"local_only"},
+ "execution_mode":"program",
+ "checkpoint_graph":{
+   "execution_order":["CP-1","CP-2"],
+   "checkpoints":[
+     {"id":"CP-1","title":"one","scope":"src/","depends_on":[],"acceptance_criterion_ids":["AC-1"],
+      "risk_budget":{"max_build_passes":2,"max_review_passes":2,"max_repair_rounds":1}},
+     {"id":"CP-2","title":"two","scope":"src/","depends_on":["CP-1"],"acceptance_criterion_ids":["AC-2"],
+      "risk_budget":{"max_build_passes":2,"max_review_passes":2,"max_repair_rounds":1}}
+   ]
+ },
+ "promotion_policy":"human_gate",
+ "acceptance_criteria":[{"id":"AC-1","text":"one"},{"id":"AC-2","text":"two"}],
+ "non_goals":[{"id":"NG-1","text":"preserve unrelated behavior"}],
+ "allowed_paths":["src/"],"protected_paths":[".ownframework-loop/"],
+ "work_units":[{"id":"UNIT-1","title":"program","scope":"src/"}],
+ "merge_authority":"human_only","deploy_authority":"human_only","push_authority":"human_only",
+ "external_action_authority":"none",
+ "risk_budget":{"max_build_passes":4,"max_review_passes":4,"max_repair_rounds":2,"max_files_changed":25,"max_diff_lines":1000}
+}
+errors=packet.validate_packet_for_approval(valid)
+assert errors == [], errors
 fence=chr(96)*3
-start=text.find(fence+"json")
-end=text.find("\n"+fence,start)
-assert start >= 0 and end >= 0
-replacement=fence+"json\n"+json.dumps(meta,sort_keys=True)+"\n"+fence
-p.write_text(text[:start]+replacement+text[end+4:])
+p.write_text(fence+"json\n"+json.dumps(valid,sort_keys=True)+"\n"+fence+"\n")
+roundtrip,_=packet.parse_packet_file(p)
+assert packet.validate_packet_for_approval(roundtrip) == []
+
+roundtrip["acceptance_criteria"][0]["id"]="AC-BAD"
+p.write_text(fence+"json\n"+json.dumps(roundtrip,sort_keys=True)+"\n"+fence+"\n")
+bad_errors=packet.validate_packet_for_approval(roundtrip)
+assert bad_errors and bad_errors[0].startswith("schema:"), bad_errors
+print("BAD_PACKET_VALID_FIXTURE_THEN_CORRUPT=PASS")
 PY
 set +e
 BAD_PRESEAL_OUT="$(python3 - "$BAD_PACKET_REPO" "$BAD_PACKET_RID" <<'PY' 2>&1
@@ -240,8 +269,18 @@ BAD_PRESEAL_RC=$?
 set -e
 [[ "$BAD_PRESEAL_RC" -ne 0 ]] || fail "schema-invalid packet unexpectedly sealed"
 printf '%s' "$BAD_PRESEAL_OUT" | grep -Fq "packet invalid: schema:" || fail "schema-invalid packet refusal was not structural"
-[[ ! -e "$BAD_PACKET_REPO/.ownframework-loop/$BAD_PACKET_RID/APPROVAL.json" ]] || fail "schema-invalid packet created execution seal"
+BAD_RUN_DIR="$BAD_PACKET_REPO/.ownframework-loop/$BAD_PACKET_RID"
+[[ ! -e "$BAD_RUN_DIR/APPROVAL.json" ]] || fail "schema-invalid packet created execution seal"
+[[ ! -e "$BAD_RUN_DIR/BUILD_RECEIPT.json" ]] || fail "schema-invalid packet created build receipt"
+assert_eq "$(jq -r '.build_pass_count' "$BAD_RUN_DIR/STATE.json")" "0" "schema-invalid packet cannot claim BUILD"
+assert_eq "$(jq -r '.review_pass_count' "$BAD_RUN_DIR/STATE.json")" "0" "schema-invalid packet cannot claim REVIEW"
+assert_eq "$(jq -r '.repair_round' "$BAD_RUN_DIR/STATE.json")" "0" "schema-invalid packet cannot fund repair"
+if find "$BAD_RUN_DIR" -type f -name 'BUILD_AGENT_RESULT.json' -print -quit | grep -q .; then
+  fail "schema-invalid packet created semantic builder output"
+fi
 echo "PACKET_SCHEMA_PRESEAL_REJECTION=PASS"
+echo "PACKET_SCHEMA_PRESEAL_NO_BUILD_CLAIM=PASS"
+echo "PACKET_SCHEMA_PRESEAL_NO_SEMANTIC_WORK=PASS"
 
 python3 - <<'PY'
 import json
