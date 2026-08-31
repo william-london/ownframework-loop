@@ -155,7 +155,7 @@ cat > "$ASSESSMENT" <<JSON
   "schema": "ownframework-loop-review-agent-assessment/v1",
   "run_id": "$RID",
   "candidate_sha_claimed": "$(cat "$T/.ownframework-loop/$RID/BUILD_RECEIPT.json" | python3 -c "import json,sys; print(json.load(sys.stdin)['candidate_sha'])")",
-  "acceptance_results": [{"id": "AC-1", "result": "pass", "notes": "ok"}],
+  "acceptance_results": [{"id": "AC-1", "result": "pass", "evidence": "lifecycle exact-SHA review"}],
   "non_goal_results": [],
   "findings": [],
   "recommended_verdict": "APPROVED"
