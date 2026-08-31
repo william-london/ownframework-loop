@@ -1697,6 +1697,21 @@ def enqueue(
     )
     execution_mode = _packet_execution_mode(Path(repo), run_id)
     db = db_path or default_db_path()
+    if not identity_proven or not workspace_proven:
+        return {
+            "schema": SCHEMA,
+            "ok": False,
+            "db_path": str(db),
+            "repo": repo,
+            "run_id": run_id,
+            "enqueue_refused": True,
+            "reason": (
+                "repository_identity_unproven"
+                if not identity_proven
+                else "workspace_identity_unproven"
+            ),
+            "candidate_branch": candidate_branch or None,
+        }
     now = time.time()
     eff_generation = (
         runtime_generation if runtime_generation is not None
@@ -1708,6 +1723,45 @@ def enqueue(
     # between the status/generation check and this upsert.
     with _managed_connect(db) as conn:
         conn.execute("BEGIN IMMEDIATE")
+        logical_existing = conn.execute(
+            """SELECT * FROM jobs
+                 WHERE repository_scheduling_key=? AND run_id=? AND repo!=?
+                 ORDER BY id LIMIT 1""",
+            (scheduling_key, run_id, repo),
+        ).fetchone()
+        if logical_existing is not None:
+            out = dict(logical_existing)
+            out.update({
+                "schema": SCHEMA,
+                "ok": False,
+                "db_path": str(db),
+                "enqueue_refused": True,
+                "reason": "logical_run_already_enrolled_via_other_worktree",
+                "requested_repo": repo,
+            })
+            return out
+
+        branch_existing = conn.execute(
+            """SELECT * FROM jobs
+                 WHERE repository_scheduling_key=? AND candidate_branch=?
+                   AND run_id!=? AND status!='RETIRED'
+                 ORDER BY id LIMIT 1""",
+            (scheduling_key, candidate_branch, run_id),
+        ).fetchone()
+        if branch_existing is not None:
+            out = dict(branch_existing)
+            out.update({
+                "schema": SCHEMA,
+                "ok": False,
+                "db_path": str(db),
+                "enqueue_refused": True,
+                "reason": "candidate_branch_already_enrolled",
+                "requested_repo": repo,
+                "requested_run_id": run_id,
+                "candidate_branch": candidate_branch,
+            })
+            return out
+
         existing = conn.execute(
             "SELECT * FROM jobs WHERE repo=? AND run_id=?", (repo, run_id)
         ).fetchone()
