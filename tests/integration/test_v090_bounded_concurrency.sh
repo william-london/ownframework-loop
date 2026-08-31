@@ -116,7 +116,7 @@ print("MULTI_WORKER_STALE_RECOVERY=PASS")
 for j in jobs: reset(j)
 alias_target = repo("alias-target"); alias = tmp / "alias-link"; alias.symlink_to(alias_target, target_is_directory=True)
 same_a = enqueue(alias_target, "run-a"); same_b = enqueue(alias, "run-b")
-assert same_a["repository_scheduling_key"] == same_b["repository_scheduling_key"]
+assert same_a["repository_scheduling_key"] == same_b["repository_scheduling_key"], (same_a["repo"], same_b["repo"], same_a["repository_scheduling_key"], same_b["repository_scheduling_key"], same_a.get("candidate_branch"), same_b.get("candidate_branch"), same_a.get("workspace_scheduling_key"), same_b.get("workspace_scheduling_key"))
 assert same_a["workspace_scheduling_key"] != same_b["workspace_scheduling_key"]
 linked = tmp / "linked"; git(alias_target, "worktree", "add", "-q", str(linked), "-b", "linked-branch")
 same_c = enqueue(linked, "run-c")
