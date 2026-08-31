@@ -230,6 +230,14 @@ fallback_owner = enqueue(fallback_repo, "fallback-owner", "SINGLE")
 fallback_blocked = enqueue(fallback_repo, "fallback-blocked", "SINGLE")
 fallback_program = enqueue(repo("fallback-program"), "fallback-program", "PROGRAM")
 with supervisor._connect(db) as c:
+    owner = c.execute("SELECT * FROM jobs WHERE id=?", (fallback_owner["id"],)).fetchone()
+    c.execute(
+        """UPDATE jobs
+              SET candidate_branch=?, workspace_scheduling_key=?,
+                  workspace_identity_proven=1
+            WHERE id=?""",
+        (owner["candidate_branch"], owner["workspace_scheduling_key"], fallback_blocked["id"]),
+    )
     c.execute(
         "UPDATE jobs SET status='RUNNING', worker_pid=?, worker_started_at=?, worker_role='builder' WHERE id=?",
         (os.getpid(), time.time(), fallback_owner["id"]),
@@ -385,6 +393,8 @@ with supervisor._connect(db) as c:
     c.execute(
         """UPDATE jobs
               SET repository_scheduling_key='', repository_identity_proven=0,
+                  candidate_branch='', workspace_scheduling_key='',
+                  workspace_identity_proven=0,
                   execution_mode='SINGLE', status='QUEUED'
             WHERE id=?""",
         (migration_job["id"],),
@@ -398,6 +408,9 @@ with supervisor._connect(db) as c:
     assert int(c.execute("PRAGMA user_version").fetchone()[0]) == supervisor.SCHEMA_DATA_VERSION
 assert int(migrated["repository_identity_proven"]) == 1, dict(migrated)
 assert str(migrated["repository_scheduling_key"]) == str((migration_repo / ".git").resolve()), dict(migrated)
+assert str(migrated["candidate_branch"]) == "factory/candidate/migration-program", dict(migrated)
+assert int(migrated["workspace_identity_proven"]) == 1, dict(migrated)
+assert migrated["workspace_scheduling_key"], dict(migrated)
 assert str(migrated["execution_mode"]) == "PROGRAM", dict(migrated)
 orig_identity = supervisor._repository_scheduling_identity
 supervisor._repository_scheduling_identity = lambda _p: (_ for _ in ()).throw(
