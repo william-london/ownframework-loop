@@ -117,16 +117,42 @@ for j in jobs: reset(j)
 alias_target = repo("alias-target"); alias = tmp / "alias-link"; alias.symlink_to(alias_target, target_is_directory=True)
 same_a = enqueue(alias_target, "run-a"); same_b = enqueue(alias, "run-b")
 assert same_a["repository_scheduling_key"] == same_b["repository_scheduling_key"]
+assert same_a["workspace_scheduling_key"] != same_b["workspace_scheduling_key"]
 linked = tmp / "linked"; git(alias_target, "worktree", "add", "-q", str(linked), "-b", "linked-branch")
-same_c = enqueue(linked, "run-c"); assert same_a["repository_scheduling_key"] == same_c["repository_scheduling_key"]
+same_c = enqueue(linked, "run-c")
+assert same_a["repository_scheduling_key"] == same_c["repository_scheduling_key"]
+assert len({same_a["workspace_scheduling_key"], same_b["workspace_scheduling_key"], same_c["workspace_scheduling_key"]}) == 3
 clone = tmp / "independent-clone"; subprocess.run(["git", "clone", "-q", str(alias_target), str(clone)], check=True)
-same_d = enqueue(clone, "run-d"); assert same_d["repository_scheduling_key"] != same_a["repository_scheduling_key"]
+same_d = enqueue(clone, "run-d")
+assert same_d["repository_scheduling_key"] != same_a["repository_scheduling_key"]
 with supervisor._connect(db) as c:
-    first = supervisor._take_next_job(c); second = supervisor._take_next_job(c)
-assert first is not None and second is not None and first["repository_scheduling_key"] != second["repository_scheduling_key"]
-print("GIT_COMMON_DIR_REPOSITORY_EXCLUSION=PASS")
+    branch_claims = [supervisor._take_next_job(c) for _ in range(4)]
+assert all(branch_claims), [dict(x) if x is not None else None for x in branch_claims]
+assert len({int(x["id"]) for x in branch_claims}) == 4
+assert sum(1 for x in branch_claims if x["repository_scheduling_key"] == same_a["repository_scheduling_key"]) == 3
+print("SAME_REPOSITORY_DISTINCT_BRANCH_CONCURRENCY=PASS")
 
+# Same candidate branch/workspace remains exclusive even when run ids differ.
 for j in (same_a, same_b, same_c, same_d): reset(j)
+collision_repo = repo("branch-collision")
+collision_a = enqueue(collision_repo, "collision-a")
+collision_b = enqueue(collision_repo, "collision-b")
+with supervisor._connect(db) as c:
+    a = c.execute("SELECT * FROM jobs WHERE id=?", (collision_a["id"],)).fetchone()
+    c.execute(
+        """UPDATE jobs
+              SET candidate_branch=?, workspace_scheduling_key=?,
+                  workspace_identity_proven=1
+            WHERE id=?""",
+        (a["candidate_branch"], a["workspace_scheduling_key"], collision_b["id"]),
+    )
+    c.commit()
+    first = supervisor._take_next_job(c)
+    second = supervisor._take_next_job(c)
+assert first is not None and second is None
+print("SAME_CANDIDATE_BRANCH_EXCLUSION=PASS")
+
+for j in (collision_a, collision_b): reset(j)
 four = []
 for i in range(4):
     try:
