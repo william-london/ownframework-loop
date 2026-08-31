@@ -29,7 +29,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import approval as approval_mod, branch_resolver as branch_resolver_mod, dispatch as dispatch_mod, dispatch_hold as dispatch_hold_mod, packet as packet_mod, runtime_env, state as state_mod, util, runtime_identity
+from . import approval as approval_mod, branch_resolver as branch_resolver_mod, dispatch as dispatch_mod, dispatch_hold as dispatch_hold_mod, git_checks, packet as packet_mod, runtime_env, state as state_mod, util, runtime_identity
 
 SCHEMA = "ownframework-loop-supervisor/v1"
 DISPATCH_HOLD_KIND = "PROGRAM_CHECKPOINT_BOUNDARY"
@@ -338,7 +338,7 @@ def _semantic_worker_settings(
         str(semantic_path.parent.resolve(strict=False)),
         str(run_evidence_dir),
         str(cache_root.resolve(strict=False)),
-        str((canonical_repo / ".git").resolve(strict=False)),
+        str((git_checks.git_common_dir(canonical_repo) or (canonical_repo / ".git")).resolve(strict=False)),
         str(_source_root().resolve(strict=False)),
         *_parse_adapter_auth_read_paths(),
     })
@@ -539,34 +539,14 @@ _CONFIG_MAX_CONCURRENCY = "max_concurrency"
 
 
 def _repository_scheduling_identity(repo: Path) -> tuple[str, bool]:
-    """Return the operational identity shared by aliases and linked worktrees.
-
-    Git's common directory is deliberately used instead of a remote URL: two
-    independent clones are independent scheduler resources, while path and
-    linked-worktree aliases share the same common directory.
-    """
+    """Return Git-common-dir repository identity for aliases/worktrees."""
     resolved = Path(repo).expanduser().resolve(strict=False)
-    try:
-        probe = subprocess.run(
-            ["git", "-C", str(resolved), "rev-parse", "--git-common-dir"],
-            capture_output=True, text=True, timeout=10, check=True,
-        )
-        raw = probe.stdout.strip()
-        common = Path(raw)
-        if not common.is_absolute():
-            common = resolved / common
-        return str(common.resolve(strict=False)), True
-    except (OSError, subprocess.SubprocessError):
-        # A real Git repository whose common-dir identity cannot be proven must
-        # fail closed. Falling back to a merely textual path here can split one
-        # repository into several scheduler identities under aliases and permit
-        # concurrent semantic work against the same Git object database.
-        if (resolved / ".git").exists():
-            return f"unproven-git:{resolved}", False
-        # Small protocol/unit fixtures may intentionally use an ordinary
-        # directory with mocked dispatch. Preserve that narrow path-scoped
-        # identity without weakening real Git enrollment.
-        return f"path:{resolved}", resolved.exists()
+    common = git_checks.git_common_dir(resolved)
+    if common is not None:
+        return str(common), True
+    if (resolved / ".git").exists():
+        return f"unproven-git:{resolved}", False
+    return f"path:{resolved}", resolved.exists()
 
 
 def _workspace_scheduling_identity(
