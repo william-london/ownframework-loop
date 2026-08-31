@@ -5,7 +5,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 TMP="$(mktemp -d -t ofloop-v090-concurrency.XXXXXX)"
 trap 'rm -rf "$TMP"' EXIT
 TMP_ROOT="$TMP" PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$LIB_DIR" python3 -B - <<'PY'
-import os, subprocess, tempfile, threading, time
+import hashlib, os, sqlite3, subprocess, tempfile, threading, time
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 from ownframework_loop import dispatch, guards, supervisor, worktrees
@@ -861,6 +861,38 @@ assert supervisor._scheduler_submission_budget(
     db_path=idle_db, configured=1, local_inflight=0
 ) == 1
 print("HIGH_CAPACITY_BACKGROUND_PROBE_BUDGET=PASS")
+
+# Untouched pre-v0.9 ledgers remain inspectable through read-only APIs without migration.
+legacy_repo = repo("legacy-readonly")
+legacy_db = tmp / "legacy-readonly.sqlite3"
+raw = sqlite3.connect(legacy_db)
+raw.execute(
+    """CREATE TABLE jobs(
+         id INTEGER PRIMARY KEY AUTOINCREMENT, repo TEXT NOT NULL, run_id TEXT NOT NULL,
+         runner TEXT NOT NULL DEFAULT 'claude-code', status TEXT NOT NULL,
+         created_at REAL NOT NULL, updated_at REAL NOT NULL,
+         runtime_generation TEXT NOT NULL DEFAULT ''
+       )"""
+)
+raw.execute(
+    "INSERT INTO jobs(repo,run_id,status,created_at,updated_at,runtime_generation) VALUES (?,?,?,?,?,?)",
+    (str(legacy_repo.resolve()), "legacy-run", "QUEUED", 1.0, 1.0, "legacy-generation"),
+)
+raw.commit(); raw.close()
+before_digest = hashlib.sha256(legacy_db.read_bytes()).hexdigest()
+legacy_status = supervisor.status(canonical_repo=legacy_repo, run_id="legacy-run", db_path=legacy_db)
+legacy_config = supervisor.supervisor_config_get(db_path=legacy_db)
+legacy_fleet = supervisor.fleet_status(db_path=legacy_db)
+after_digest = hashlib.sha256(legacy_db.read_bytes()).hexdigest()
+assert legacy_status.get("status") == "QUEUED", legacy_status
+assert legacy_config["max_concurrency"] == 1 and legacy_config["schema_migration_required"] is True, legacy_config
+assert legacy_fleet["legacy_serial_projection"] is True, legacy_fleet
+assert legacy_fleet["configured_max_concurrency"] == 1, legacy_fleet
+assert before_digest == after_digest, (before_digest, after_digest)
+print("V084_LEDGER_READONLY_STATUS=PASS")
+print("V084_LEDGER_READONLY_FLEET=PASS")
+print("V084_LEDGER_READONLY_CONFIG=PASS")
+print("READ_ONLY_LEDGER_SHA_UNCHANGED=PASS")
 
 print("MODEL_FREE_CONCURRENCY_FAILURES=0")
 PY
