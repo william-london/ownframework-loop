@@ -185,12 +185,30 @@ def make_repo(label: str) -> Path:
     if r.exists():
         shutil.rmtree(r)
     r.mkdir()
-    (r / ".ownframework-loop" / f"run-{label}").mkdir(parents=True)
-    (r / ".ownframework-loop" / f"run-{label}" / "STATE.json").write_text(
+    subprocess.run(["git", "init", "-q", "-b", "master", str(r)], check=True)
+    subprocess.run(["git", "-C", str(r), "config", "user.email", "test@localhost"], check=True)
+    subprocess.run(["git", "-C", str(r), "config", "user.name", "OwnFramework Test"], check=True)
+    (r / "README.md").write_text("fixture\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(r), "add", "README.md"], check=True)
+    subprocess.run(["git", "-C", str(r), "commit", "-qm", "fixture"], check=True)
+
+    run_dir = r / ".ownframework-loop" / f"run-{label}"
+    run_dir.mkdir(parents=True)
+    run_dir.joinpath("STATE.json").write_text(
         json.dumps({"state": "BUILDING", "label": label}), encoding="utf-8"
     )
-    (r / ".ownframework-loop" / f"run-{label}" / "WORK_PACKET.md").write_text(
-        f"# Packet for {label}\n", encoding="utf-8"
+    packet_meta = {
+        "schema": "ownframework-work-packet/v2",
+        "target": {
+            "repo": str(r.resolve()),
+            "branch": "master",
+            "classification": "local_only",
+        },
+    }
+    fence = chr(96) * 3
+    run_dir.joinpath("WORK_PACKET.md").write_text(
+        fence + "json\n" + json.dumps(packet_meta, sort_keys=True) + "\n" + fence + "\n",
+        encoding="utf-8",
     )
     return r
 
