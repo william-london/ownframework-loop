@@ -5,7 +5,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 TMP="$(mktemp -d -t ofloop-v090-concurrency.XXXXXX)"
 trap 'rm -rf "$TMP"' EXIT
 TMP_ROOT="$TMP" PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$LIB_DIR" python3 -B - <<'PY'
-import os, subprocess, tempfile, time
+import os, subprocess, tempfile, threading, time
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 from ownframework_loop import dispatch, supervisor, worktrees
@@ -113,6 +113,114 @@ with supervisor._connect(stale_db) as c:
     assert recovered_attempts == 2, (recovered_stale, queued_stale, recovered_attempts)
 print("MULTI_WORKER_STALE_RECOVERY=PASS")
 
+# Two stale-recovery callers may observe the same old owner. One may recover
+# and the scheduler may legitimately reclaim the job before the slower caller
+# resumes. The stale caller must not overwrite the new RUNNING ownership.
+race_db = tmp / "recovery-race.sqlite3"
+race_repo = repo("recovery-race")
+race_job = supervisor.enqueue(
+    canonical_repo=race_repo, run_id="recovery-race", db_path=race_db,
+    runtime_generation="test-generation",
+)
+old_attempt = "recovery-race-old-attempt"
+with supervisor._connect(race_db) as c:
+    observed_started = time.time()
+    c.execute(
+        """UPDATE jobs SET status='RUNNING', worker_pid=999999, worker_pgid=999999,
+                  worker_started_at=?, worker_deadline_at=?,
+                  worker_start_identity='old-owner', worker_role='builder',
+                  worker_attempt_id=?, latest_attempt_id=?
+            WHERE id=?""",
+        (observed_started, observed_started + 600, old_attempt, old_attempt, race_job["id"]),
+    )
+    c.execute(
+        """INSERT INTO semantic_attempts
+             (attempt_id,job_id,role,status,started_at,worker_pid,worker_pgid,
+              worker_start_identity,stdout_path,stderr_path)
+           VALUES (?,?,'builder','RUNNING',?,999999,999999,'old-owner',?,?)""",
+        (old_attempt, race_job["id"], observed_started, str(tmp / "race.out"), str(tmp / "race.err")),
+    )
+    c.commit()
+
+orig_cost_parser = supervisor._parse_cost_from_durable_stdout
+orig_usage_parser = supervisor._parse_token_usage_from_durable_stdout
+b_observed = threading.Event()
+release_b = threading.Event()
+recovery_results = {}
+def fake_cost_parser(_path):
+    if threading.current_thread().name == "recovery-b":
+        b_observed.set()
+        assert release_b.wait(10), "slow recovery was not released"
+    return 0.5
+def fake_usage_parser(_path):
+    return {
+        "input_tokens": 11, "output_tokens": 7,
+        "cache_read_tokens": 3, "cache_creation_tokens": 2,
+    }
+def run_recovery(name):
+    with supervisor._connect(race_db) as c:
+        recovery_results[name] = supervisor._recover_stale_running(c)
+
+supervisor._parse_cost_from_durable_stdout = fake_cost_parser
+supervisor._parse_token_usage_from_durable_stdout = fake_usage_parser
+try:
+    slow = threading.Thread(target=run_recovery, args=("b",), name="recovery-b")
+    slow.start()
+    assert b_observed.wait(10), "slow recovery never observed the stale owner"
+    fast = threading.Thread(target=run_recovery, args=("a",), name="recovery-a")
+    fast.start(); fast.join(10)
+    assert not fast.is_alive(), "fast recovery did not finish"
+    assert recovery_results.get("a") == 1, recovery_results
+
+    with supervisor._connect(race_db) as c:
+        reclaimed = supervisor._take_next_job(c)
+        assert reclaimed is not None and int(reclaimed["id"]) == int(race_job["id"]), reclaimed
+        new_attempt = "recovery-race-new-attempt"
+        new_started = time.time()
+        c.execute(
+            """UPDATE jobs SET worker_pid=?, worker_pgid=?, worker_started_at=?,
+                      worker_deadline_at=?, worker_start_identity='new-owner',
+                      worker_role='builder', worker_attempt_id=?, latest_attempt_id=?
+                WHERE id=? AND status='RUNNING'""",
+            (os.getpid(), os.getpid(), new_started, new_started + 600,
+             new_attempt, new_attempt, race_job["id"]),
+        )
+        c.execute(
+            """INSERT INTO semantic_attempts
+                 (attempt_id,job_id,role,status,started_at,worker_pid,worker_pgid,
+                  worker_start_identity,stdout_path,stderr_path)
+               VALUES (?,?,'builder','RUNNING',?,?,?,?,?,?)""",
+            (new_attempt, race_job["id"], new_started, os.getpid(), os.getpid(),
+             "new-owner", str(tmp / "new.out"), str(tmp / "new.err")),
+        )
+        c.commit()
+
+    release_b.set(); slow.join(10)
+    assert not slow.is_alive(), "slow recovery did not finish"
+    assert recovery_results.get("b") == 0, recovery_results
+finally:
+    release_b.set()
+    supervisor._parse_cost_from_durable_stdout = orig_cost_parser
+    supervisor._parse_token_usage_from_durable_stdout = orig_usage_parser
+
+with supervisor._connect_readonly(race_db) as c:
+    job_row = c.execute("SELECT * FROM jobs WHERE id=?", (race_job["id"],)).fetchone()
+    old_row = c.execute("SELECT * FROM semantic_attempts WHERE attempt_id=?", (old_attempt,)).fetchone()
+    new_row = c.execute("SELECT * FROM semantic_attempts WHERE attempt_id=?", ("recovery-race-new-attempt",)).fetchone()
+assert job_row["status"] == "RUNNING", dict(job_row)
+assert job_row["worker_start_identity"] == "new-owner", dict(job_row)
+assert job_row["worker_attempt_id"] == "recovery-race-new-attempt", dict(job_row)
+assert old_row["cost_accounted"] == 1 and old_row["cost_usd"] == 0.5, dict(old_row)
+assert old_row["input_tokens"] == 11 and old_row["output_tokens"] == 7, dict(old_row)
+assert new_row["status"] == "RUNNING", dict(new_row)
+assert float(job_row["total_cost_usd"]) == 0.5, dict(job_row)
+assert int(job_row["total_input_tokens"]) == 11, dict(job_row)
+assert int(job_row["total_output_tokens"]) == 7, dict(job_row)
+print("CONCURRENT_RECOVERY_SAME_STALE_OWNER=PASS")
+print("RECOVERY_CANNOT_CLOBBER_RECLAIMED_JOB=PASS")
+print("RECOVERY_COST_ACCOUNTED_ONCE=PASS")
+print("RECOVERY_TOKEN_ACCOUNTED_ONCE=PASS")
+print("NEW_WORKER_OWNERSHIP_PRESERVED=PASS")
 for j in jobs: reset(j)
 alias_target = repo("alias-target"); alias = tmp / "alias-link"; alias.symlink_to(alias_target, target_is_directory=True)
 same_a = enqueue(alias_target, "run-a"); same_b = enqueue(alias, "run-b")
