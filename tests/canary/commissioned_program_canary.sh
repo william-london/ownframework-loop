@@ -199,7 +199,7 @@ PY
 
 arm_restart(){
   [[ -x "$WATCHER_HELPER" || -f "$WATCHER_HELPER" ]] || die "restart_watcher_helper_missing"
-  python3 "$WATCHER_HELPER" arm "$1" "$WATCHER_HELPER"
+  python3 "$WATCHER_HELPER" arm "$1"
 }
 
 verify(){

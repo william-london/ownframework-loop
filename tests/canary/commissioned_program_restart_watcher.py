@@ -645,9 +645,20 @@ def watch(root: Path) -> int:
     return 1
 
 
+def check(root: Path) -> int:
+    control = root / "control.json"
+    c = load(control)
+    if c.get("watcher_status") in {"ARMED", "WAITING", "BOUNDARY_OBSERVED", "RESTARTING"} and manager_alive(c):
+        print("WATCHER_DURABLE=yes")
+        print(f"WATCHER_ID={watcher_id(c)}")
+        return 0
+    print(f"WATCHER_DURABLE=no reason={c.get('watcher_status') or 'not_armed'}", file=sys.stderr)
+    return 1
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("action", choices=["arm", "watch", "cleanup"])
+    parser.add_argument("action", choices=["arm", "watch", "check", "cleanup"])
     parser.add_argument("root")
     args = parser.parse_args()
     root = Path(args.root).expanduser().resolve(strict=False)
@@ -656,6 +667,8 @@ def main() -> int:
         return arm(root, helper)
     if args.action == "watch":
         return watch(root)
+    if args.action == "check":
+        return check(root)
     c = load(root / "control.json")
     c["control"] = str(root / "control.json")
     cleanup(c)

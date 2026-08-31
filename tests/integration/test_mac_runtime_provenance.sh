@@ -208,6 +208,19 @@ echo "ENV_SUPPLIED"
 exit 0
 P2
 chmod +x "$PROBE_DIR/supplied-claude"
+# The semantic worker proves Git common-dir identity before launching the
+# provider. Use a legitimate disposable repository/worktree fixture so this
+# test exercises provider precedence without weakening that production gate.
+T2_REPO="$PROBE_DIR/source"
+T2_WORKTREE="$PROBE_DIR/worktree"
+mkdir -p "$T2_REPO"
+git -C "$T2_REPO" init -q
+git -C "$T2_REPO" config user.email test@example.invalid
+git -C "$T2_REPO" config user.name test
+printf 'fixture\n' > "$T2_REPO/README.md"
+git -C "$T2_REPO" add README.md
+git -C "$T2_REPO" commit -q -m fixture
+git -C "$T2_REPO" worktree add -q "$T2_WORKTREE" HEAD
 # Drive ClaudeCodeRunner.run indirectly via subprocess.Popen mock. The
 # process born by Popen is intentionally the persist-before-exec Python release
 # gate; prove the provider argv behind that gate is the commissioned binary.
@@ -217,11 +230,15 @@ os.environ["OFLOOP_CLAUDE_BIN"] = "$PROBE_DIR/supplied-claude"
 os.environ["PATH"] = "$PROBE_DIR:/usr/bin:/bin"
 from ownframework_loop import supervisor
 captured = {}
-class FakePopen:
-    def __init__(self, cmd, **kw):
+real_popen = supervisor.subprocess.Popen
+def fake_popen(cmd, **kw):
+    # subprocess is a shared module object: leave the production Git common-dir
+    # probe alone and intercept only the provider release-gate child.
+    if len(cmd) >= 3 and cmd[0] == sys.executable and cmd[1] == "-c" and cmd[2] == supervisor._WORKER_RELEASE_GATE_CODE:
         captured["cmd"] = cmd
         raise SystemExit(0)
-supervisor.subprocess.Popen = FakePopen
+    return real_popen(cmd, **kw)
+supervisor.subprocess.Popen = fake_popen
 try:
     wo = {
         "schema": supervisor.SCHEMA,
@@ -230,9 +247,9 @@ try:
         "run_id": "run-T2",
         "state": "BUILDING",
         "replayed": False,
-        "canonical_repo": "/tmp",
-        "worktree": "/tmp",
-        "semantic_path": "/tmp/x",
+        "canonical_repo": "$T2_REPO",
+        "worktree": "$T2_WORKTREE",
+        "semantic_path": "$T2_WORKTREE/x",
     }
     supervisor.ClaudeCodeRunner().run(wo, timeout_seconds=1)
 except SystemExit:
