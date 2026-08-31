@@ -58,6 +58,32 @@ def _wt_lock_path(canonical_repo: Path, run_id: str, role: str) -> Path:
     return parent / f"wt-{role}-{run_id}.lock"
 
 
+def _git_common_dir(canonical_repo: Path) -> Path:
+    """Resolve the shared Git administration directory for all worktrees."""
+    r = run_subprocess(
+        ["git", "-C", str(canonical_repo), "rev-parse", "--git-common-dir"],
+        timeout=10,
+    )
+    if r.returncode != 0 or not r.stdout.strip():
+        raise WorktreeError("cannot prove Git common directory for worktree administration")
+    common = Path(r.stdout.strip())
+    if not common.is_absolute():
+        common = Path(canonical_repo).resolve(strict=False) / common
+    return common.resolve(strict=False)
+
+
+def _worktree_admin_lock_path(canonical_repo: Path) -> Path:
+    """One brief lock for shared Git worktree metadata mutations.
+
+    Semantic work remains fully concurrent. Only git-worktree registration and
+    removal are serialized because every linked worktree shares the common Git
+    administration directory even when candidate branches are independent.
+    """
+    lock_dir = _git_common_dir(canonical_repo) / "ownframework-loop"
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    return lock_dir / "worktree-admin.lock"
+
+
 def _require_builder_branch(wt: Path, expected_branch: str) -> str:
     """Return actual branch or fail closed on detached/mismatched worktree."""
     actual = current_branch(wt)
@@ -109,7 +135,8 @@ def add_builder_worktree(
             "git", "-C", str(canonical_repo), "worktree", "add",
             "-b", branch, str(wt), base_sha,
         ]
-        r = run_subprocess(cmd, timeout=30)
+        with flock_exclusive(_worktree_admin_lock_path(canonical_repo)):
+            r = run_subprocess(cmd, timeout=30)
         if r.returncode != 0:
             if wt.exists():
                 if not is_registered_worktree(canonical_repo, wt):
@@ -179,10 +206,11 @@ def add_reviewer_worktree(
             else:
                 reset_reason = "dirty"
 
-            r = run_subprocess(
-                ["git", "-C", str(canonical_repo), "worktree", "remove", "--force", str(wt)],
-                timeout=30,
-            )
+            with flock_exclusive(_worktree_admin_lock_path(canonical_repo)):
+                r = run_subprocess(
+                    ["git", "-C", str(canonical_repo), "worktree", "remove", "--force", str(wt)],
+                    timeout=30,
+                )
             if r.returncode != 0:
                 raise WorktreeError(f"git worktree remove failed: {r.stderr.strip()}")
             if wt.exists():
@@ -196,7 +224,8 @@ def add_reviewer_worktree(
             "git", "-C", str(canonical_repo), "worktree", "add",
             "--detach", str(wt), candidate_sha,
         ]
-        r = run_subprocess(cmd, timeout=30)
+        with flock_exclusive(_worktree_admin_lock_path(canonical_repo)):
+            r = run_subprocess(cmd, timeout=30)
         if r.returncode != 0:
             if wt.exists():
                 if not is_registered_worktree(canonical_repo, wt):
@@ -236,47 +265,38 @@ def add_reviewer_worktree(
 
 def cleanup_reviewer_worktree(canonical_repo: Path, run_id: str) -> tuple[bool, str]:
     wt = reviewer_worktree(canonical_repo, run_id)
-    if not wt.exists():
-        return False, "reviewer worktree not present"
-    try:
-        wt_canonical = wt.resolve(strict=False)
-    except OSError:
-        wt_canonical = wt
-    registered = False
-    for entry in worktree_list(canonical_repo):
-        candidate = entry.get("worktree") or entry.get("path") or ""
-        try:
-            entry_path = Path(candidate).resolve(strict=False)
-        except OSError:
-            entry_path = Path(candidate)
-        if entry_path == wt_canonical or entry_path == wt:
-            registered = True
-            break
-    if not registered:
-        return False, "reviewer worktree path is not a registered worktree of this repo"
-    r = run_subprocess(
-        ["git", "-C", str(canonical_repo), "worktree", "remove", "--force", str(wt)],
-        timeout=30,
-    )
-    if r.returncode != 0:
-        return False, f"git worktree remove failed: {r.stderr.strip()}"
-    return True, f"removed reviewer worktree {wt}"
+    run_lock = _wt_lock_path(canonical_repo, run_id, "reviewer")
+    with flock_exclusive(run_lock):
+        if not wt.exists():
+            return False, "reviewer worktree not present"
+        with flock_exclusive(_worktree_admin_lock_path(canonical_repo)):
+            if not is_registered_worktree(canonical_repo, wt):
+                return False, "reviewer worktree path is not a registered worktree of this repo"
+            r = run_subprocess(
+                ["git", "-C", str(canonical_repo), "worktree", "remove", "--force", str(wt)],
+                timeout=30,
+            )
+        if r.returncode != 0:
+            return False, f"git worktree remove failed: {r.stderr.strip()}"
+        return True, f"removed reviewer worktree {wt}"
 
 
 def cleanup_builder_worktree(canonical_repo: Path, run_id: str) -> tuple[bool, str]:
     wt = builder_worktree(canonical_repo, run_id)
-    if not wt.exists():
-        return False, "builder worktree not present"
-    if not is_registered_worktree(canonical_repo, wt):
-        return False, "builder worktree path is not a registered worktree of this repo"
-    r = run_subprocess(
-        ["git", "-C", str(canonical_repo), "worktree", "remove", "--force", str(wt)],
-        timeout=30,
-    )
-    if r.returncode != 0:
-        return False, f"git worktree remove failed: {r.stderr.strip()}"
-    return True, f"removed builder worktree {wt}"
-
+    run_lock = _wt_lock_path(canonical_repo, run_id, "builder")
+    with flock_exclusive(run_lock):
+        if not wt.exists():
+            return False, "builder worktree not present"
+        with flock_exclusive(_worktree_admin_lock_path(canonical_repo)):
+            if not is_registered_worktree(canonical_repo, wt):
+                return False, "builder worktree path is not a registered worktree of this repo"
+            r = run_subprocess(
+                ["git", "-C", str(canonical_repo), "worktree", "remove", "--force", str(wt)],
+                timeout=30,
+            )
+        if r.returncode != 0:
+            return False, f"git worktree remove failed: {r.stderr.strip()}"
+        return True, f"removed builder worktree {wt}"
 
 def record_worktree_status(
     canonical_repo: Path,
