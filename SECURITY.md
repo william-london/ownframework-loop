@@ -8,7 +8,7 @@ or OS-level containment of arbitrary same-user code.
 
 ## Supported release posture
 
-- The source/master supported line in this repository is **0.8.4**.
+- The source/master supported line in this repository is **0.9.0**.
 - The latest published GitHub Release is **v0.6.0**; the 0.8.x source line is
   intentionally not yet tagged/published.
 - Earlier 0.2.x/0.3.x/0.4.x/0.5.0-0.5.4 behavior remains in Git history for

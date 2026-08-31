@@ -1,6 +1,6 @@
 # OwnFramework Loop
 
-Source/master release line: **0.8.4**
+Source/master release line: **0.9.0**
 
 Latest published GitHub Release: **v0.6.0**. The 0.8.x source line is not yet
 tagged or published; publication follows integration, exact-head hosted CI, and

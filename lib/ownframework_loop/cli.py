@@ -1713,6 +1713,29 @@ def _build_parser() -> argparse.ArgumentParser:
         )
         _emit(out, exit_code=0 if out.get("ok") else 2)
 
+    def cmd_supervisor_fleet(args: argparse.Namespace) -> None:
+        out = supervisor_mod.fleet_status(
+            db_path=Path(args.db).expanduser() if args.db else None,
+        )
+        _emit(out, exit_code=0 if out.get("ok") else 2)
+
+    def cmd_supervisor_config_get(args: argparse.Namespace) -> None:
+        out = supervisor_mod.supervisor_config_get(
+            db_path=Path(args.db).expanduser() if args.db else None,
+        )
+        _emit(out, exit_code=0 if out.get("ok") else 2)
+
+    def cmd_supervisor_config_set(args: argparse.Namespace) -> None:
+        try:
+            out = supervisor_mod.supervisor_config_set(
+                max_concurrency=args.value,
+                db_path=Path(args.db).expanduser() if args.db else None,
+            )
+        except ValueError as exc:
+            _emit({"schema": supervisor_mod.SCHEMA, "ok": False, "error": str(exc)}, exit_code=2)
+            return
+        _emit(out, exit_code=0 if out.get("ok") else 2)
+
     def cmd_supervisor_hold_status(args: argparse.Namespace) -> None:
         repo = _repo_path(args.repo)
         out = supervisor_mod.dispatch_hold_status(
@@ -1851,6 +1874,19 @@ def _build_parser() -> argparse.ArgumentParser:
     s_ss.add_argument("run_id")
     s_ss.add_argument("--db", default=None)
     s_ss.set_defaults(func=cmd_supervisor_status)
+    s_fleet = sup_sub.add_parser("fleet", help="show read-only fleet operational state")
+    s_fleet.add_argument("--db", default=None)
+    s_fleet.set_defaults(func=cmd_supervisor_fleet)
+    s_cfg = sup_sub.add_parser("config", help="read or set persistent supervisor configuration")
+    s_cfg_sub = s_cfg.add_subparsers(dest="config_cmd", required=True)
+    s_cfg_get = s_cfg_sub.add_parser("get", help="read supervisor configuration")
+    s_cfg_get.add_argument("--db", default=None)
+    s_cfg_get.set_defaults(func=cmd_supervisor_config_get)
+    s_cfg_set = s_cfg_sub.add_parser("set", help="set supervisor configuration")
+    s_cfg_set.add_argument("key", choices=["max_concurrency"])
+    s_cfg_set.add_argument("value")
+    s_cfg_set.add_argument("--db", default=None)
+    s_cfg_set.set_defaults(func=cmd_supervisor_config_set)
     s_hold = sup_sub.add_parser("hold", help="manage one-shot per-run dispatch holds")
     s_hold_sub = s_hold.add_subparsers(dest="hold_cmd", required=True)
     for name, handler, help_text in (

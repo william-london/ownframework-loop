@@ -133,6 +133,9 @@ tests/integration/test_v085_network_mutation_defense.sh
 # v0.8.5 commissioned PROGRAM canary model-free contract
 tests/integration/test_v085_commissioned_canary_contract.sh
 
+# v0.9 bounded single-host multi-repository scheduler proof (model-free)
+tests/integration/test_v090_bounded_concurrency.sh
+
 # v0.8.5 commissioned PROGRAM canary durable restart-watcher lifecycle
 tests/integration/test_v085_commissioned_canary_restart_watcher.sh
 

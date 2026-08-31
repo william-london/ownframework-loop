@@ -2,12 +2,18 @@
 
 All notable source/master release-line changes to OwnFramework Loop are documented here.
 
-**Publication status:** 0.8.4 is the current source/master line but is not yet a
-published GitHub Release/tag. **v0.6.0** remains the latest published GitHub
-Release until integration, exact-head hosted CI, and the commissioned PROGRAM
-canary close.
+**Publication status:** 0.9.0 is the current development source/master line and
+is not yet a published GitHub Release/tag. 0.8.4 remains the immutable released
+serial baseline. The latest published GitHub Release is **v0.8.4** after the
+commissioning gates below close.
 The complete historical changelog through 0.5.2 is preserved at
 [`docs/history/CHANGELOG-through-0.5.2.md`](docs/history/CHANGELOG-through-0.5.2.md).
+
+## 0.9.0 - Bounded Multi-Repository Autonomy (2026-08-31)
+
+Development line for bounded single-host multi-repository execution. Release
+publication remains gated on deterministic tests, exact-head CI, and real
+commissioning at N=4.
 
 ## 0.8.4 - Autonomous Runtime Portability and Containment (2026-08-30)
 

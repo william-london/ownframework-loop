@@ -10,6 +10,7 @@ engineering transitions itself.
 from __future__ import annotations
 import sys
 
+from concurrent.futures import Future, ThreadPoolExecutor
 import json
 import math
 import re
@@ -501,8 +502,64 @@ def worker_log_paths(
 # Historical rows may carry the old $25 / unlimited-token / 8h fingerprint,
 # but that tuple is indistinguishable from an operator explicitly selecting it.
 # Preserve it and mark ambiguity rather than inventing intent.
-SCHEMA_DATA_VERSION = 4
+SCHEMA_DATA_VERSION = 5
 _LEGACY_BUDGET_DEFAULT_FINGERPRINT = (25.0, 0, 28800)
+DEFAULT_MAX_CONCURRENCY = 1
+IMPLEMENTATION_MAX_CONCURRENCY = 64
+_CONFIG_MAX_CONCURRENCY = "max_concurrency"
+
+
+def _repository_scheduling_identity(repo: Path) -> tuple[str, bool]:
+    """Return the operational identity shared by aliases and linked worktrees.
+
+    Git's common directory is deliberately used instead of a remote URL: two
+    independent clones are independent scheduler resources, while path and
+    linked-worktree aliases share the same common directory.
+    """
+    resolved = Path(repo).expanduser().resolve(strict=False)
+    try:
+        probe = subprocess.run(
+            ["git", "-C", str(resolved), "rev-parse", "--git-common-dir"],
+            capture_output=True, text=True, timeout=10, check=True,
+        )
+        raw = probe.stdout.strip()
+        common = Path(raw)
+        if not common.is_absolute():
+            common = resolved / common
+        return str(common.resolve(strict=False)), True
+    except (OSError, subprocess.SubprocessError):
+        # Small protocol/unit fixtures sometimes use an ordinary directory
+        # because the dispatch layer is mocked. Resolve it as a path-scoped
+        # identity in that narrow case; real Git repositories take the
+        # stronger common-dir branch above. A missing path remains unproven.
+        return f"path:{resolved}", resolved.exists()
+
+
+def _packet_execution_mode(repo: Path, run_id: str) -> str:
+    packet_path = state_mod.run_dir(repo, run_id) / "WORK_PACKET.md"
+    if not packet_path.exists():
+        return "SINGLE"
+    try:
+        meta, _ = packet_mod.parse_packet_file(packet_path)
+    except (OSError, ValueError):
+        return "SINGLE"
+    return "PROGRAM" if str(meta.get("execution_mode") or "").lower() == "program" else "SINGLE"
+
+
+def _validate_max_concurrency(value: Any) -> int:
+    if isinstance(value, bool):
+        raise ValueError("max_concurrency must be an integer >= 1")
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("max_concurrency must be an integer >= 1") from exc
+    if str(value).strip() != str(parsed):
+        raise ValueError("max_concurrency must be an integer >= 1")
+    if parsed < 1 or parsed > IMPLEMENTATION_MAX_CONCURRENCY:
+        raise ValueError(
+            f"max_concurrency must be between 1 and {IMPLEMENTATION_MAX_CONCURRENCY}"
+        )
+    return parsed
 
 
 def _apply_data_migrations(conn: sqlite3.Connection) -> None:
@@ -518,7 +575,7 @@ def _apply_data_migrations(conn: sqlite3.Connection) -> None:
         )
         conn.execute("PRAGMA user_version = 3")
         version = 3
-    if version < 4:
+    if version < 5:
         conn.execute(f"PRAGMA user_version = {SCHEMA_DATA_VERSION}")
         conn.commit()
 
@@ -572,6 +629,11 @@ def _connect(path: Path) -> sqlite3.Connection:
           worker_stderr_path TEXT,
           runtime_generation TEXT NOT NULL DEFAULT '',
           legacy_budget_ambiguous INTEGER NOT NULL DEFAULT 0,
+          repository_scheduling_key TEXT NOT NULL DEFAULT '',
+          repository_identity_proven INTEGER NOT NULL DEFAULT 0,
+          execution_mode TEXT NOT NULL DEFAULT 'SINGLE',
+          dispatch_count INTEGER NOT NULL DEFAULT 0,
+          last_dispatch_sequence INTEGER NOT NULL DEFAULT 0,
           UNIQUE(repo, run_id)
         );
         CREATE TABLE IF NOT EXISTS cost_attempts (
@@ -628,6 +690,17 @@ def _connect(path: Path) -> sqlite3.Connection:
         );
         CREATE INDEX IF NOT EXISTS dispatch_holds_state_idx
           ON dispatch_holds(state, updated_at);
+        CREATE TABLE IF NOT EXISTS supervisor_config (
+          key TEXT PRIMARY KEY,
+          value TEXT NOT NULL,
+          updated_at REAL NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS scheduler_meta (
+          id INTEGER PRIMARY KEY CHECK (id=1),
+          dispatch_sequence INTEGER NOT NULL DEFAULT 0,
+          single_since_program INTEGER NOT NULL DEFAULT 0,
+          updated_at REAL NOT NULL
+        );
         """
     )
     columns = {
@@ -664,6 +737,11 @@ def _connect(path: Path) -> sqlite3.Connection:
         "last_failure_reason": "ALTER TABLE jobs ADD COLUMN last_failure_reason TEXT",
         "runtime_generation": "ALTER TABLE jobs ADD COLUMN runtime_generation TEXT NOT NULL DEFAULT ''",
         "legacy_budget_ambiguous": "ALTER TABLE jobs ADD COLUMN legacy_budget_ambiguous INTEGER NOT NULL DEFAULT 0",
+        "repository_scheduling_key": "ALTER TABLE jobs ADD COLUMN repository_scheduling_key TEXT NOT NULL DEFAULT ''",
+        "repository_identity_proven": "ALTER TABLE jobs ADD COLUMN repository_identity_proven INTEGER NOT NULL DEFAULT 0",
+        "execution_mode": "ALTER TABLE jobs ADD COLUMN execution_mode TEXT NOT NULL DEFAULT 'SINGLE'",
+        "dispatch_count": "ALTER TABLE jobs ADD COLUMN dispatch_count INTEGER NOT NULL DEFAULT 0",
+        "last_dispatch_sequence": "ALTER TABLE jobs ADD COLUMN last_dispatch_sequence INTEGER NOT NULL DEFAULT 0",
     }
     for name, statement in migrations.items():
         if name not in columns:
@@ -699,6 +777,28 @@ def _connect(path: Path) -> sqlite3.Connection:
         conn.execute(
             "UPDATE semantic_attempts SET cost_known=0 WHERE status='COST_UNKNOWN'"
         )
+    now = time.time()
+    conn.execute(
+        "INSERT OR IGNORE INTO supervisor_config(key, value, updated_at) VALUES (?, ?, ?)",
+        (_CONFIG_MAX_CONCURRENCY, str(DEFAULT_MAX_CONCURRENCY), now),
+    )
+    conn.execute(
+        "INSERT OR IGNORE INTO scheduler_meta(id, dispatch_sequence, single_since_program, updated_at) VALUES (1, 0, 0, ?)",
+        (now,),
+    )
+    # Safe, deterministic backfill for rows that still have a live checkout.
+    # Terminal historical rows with unavailable paths remain inspectable.
+    for row in conn.execute(
+        "SELECT id, repo, repository_scheduling_key, repository_identity_proven FROM jobs"
+    ).fetchall():
+        if str(row[2] or "") and int(row[3] or 0):
+            continue
+        if str(row[1]) and Path(str(row[1])).exists():
+            key, proven = _repository_scheduling_identity(Path(str(row[1])))
+            conn.execute(
+                "UPDATE jobs SET repository_scheduling_key=?, repository_identity_proven=? WHERE id=?",
+                (key, int(proven), int(row[0])),
+            )
     conn.commit()
     return conn
 
@@ -1153,6 +1253,13 @@ def _recover_stale_running(conn: sqlite3.Connection) -> int:
         "SELECT * FROM jobs WHERE status='RUNNING' ORDER BY id"
     ).fetchall()
     for row in rows:
+        # A concurrent execution lane records the supervisor PID while it is
+        # between the durable RUNNING claim and semantic-attempt reservation.
+        # Other lanes in this same supervisor must not mistake that short
+        # dispatch-publication window for a stale orphan. A replacement
+        # supervisor has a different PID and will reconcile it normally.
+        if str(row["worker_role"] or "") == "dispatching" and int(row["worker_pid"] or 0) == os.getpid():
+            continue
         pid = row["worker_pid"]
         started_at = float(row["worker_started_at"]) if row["worker_started_at"] else None
         deadline_at = float(row["worker_deadline_at"]) if row["worker_deadline_at"] else None
@@ -1405,6 +1512,8 @@ def enqueue(
         dispatch_hold_next_checkpoint_id,
     )
     repo = str(Path(canonical_repo).resolve(strict=False))
+    scheduling_key, identity_proven = _repository_scheduling_identity(Path(repo))
+    execution_mode = _packet_execution_mode(Path(repo), run_id)
     db = db_path or default_db_path()
     now = time.time()
     eff_generation = (
@@ -1488,8 +1597,10 @@ def enqueue(
                transient_recovery_cycles, max_transient_recovery_cycles,
                total_cost_usd, next_attempt_at,
                max_total_cost_usd, max_total_tokens, max_wall_seconds,
-               runtime_generation, legacy_budget_ambiguous, created_at, updated_at)
-            VALUES (?, ?, ?, 'QUEUED', 0, ?, 0, ?, 0, ?, 0, 0, ?, ?, ?, ?, ?, ?, ?)
+               runtime_generation, legacy_budget_ambiguous,
+               repository_scheduling_key, repository_identity_proven,
+               execution_mode, created_at, updated_at)
+            VALUES (?, ?, ?, 'QUEUED', 0, ?, 0, ?, 0, ?, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(repo, run_id) DO UPDATE SET
               runner=excluded.runner,
               max_infra_failures=excluded.max_infra_failures,
@@ -1500,6 +1611,9 @@ def enqueue(
               max_wall_seconds=excluded.max_wall_seconds,
               runtime_generation=excluded.runtime_generation,
               legacy_budget_ambiguous=excluded.legacy_budget_ambiguous,
+              repository_scheduling_key=excluded.repository_scheduling_key,
+              repository_identity_proven=excluded.repository_identity_proven,
+              execution_mode=excluded.execution_mode,
               updated_at=excluded.updated_at
             """,
             (
@@ -1514,6 +1628,9 @@ def enqueue(
                 int(eff_wall),
                 str(eff_generation),
                 int(eff_legacy_ambiguous),
+                scheduling_key,
+                int(identity_proven),
+                execution_mode,
                 now,
                 now,
             ),
@@ -1606,6 +1723,93 @@ def status(
             "db_path": str(db),
         }
     return _job_dict(row, db)
+
+
+def supervisor_config_get(*, db_path: Path | None = None) -> dict[str, Any]:
+    """Read persistent operational supervisor configuration."""
+    db = db_path or default_db_path()
+    if not Path(db).expanduser().is_file():
+        return {"schema": SCHEMA, "ok": True, "max_concurrency": DEFAULT_MAX_CONCURRENCY,
+                "db_path": str(db)}
+    with _connect_readonly(db) as conn:
+        row = conn.execute(
+            "SELECT value FROM supervisor_config WHERE key=?",
+            (_CONFIG_MAX_CONCURRENCY,),
+        ).fetchone()
+    value = _validate_max_concurrency(row[0] if row is not None else DEFAULT_MAX_CONCURRENCY)
+    return {"schema": SCHEMA, "ok": True, "max_concurrency": value, "db_path": str(db)}
+
+
+def supervisor_config_set(*, max_concurrency: Any, db_path: Path | None = None) -> dict[str, Any]:
+    """Persist the bounded operational execution capacity."""
+    value = _validate_max_concurrency(max_concurrency)
+    db = db_path or default_db_path()
+    now = time.time()
+    with _connect(db) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute(
+            """INSERT INTO supervisor_config(key, value, updated_at) VALUES (?, ?, ?)
+               ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at""",
+            (_CONFIG_MAX_CONCURRENCY, str(value), now),
+        )
+        conn.commit()
+    return {"schema": SCHEMA, "ok": True, "max_concurrency": value, "db_path": str(db)}
+
+
+def fleet_status(*, db_path: Path | None = None) -> dict[str, Any]:
+    """Project fleet-wide operational truth without claims or mutations."""
+    db = db_path or default_db_path()
+    if not Path(db).expanduser().is_file():
+        return {"schema": SCHEMA, "ok": True, "db_path": str(db),
+                "configured_max_concurrency": DEFAULT_MAX_CONCURRENCY,
+                "active_running": 0, "active_slots": 0, "free_slots": DEFAULT_MAX_CONCURRENCY,
+                "capacity_draining": False, "jobs": []}
+    with _connect_readonly(db) as conn:
+        cfg = conn.execute(
+            "SELECT value FROM supervisor_config WHERE key=?", (_CONFIG_MAX_CONCURRENCY,)
+        ).fetchone()
+        configured = _validate_max_concurrency(cfg[0] if cfg is not None else DEFAULT_MAX_CONCURRENCY)
+        rows = conn.execute(
+            """SELECT j.*, h.state AS hold_state, h.hold_id, h.kind AS hold_kind,
+                      h.previous_checkpoint_id, h.next_checkpoint_id
+               FROM jobs j LEFT JOIN dispatch_holds h ON h.job_id=j.id
+               ORDER BY j.id"""
+        ).fetchall()
+        running_keys = {str(r["repository_scheduling_key"] or "") for r in rows if r["status"] == "RUNNING"}
+        active = sum(1 for r in rows if r["status"] == "RUNNING")
+        projected: list[dict[str, Any]] = []
+        for row in rows:
+            hold_state = str(row["hold_state"] or "")
+            status_value = str(row["status"])
+            blocked = status_value in {"QUEUED", "BACKOFF"} and (
+                hold_state in {"HELD", "ARMED"}
+                or str(row["repository_scheduling_key"] or "") in running_keys
+            )
+            effective = status_value in {"QUEUED", "BACKOFF"} and not blocked and active < configured
+            item = dict(row)
+            item.update({
+                "effective_schedulability": bool(effective),
+                "repo_blocked": bool(status_value in {"QUEUED", "BACKOFF"} and str(row["repository_scheduling_key"] or "") in running_keys),
+                "held": hold_state == "HELD",
+                "active_slot": status_value == "RUNNING",
+                "scheduler_class": str(row["execution_mode"] or "SINGLE"),
+            })
+            projected.append(item)
+        counts = {name: sum(1 for r in rows if r["status"] == name) for name in
+                  ("QUEUED", "BACKOFF", "QUARANTINED", "DONE", "RETIRED")}
+        held = sum(1 for r in rows if r["hold_state"] == "HELD")
+        return {
+            "schema": SCHEMA, "ok": True, "db_path": str(db),
+            "configured_max_concurrency": configured,
+            "active_running": active, "active_slots": active,
+            "free_slots": max(0, configured - active),
+            "capacity_draining": active > configured,
+            "running_jobs": active, "queued_jobs": counts["QUEUED"],
+            "repo_blocked_jobs": sum(1 for r in projected if r["repo_blocked"]),
+            "held_jobs": held, "backoff_jobs": counts["BACKOFF"],
+            "quarantined_jobs": counts["QUARANTINED"], "done_jobs": counts["DONE"],
+            "retired_jobs": counts["RETIRED"], "jobs": projected,
+        }
 
 
 def dispatch_hold_status(
@@ -2812,20 +3016,38 @@ def _take_next_job(conn: sqlite3.Connection) -> sqlite3.Row | None:
     _recover_stale_running(conn)
     while True:
         now = time.time()
-        if conn.execute(
-            "SELECT id FROM jobs WHERE status='RUNNING' LIMIT 1"
-        ).fetchone() is not None:
-            return None
         candidates = conn.execute(
             """
             SELECT * FROM jobs
             WHERE status IN ('QUEUED','BACKOFF') AND next_attempt_at <= ?
-            ORDER BY created_at, id
+            ORDER BY last_dispatch_sequence, created_at, id
             """,
             (now,),
         ).fetchall()
         if not candidates:
             return None
+
+        # Persisted two-to-one SINGLE preference, with least-recently-served
+        # ordering inside each class.  The counter lives in the ledger so a
+        # supervisor restart cannot reset a continuously eligible PROGRAM.
+        meta = conn.execute(
+            "SELECT single_since_program FROM scheduler_meta WHERE id=1"
+        ).fetchone()
+        single_since_program = int(meta[0] if meta is not None else 0)
+        singles = [r for r in candidates if str(r["execution_mode"] or "SINGLE") == "SINGLE"]
+        programs = [r for r in candidates if str(r["execution_mode"] or "SINGLE") == "PROGRAM"]
+        if singles and programs:
+            candidates = singles if single_since_program < 2 else programs
+        else:
+            candidates = singles or programs
+        candidates = sorted(
+            candidates,
+            key=lambda r: (
+                int(r["last_dispatch_sequence"] or 0),
+                float(r["created_at"]),
+                int(r["id"]),
+            ),
+        )
 
         retry_candidates = False
         for candidate in candidates:
@@ -2851,8 +3073,20 @@ def _take_next_job(conn: sqlite3.Connection) -> sqlite3.Row | None:
                     "SELECT * FROM jobs WHERE id=?", (int(candidate["id"]),)
                 ).fetchone()
                 current_hold = _hold_row(conn, int(candidate["id"]))
-                running = conn.execute(
-                    "SELECT id FROM jobs WHERE status='RUNNING' LIMIT 1"
+                active = int(conn.execute(
+                    "SELECT COUNT(*) FROM jobs WHERE status='RUNNING'"
+                ).fetchone()[0])
+                config = conn.execute(
+                    "SELECT value FROM supervisor_config WHERE key=?",
+                    (_CONFIG_MAX_CONCURRENCY,),
+                ).fetchone()
+                max_concurrency = _validate_max_concurrency(
+                    config[0] if config is not None else DEFAULT_MAX_CONCURRENCY
+                )
+                same_repo = conn.execute(
+                    """SELECT id FROM jobs WHERE status='RUNNING'
+                       AND repository_scheduling_key=? LIMIT 1""",
+                    (str(candidate["repository_scheduling_key"] or ""),),
                 ).fetchone()
                 if (
                     current is None
@@ -2860,11 +3094,12 @@ def _take_next_job(conn: sqlite3.Connection) -> sqlite3.Row | None:
                     or float(current["next_attempt_at"] or 0) > time.time()
                     or current_hold is None
                     or current_hold["state"] != "ARMED"
-                    or running is not None
+                    or active >= max_concurrency
+                    or same_repo is not None
+                    or int(current["repository_identity_proven"] or 0) != 1
                 ):
                     conn.commit()
-                    retry_candidates = True
-                    break
+                    continue
                 held_at = time.time()
                 conn.execute(
                     """UPDATE dispatch_holds
@@ -2875,8 +3110,7 @@ def _take_next_job(conn: sqlite3.Connection) -> sqlite3.Row | None:
                 conn.commit()
                 # Re-scan in case another queued job can safely run while
                 # this run waits for its explicit operational release.
-                retry_candidates = True
-                break
+                continue
 
             # Normal no-hold or predicate-false claim. Revalidate the job
             # after the out-of-transaction hold observation.
@@ -2884,18 +3118,31 @@ def _take_next_job(conn: sqlite3.Connection) -> sqlite3.Row | None:
             current = conn.execute(
                 "SELECT * FROM jobs WHERE id=?", (int(candidate["id"]),)
             ).fetchone()
-            running = conn.execute(
-                "SELECT id FROM jobs WHERE status='RUNNING' LIMIT 1"
+            active = int(conn.execute(
+                "SELECT COUNT(*) FROM jobs WHERE status='RUNNING'"
+            ).fetchone()[0])
+            config = conn.execute(
+                "SELECT value FROM supervisor_config WHERE key=?",
+                (_CONFIG_MAX_CONCURRENCY,),
+            ).fetchone()
+            max_concurrency = _validate_max_concurrency(
+                config[0] if config is not None else DEFAULT_MAX_CONCURRENCY
+            )
+            same_repo = conn.execute(
+                """SELECT id FROM jobs WHERE status='RUNNING'
+                   AND repository_scheduling_key=? LIMIT 1""",
+                (str(candidate["repository_scheduling_key"] or ""),),
             ).fetchone()
             if (
                 current is None
                 or current["status"] not in ("QUEUED", "BACKOFF")
                 or float(current["next_attempt_at"] or 0) > time.time()
-                or running is not None
+                or active >= max_concurrency
+                or same_repo is not None
+                or int(current["repository_identity_proven"] or 0) != 1
             ):
                 conn.commit()
-                retry_candidates = True
-                break
+                continue
             conn.execute(
                 """
                 UPDATE jobs SET
@@ -2903,10 +3150,25 @@ def _take_next_job(conn: sqlite3.Connection) -> sqlite3.Row | None:
                   worker_pid=?,
                   worker_started_at=?,
                   worker_role='dispatching',
+                  dispatch_count=dispatch_count+1,
+                  last_dispatch_sequence=(SELECT COALESCE(MAX(last_dispatch_sequence),0)+1 FROM jobs),
                   updated_at=?
                 WHERE id=? AND status IN ('QUEUED','BACKOFF')
                 """,
                 (os.getpid(), now, now, int(candidate["id"])),
+            )
+            sequence = int(conn.execute(
+                "SELECT COALESCE(MAX(last_dispatch_sequence), 0) FROM jobs"
+            ).fetchone()[0]) + 1
+            mode = str(current["execution_mode"] or "SINGLE")
+            next_single_since_program = 0 if mode == "PROGRAM" else single_since_program + 1
+            conn.execute(
+                "UPDATE jobs SET last_dispatch_sequence=?, updated_at=? WHERE id=?",
+                (sequence, time.time(), int(candidate["id"])),
+            )
+            conn.execute(
+                "UPDATE scheduler_meta SET dispatch_sequence=?, single_since_program=?, updated_at=? WHERE id=1",
+                (sequence, next_single_since_program, time.time()),
             )
             conn.commit()
             return conn.execute(
@@ -3659,22 +3921,52 @@ def serve(
     """Run the durable execution clock. Idle iterations make zero model calls."""
     _load_service_env_file()
     _cleanup_done_runtime_caches(db_path)
+    if once:
+        return run_one(db_path=db_path, timeout_seconds=timeout_seconds)
     last_emit: float = 0.0
     idle_log_interval = max(60.0, float(poll_seconds) * 30)
-    while True:
-        event = run_one(db_path=db_path, timeout_seconds=timeout_seconds)
-        if once:
-            return event
-        action = event.get("action")
-        # Emit non-IDLE actions immediately; rate-limit IDLE so the durable
-        # launchd-owned service does not flood its stdout with an unbounded
-        # 2-second heartbeat stream.
-        now = time.time()
-        if action != "IDLE" or (now - last_emit) >= idle_log_interval:
-            print(json.dumps(event, sort_keys=True), flush=True)
-            last_emit = now
-        if action == "IDLE":
-            time.sleep(max(0.25, float(poll_seconds)))
+    # One durable scheduler process owns a bounded pool of execution lanes.
+    # SQLite, rather than pool occupancy, remains the capacity authority.
+    futures: set[Future[dict[str, Any]]] = set()
+    with ThreadPoolExecutor(max_workers=IMPLEMENTATION_MAX_CONCURRENCY) as pool:
+        while True:
+            db = db_path or default_db_path()
+            try:
+                with _connect_readonly(db) as read_conn:
+                    cfg = read_conn.execute(
+                        "SELECT value FROM supervisor_config WHERE key=?",
+                        (_CONFIG_MAX_CONCURRENCY,),
+                    ).fetchone()
+                    configured = _validate_max_concurrency(
+                        cfg[0] if cfg is not None else DEFAULT_MAX_CONCURRENCY
+                    )
+            except (OSError, sqlite3.Error, ValueError):
+                configured = DEFAULT_MAX_CONCURRENCY
+            # Retire completed lanes and emit their durable result. A failed
+            # lane is isolated; the scheduler continues to reconcile others.
+            completed = {f for f in futures if f.done()}
+            for future in completed:
+                futures.remove(future)
+                try:
+                    event = future.result()
+                except Exception as exc:  # pragma: no cover - defensive lane fence
+                    event = {"schema": SCHEMA, "ok": False, "action": "LANE_ERROR",
+                             "error": f"{type(exc).__name__}: {exc}"}
+                action = event.get("action")
+                now = time.time()
+                if action != "IDLE" or (now - last_emit) >= idle_log_interval:
+                    print(json.dumps(event, sort_keys=True), flush=True)
+                    last_emit = now
+            # At most configured lanes are submitted. Each lane claims through
+            # the same transactional scheduler path; no in-memory counter can
+            # authorize an oversubscribed durable claim.
+            while len(futures) < configured:
+                futures.add(pool.submit(run_one, db_path=db_path,
+                                         timeout_seconds=timeout_seconds))
+            if not futures:
+                time.sleep(max(0.25, float(poll_seconds)))
+            else:
+                time.sleep(max(0.1, min(float(poll_seconds), 1.0)))
 
 
 __all__ = [
@@ -3688,6 +3980,9 @@ __all__ = [
     "dispatch_hold_status",
     "release_dispatch_hold",
     "cancel_dispatch_hold",
+    "supervisor_config_get",
+    "supervisor_config_set",
+    "fleet_status",
     "enqueue",
     "register_runner",
     "resume",
