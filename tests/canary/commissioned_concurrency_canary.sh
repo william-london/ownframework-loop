@@ -185,21 +185,140 @@ PY
 }
 verify(){
   local root="$1"; PYTHONPATH="$ROOT/lib" python3 - "$root/control.json" <<'PY'
-import json,sqlite3,sys
+import json, sqlite3, sys
+from collections import defaultdict
 from pathlib import Path
-c=json.loads(Path(sys.argv[1]).read_text()); db=sqlite3.connect('file:'+c['db']+'?mode=ro',uri=True); db.row_factory=sqlite3.Row
-jobs=[]
-all_spans=[]
-for repo,rid in zip(c['repos'],c['runs']):
- j=db.execute('select * from jobs where repo=? and run_id=?',(str(Path(repo).resolve()),rid)).fetchone(); assert j and j['status']=='DONE',dict(j) if j else None; jobs.append(j)
- attempts=[]
- for a in db.execute('select * from semantic_attempts where job_id=? order by started_at',(j['id'],)): attempts.append(a)
- assert attempts and all(a['status'] in ('COMPLETED','COST_UNKNOWN','TOKENS_UNKNOWN','RECOVERED','FAILED') for a in attempts)
- spans=[(float(a['started_at']),float(a['completed_at'] or a['started_at']),str(j['repository_scheduling_key'])) for a in attempts if a['completed_at']]
- all_spans.extend(spans)
- c['_attempts']=sum(len(list(db.execute('select 1 from semantic_attempts where job_id=?',(j['id'],)))) for j in jobs)
- c['_overlap']=any(x[2]!=y[2] and x[0]<y[1] and y[0]<x[1] for x in all_spans for y in all_spans)
-db.close(); assert c.get('_overlap') is True, 'no durable cross-repository overlap'; print('CANARY_STATE=TERMINAL_PASS'); print('SEMANTIC_ATTEMPTS='+str(c['_attempts'])); print('PEAK_ACTIVE_REPOSITORIES='+str(len(c['repos'])))
+from ownframework_loop import state as state_mod
+
+control_path = Path(sys.argv[1])
+c = json.loads(control_path.read_text())
+db = sqlite3.connect('file:' + c['db'] + '?mode=ro', uri=True)
+db.row_factory = sqlite3.Row
+
+terminal_attempt_statuses = {
+    'COMPLETED', 'COST_UNKNOWN', 'TOKENS_UNKNOWN', 'RECOVERED', 'FAILED'
+}
+jobs = []
+attempt_ids = set()
+spans = []
+per_job_spans = defaultdict(list)
+failed_attempts = 0
+cross_repo_mixups = 0
+wrong_sha = 0
+
+for repo_text, rid in zip(c['repos'], c['runs']):
+    repo = Path(repo_text).resolve()
+    job = db.execute(
+        'select * from jobs where repo=? and run_id=?',
+        (str(repo), rid),
+    ).fetchone()
+    assert job is not None, (repo, rid)
+    assert job['status'] == 'DONE', dict(job)
+    assert int(job['repository_identity_proven'] or 0) == 1, dict(job)
+    jobs.append(job)
+
+    state_doc = state_mod.load_verified(repo, rid)
+    assert isinstance(state_doc, dict), (repo, rid, 'state missing')
+    assert state_doc.get('state') == 'APPROVED', state_doc
+
+    verdict_path = repo / '.ownframework-loop' / rid / 'REVIEW_VERDICT.json'
+    assert verdict_path.is_file(), verdict_path
+    verdict = json.loads(verdict_path.read_text())
+    assert verdict.get('run_id') == rid, verdict
+    if verdict.get('candidate_sha_reviewed') != state_doc.get('last_candidate_sha'):
+        wrong_sha += 1
+
+    attempts = list(db.execute(
+        'select * from semantic_attempts where job_id=? order by started_at, attempt_id',
+        (job['id'],),
+    ))
+    assert attempts, dict(job)
+    for attempt in attempts:
+        assert attempt['status'] in terminal_attempt_statuses, dict(attempt)
+        if attempt['status'] == 'FAILED':
+            failed_attempts += 1
+        attempt_id = str(attempt['attempt_id'])
+        assert attempt_id not in attempt_ids, attempt_id
+        attempt_ids.add(attempt_id)
+        assert int(attempt['job_id']) == int(job['id']), dict(attempt)
+
+        role = str(attempt['role'])
+        for field, suffix in (('stdout_path', '.out'), ('stderr_path', '.err')):
+            p = Path(str(attempt[field]))
+            expected_name = f"job-{int(job['id'])}-{role}-attempt-{attempt_id}{suffix}"
+            if p.parent.name != rid or p.name != expected_name:
+                cross_repo_mixups += 1
+
+        if attempt['completed_at'] is not None:
+            start = float(attempt['started_at'])
+            end = float(attempt['completed_at'])
+            assert end >= start, dict(attempt)
+            span = (
+                start, end, str(job['repository_scheduling_key']),
+                int(job['id']), attempt_id,
+            )
+            spans.append(span)
+            per_job_spans[int(job['id'])].append(span)
+
+# One job may never own overlapping semantic attempts.
+for job_id, job_spans in per_job_spans.items():
+    ordered = sorted(job_spans)
+    for left, right in zip(ordered, ordered[1:]):
+        assert left[1] <= right[0], (
+            'duplicate active semantic work in one job', job_id, left, right
+        )
+
+# Compute actual peak concurrently active distinct repository identities from
+# durable semantic-attempt intervals. End events sort before start events at an
+# identical timestamp so zero-width handoffs do not manufacture overlap.
+events = []
+for start, end, repo_key, job_id, attempt_id in spans:
+    if end > start:
+        events.append((start, 1, repo_key))
+        events.append((end, -1, repo_key))
+events.sort(key=lambda x: (x[0], x[1]))
+active_counts = defaultdict(int)
+peak = 0
+for _, delta, repo_key in events:
+    if delta < 0:
+        active_counts[repo_key] = max(0, active_counts[repo_key] - 1)
+    else:
+        active_counts[repo_key] += 1
+    peak = max(peak, sum(1 for value in active_counts.values() if value > 0))
+
+repo_keys = [str(j['repository_scheduling_key']) for j in jobs]
+assert len(set(repo_keys)) == len(repo_keys), repo_keys
+assert cross_repo_mixups == 0, cross_repo_mixups
+assert wrong_sha == 0, wrong_sha
+
+stage = c['stage']
+required_peak = 4 if stage == 'C' else 2
+assert peak >= required_peak, (stage, peak, required_peak)
+
+if stage == 'B':
+    assert c.get('supervisor_restart_proven') is True, c
+    assert int(c.get('multi_inflight_before_restart') or 0) >= 2, c
+    before = str(c.get('runtime_generation_before_restart') or '')
+    after = str(c.get('runtime_generation_after_restart') or '')
+    assert before and before == after, (before, after)
+
+total_attempts = len(attempt_ids)
+db.close()
+
+print('CANARY_STATE=TERMINAL_PASS')
+print('STAGE=' + stage)
+print('SEMANTIC_ATTEMPTS=' + str(total_attempts))
+print('FAILED_SEMANTIC_ATTEMPTS=' + str(failed_attempts))
+print('PEAK_ACTIVE_REPOSITORIES=' + str(peak))
+print('DUPLICATE_ACTIVE_ATTEMPTS=0')
+print('LOST_RUNS=0')
+print('WRONG_SHA_REVIEWS=0')
+print('CROSS_REPO_ATTEMPT_MIXUPS=0')
+print('LEDGER_COHERENCE=PASS')
+if stage == 'B':
+    print('MULTI_INFLIGHT_BEFORE_RESTART=' + str(c['multi_inflight_before_restart']))
+    print('SUPERVISOR_RESTART_PROVEN=yes')
+    print('RUNTIME_GENERATION_STABLE=yes')
 PY
 }
 destroy(){

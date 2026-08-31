@@ -8,7 +8,7 @@ TMP_ROOT="$TMP" PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$LIB_DIR" python3 -B - <<'
 import os, subprocess, tempfile, time
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
-from ownframework_loop import supervisor
+from ownframework_loop import dispatch, supervisor
 
 tmp = Path(os.environ["TMP_ROOT"]); db = tmp / "supervisor.sqlite3"
 def git(repo, *args):
@@ -168,6 +168,124 @@ with supervisor._connect_readonly(db) as c:
     assert c.execute("select status from jobs where id=?", (hold_job["id"],)).fetchone()[0] == "QUEUED"
     assert "HELD" not in {r[1] for r in c.execute("pragma table_info(jobs)")}
 print("HELD_ISOLATION_READ_ONLY_FLEET_NO_JOBS_STATUS_HELD=PASS")
+
+# Concurrent fairness claims must serialize against the persisted scheduler
+# generation. Three lanes starting from the same observation must still commit
+# exactly SINGLE, SINGLE, PROGRAM with consecutive dispatch sequence values.
+reset(hold_job)
+supervisor.supervisor_config_set(max_concurrency=3, db_path=db)
+with supervisor._connect(db) as c:
+    c.execute("UPDATE scheduler_meta SET dispatch_sequence=0, single_since_program=0 WHERE id=1")
+    c.commit()
+fair_concurrent = [
+    enqueue(repo("fair-cs-0"), "fair-cs-0", "SINGLE"),
+    enqueue(repo("fair-cs-1"), "fair-cs-1", "SINGLE"),
+    enqueue(repo("fair-cp-0"), "fair-cp-0", "PROGRAM"),
+]
+with ThreadPoolExecutor(max_workers=3) as pool:
+    fair_claims = [x for x in pool.map(claim, range(3)) if x is not None]
+assert len(fair_claims) == 3, [dict(x) for x in fair_claims]
+fair_claims = sorted(fair_claims, key=lambda r: int(r["last_dispatch_sequence"]))
+assert [str(x["execution_mode"]) for x in fair_claims] == ["SINGLE", "SINGLE", "PROGRAM"], [
+    dict(x) for x in fair_claims
+]
+assert [int(x["last_dispatch_sequence"]) for x in fair_claims] == [1, 2, 3], [
+    dict(x) for x in fair_claims
+]
+print("CONCURRENT_FAIRNESS_CAS_AND_SEQUENCE=PASS")
+for j in fair_concurrent:
+    reset(j)
+
+# Preferred-class jobs that are all same-repository blocked may not strand a
+# free slot while the fallback class has an unrelated eligible repository.
+supervisor.supervisor_config_set(max_concurrency=2, db_path=db)
+fallback_repo = repo("fallback-same")
+fallback_owner = enqueue(fallback_repo, "fallback-owner", "SINGLE")
+fallback_blocked = enqueue(fallback_repo, "fallback-blocked", "SINGLE")
+fallback_program = enqueue(repo("fallback-program"), "fallback-program", "PROGRAM")
+with supervisor._connect(db) as c:
+    c.execute(
+        "UPDATE jobs SET status='RUNNING', worker_pid=?, worker_started_at=?, worker_role='builder' WHERE id=?",
+        (os.getpid(), time.time(), fallback_owner["id"]),
+    )
+    c.execute("UPDATE scheduler_meta SET single_since_program=0 WHERE id=1")
+    c.commit()
+with supervisor._connect(db) as c:
+    fallback_claim = supervisor._take_next_job(c)
+assert fallback_claim is not None and int(fallback_claim["id"]) == int(fallback_program["id"]), (
+    dict(fallback_claim) if fallback_claim is not None else None
+)
+print("BLOCKED_PREFERRED_CLASS_FALLS_BACK_WITHOUT_IDLE_SLOT=PASS")
+for j in (fallback_owner, fallback_blocked, fallback_program):
+    reset(j)
+
+# Fleet projection must distinguish ARMED from HELD and must respect backoff
+# readiness/identity instead of reporting every queued row as schedulable.
+supervisor.supervisor_config_set(max_concurrency=1, db_path=db)
+fleet_repo = repo("fleet-armed")
+fleet_job = enqueue(fleet_repo, "fleet-armed", "PROGRAM")
+with supervisor._connect(db) as c:
+    c.execute(
+        """INSERT INTO dispatch_holds(
+               hold_id,job_id,repo,run_id,kind,previous_checkpoint_id,
+               next_checkpoint_id,state,armed_at,updated_at
+           ) VALUES ('fleet-armed-hold',?,?,?,?,?,?,'ARMED',?,?)""",
+        (
+            fleet_job["id"],
+            str(fleet_repo.resolve()),
+            "fleet-armed",
+            supervisor.DISPATCH_HOLD_KIND,
+            "CP-1",
+            "CP-2",
+            time.time(),
+            time.time(),
+        ),
+    )
+    c.commit()
+fleet_now = supervisor.fleet_status(db_path=db)
+fleet_item = next(x for x in fleet_now["jobs"] if int(x["id"]) == int(fleet_job["id"]))
+assert fleet_item["hold_state"] == "ARMED"
+assert fleet_item["held"] is False
+assert fleet_item["effective_schedulability"] is True
+with supervisor._connect(db) as c:
+    c.execute(
+        "UPDATE jobs SET status='BACKOFF', next_attempt_at=? WHERE id=?",
+        (time.time() + 120, fleet_job["id"]),
+    )
+    c.commit()
+fleet_later = supervisor.fleet_status(db_path=db)
+fleet_item = next(x for x in fleet_later["jobs"] if int(x["id"]) == int(fleet_job["id"]))
+assert fleet_item["effective_schedulability"] is False
+print("FLEET_ARMED_AND_BACKOFF_TRUTH=PASS")
+reset(fleet_job)
+
+# Provider/model output that fails the semantic artifact contract is a bounded
+# same-pass runner retry, while structural worktree/identity failures remain
+# immediate invariants.
+retryable = dispatch.SemanticResultIncomplete("review_acceptance_coverage_incomplete")
+assert retryable.retryable is True
+assert supervisor._classify_exception(retryable) == ("runner", "semantic_result_incomplete")
+structural = dispatch.SemanticResultIncomplete("reviewer_worktree_missing")
+assert structural.retryable is False
+assert supervisor._classify_exception(structural) == ("invariant", "semantic_result_not_finalizable")
+retry_job = enqueue(repo("semantic-retry"), "semantic-retry", "PROGRAM")
+with supervisor._connect(db) as c:
+    c.execute(
+        "UPDATE jobs SET status='RUNNING', max_infra_failures=3 WHERE id=?",
+        (retry_job["id"],),
+    )
+    c.commit()
+    policy = supervisor._apply_failure_policy(
+        c,
+        job_id=int(retry_job["id"]),
+        failure_class="runner",
+        failure_reason="semantic_result_incomplete",
+        detail="review acceptance coverage incomplete",
+    )
+assert policy["status"] == "BACKOFF" and policy["infra_failures"] == 1, policy
+print("SEMANTIC_ARTIFACT_INCOMPLETE_BOUNDED_RETRY=PASS")
+reset(retry_job)
+
 print("MODEL_FREE_CONCURRENCY_FAILURES=0")
 PY
 pass "bounded concurrency, repository exclusion, fairness, draining, hold isolation, and fleet contract"
