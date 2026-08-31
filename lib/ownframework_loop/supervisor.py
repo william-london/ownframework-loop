@@ -2096,6 +2096,58 @@ def status(
     return _job_dict(row, db)
 
 
+def _readonly_columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    try:
+        return {str(row["name"]) for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+    except sqlite3.Error:
+        return set()
+
+
+def _legacy_readonly_fleet_projection(
+    conn: sqlite3.Connection, db: Path
+) -> dict[str, Any]:
+    """Safe serial projection for a pre-v0.9 ledger; never migrates it."""
+    job_columns = _readonly_columns(conn, "jobs")
+    if not {"id", "repo", "run_id", "status"}.issubset(job_columns):
+        return {
+            "schema": SCHEMA, "ok": False, "db_path": str(db),
+            "reason": "legacy_ledger_schema_unreadable",
+            "schema_migration_required": True,
+            "legacy_serial_projection": True,
+        }
+    rows = conn.execute("SELECT * FROM jobs ORDER BY id").fetchall()
+    projected = []
+    for row in rows:
+        item = dict(row)
+        item.update({
+            "effective_schedulability": False,
+            "workspace_blocked": False,
+            "repository_peer_running": False,
+            "held": False,
+            "active_slot": str(row["status"] or "") == "RUNNING",
+            "scheduler_class": "SINGLE",
+            "legacy_projection": True,
+        })
+        projected.append(item)
+    active = sum(1 for row in rows if str(row["status"] or "") == "RUNNING")
+    counts = {name: sum(1 for row in rows if str(row["status"] or "") == name)
+              for name in ("QUEUED", "BACKOFF", "QUARANTINED", "DONE", "RETIRED")}
+    return {
+        "schema": SCHEMA, "ok": True, "db_path": str(db),
+        "schema_migration_required": True,
+        "legacy_serial_projection": True,
+        "configured_max_concurrency": 1,
+        "active_running": active, "active_slots": active,
+        "free_slots": max(0, 1 - active),
+        "capacity_draining": active > 1,
+        "running_jobs": active, "queued_jobs": counts["QUEUED"],
+        "workspace_blocked_jobs": 0, "held_jobs": 0,
+        "backoff_jobs": counts["BACKOFF"],
+        "quarantined_jobs": counts["QUARANTINED"],
+        "done_jobs": counts["DONE"], "retired_jobs": counts["RETIRED"],
+        "jobs": projected,
+    }
+
 def supervisor_config_get(*, db_path: Path | None = None) -> dict[str, Any]:
     """Read persistent operational supervisor configuration."""
     db = db_path or default_db_path()
@@ -2103,6 +2155,14 @@ def supervisor_config_get(*, db_path: Path | None = None) -> dict[str, Any]:
         return {"schema": SCHEMA, "ok": True, "max_concurrency": DEFAULT_MAX_CONCURRENCY,
                 "db_path": str(db)}
     with _managed_connect_readonly(db) as conn:
+        if not _readonly_columns(conn, "supervisor_config"):
+            return {
+                "schema": SCHEMA, "ok": True,
+                "max_concurrency": DEFAULT_MAX_CONCURRENCY,
+                "db_path": str(db),
+                "schema_migration_required": True,
+                "legacy_serial_projection": True,
+            }
         row = conn.execute(
             "SELECT value FROM supervisor_config WHERE key=?",
             (_CONFIG_MAX_CONCURRENCY,),
@@ -2136,6 +2196,18 @@ def fleet_status(*, db_path: Path | None = None) -> dict[str, Any]:
                 "active_running": 0, "active_slots": 0, "free_slots": DEFAULT_MAX_CONCURRENCY,
                 "capacity_draining": False, "jobs": []}
     with _managed_connect_readonly(db) as conn:
+        job_columns = _readonly_columns(conn, "jobs")
+        required_v09 = {
+            "repository_scheduling_key", "repository_identity_proven",
+            "workspace_scheduling_key", "workspace_identity_proven",
+            "execution_mode",
+        }
+        if (
+            not required_v09.issubset(job_columns)
+            or not _readonly_columns(conn, "supervisor_config")
+            or not _readonly_columns(conn, "dispatch_holds")
+        ):
+            return _legacy_readonly_fleet_projection(conn, Path(db))
         cfg = conn.execute(
             "SELECT value FROM supervisor_config WHERE key=?", (_CONFIG_MAX_CONCURRENCY,)
         ).fetchone()
