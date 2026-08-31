@@ -1849,15 +1849,27 @@ def fleet_status(*, db_path: Path | None = None) -> dict[str, Any]:
         for row in rows:
             hold_state = str(row["hold_state"] or "")
             status_value = str(row["status"])
-            blocked = status_value in {"QUEUED", "BACKOFF"} and (
-                hold_state in {"HELD", "ARMED"}
-                or str(row["repository_scheduling_key"] or "") in running_keys
+            repo_blocked = (
+                status_value in {"QUEUED", "BACKOFF"}
+                and str(row["repository_scheduling_key"] or "") in running_keys
             )
-            effective = status_value in {"QUEUED", "BACKOFF"} and not blocked and active < configured
+            blocked = (
+                status_value in {"QUEUED", "BACKOFF"}
+                and (hold_state == "HELD" or repo_blocked)
+            )
+            due = float(row["next_attempt_at"] or 0) <= time.time()
+            identity_proven = int(row["repository_identity_proven"] or 0) == 1
+            effective = (
+                status_value in {"QUEUED", "BACKOFF"}
+                and not blocked
+                and due
+                and identity_proven
+                and active < configured
+            )
             item = dict(row)
             item.update({
                 "effective_schedulability": bool(effective),
-                "repo_blocked": bool(status_value in {"QUEUED", "BACKOFF"} and str(row["repository_scheduling_key"] or "") in running_keys),
+                "repo_blocked": bool(repo_blocked),
                 "held": hold_state == "HELD",
                 "active_slot": status_value == "RUNNING",
                 "scheduler_class": str(row["execution_mode"] or "SINGLE"),
@@ -2977,6 +2989,10 @@ def _classify_runner_failure(result: RunnerResult) -> tuple[str, str]:
 def _classify_exception(exc: BaseException) -> tuple[str, str]:
     if isinstance(exc, WorkerLaunchError):
         return "configuration", "worker_launch_failed"
+    if isinstance(exc, dispatch_mod.SemanticResultIncomplete):
+        if exc.retryable:
+            return "runner", "semantic_result_incomplete"
+        return "invariant", "semantic_result_not_finalizable"
     if isinstance(exc, dispatch_mod.DispatchError):
         return "invariant", "dispatch_refused"
     if isinstance(exc, (FileNotFoundError, PermissionError)):
@@ -3099,23 +3115,40 @@ def _take_next_job(conn: sqlite3.Connection) -> sqlite3.Row | None:
         # ordering inside each class.  The counter lives in the ledger so a
         # supervisor restart cannot reset a continuously eligible PROGRAM.
         meta = conn.execute(
-            "SELECT single_since_program FROM scheduler_meta WHERE id=1"
+            "SELECT dispatch_sequence, single_since_program FROM scheduler_meta WHERE id=1"
         ).fetchone()
-        single_since_program = int(meta[0] if meta is not None else 0)
-        singles = [r for r in candidates if str(r["execution_mode"] or "SINGLE") == "SINGLE"]
-        programs = [r for r in candidates if str(r["execution_mode"] or "SINGLE") == "PROGRAM"]
+        observed_dispatch_sequence = int(meta["dispatch_sequence"] if meta is not None else 0)
+        single_since_program = int(meta["single_since_program"] if meta is not None else 0)
+
+        def _fair_order(rows: list[sqlite3.Row]) -> list[sqlite3.Row]:
+            return sorted(
+                rows,
+                key=lambda r: (
+                    int(r["last_dispatch_sequence"] or 0),
+                    float(r["created_at"]),
+                    int(r["id"]),
+                ),
+            )
+
+        singles = _fair_order([
+            r for r in candidates
+            if str(r["execution_mode"] or "SINGLE") == "SINGLE"
+        ])
+        programs = _fair_order([
+            r for r in candidates
+            if str(r["execution_mode"] or "SINGLE") == "PROGRAM"
+        ])
+        # Prefer the configured class but retain the other class as fallback.
+        # Otherwise a HELD or same-repository-blocked preferred job can strand
+        # a free slot while an unrelated job is eligible.
         if singles and programs:
-            candidates = singles if single_since_program < 2 else programs
+            candidates = (
+                singles + programs
+                if single_since_program < 2
+                else programs + singles
+            )
         else:
             candidates = singles or programs
-        candidates = sorted(
-            candidates,
-            key=lambda r: (
-                int(r["last_dispatch_sequence"] or 0),
-                float(r["created_at"]),
-                int(r["id"]),
-            ),
-        )
 
         retry_candidates = False
         for candidate in candidates:
@@ -3196,6 +3229,20 @@ def _take_next_job(conn: sqlite3.Connection) -> sqlite3.Row | None:
             max_concurrency = _validate_max_concurrency(
                 config[0] if config is not None else DEFAULT_MAX_CONCURRENCY
             )
+            current_meta = conn.execute(
+                "SELECT dispatch_sequence, single_since_program FROM scheduler_meta WHERE id=1"
+            ).fetchone()
+            if (
+                current_meta is None
+                or int(current_meta["dispatch_sequence"] or 0) != observed_dispatch_sequence
+                or int(current_meta["single_since_program"] or 0) != single_since_program
+            ):
+                # Another lane committed a scheduling decision after our
+                # observation. Retry from fresh fairness truth instead of
+                # allowing multiple lanes to spend the same 2:1 preference.
+                conn.commit()
+                retry_candidates = True
+                break
             same_repo = conn.execute(
                 """SELECT id FROM jobs WHERE status='RUNNING'
                    AND repository_scheduling_key=? LIMIT 1""",
@@ -3219,15 +3266,12 @@ def _take_next_job(conn: sqlite3.Connection) -> sqlite3.Row | None:
                   worker_started_at=?,
                   worker_role='dispatching',
                   dispatch_count=dispatch_count+1,
-                  last_dispatch_sequence=(SELECT COALESCE(MAX(last_dispatch_sequence),0)+1 FROM jobs),
                   updated_at=?
                 WHERE id=? AND status IN ('QUEUED','BACKOFF')
                 """,
                 (os.getpid(), now, now, int(candidate["id"])),
             )
-            sequence = int(conn.execute(
-                "SELECT COALESCE(MAX(last_dispatch_sequence), 0) FROM jobs"
-            ).fetchone()[0]) + 1
+            sequence = observed_dispatch_sequence + 1
             mode = str(current["execution_mode"] or "SINGLE")
             next_single_since_program = 0 if mode == "PROGRAM" else single_since_program + 1
             conn.execute(
@@ -3951,6 +3995,20 @@ def run_one(*, db_path: Path | None = None, timeout_seconds: int = 0) -> dict[st
                     attempt_id=attempt_id,
                     detail=str(exc),
                 )
+            elif attempt_id and isinstance(exc, dispatch_mod.SemanticResultIncomplete):
+                conn.execute(
+                    """UPDATE semantic_attempts SET status='FAILED',
+                       failure_class=?, failure_reason=?, completed_at=COALESCE(completed_at, ?)
+                       WHERE attempt_id=? AND job_id=?""",
+                    (
+                        "runner" if exc.retryable else "invariant",
+                        "semantic_result_incomplete",
+                        time.time(),
+                        attempt_id,
+                        int(job["id"]),
+                    ),
+                )
+                conn.commit()
             # Completed semantic attempts are accounted transactionally by
             # attempt identity. If an exception happened before completion,
             # stale-worker recovery will inspect the durable attempt/output;

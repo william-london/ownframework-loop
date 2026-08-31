@@ -42,6 +42,37 @@ REVIEW_STATES = {"READY_FOR_REVIEW", "REVIEWING"}
 class DispatchError(RuntimeError):
     """Deterministic dispatch refusal."""
 
+
+_RETRYABLE_SEMANTIC_RESULT_REASONS = frozenset({
+    "semantic_artifact_missing_or_invalid",
+    "semantic_run_id_mismatch",
+    "builder_schema_mismatch",
+    "builder_outcome_invalid",
+    "builder_summary_empty",
+    "builder_completion_evidence_empty",
+    "review_schema_mismatch",
+    "review_candidate_mismatch",
+    "review_recommendation_invalid",
+    "review_findings_invalid",
+    "review_coverage_not_lists",
+    "review_acceptance_coverage_incomplete",
+    "review_non_goal_coverage_incomplete",
+    "review_acceptance_result_incomplete",
+    "review_non_goal_result_incomplete",
+})
+
+
+class SemanticResultIncomplete(DispatchError):
+    """Semantic output exists but cannot safely enter deterministic finalization."""
+
+    def __init__(self, reason: str):
+        self.reason = str(reason)
+        self.retryable = self.reason in _RETRYABLE_SEMANTIC_RESULT_REASONS
+        super().__init__(
+            f"semantic result is incomplete ({self.reason}); refusing finalization"
+        )
+
+
 BUILD_AGENT_SCHEMA = "ownframework-loop-build-agent-result/v1"
 REVIEW_AGENT_SCHEMA = "ownframework-loop-review-agent-assessment/v1"
 BUILD_OUTCOMES = {"candidate_ready", "blocked", "stopped"}
@@ -208,12 +239,34 @@ def semantic_result_ready(work_order: dict[str, Any]) -> tuple[bool, str]:
     ng = data.get("non_goal_results")
     if not isinstance(ac, list) or not isinstance(ng, list):
         return False, "review_coverage_not_lists"
-    ac_ids = {str(x.get("id") or "") for x in ac if isinstance(x, dict)}
-    ng_ids = {str(x.get("id") or "") for x in ng if isinstance(x, dict)}
-    if ac_ids != expected_ac:
+    ac_ids = [str(x.get("id") or "") for x in ac if isinstance(x, dict)]
+    ng_ids = [str(x.get("id") or "") for x in ng if isinstance(x, dict)]
+    if (
+        len(ac_ids) != len(ac)
+        or len(set(ac_ids)) != len(ac_ids)
+        or set(ac_ids) != expected_ac
+    ):
         return False, "review_acceptance_coverage_incomplete"
-    if ng_ids != expected_ng:
+    if (
+        len(ng_ids) != len(ng)
+        or len(set(ng_ids)) != len(ng_ids)
+        or set(ng_ids) != expected_ng
+    ):
         return False, "review_non_goal_coverage_incomplete"
+    if any(
+        not str(item.get("result") or "").strip()
+        or not str(item.get("evidence") or "").strip()
+        for item in ac
+        if isinstance(item, dict)
+    ):
+        return False, "review_acceptance_result_incomplete"
+    if any(
+        not str(item.get("result") or "").strip()
+        or not str(item.get("evidence") or "").strip()
+        for item in ng
+        if isinstance(item, dict)
+    ):
+        return False, "review_non_goal_result_incomplete"
     return True, "ready"
 
 
@@ -567,6 +620,11 @@ def claim_next(*, canonical_repo: Path, run_id: str) -> dict[str, Any]:
                     "candidate_sha": prep.get("candidate_sha"),
                     "checkpoint_id": prep.get("checkpoint_id"),
                     "acceptance_criterion_ids": prep.get("acceptance_criterion_ids"),
+                    "non_goal_ids": [
+                        str(item.get("id"))
+                        for item in (pmeta.get("non_goals") or [])
+                        if isinstance(item, dict) and item.get("id")
+                    ],
                     "network_read_allowlist": list(pmeta.get("network_read_allowlist") or []),
                     "claim": claim,
                     "prepare": prep,
@@ -631,9 +689,7 @@ def finalize_work_order(
 
     ready, reason = semantic_result_ready(hydrated)
     if not ready:
-        raise DispatchError(
-            f"semantic result is incomplete ({reason}); refusing finalization"
-        )
+        raise SemanticResultIncomplete(reason)
 
     if decision == "BUILD":
         result = _run_cli(["build", "finalize", repo, run_id, str(semantic)], timeout_seconds=timeout_seconds)

@@ -31,7 +31,7 @@ from pathlib import Path
 from typing import Any
 
 from . import approval as approval_mod
-from . import git_checks, packet as packet_mod, state as state_mod, util
+from . import git_checks, packet as packet_mod, program as program_mod, state as state_mod, util
 
 
 SCHEMA_AGENT_ASSESSMENT = "ownframework-loop-review-agent-assessment/v1"
@@ -185,12 +185,11 @@ def build_skeleton(
     *,
     source_root: Path | None = None,
 ) -> dict[str, Any]:
-    """Return a fully-shaped skeleton dict ready to be JSON-dumped.
+    """Return a fully-shaped, pass-scoped skeleton ready to be JSON-dumped.
 
-    The skeleton has every required top-level key present, the verdict set
-    to the placeholder string "APPROVED" (uppercase), and the run-scoped
-    fields pre-populated. Empty list fields are real `[]` not `null` so
-    the finalizer's isinstance(... list) check passes.
+    Identity fields and the exact acceptance/non-goal IDs are deterministic.
+    Semantic result/evidence values remain empty so a pristine skeleton can
+    never be mistaken for completed review work.
     """
     canonical_repo = Path(canonical_repo).resolve(strict=False)
     if not git_checks.is_git_repo(canonical_repo):
@@ -233,12 +232,43 @@ def build_skeleton(
     clean["escalation_reason"] = None
     clean["timestamp"] = util.utc_now_iso()
 
-    # Ensure list fields are lists (never None).
-    for lk in ("validation_results", "acceptance_results",
-               "non_goal_results", "findings",
-               "scope_findings", "protected_findings", "secret_findings"):
-        if not isinstance(clean.get(lk), list):
-            clean[lk] = []
+    packet_path = state_mod.run_dir(canonical_repo, run_id) / "WORK_PACKET.md"
+    meta, _ = packet_mod.parse_packet_file(packet_path)
+    state_doc = state_mod.load_verified(canonical_repo, run_id)
+
+    def _expected_ids(items: list[Any], prefix: str) -> list[str]:
+        out: list[str] = []
+        for idx, item in enumerate(items, start=1):
+            if isinstance(item, dict) and isinstance(item.get("id"), str):
+                out.append(item["id"])
+            else:
+                out.append(f"{prefix}-{idx}")
+        return out
+
+    if state_mod.is_program_state(state_doc):
+        expected_ac_ids = program_mod.current_checkpoint_acceptance_criterion_ids(
+            meta, (state_doc or {}).get("program") or {}
+        )
+    else:
+        expected_ac_ids = _expected_ids(meta.get("acceptance_criteria") or [], "AC")
+    expected_ng_ids = _expected_ids(meta.get("non_goals") or [], "NG")
+
+    # Never inherit example/template rows into a live semantic pass.
+    clean["validation_results"] = []
+    clean["acceptance_results"] = [
+        {"id": item_id, "result": "", "evidence": ""}
+        for item_id in expected_ac_ids
+    ]
+    clean["non_goal_results"] = [
+        {"id": item_id, "result": "", "evidence": ""}
+        for item_id in expected_ng_ids
+    ]
+    clean["findings"] = []
+    clean["scope_findings"] = []
+    clean["protected_findings"] = []
+    clean["secret_findings"] = []
+    # Missing reviewer intent must never inherit an APPROVED template default.
+    clean["recommended_verdict"] = "HUMAN_REVIEW_REQUIRED"
 
     return clean
 

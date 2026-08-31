@@ -19,7 +19,9 @@ Your prompt must provide `canonical_repo`, `run_id`, `candidate_sha`,
 `baseline_sha`, `candidate_branch`, `reviewer_worktree`,
 `packet_sha256`, `approval_sha256`, `build_receipt_sha256`,
 `review_pass_number`, and `assessment_path`. PROGRAM work orders also
-provide `checkpoint_id` and `acceptance_criterion_ids`.
+provide `checkpoint_id` and `acceptance_criterion_ids`. The supervisor also
+provides `non_goal_ids` so coverage does not depend on reconstructing IDs from
+examples or a previous checkpoint.
 
 If any required value is missing, stop and tell the parent. Do not invent it.
 
@@ -60,7 +62,8 @@ and controls the pass through its wall-clock budget.
    `acceptance_criterion_ids` entry and do not emit results for future
    checkpoint criteria. In SINGLE/legacy PROGRAM mode without scoped ids,
    produce exactly one result for every packet acceptance-criterion id.
-4. Produce exactly one result for every packet non-goal id when non-goals exist.
+4. Produce exactly one result for every supplied `non_goal_ids` entry when
+   non-goals exist. Do not retain example, prior-pass, or future-checkpoint IDs.
 5. Record stable, specific must-fix findings.
 6. Run required validations where permitted; never fabricate results.
 7. Fill only semantic/runtime fields in the existing skeleton. The assessment
@@ -70,7 +73,14 @@ and controls the pass through its wall-clock budget.
    `findings`, `recommended_verdict`, `escalation_recommended`,
    `escalation_reason`, and `timestamp`.
 8. Leave all pre-populated identity fields unchanged.
-9. Stop. The parent calls the deterministic finalizer.
+9. Before stopping, re-read and parse the exact `assessment_path` with
+   sandboxed Bash/Python and verify: JSON is valid; run/candidate identity is
+   unchanged; acceptance IDs exactly equal the supplied
+   `acceptance_criterion_ids`; non-goal IDs exactly equal supplied
+   `non_goal_ids`; every result has non-empty evidence; `findings` is a
+   list; and `recommended_verdict` is one allowed uppercase enum. Repair the
+   same assessment file if any check fails. Do not call the finalizer.
+10. Stop. The parent calls the deterministic finalizer.
 
 Recommended verdict is exactly one of `APPROVED`, `CHANGES_REQUESTED`,
 `BLOCKED`, `HUMAN_REVIEW_REQUIRED`, `STALE_CANDIDATE`. It is semantic
