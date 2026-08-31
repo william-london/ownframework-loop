@@ -273,7 +273,7 @@ def _builder_git_topology_mutation(seg: str) -> str | None:
     i = 0
     # Skip common Git global options only to reach the subcommand. Options
     # that redirect Git metadata/worktree roots are themselves refused.
-NaN
+    while i < len(rest) and rest[i].startswith("-"):
         tok = rest[i]
         if tok.startswith("--git-dir") or tok.startswith("--work-tree") or tok.startswith("--namespace"):
             return f"builder may not redirect shared Git topology with {tok}"
