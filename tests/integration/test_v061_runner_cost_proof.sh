@@ -43,4 +43,82 @@ if grep -Fq 'or proc.returncode == 0' "$ROOT_DIR/lib/ownframework_loop/superviso
   fail "structured Claude output can still be bypassed by returncode zero"
 fi
 
+# A valid Claude result may exceed diagnostic retention. The runner must parse
+# the complete durable envelope and bound only the returned diagnostics.
+LARGE_FAKE="$TMP/large-claude"
+cat > "$LARGE_FAKE" <<'PY'
+#!/usr/bin/env python3
+import json
+import sys
+
+payload = {
+    "is_error": False,
+    "subtype": "success",
+    "result": "ok-" + ("x" * 70000),
+    "total_cost_usd": 1.25,
+    "usage": {
+        "input_tokens": 123,
+        "output_tokens": 456,
+        "cache_read_input_tokens": 789,
+        "cache_creation_input_tokens": 10,
+    },
+}
+sys.stdout.write(json.dumps(payload) + "\n")
+sys.stderr.write("diagnostic-" + ("e" * 70000) + "\n")
+PY
+chmod +x "$LARGE_FAKE"
+LARGE_RESULT="$(OFLOOP_CLAUDE_BIN="$LARGE_FAKE" python3 - "$TMP" <<'PY'
+import json
+import sys
+from pathlib import Path
+from ownframework_loop import supervisor
+
+root = Path(sys.argv[1])
+repo = root / "large-repo"
+worktree = root / "large-worktree"
+repo.mkdir()
+worktree.mkdir()
+out = root / "large.out"
+err = root / "large.err"
+result = supervisor.ClaudeCodeRunner().run(
+    {
+        "schema": supervisor.SCHEMA,
+        "decision": "BUILD",
+        "role": "builder",
+        "run_id": "run-large-durable-output",
+        "state": "BUILDING",
+        "replayed": False,
+        "canonical_repo": str(repo),
+        "worktree": str(worktree),
+        "semantic_path": str(worktree / "result.json"),
+        "network_read_allowlist": [],
+    },
+    timeout_seconds=30,
+    durable_files=(out, err),
+)
+full_text = out.read_text(encoding="utf-8")
+full = json.loads(full_text)
+assert len(full_text) > 65536
+assert full["is_error"] is False
+assert full["subtype"] == "success"
+assert full["result"].startswith("ok-")
+assert result.ok is True
+assert result.cost_known is True
+assert result.cost_usd == 1.25
+assert result.tokens_known is True
+assert result.input_tokens == 123
+assert result.output_tokens == 456
+assert result.cache_read_tokens == 789
+assert result.cache_creation_tokens == 10
+assert len(result.stdout) <= 65536
+assert len(result.stderr) <= 65536
+print("LARGE_DURABLE_STDOUT_FULL_JSON_PARSE=PASS")
+print("LARGE_DURABLE_STDOUT_RUNNER_OK=PASS")
+print("LARGE_DURABLE_STDOUT_COST_KNOWN=PASS")
+print("LARGE_DURABLE_STDOUT_TOKEN_USAGE_KNOWN=PASS")
+print("LARGE_DURABLE_STDOUT_DIAGNOSTIC_BOUND_PRESERVED=PASS")
+PY
+)"
+printf '%s\n' "$LARGE_RESULT"
+
 echo "V061_RUNNER_COST_PROOF=PASS"

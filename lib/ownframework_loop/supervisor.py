@@ -3197,11 +3197,15 @@ class ClaudeCodeRunner:
                 pass
             out_path, err_path = durable_files
             try:
-                stdout_data = out_path.read_text(encoding="utf-8", errors="replace")[-65536:]
+                # The complete durable provider envelope is authoritative for
+                # parsing and usage extraction. Bound only the diagnostic
+                # copies returned below; truncating before json.loads corrupts
+                # otherwise valid large Claude responses.
+                stdout_data = out_path.read_text(encoding="utf-8", errors="replace")
             except Exception:
                 stdout_data = ""
             try:
-                stderr_data = err_path.read_text(encoding="utf-8", errors="replace")[-65536:]
+                stderr_data = err_path.read_text(encoding="utf-8", errors="replace")
             except Exception:
                 stderr_data = ""
 
