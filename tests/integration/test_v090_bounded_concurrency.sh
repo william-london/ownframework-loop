@@ -175,6 +175,48 @@ for i in range(4):
     ok, _ = worktrees.cleanup_builder_worktree(wt_repo, f"wt-run-{i}")
     assert ok
 print("SAME_REPOSITORY_PARALLEL_WORKTREE_SETUP=PASS")
+
+# Pre-approval workspace identity honors an explicit packet candidate branch.
+custom_repo = repo("custom-preapproval-branch")
+custom_run = "custom-preapproval-branch"
+custom_dir = custom_repo / ".ownframework-loop" / custom_run
+custom_dir.mkdir(parents=True)
+fence = chr(96) * 3
+(custom_dir / "WORK_PACKET.md").write_text(
+    fence + 'json\n{"target":{"candidate_branch_prefix":"factory/candidate/custom-preapproval"}}\n' + fence + '\n'
+)
+custom_job = supervisor.enqueue(
+    canonical_repo=custom_repo, run_id=custom_run, db_path=db,
+    runtime_generation="test-generation",
+)
+assert custom_job.get("candidate_branch") == "factory/candidate/custom-preapproval", custom_job
+assert "factory/candidate/custom-preapproval" in custom_job["workspace_scheduling_key"], custom_job
+print("PREAPPROVAL_CUSTOM_BRANCH_WORKSPACE_IDENTITY=PASS")
+reset(custom_job)
+
+# Recover a vanished disposable worktree by reattaching its surviving frozen branch.
+recover_repo = repo("surviving-branch-recovery")
+recover_head = subprocess.run(
+    ["git", "-C", str(recover_repo), "rev-parse", "HEAD"],
+    check=True, capture_output=True, text=True,
+).stdout.strip()
+recover_run = "surviving-branch-recovery"
+recover_branch = "factory/candidate/surviving-branch-recovery"
+first_wt = worktrees.add_builder_worktree(
+    recover_repo, recover_run, branch=recover_branch, base_sha=recover_head
+)
+git(recover_repo, "worktree", "remove", "--force", first_wt["path"])
+assert not Path(first_wt["path"]).exists()
+second_wt = worktrees.add_builder_worktree(
+    recover_repo, recover_run, branch=recover_branch, base_sha=recover_head
+)
+assert second_wt["actual_branch"] == recover_branch, second_wt
+assert second_wt["head"] == recover_head, second_wt
+assert worktrees.is_registered_worktree(recover_repo, Path(second_wt["path"]))
+ok, _ = worktrees.cleanup_builder_worktree(recover_repo, recover_run)
+assert ok
+print("SURVIVING_CANDIDATE_BRANCH_REATTACH=PASS")
+
 four = []
 for i in range(4):
     try:
