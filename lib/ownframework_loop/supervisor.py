@@ -4194,6 +4194,53 @@ def run_one(*, db_path: Path | None = None, timeout_seconds: int = 0) -> dict[st
             }
 
 
+def _scheduler_submission_budget(
+    *,
+    db_path: Path,
+    configured: int,
+    local_inflight: int,
+) -> int:
+    """Bound useful lane probes without becoming scheduling authority.
+
+    The transactional claim path still owns capacity and workspace exclusion.
+    This read-only projection prevents a high max_concurrency setting from
+    creating an idle SQLite/thread storm. If projection is unavailable, one
+    authoritative run_one probe is allowed so bootstrap/recovery cannot stall.
+    """
+    local_room = max(0, int(configured) - int(local_inflight))
+    if local_room <= 0:
+        return 0
+    try:
+        with _managed_connect_readonly(db_path) as conn:
+            active = int(conn.execute(
+                "SELECT COUNT(*) FROM jobs WHERE status='RUNNING'"
+            ).fetchone()[0])
+            durable_room = max(0, int(configured) - active)
+            due = int(conn.execute(
+                """SELECT COUNT(*)
+                     FROM jobs j
+                     LEFT JOIN dispatch_holds h ON h.job_id=j.id
+                    WHERE j.status IN ('QUEUED','BACKOFF')
+                      AND j.next_attempt_at <= ?
+                      AND j.repository_identity_proven=1
+                      AND j.workspace_identity_proven=1
+                      AND (h.state IS NULL OR h.state != 'HELD')
+                      AND NOT EXISTS (
+                          SELECT 1 FROM jobs r
+                           WHERE r.status='RUNNING'
+                             AND r.workspace_scheduling_key=j.workspace_scheduling_key
+                      )""",
+                (time.time(),),
+            ).fetchone()[0])
+            useful = min(local_room, durable_room, max(0, due))
+            # After supervisor restart, durable RUNNING rows may have no local
+            # Future. Keep one reconciliation probe alive even at full durable
+            # capacity so dead workers cannot strand the fleet forever.
+            orphan_probe = 1 if active > int(local_inflight) else 0
+            return min(local_room, max(useful, orphan_probe))
+    except (OSError, sqlite3.Error, ValueError):
+        return min(local_room, 1)
+
 def serve(
     *,
     db_path: Path | None = None,
@@ -4240,13 +4287,18 @@ def serve(
                 if action != "IDLE" or (now - last_emit) >= idle_log_interval:
                     print(json.dumps(event, sort_keys=True), flush=True)
                     last_emit = now
-            # At most configured lanes are submitted. Each lane claims through
-            # the same transactional scheduler path; no in-memory counter can
-            # authorize an oversubscribed durable claim.
-            while len(futures) < configured:
-                futures.add(pool.submit(run_one, db_path=db_path,
-                                         timeout_seconds=timeout_seconds))
-            if not futures:
+            # SQLite remains authority; this projection only limits pointless
+            # idle probes when configured capacity is much larger than demand.
+            submit_count = _scheduler_submission_budget(
+                db_path=Path(db),
+                configured=configured,
+                local_inflight=len(futures),
+            )
+            for _ in range(submit_count):
+                futures.add(pool.submit(
+                    run_one, db_path=db_path, timeout_seconds=timeout_seconds
+                ))
+            if not futures and submit_count == 0:
                 time.sleep(max(0.25, float(poll_seconds)))
             else:
                 time.sleep(max(0.1, min(float(poll_seconds), 1.0)))
