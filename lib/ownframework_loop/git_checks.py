@@ -24,7 +24,13 @@ def git_toplevel(path: Path) -> Path | None:
 def git_common_dir(path: Path) -> Path | None:
     """Return the resolved Git common directory for a main or linked worktree."""
     base = Path(path).expanduser().resolve(strict=False)
-    r = run_subprocess(["git", "-C", str(base), "rev-parse", "--git-common-dir"], timeout=10)
+    try:
+        r = run_subprocess(
+            ["git", "-C", str(base), "rev-parse", "--git-common-dir"],
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
     raw = r.stdout.strip()
     if r.returncode != 0 or not raw:
         return None
