@@ -164,10 +164,33 @@ for cmd in reviewer_blocked:
 for cmd in reviewer_allowed:
     r = guards.classify_bash_command(cmd, role="reviewer")
     assert r["severity"] == "allowed", f"reviewer lane must allow: {cmd!r} -> {r['forbidden']}"
-# Builder lane keeps broad local engineering capability.
-for cmd in ["git branch new-feature", "echo x > /tmp/y", "find . -delete"]:
+# Builder lane keeps normal candidate-worktree engineering capability, but
+# shared Git topology is core-owned in v0.9.
+builder_allowed = [
+    "git status --porcelain",
+    "git diff --stat",
+    "git add src/app.py",
+    "git commit -m 'candidate change'",
+    "echo x > /tmp/y",
+    "find . -delete",
+]
+builder_topology_blocked = [
+    "git branch new-feature",
+    "git branch -f hotfix",
+    "git switch other",
+    "git checkout -b other",
+    "git update-ref refs/heads/x HEAD",
+    "git worktree add ../other other",
+    "git stash",
+]
+for cmd in builder_allowed:
     r = guards.classify_bash_command(cmd, role="builder")
-    assert r["severity"] == "allowed", f"builder lane must allow: {cmd!r}"
+    assert r["severity"] == "allowed", f"builder lane must allow: {cmd!r} -> {r['forbidden']}"
+for cmd in builder_topology_blocked:
+    r = guards.classify_bash_command(cmd, role="builder")
+    assert r["severity"] == "forbidden", f"builder shared Git topology must be core-owned: {cmd!r}"
+print("BUILDER_NORMAL_GIT_ALLOWED=PASS")
+print("BUILDER_SHARED_GIT_TOPOLOGY_REFUSED=PASS")
 print("REVIEWER_POLICY_MATRIX=OK")
 PY
 pass "reviewer read-only policy: mutation forms refused, listing/redirect-capture allowed"
