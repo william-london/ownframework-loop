@@ -2743,13 +2743,19 @@ def _job_dict(row: sqlite3.Row, db: Path) -> dict[str, Any]:
     except Exception:
         d["packet_max_pass_runtime_seconds"] = 0
         d["packet_max_runtime_seconds"] = 0
+    durable_candidate_branch = str(d.get("candidate_branch") or "")
     try:
-        d.update(_core_snapshot(Path(str(row["repo"])), str(row["run_id"])))
+        snapshot = _core_snapshot(Path(str(row["repo"])), str(row["run_id"]))
+        if not snapshot.get("candidate_branch") and durable_candidate_branch:
+            snapshot["candidate_branch"] = durable_candidate_branch
+        d.update(snapshot)
     except Exception as exc:
         d.update({
             "core_snapshot_ok": False,
             "core_snapshot_errors": [f"snapshot_error:{type(exc).__name__}"],
         })
+        if durable_candidate_branch:
+            d["candidate_branch"] = durable_candidate_branch
     return d
 
 
