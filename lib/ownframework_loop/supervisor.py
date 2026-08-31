@@ -1304,6 +1304,7 @@ def _account_attempt_cost(
     cache_read_tokens: int = 0,
     cache_creation_tokens: int = 0,
     tokens_known: bool = False,
+    manage_transaction: bool = True,
 ) -> float:
     """Account one durable semantic attempt exactly once by attempt identity.
 
@@ -1320,7 +1321,8 @@ def _account_attempt_cost(
     )
     if any(value < 0 for value in usage_values):
         raise RuntimeError("semantic attempt token usage must be non-negative")
-    conn.execute("BEGIN IMMEDIATE")
+    if manage_transaction:
+        conn.execute("BEGIN IMMEDIATE")
     attempt = conn.execute(
         "SELECT * FROM semantic_attempts WHERE attempt_id=? AND job_id=?",
         (attempt_id, int(job_id)),
@@ -1371,7 +1373,8 @@ def _account_attempt_cost(
                WHERE attempt_id=?""",
             (status_value, time.time(), returncode, attempt_id),
         )
-    conn.commit()
+    if manage_transaction:
+        conn.commit()
     row = conn.execute("SELECT total_cost_usd FROM jobs WHERE id=?", (int(job_id),)).fetchone()
     return float(row[0] or 0.0)
 
@@ -1420,78 +1423,148 @@ def _mark_attempt_launch_failed(
     conn.commit()
 
 
+_RECOVERY_OWNERSHIP_FIELDS = (
+    "worker_pid",
+    "worker_started_at",
+    "worker_pgid",
+    "worker_deadline_at",
+    "worker_start_identity",
+    "worker_role",
+    "worker_attempt_id",
+)
+
+
+def _recovery_ownership_matches(
+    current: sqlite3.Row | None,
+    observed: sqlite3.Row,
+) -> bool:
+    """True iff the exact RUNNING ownership snapshot is still current."""
+    if current is None or str(current["status"] or "") != "RUNNING":
+        return False
+    return all(
+        current[field] == observed[field]
+        for field in _RECOVERY_OWNERSHIP_FIELDS
+    )
+
+
 def _recover_stale_running(conn: sqlite3.Connection) -> int:
-    """Recover dead/expired RUNNING ownership without losing model-cost evidence."""
+    """Recover stale RUNNING ownership with an exact ownership CAS.
+
+    Process/filesystem evidence is observed without holding SQLite write
+    ownership. Before mutating attempt/job state, recovery acquires
+    BEGIN IMMEDIATE and re-proves the exact worker/attempt ownership snapshot.
+    A concurrent recovery or legitimate reclaim therefore turns this stale
+    decision into a no-op instead of clobbering the newer RUNNING owner.
+    """
     recovered = 0
     rows = conn.execute(
         "SELECT * FROM jobs WHERE status='RUNNING' ORDER BY id"
     ).fetchall()
-    for row in rows:
-        # A prior stale row may have been accounted and have its operational
-        # handoff pending below.  Commit that per-job handoff before the next
-        # stale attempt opens its own BEGIN IMMEDIATE transaction.  Recovery
-        # is intentionally independently durable per worker, so a crash
-        # between rows remains recoverable without one long transaction across
-        # unrelated execution lanes.
+    for observed in rows:
         if conn.in_transaction:
             conn.commit()
-        if _local_execution_owned(int(row["id"])):
-            # The current supervisor still has an execution lane finishing
-            # this job. Its child may already be gone while the lane is
-            # accounting output and finalizing the engineering artifact;
-            # recovery here would duplicate that pass and steal ownership.
+
+        job_id = int(observed["id"])
+        if _local_execution_owned(job_id):
             continue
-        # A concurrent execution lane records the supervisor PID while it is
-        # between the durable RUNNING claim and semantic-attempt reservation.
-        # Other lanes in this same supervisor must not mistake that short
-        # dispatch-publication window for a stale orphan. A replacement
-        # supervisor has a different PID and will reconcile it normally.
-        if str(row["worker_role"] or "") == "dispatching" and int(row["worker_pid"] or 0) == os.getpid():
+        if (
+            str(observed["worker_role"] or "") == "dispatching"
+            and int(observed["worker_pid"] or 0) == os.getpid()
+        ):
             continue
-        pid = row["worker_pid"]
-        started_at = float(row["worker_started_at"]) if row["worker_started_at"] else None
-        deadline_at = float(row["worker_deadline_at"]) if row["worker_deadline_at"] else None
-        start_identity = str(row["worker_start_identity"] or "")
+
+        pid = observed["worker_pid"]
+        started_at = (
+            float(observed["worker_started_at"])
+            if observed["worker_started_at"] else None
+        )
+        deadline_at = (
+            float(observed["worker_deadline_at"])
+            if observed["worker_deadline_at"] else None
+        )
+        start_identity = str(observed["worker_start_identity"] or "")
         recovery_reason = "recovered stale RUNNING job after supervisor/worker exit"
+
         if _pid_alive(pid, started_at):
             if deadline_at is None or time.time() < deadline_at:
                 continue
-            pgid = int(row["worker_pgid"]) if row["worker_pgid"] else None
+            pgid = int(observed["worker_pgid"]) if observed["worker_pgid"] else None
             if not _terminate_owned_process_group(
                 int(pid), pgid, start_identity or None, started_at
             ):
+                conn.execute("BEGIN IMMEDIATE")
+                current = conn.execute(
+                    "SELECT * FROM jobs WHERE id=?", (job_id,)
+                ).fetchone()
+                if not _recovery_ownership_matches(current, observed):
+                    conn.rollback()
+                    continue
                 conn.execute(
-                    """UPDATE jobs SET last_error=?, updated_at=? WHERE id=?""",
+                    """UPDATE jobs SET last_error=?, updated_at=?
+                       WHERE id=? AND status='RUNNING'""",
                     (
                         "semantic deadline expired but exact orphan process identity "
                         "could not be proven/terminated; retaining RUNNING ownership",
                         time.time(),
-                        row["id"],
+                        job_id,
                     ),
                 )
                 conn.commit()
                 continue
             recovery_reason = "semantic deadline expired; exact owned orphan terminated"
 
-        attempt_id = str(row["worker_attempt_id"] or "")
+        attempt_id = str(observed["worker_attempt_id"] or "")
+        observed_attempt = None
+        recovered_cost = None
+        recovered_usage = None
+        recovered_cost_known = False
+        if attempt_id:
+            observed_attempt = conn.execute(
+                "SELECT * FROM semantic_attempts WHERE attempt_id=? AND job_id=?",
+                (attempt_id, job_id),
+            ).fetchone()
+            if observed_attempt is not None and not bool(
+                int(observed_attempt["cost_accounted"] or 0)
+            ):
+                recovered_cost = _parse_cost_from_durable_stdout(
+                    observed_attempt["stdout_path"]
+                )
+                recovered_cost_known = recovered_cost is not None
+                recovered_usage = _parse_token_usage_from_durable_stdout(
+                    observed_attempt["stdout_path"]
+                )
+
+        conn.execute("BEGIN IMMEDIATE")
+        current = conn.execute(
+            "SELECT * FROM jobs WHERE id=?", (job_id,)
+        ).fetchone()
+        if not _recovery_ownership_matches(current, observed):
+            conn.rollback()
+            continue
+
+        attempt = None
         if attempt_id:
             attempt = conn.execute(
                 "SELECT * FROM semantic_attempts WHERE attempt_id=? AND job_id=?",
-                (attempt_id, int(row["id"])),
+                (attempt_id, job_id),
             ).fetchone()
             if attempt is None:
                 conn.execute(
                     """UPDATE jobs SET status='QUARANTINED', last_error=?,
-                       worker_pid=NULL, worker_started_at=NULL, worker_role=NULL,
-                       next_attempt_at=0, updated_at=? WHERE id=?""",
-                    ("semantic attempt ownership missing during crash recovery",
-                     time.time(), row["id"]),
+                       worker_pid=NULL, worker_started_at=NULL, worker_pgid=NULL,
+                       worker_deadline_at=NULL, worker_start_identity=NULL,
+                       worker_role=NULL, worker_attempt_id=NULL,
+                       next_attempt_at=0, updated_at=?
+                       WHERE id=? AND status='RUNNING'""",
+                    (
+                        "semantic attempt ownership missing during crash recovery",
+                        time.time(),
+                        job_id,
+                    ),
                 )
                 conn.commit()
                 continue
-            # Only gate-v1 reservations are provably pre-provider here.
-            # Historical rows default to launch_gate_version=0 and remain
-            # ambiguous because old runtimes had a post-spawn/pre-PID window.
+
             if (
                 str(attempt["status"] or "") == "RESERVED"
                 and not attempt["worker_pid"]
@@ -1505,88 +1578,94 @@ def _recover_stale_running(conn: sqlite3.Connection) -> int:
                          cache_creation_tokens=0, tokens_known=1,
                          failure_class='supervisor',
                          failure_reason='worker_ownership_not_published'
-                       WHERE attempt_id=? AND job_id=?""",
-                    (time.time(), attempt_id, int(row["id"])),
+                       WHERE attempt_id=? AND job_id=? AND status='RESERVED'""",
+                    (time.time(), attempt_id, job_id),
                 )
                 recovery_reason = (
                     "recovered unpublished gated semantic reservation; "
                     "provider was never released"
                 )
             elif not bool(int(attempt["cost_accounted"] or 0)):
-                recovered_cost = _parse_cost_from_durable_stdout(attempt["stdout_path"])
-                if recovered_cost is None:
-                    # Cost telemetry could not be recovered. With an active
-                    # operator cost ceiling, continuing could exceed the declared
-                    # budget, so fail operationally closed instead of assuming
-                    # zero. Without a ceiling the attempt is accounted at zero
-                    # (marked COST_UNKNOWN) and the run resumes — telemetry loss
-                    # alone must not stop unattended progress.
-                    if float(row["max_total_cost_usd"] or 0) > 0:
-                        conn.execute(
-                            """UPDATE semantic_attempts SET status='COST_UNKNOWN',
-                               completed_at=?, cost_usd=0, cost_accounted=1,
-                               cost_known=0 WHERE attempt_id=?""",
-                            (time.time(), attempt_id),
-                        )
-                        conn.execute(
-                            """UPDATE jobs SET status='QUARANTINED', last_error=?,
-                               worker_pid=NULL, worker_started_at=NULL, worker_role=NULL,
-                               next_attempt_at=0, updated_at=? WHERE id=?""",
-                            ("semantic worker died and model cost could not be recovered "
-                             "from durable structured output while a cost ceiling is active",
-                             time.time(), row["id"]),
-                        )
-                        conn.commit()
-                        continue
-                    recovered_cost = 0.0
-                recovered_cost_known = (
-                    _parse_cost_from_durable_stdout(attempt["stdout_path"]) is not None
+                if (
+                    recovered_cost is None
+                    and float(current["max_total_cost_usd"] or 0) > 0
+                ):
+                    conn.execute(
+                        """UPDATE semantic_attempts SET status='COST_UNKNOWN',
+                           completed_at=?, cost_usd=0, cost_accounted=1,
+                           cost_known=0 WHERE attempt_id=? AND job_id=?""",
+                        (time.time(), attempt_id, job_id),
+                    )
+                    conn.execute(
+                        """UPDATE jobs SET status='QUARANTINED', last_error=?,
+                           worker_pid=NULL, worker_started_at=NULL, worker_pgid=NULL,
+                           worker_deadline_at=NULL, worker_start_identity=NULL,
+                           worker_role=NULL, worker_attempt_id=NULL,
+                           next_attempt_at=0, updated_at=?
+                           WHERE id=? AND status='RUNNING'""",
+                        (
+                            "semantic worker died and model cost could not be recovered "
+                            "from durable structured output while a cost ceiling is active",
+                            time.time(),
+                            job_id,
+                        ),
+                    )
+                    conn.commit()
+                    continue
+
+                effective_cost = (
+                    0.0 if recovered_cost is None else float(recovered_cost)
                 )
-                recovered_usage = _parse_token_usage_from_durable_stdout(
-                    attempt["stdout_path"]
-                )
-                if int(row["max_total_tokens"] or 0) > 0 and recovered_usage is None:
+                if (
+                    int(current["max_total_tokens"] or 0) > 0
+                    and recovered_usage is None
+                ):
                     conn.execute(
                         """UPDATE semantic_attempts SET status='TOKENS_UNKNOWN',
-                           completed_at=? WHERE attempt_id=?""",
-                        (time.time(), attempt_id),
+                           completed_at=? WHERE attempt_id=? AND job_id=?""",
+                        (time.time(), attempt_id, job_id),
                     )
                     conn.execute(
                         """UPDATE jobs SET status='QUARANTINED',
                            last_error=?, last_failure_class='usage_unknown',
                            last_failure_reason=?,
                            worker_pid=NULL, worker_started_at=NULL,
-                           worker_role=NULL, next_attempt_at=0, updated_at=?
-                           WHERE id=?""",
+                           worker_pgid=NULL, worker_deadline_at=NULL,
+                           worker_start_identity=NULL, worker_role=NULL,
+                           worker_attempt_id=NULL, next_attempt_at=0, updated_at=?
+                           WHERE id=? AND status='RUNNING'""",
                         (
                             "semantic worker died and token usage could not be recovered "
                             "while a token ceiling is enabled",
                             "token_usage_unknown_during_crash_recovery",
                             time.time(),
-                            row["id"],
+                            job_id,
                         ),
                     )
                     conn.commit()
                     continue
+
                 usage = recovered_usage or {}
                 _account_attempt_cost(
                     conn,
-                    job_id=int(row["id"]),
+                    job_id=job_id,
                     attempt_id=attempt_id,
-                    cost_usd=recovered_cost,
+                    cost_usd=effective_cost,
                     returncode=None,
-                    status_value=("RECOVERED" if recovered_cost_known else "COST_UNKNOWN"),
+                    status_value=(
+                        "RECOVERED" if recovered_cost_known else "COST_UNKNOWN"
+                    ),
                     cost_known=recovered_cost_known,
                     input_tokens=int(usage.get("input_tokens", 0)),
                     output_tokens=int(usage.get("output_tokens", 0)),
                     cache_read_tokens=int(usage.get("cache_read_tokens", 0)),
                     cache_creation_tokens=int(usage.get("cache_creation_tokens", 0)),
                     tokens_known=recovered_usage is not None,
+                    manage_transaction=False,
                 )
 
-        conn.execute(
-            """
-            UPDATE jobs SET
+        cur = conn.execute(
+            """UPDATE jobs SET
               status='QUEUED',
               worker_pid=NULL,
               worker_started_at=NULL,
@@ -1598,15 +1677,16 @@ def _recover_stale_running(conn: sqlite3.Connection) -> int:
               last_error=?,
               next_attempt_at=0,
               updated_at=?
-            WHERE id=?
+            WHERE id=? AND status='RUNNING'
             """,
-            (recovery_reason, time.time(), row["id"]),
+            (recovery_reason, time.time(), job_id),
         )
-        recovered += 1
-    if recovered:
+        if cur.rowcount != 1:
+            conn.rollback()
+            continue
         conn.commit()
+        recovered += 1
     return recovered
-
 
 def _validate_dispatch_hold_request(
     kind: str | None,
