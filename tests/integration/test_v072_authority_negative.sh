@@ -227,7 +227,7 @@ from pathlib import Path
 p = Path(sys.argv[1])
 text = p.read_text()
 text = text.replace('"schema": "ownframework-work-packet/v2"',
-                    '"schema": "ownframework-work-packet/v2", "promotion_policy": "merge_on_approved"')
+                    '"schema": "ownframework-work-packet/v3", "promotion_policy": "merge_on_approved"')
 p.write_text(text)
 PY
 set +e
