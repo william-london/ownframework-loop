@@ -24,7 +24,7 @@ The finalizer independently:
  15. Executes the packet's required-validation commands itself.
  16. Captures exact exit codes and durations.
  16b. Re-proves builder worktree HEAD, worktree cleanliness, and
-      canonical-branch identity AFTER validation, so validation can
+      baseline-ref identity AFTER validation, so validation can
       never mutate the candidate behind the receipt's back.
  16c. For PROGRAM runs, re-measures the absolute baseline-to-candidate
       source accounting against the packet's global source ceilings.
@@ -181,21 +181,19 @@ def _ancestor_of(canonical_repo: Path, candidate_sha: str, baseline_sha: str) ->
 
 
 def _verify_canonical_branch_unchanged(canonical_repo: Path, baseline_sha: str, expected_branch: str) -> tuple[bool, str]:
-    """Refuse if the canonical branch's HEAD has drifted from the approved baseline.
+    """Refuse if the frozen local baseline branch ref drifted from approval.
 
-    The builder writes commits inside its own worktree; the canonical
-    branch (master / main / etc.) must NOT be advanced by the build.
+    The visible canonical checkout may sit on another branch. The builder owns
+    its isolated candidate worktree; source authority is the exact baseline ref
+    and SHA, not the operator's current checkout position.
     """
     if not git_checks.is_git_repo(canonical_repo):
         return False, "canonical repo is not a git repository"
-    branch = git_checks.current_branch(canonical_repo)
-    if branch != expected_branch:
-        return False, f"canonical branch={branch!r}, expected {expected_branch!r}"
-    head = git_checks.current_head(canonical_repo)
+    head = git_checks.branch_head(canonical_repo, expected_branch)
     if head is None:
-        return False, "canonical repo has no HEAD"
+        return False, f"baseline branch {expected_branch!r} is missing or not resolvable"
     if head != baseline_sha:
-        return False, f"canonical HEAD {head} drifted from approved baseline {baseline_sha}"
+        return False, f"baseline branch ref {head} drifted from approved baseline {baseline_sha}"
     return True, "ok"
 
 
@@ -550,7 +548,7 @@ def finalize_build(
     # prove nothing about what those commands subsequently did.
     # Deterministic validation must never mutate the candidate behind the
     # receipt's back: re-prove the full sealing identity here (builder
-    # HEAD, worktree cleanliness, canonical branch pinned at baseline).
+    # HEAD, worktree cleanliness, baseline branch ref pinned at approved SHA).
     # A breach fails closed toward BLOCKED with a legible receipt instead
     # of an opaque finalize crash after the claimed pass was consumed.
     reproof_head = git_checks.current_head(builder_wt)
