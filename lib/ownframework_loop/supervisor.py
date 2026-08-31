@@ -1307,6 +1307,14 @@ def _recover_stale_running(conn: sqlite3.Connection) -> int:
         "SELECT * FROM jobs WHERE status='RUNNING' ORDER BY id"
     ).fetchall()
     for row in rows:
+        # A prior stale row may have been accounted and have its operational
+        # handoff pending below.  Commit that per-job handoff before the next
+        # stale attempt opens its own BEGIN IMMEDIATE transaction.  Recovery
+        # is intentionally independently durable per worker, so a crash
+        # between rows remains recoverable without one long transaction across
+        # unrelated execution lanes.
+        if conn.in_transaction:
+            conn.commit()
         if _local_execution_owned(int(row["id"])):
             # The current supervisor still has an execution lane finishing
             # this job. Its child may already be gone while the lane is

@@ -5,7 +5,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 TMP="$(mktemp -d -t ofloop-v090-concurrency.XXXXXX)"
 trap 'rm -rf "$TMP"' EXIT
 TMP_ROOT="$TMP" PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$LIB_DIR" python3 -B - <<'PY'
-import os, subprocess, time
+import os, subprocess, tempfile, time
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 from ownframework_loop import supervisor
@@ -67,6 +67,51 @@ with supervisor._connect(db) as c:
     assert supervisor._recover_stale_running(c) == 1
     assert c.execute("select status from jobs where id=?", (handoff["id"],)).fetchone()[0] == "QUEUED"
 print("SAME_SUPERVISOR_COMPLETION_HANDOFF_RECOVERY_FENCE=PASS")
+
+# Multiple dead workers must reconcile independently.  The first stale
+# attempt is durably accounted before the next attempt opens its own SQLite
+# transaction; this is the regression for the multi-worker recovery handoff.
+stale_root = Path(tempfile.mkdtemp(prefix="ofloop-multi-stale-"))
+stale_db = stale_root / "supervisor.sqlite3"
+stale_jobs = []
+for index in range(2):
+    stale_repo = repo(f"multi-stale-{index}")
+    stale_jobs.append(
+        supervisor.enqueue(
+            canonical_repo=stale_repo,
+            run_id=f"run-multi-stale-{index}",
+            db_path=stale_db,
+            runtime_generation="test-generation",
+        )
+    )
+with supervisor._connect(stale_db) as c:
+    now = time.time()
+    for job in stale_jobs:
+        attempt_id = f"stale-attempt-{job['id']}"
+        c.execute(
+            "UPDATE jobs SET status='RUNNING', worker_pid=999999, "
+            "worker_started_at=?, worker_role='builder', worker_attempt_id=?, "
+            "latest_attempt_id=? WHERE id=?",
+            (now, attempt_id, attempt_id, job["id"]),
+        )
+        c.execute(
+            "INSERT INTO semantic_attempts "
+            "(attempt_id,job_id,role,status,started_at,worker_pid,stdout_path,stderr_path) "
+            "VALUES (?,?, 'builder','RUNNING', ?,999999, ?, ?)",
+            (attempt_id, job["id"], now, str(stale_root / "out"), str(stale_root / "err")),
+        )
+    c.commit()
+with supervisor._connect(stale_db) as c:
+    recovered_stale = supervisor._recover_stale_running(c)
+    queued_stale = c.execute("SELECT COUNT(*) FROM jobs WHERE status='QUEUED'").fetchone()[0]
+    recovered_attempts = c.execute(
+        "SELECT COUNT(*) FROM semantic_attempts "
+        "WHERE status IN ('RECOVERED','COST_UNKNOWN') AND cost_accounted=1"
+    ).fetchone()[0]
+    assert recovered_stale == 2, (recovered_stale, queued_stale, recovered_attempts)
+    assert queued_stale == 2, (recovered_stale, queued_stale, recovered_attempts)
+    assert recovered_attempts == 2, (recovered_stale, queued_stale, recovered_attempts)
+print("MULTI_WORKER_STALE_RECOVERY=PASS")
 
 for j in jobs: reset(j)
 alias_target = repo("alias-target"); alias = tmp / "alias-link"; alias.symlink_to(alias_target, target_is_directory=True)
