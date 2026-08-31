@@ -49,9 +49,7 @@ def _seal_path(canonical_repo, run_id):
 def _current_baseline(canonical_repo, expected_branch):
     if not git_checks.is_git_repo(canonical_repo):
         return None
-    if git_checks.current_branch(canonical_repo) != expected_branch:
-        return None
-    return git_checks.current_head(canonical_repo)
+    return git_checks.branch_head(canonical_repo, expected_branch)
 
 
 def _is_tracked_or_staged_dirty(canonical_repo):
@@ -183,10 +181,10 @@ def _validate_seal_against_current(
 
     current_head = _current_baseline(canonical_repo, expected_branch)
     if current_head is None:
-        return False, "canonical source branch missing or HEAD not resolvable"
+        return False, "baseline branch ref missing or not resolvable"
     if current_head != seal.get("baseline_sha"):
         return False, (
-            f"canonical HEAD {current_head[:12]} does not match seal baseline_sha "
+            f"baseline branch ref {current_head[:12]} does not match seal baseline_sha "
             f"{str(seal.get('baseline_sha', ''))[:12]}"
         )
 
@@ -203,7 +201,7 @@ def _validate_seal_against_current(
     spec_sha = seal.get("spec_baseline_sha")
     if spec_sha and spec_sha != current_head:
         return False, (
-            f"canonical source moved between spec and start: "
+            f"baseline branch ref moved between spec and start: "
             f"spec_snapshot={spec_sha[:12]} current={current_head[:12]}"
         )
 
@@ -292,11 +290,10 @@ def ensure_executable(
     target_branch = (packet.get("target") or {}).get("branch") or ""
     if not target_branch:
         raise RuntimeError("packet target.branch missing")
-    actual_branch = git_checks.current_branch(canonical_repo)
-    if actual_branch != target_branch:
+    target_head = git_checks.branch_head(canonical_repo, target_branch)
+    if not target_head:
         raise RuntimeError(
-            f"canonical repo is on branch {actual_branch!r}, packet expects "
-            f"{target_branch!r}"
+            f"packet target branch {target_branch!r} is missing or not a local commit ref"
         )
 
     seal_path = _seal_path(canonical_repo, run_id)
@@ -345,13 +342,21 @@ def ensure_executable(
                         )
                     return existing
 
-                baseline_sha = git_checks.current_head(canonical_repo)
+                baseline_sha = git_checks.branch_head(canonical_repo, target_branch)
                 if not baseline_sha:
-                    raise RuntimeError("canonical repo has no HEAD")
-                if _is_tracked_or_staged_dirty(canonical_repo):
                     raise RuntimeError(
-                        "canonical source has tracked or staged changes; refusing "
-                        "to seal execution start against dirty source"
+                        f"target branch {target_branch!r} is missing or not resolvable"
+                    )
+                # Dirty tracked state only matters when the visible checkout is
+                # the exact baseline branch being sealed. A different checked-out
+                # branch is not execution authority; the frozen local ref/SHA is.
+                if (
+                    git_checks.current_branch(canonical_repo) == target_branch
+                    and _is_tracked_or_staged_dirty(canonical_repo)
+                ):
+                    raise RuntimeError(
+                        "canonical source has tracked or staged changes on the "
+                        "target baseline branch; refusing to seal execution start"
                     )
 
                 prior_state = state_mod.load_verified(canonical_repo, run_id)
