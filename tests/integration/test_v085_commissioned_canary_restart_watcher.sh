@@ -219,7 +219,11 @@ root, run, state, count, active = fixture("missed-boundary", missed=True)
 e = env(count, active)
 missed_arm = subprocess.run(["bash", str(harness), "arm-restart", str(root)], capture_output=True, text=True, env=e)
 assert missed_arm.returncode in (0, 1)
-wait_for(lambda: control(root).get("watcher_result") == "RESTART_BOUNDARY_MISSED", timeout=5)
+try:
+    wait_for(lambda: control(root).get("watcher_result") == "RESTART_BOUNDARY_MISSED", timeout=15)
+except AssertionError:
+    log = (root / "restart-watcher.log").read_text(errors="replace") if (root / "restart-watcher.log").is_file() else "<missing>"
+    raise AssertionError(f"missed-boundary watcher did not fail closed control={control(root)} log={log}")
 assert not (root / "restart-proof.json").exists()
 assert not count.exists()
 assert control(root)["watcher_status"] == "FAILED"
