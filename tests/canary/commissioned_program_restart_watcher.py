@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import fcntl
 import json
 import os
 import re
@@ -19,6 +20,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -59,12 +61,35 @@ def atomic_write(path: Path, value: dict[str, Any]) -> None:
             pass
 
 
+@contextmanager
+def control_lock(control: Path):
+    """Serialize control.json read-modify-write across launcher + watcher.
+
+    Atomic replacement prevents torn JSON, but it cannot prevent two processes
+    from reading the same old document and then overwriting each other's
+    logically newer fields.  A stable sibling lock file survives os.replace()
+    and makes terminal watcher state monotonic under launcher/watcher races.
+    """
+    control = Path(control)
+    lock_path = control.with_name(control.name + ".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        os.fchmod(fd, 0o600)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+
+
 def update_control(control: Path, **changes: Any) -> dict[str, Any]:
     control = Path(control)
-    value = load(control)
-    value.update(changes)
-    atomic_write(control, value)
-    return value
+    with control_lock(control):
+        value = load(control)
+        value.update(changes)
+        atomic_write(control, value)
+        return value
 
 
 def manager(c: dict[str, Any]) -> str:
@@ -620,40 +645,21 @@ def watch(root: Path) -> int:
     return 1
 
 
-def check(root: Path) -> int:
-    control = root / "control.json"
-    c = load(control)
-    c["control"] = str(control)
-    if c.get("watcher_status") in {"ARMED", "WAITING", "BOUNDARY_OBSERVED", "RESTARTING"} and manager_alive(c):
-        print("WATCHER_DURABLE=yes")
-        print(f"WATCHER_ID={watcher_id(c)}")
-        return 0
-    print(f"WATCHER_DURABLE=no reason={c.get('watcher_status') or 'not_armed'}", file=sys.stderr)
-    return 1
-
-
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("command", choices=["arm", "watch", "check", "cleanup"])
+    parser.add_argument("action", choices=["arm", "watch", "cleanup"])
     parser.add_argument("root")
-    parser.add_argument("helper", nargs="?")
     args = parser.parse_args()
-    root = Path(args.root).expanduser().resolve()
-    control = root / "control.json"
-    c = load(control)
-    c["control"] = str(control)
-    try:
-        if args.command == "arm":
-            return arm(root, Path(args.helper or __file__).resolve())
-        if args.command == "watch":
-            return watch(root)
-        if args.command == "check":
-            return check(root)
-        cleanup(c)
-        return 0
-    except Exception as exc:
-        print(f"WATCHER_ERROR={type(exc).__name__}:{exc}", file=sys.stderr)
-        return 1
+    root = Path(args.root).expanduser().resolve(strict=False)
+    helper = Path(__file__).resolve()
+    if args.action == "arm":
+        return arm(root, helper)
+    if args.action == "watch":
+        return watch(root)
+    c = load(root / "control.json")
+    c["control"] = str(root / "control.json")
+    cleanup(c)
+    return 0
 
 
 if __name__ == "__main__":
