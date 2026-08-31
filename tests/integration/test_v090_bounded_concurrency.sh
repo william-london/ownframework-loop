@@ -286,6 +286,59 @@ assert policy["status"] == "BACKOFF" and policy["infra_failures"] == 1, policy
 print("SEMANTIC_ARTIFACT_INCOMPLETE_BOUNDED_RETRY=PASS")
 reset(retry_job)
 
+# If Git common-dir discovery fails for a real repository, scheduling identity
+# must be unproven rather than a path-based false positive.
+identity_repo = repo("identity-failclosed")
+orig_run = supervisor.subprocess.run
+def _fail_git_probe(*args, **kwargs):
+    raise OSError("synthetic git identity probe failure")
+supervisor.subprocess.run = _fail_git_probe
+try:
+    identity_key, identity_proven = supervisor._repository_scheduling_identity(identity_repo)
+finally:
+    supervisor.subprocess.run = orig_run
+assert identity_proven is False and identity_key.startswith("unproven-git:"), (
+    identity_key, identity_proven
+)
+print("REAL_GIT_IDENTITY_UNCERTAINTY_FAILS_CLOSED=PASS")
+
+# Re-enqueue cannot rewrite repository scheduling identity while a job owns a
+# live RUNNING slot.
+identity_job = enqueue(repo("identity-running"), "identity-running", "SINGLE")
+with supervisor._connect(db) as c:
+    c.execute(
+        "UPDATE jobs SET status='RUNNING', worker_pid=?, worker_started_at=?, worker_role='builder' WHERE id=?",
+        (os.getpid(), time.time(), identity_job["id"]),
+    )
+    c.commit()
+orig_identity = supervisor._repository_scheduling_identity
+supervisor._repository_scheduling_identity = lambda _p: ("synthetic-drift-key", True)
+try:
+    refused = supervisor.enqueue(
+        canonical_repo=Path(identity_job["repo"]),
+        run_id="identity-running",
+        db_path=db,
+        runtime_generation="test-generation",
+    )
+finally:
+    supervisor._repository_scheduling_identity = orig_identity
+assert refused.get("enqueue_refused") is True, refused
+assert refused.get("reason") == "cannot_change_scheduling_identity_while_running", refused
+print("RUNNING_SCHEDULING_IDENTITY_IMMUTABLE=PASS")
+reset(identity_job)
+
+# Closing a nested managed SQLite connection in one execution lane must not
+# clear the ownership fence held by its outer run_one connection.
+nested_job = enqueue(repo("nested-connection"), "nested-connection", "SINGLE")
+with supervisor._managed_connect(db):
+    supervisor._register_local_execution(int(nested_job["id"]))
+    with supervisor._managed_connect(db):
+        pass
+    assert supervisor._local_execution_owned(int(nested_job["id"])) is True
+assert supervisor._local_execution_owned(int(nested_job["id"])) is False
+print("NESTED_CONNECTION_PRESERVES_EXECUTION_OWNERSHIP_FENCE=PASS")
+reset(nested_job)
+
 print("MODEL_FREE_CONCURRENCY_FAILURES=0")
 PY
 pass "bounded concurrency, repository exclusion, fairness, draining, hold isolation, and fleet contract"

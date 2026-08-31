@@ -57,6 +57,7 @@ CLAUDE_REVIEWER_TOOLS = "Read,Bash,Glob,Grep"
 # this optimization.
 _LOCAL_EXECUTION_LOCK = threading.Lock()
 _LOCAL_EXECUTION_JOBS: dict[int, set[int]] = {}
+_LOCAL_CONNECTION_DEPTH: dict[int, int] = {}
 
 
 def _register_local_execution(job_id: int) -> None:
@@ -556,10 +557,15 @@ def _repository_scheduling_identity(repo: Path) -> tuple[str, bool]:
             common = resolved / common
         return str(common.resolve(strict=False)), True
     except (OSError, subprocess.SubprocessError):
-        # Small protocol/unit fixtures sometimes use an ordinary directory
-        # because the dispatch layer is mocked. Resolve it as a path-scoped
-        # identity in that narrow case; real Git repositories take the
-        # stronger common-dir branch above. A missing path remains unproven.
+        # A real Git repository whose common-dir identity cannot be proven must
+        # fail closed. Falling back to a merely textual path here can split one
+        # repository into several scheduler identities under aliases and permit
+        # concurrent semantic work against the same Git object database.
+        if (resolved / ".git").exists():
+            return f"unproven-git:{resolved}", False
+        # Small protocol/unit fixtures may intentionally use an ordinary
+        # directory with mocked dispatch. Preserve that narrow path-scoped
+        # identity without weakening real Git enrollment.
         return f"path:{resolved}", resolved.exists()
 
 
@@ -840,12 +846,21 @@ def _managed_connect(path: Path):
     leak when multiple execution lanes repeatedly open their own connections.
     """
     conn = _connect(path)
+    tid = threading.get_ident()
+    with _LOCAL_EXECUTION_LOCK:
+        _LOCAL_CONNECTION_DEPTH[tid] = _LOCAL_CONNECTION_DEPTH.get(tid, 0) + 1
     try:
         with conn:
             yield conn
     finally:
         conn.close()
-        _clear_local_executions_for_thread()
+        with _LOCAL_EXECUTION_LOCK:
+            remaining = _LOCAL_CONNECTION_DEPTH.get(tid, 1) - 1
+            if remaining <= 0:
+                _LOCAL_CONNECTION_DEPTH.pop(tid, None)
+                _LOCAL_EXECUTION_JOBS.pop(tid, None)
+            else:
+                _LOCAL_CONNECTION_DEPTH[tid] = remaining
 
 
 def _connect_readonly(path: Path) -> sqlite3.Connection:
@@ -1627,6 +1642,22 @@ def enqueue(
                             if not existing_generation
                             else "cannot_change_runtime_generation_while_running"
                         ),
+                    })
+                    return out
+                existing_key = str(existing["repository_scheduling_key"] or "")
+                existing_mode = str(existing["execution_mode"] or "SINGLE")
+                if (
+                    int(existing["repository_identity_proven"] or 0) != 1
+                    or existing_key != str(scheduling_key)
+                    or existing_mode != str(execution_mode)
+                ):
+                    out = dict(existing)
+                    out.update({
+                        "schema": SCHEMA,
+                        "ok": False,
+                        "db_path": str(db),
+                        "enqueue_refused": True,
+                        "reason": "cannot_change_scheduling_identity_while_running",
                     })
                     return out
             def _keep(field: str, supplied: Any, default: Any) -> Any:
