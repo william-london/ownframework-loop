@@ -246,6 +246,8 @@ def _build_agent_result_schema_ok(result: dict[str, Any]) -> tuple[bool, list[st
     ):
         errors.append("escalation_recommended must be a boolean")
     for field in ("unit_ids_completed", "acceptance_addressed"):
+        if field not in result:
+            continue
         value = result.get(field)
         if not isinstance(value, list):
             errors.append(f"{field} must be a list")

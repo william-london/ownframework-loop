@@ -156,6 +156,8 @@ def semantic_result_ready(work_order: dict[str, Any]) -> tuple[bool, str]:
         ):
             return False, "builder_semantic_shape_invalid"
         for field in ("unit_ids_completed", "acceptance_addressed"):
+            if field not in data:
+                continue
             value = data.get(field)
             if (
                 not isinstance(value, list)
