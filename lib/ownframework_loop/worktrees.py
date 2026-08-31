@@ -60,16 +60,10 @@ def _wt_lock_path(canonical_repo: Path, run_id: str, role: str) -> Path:
 
 def _git_common_dir(canonical_repo: Path) -> Path:
     """Resolve the shared Git administration directory for all worktrees."""
-    r = run_subprocess(
-        ["git", "-C", str(canonical_repo), "rev-parse", "--git-common-dir"],
-        timeout=10,
-    )
-    if r.returncode != 0 or not r.stdout.strip():
+    common = git_checks.git_common_dir(canonical_repo)
+    if common is None:
         raise WorktreeError("cannot prove Git common directory for worktree administration")
-    common = Path(r.stdout.strip())
-    if not common.is_absolute():
-        common = Path(canonical_repo).resolve(strict=False) / common
-    return common.resolve(strict=False)
+    return common
 
 
 def _worktree_admin_lock_path(canonical_repo: Path) -> Path:
