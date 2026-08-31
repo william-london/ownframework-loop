@@ -24,46 +24,68 @@ make_repo(){
   touch "$p/src/__init__.py"; git -C "$p" add src tests; git -C "$p" commit -qm seed
 }
 make_single_packet(){
-  local repo="$1" rid="$2"; local p="$repo/.ownframework-loop/$rid/WORK_PACKET.md"
+  local repo="$1" rid="$2" lane="${3:-0}"; local p="$repo/.ownframework-loop/$rid/WORK_PACKET.md"
   printf '%s\n' '```json' > "$p"
   cat >> "$p" <<EOF
 {
   "schema":"ownframework-work-packet/v2", "packet_id":"v090-single-$rid", "created_at":"2026-08-31T00:00:00Z",
-  "work_class":"FEATURE", "risk_class":"low", "title":"v0.9 commissioned SINGLE $rid",
+  "work_class":"FEATURE", "risk_class":"low", "title":"v0.9 commissioned SINGLE lane $lane",
   "target":{"repo":"$repo","branch":"master","classification":"local_only"},
-  "acceptance_criteria":[{"id":"AC-1","text":"extend hello with a name while preserving seed behavior","verification":"python -m unittest discover -s tests -q"}],
-  "non_goals":[{"id":"NG-1","text":"no remote or external effects"}], "allowed_paths":["src/","tests/"], "protected_paths":[".ownframework-loop/",".git/"],
+  "acceptance_criteria":[{"id":"AC-1","text":"add isolated lane $lane behavior without changing unrelated source","verification":"python -m unittest discover -s tests -q"}],
+  "non_goals":[{"id":"NG-1","text":"no remote or external effects; do not modify unrelated lane files"}], "allowed_paths":["src/","tests/"], "protected_paths":[".ownframework-loop/",".git/"],
   "required_validation":[{"name":"unit","command":"python -m unittest discover -s tests -q","kind":"fast","expected_exit_code":0}],
-  "work_units":[{"id":"UNIT-1","title":"extend hello","scope":"src/ and tests/","acceptance":["AC-1"]}],
+  "work_units":[{"id":"UNIT-1","title":"isolated lane $lane","scope":"create src/lane_$lane.py and tests/test_lane_$lane.py only","acceptance":["AC-1"]}],
   "merge_authority":"human_only","deploy_authority":"human_only","push_authority":"human_only","external_action_authority":"none",
-  "risk_budget":{"max_files_changed":10,"max_diff_lines":300,"max_repair_rounds":2}
+  "risk_budget":{"max_files_changed":4,"max_diff_lines":180,"max_repair_rounds":2}
 }
 EOF
   printf '%s\n' '```' >> "$p"
-  cat >> "$p" <<'EOF'
-Extend hello to accept an optional name and add a passing test.
+  cat >> "$p" <<EOF
+Create src/lane_$lane.py with lane_value() returning "$lane" and add tests/test_lane_$lane.py proving it. Do not modify src/lib.py or any other lane file.
 EOF
 }
 prepare(){
   local stage="${2:-A}"; [[ "$stage" =~ ^[ABC]$ ]] || die "stage_must_be_A_B_or_C"
   local base="$STATE_ROOT/canaries/concurrency-canary-$(python3 -c 'import secrets; print(secrets.token_hex(4))')"; mkdir -m 700 -p "$base"
-  local n=2; [[ "$stage" == C ]] && n=4
-  local repos=() runs=(); local i
-  for ((i=0;i<n;i++)); do
-    local r="$base/repo-$i"; make_repo "$r"; "$OFLOOP" spec new "$r" "v090 commissioned $stage $i" >/dev/null
-    local rid; rid="$(ls -1t "$r/.ownframework-loop" | head -n1)"; repos+=("$r"); runs+=("$rid")
-    if [[ "$stage" == B || ( "$stage" == C && "$i" -lt 3 ) ]]; then
-      python3 "$HERE/commissioned_program_packet.py" "$r" "$r/.ownframework-loop/$rid/WORK_PACKET.md"
-    else
-      make_single_packet "$r" "$rid"
-    fi
-    PYTHONPATH="$ROOT/lib" python3 - "$r" "$rid" <<'PY'
+  local repos=() runs=(); local i r rid
+  if [[ "$stage" == C ]]; then
+    # Stage C deliberately proves same-repository branch concurrency:
+    # four isolated runs/workspaces across only two Git repositories.
+    local physical
+    for physical in 0 1; do
+      r="$base/repo-$physical"; make_repo "$r"
+      for i in 0 1; do
+        local lane=$((physical * 2 + i))
+        "$OFLOOP" spec new "$r" "v090 commissioned C lane $lane" >/dev/null
+        rid="$(ls -1t "$r/.ownframework-loop" | head -n1)"
+        repos+=("$r"); runs+=("$rid")
+        make_single_packet "$r" "$rid" "$lane"
+        PYTHONPATH="$ROOT/lib" python3 - "$r" "$rid" <<'PY'
 import sys
 from pathlib import Path
 from ownframework_loop import execution_start
-execution_start.ensure_executable(canonical_repo=Path(sys.argv[1]), run_id=sys.argv[2], actor='v090-canary-preparer', binding_method='build_start')
+execution_start.ensure_executable(canonical_repo=Path(sys.argv[1]), run_id=sys.argv[2], actor="v090-canary-preparer", binding_method="build_start")
 PY
-  done
+      done
+    done
+  else
+    local n=2
+    for ((i=0;i<n;i++)); do
+      r="$base/repo-$i"; make_repo "$r"; "$OFLOOP" spec new "$r" "v090 commissioned $stage $i" >/dev/null
+      rid="$(ls -1t "$r/.ownframework-loop" | head -n1)"; repos+=("$r"); runs+=("$rid")
+      if [[ "$stage" == B ]]; then
+        python3 "$HERE/commissioned_program_packet.py" "$r" "$r/.ownframework-loop/$rid/WORK_PACKET.md"
+      else
+        make_single_packet "$r" "$rid" "$i"
+      fi
+      PYTHONPATH="$ROOT/lib" python3 - "$r" "$rid" <<'PY'
+import sys
+from pathlib import Path
+from ownframework_loop import execution_start
+execution_start.ensure_executable(canonical_repo=Path(sys.argv[1]), run_id=sys.argv[2], actor="v090-canary-preparer", binding_method="build_start")
+PY
+    done
+  fi
   local prior; prior="$(PYTHONPATH="$ROOT/lib" python3 -B - <<PY
 from ownframework_loop import supervisor
 from pathlib import Path
@@ -73,7 +95,8 @@ PY
   python3 - "$base" "$stage" "$prior" "${repos[*]}" "${runs[*]}" <<'PY'
 import json,sys
 from pathlib import Path
-b=Path(sys.argv[1]); b.joinpath('control.json').write_text(json.dumps({'schema':'ownframework-loop-concurrency-canary/v1','status':'PREPARED','stage':sys.argv[2],'pre_canary_max_concurrency':int(sys.argv[3]),'db':str(b.parents[1]/'supervisor.sqlite3'),'repos':sys.argv[4].split(),'runs':sys.argv[5].split()},indent=2,sort_keys=True)+'\n')
+b=Path(sys.argv[1]); repos=sys.argv[4].split(); runs=sys.argv[5].split()
+b.joinpath("control.json").write_text(json.dumps({"schema":"ownframework-loop-concurrency-canary/v2","status":"PREPARED","stage":sys.argv[2],"pre_canary_max_concurrency":int(sys.argv[3]),"db":str(b.parents[1]/"supervisor.sqlite3"),"repos":repos,"runs":runs,"distinct_repository_paths":len(set(repos))},indent=2,sort_keys=True)+"\n")
 PY
   echo "CANARY_STATE=PREPARED"; echo "CANARY_ROOT=$base"; echo "STAGE=$stage"; echo "REAL_MODEL_EXECUTED=no"; echo "PRE_CANARY_MAX_CONCURRENCY=$prior"
 }
@@ -254,7 +277,7 @@ for repo_text, rid in zip(c['repos'], c['runs']):
             end = float(attempt['completed_at'])
             assert end >= start, dict(attempt)
             span = (
-                start, end, str(job['repository_scheduling_key']),
+                start, end, str(job['workspace_scheduling_key']),
                 int(job['id']), attempt_id,
             )
             spans.append(span)
@@ -268,8 +291,8 @@ for job_id, job_spans in per_job_spans.items():
             'duplicate active semantic work in one job', job_id, left, right
         )
 
-# Compute actual peak concurrently active distinct repository identities from
-# durable semantic-attempt intervals. End events sort before start events at an
+# Compute actual peak concurrently active workspace identities from durable
+# semantic-attempt intervals. End events sort before start events at an
 # identical timestamp so zero-width handoffs do not manufacture overlap.
 events = []
 for start, end, repo_key, job_id, attempt_id in spans:
@@ -287,13 +310,21 @@ for _, delta, repo_key in events:
     peak = max(peak, sum(1 for value in active_counts.values() if value > 0))
 
 repo_keys = [str(j['repository_scheduling_key']) for j in jobs]
-assert len(set(repo_keys)) == len(repo_keys), repo_keys
+workspace_keys = [str(j['workspace_scheduling_key']) for j in jobs]
+assert all(workspace_keys) and len(set(workspace_keys)) == len(workspace_keys), workspace_keys
+assert all(int(j['workspace_identity_proven'] or 0) == 1 for j in jobs)
 assert cross_repo_mixups == 0, cross_repo_mixups
 assert wrong_sha == 0, wrong_sha
 
 stage = c['stage']
 required_peak = 4 if stage == 'C' else 2
 assert peak >= required_peak, (stage, peak, required_peak)
+if stage == 'C':
+    assert len(set(repo_keys)) == 2, repo_keys
+    grouped = defaultdict(list)
+    for job in jobs:
+        grouped[str(job['repository_scheduling_key'])].append(str(job['workspace_scheduling_key']))
+    assert sorted(len(v) for v in grouped.values()) == [2, 2], grouped
 
 if stage == 'B':
     assert c.get('supervisor_restart_proven') is True, c
@@ -309,12 +340,17 @@ print('CANARY_STATE=TERMINAL_PASS')
 print('STAGE=' + stage)
 print('SEMANTIC_ATTEMPTS=' + str(total_attempts))
 print('FAILED_SEMANTIC_ATTEMPTS=' + str(failed_attempts))
-print('PEAK_ACTIVE_REPOSITORIES=' + str(peak))
+print('PEAK_ACTIVE_WORKSPACES=' + str(peak))
+print('DISTINCT_REPOSITORIES=' + str(len(set(repo_keys))))
 print('DUPLICATE_ACTIVE_ATTEMPTS=0')
 print('LOST_RUNS=0')
 print('WRONG_SHA_REVIEWS=0')
 print('CROSS_REPO_ATTEMPT_MIXUPS=0')
 print('LEDGER_COHERENCE=PASS')
+if stage != 'C':
+    print('PEAK_ACTIVE_REPOSITORIES=' + str(peak))
+if stage == 'C':
+    print('SAME_REPOSITORY_MULTI_WORKSPACE_PROOF=PASS')
 if stage == 'B':
     print('MULTI_INFLIGHT_BEFORE_RESTART=' + str(c['multi_inflight_before_restart']))
     print('SUPERVISOR_RESTART_PROVEN=yes')
