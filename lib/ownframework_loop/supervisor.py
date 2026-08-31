@@ -1814,7 +1814,8 @@ def enqueue(
         branch_existing = conn.execute(
             """SELECT * FROM jobs
                  WHERE repository_scheduling_key=? AND candidate_branch=?
-                   AND run_id!=? AND status!='RETIRED'
+                   AND run_id!=?
+                   AND status IN ('QUEUED','BACKOFF','RUNNING','QUARANTINED')
                  ORDER BY id LIMIT 1""",
             (scheduling_key, candidate_branch, run_id),
         ).fetchone()
@@ -1972,7 +1973,7 @@ def enqueue(
             ),
         )
         row = conn.execute(
-            "SELECT * FROM jobs WHERE repo=? AND run_id=?", (repo, run_id)
+            "SELECT * FROM jobs WHERE id=?", (int(existing["id"]),)
         ).fetchone()
         hold = _hold_row(conn, int(row["id"])) if row is not None else None
         if dispatch_hold_kind is not None:
@@ -2022,6 +2023,37 @@ def enqueue(
     return result
 
 
+def _logical_job_row(
+    conn: sqlite3.Connection,
+    canonical_repo: Path,
+    run_id: str,
+) -> tuple[sqlite3.Row | None, str | None]:
+    """Resolve one enrollment by exact path, else Git common-dir + run id.
+
+    Historical stored repo paths are never rewritten. Ambiguous logical
+    enrollments fail closed rather than guessing which row an operator meant.
+    """
+    requested = str(Path(canonical_repo).expanduser().resolve(strict=False))
+    exact = conn.execute(
+        "SELECT * FROM jobs WHERE repo=? AND run_id=?", (requested, run_id)
+    ).fetchone()
+    if exact is not None:
+        return exact, None
+    key, proven = _repository_scheduling_identity(Path(requested))
+    if not proven:
+        return None, "repository_identity_unproven"
+    rows = conn.execute(
+        """SELECT * FROM jobs
+             WHERE repository_scheduling_key=? AND run_id=?
+             ORDER BY id""",
+        (key, run_id),
+    ).fetchall()
+    if len(rows) == 1:
+        return rows[0], None
+    if len(rows) > 1:
+        return None, "logical_job_ambiguous"
+    return None, "not_enqueued"
+
 def status(
     *,
     canonical_repo: Path,
@@ -2032,13 +2064,11 @@ def status(
     repo = str(Path(canonical_repo).resolve(strict=False))
     db = db_path or default_db_path()
     if not Path(db).expanduser().is_file():
-        row = None
+        row, lookup_reason = None, "not_enqueued"
     else:
         try:
             with _managed_connect_readonly(db) as conn:
-                row = conn.execute(
-                    "SELECT * FROM jobs WHERE repo=? AND run_id=?", (repo, run_id)
-                ).fetchone()
+                row, lookup_reason = _logical_job_row(conn, canonical_repo, run_id)
         except sqlite3.Error as exc:
             return {
                 "schema": SCHEMA,
@@ -2055,7 +2085,12 @@ def status(
             "ok": False,
             "repo": repo,
             "run_id": run_id,
-            "status": "NOT_ENQUEUED",
+            "status": (
+                "LEDGER_AMBIGUOUS"
+                if lookup_reason == "logical_job_ambiguous"
+                else "NOT_ENQUEUED"
+            ),
+            "reason": lookup_reason,
             "db_path": str(db),
         }
     return _job_dict(row, db)
@@ -2145,7 +2180,6 @@ def fleet_status(*, db_path: Path | None = None) -> dict[str, Any]:
             item.update({
                 "effective_schedulability": bool(effective),
                 "workspace_blocked": bool(workspace_blocked),
-                "repo_blocked": bool(workspace_blocked),
                 "repository_peer_running": bool(repository_peer_running),
                 "held": hold_state == "HELD",
                 "active_slot": status_value == "RUNNING",
@@ -2162,7 +2196,7 @@ def fleet_status(*, db_path: Path | None = None) -> dict[str, Any]:
             "free_slots": max(0, configured - active),
             "capacity_draining": active > configured,
             "running_jobs": active, "queued_jobs": counts["QUEUED"],
-            "repo_blocked_jobs": sum(1 for r in projected if r["repo_blocked"]),
+            "workspace_blocked_jobs": sum(1 for r in projected if r["workspace_blocked"]),
             "held_jobs": held, "backoff_jobs": counts["BACKOFF"],
             "quarantined_jobs": counts["QUARANTINED"], "done_jobs": counts["DONE"],
             "retired_jobs": counts["RETIRED"], "jobs": projected,
@@ -2182,14 +2216,18 @@ def dispatch_hold_status(
     if not Path(db).expanduser().is_file():
         return {"schema": SCHEMA, "ok": False, "reason": "ledger_missing"}
     with _managed_connect_readonly(db) as conn:
-        row = conn.execute(
-            """SELECT h.*, j.status AS job_status, j.worker_pid,
-                      j.worker_role, j.worker_attempt_id
-               FROM dispatch_holds h JOIN jobs j ON j.id=h.job_id
-               WHERE h.repo=? AND h.run_id=?
-                 AND (? IS NULL OR h.hold_id=?)""",
-            (repo, run_id, hold_id, hold_id),
-        ).fetchone()
+        job, lookup_reason = _logical_job_row(conn, canonical_repo, run_id)
+        if job is None:
+            row = None
+        else:
+            row = conn.execute(
+                """SELECT h.*, j.status AS job_status, j.worker_pid,
+                          j.worker_role, j.worker_attempt_id
+                   FROM dispatch_holds h JOIN jobs j ON j.id=h.job_id
+                   WHERE h.job_id=?
+                     AND (? IS NULL OR h.hold_id=?)""",
+                (int(job["id"]), hold_id, hold_id),
+            ).fetchone()
     if row is None:
         return {
             "schema": SCHEMA,
@@ -2216,10 +2254,16 @@ def release_dispatch_hold(
     db = db_path or default_db_path()
     now = time.time()
     with _managed_connect(db) as conn:
+        job, lookup_reason = _logical_job_row(conn, canonical_repo, run_id)
+        if job is None:
+            return {
+                "schema": SCHEMA, "ok": False,
+                "reason": lookup_reason or "dispatch_hold_not_found",
+            }
         conn.execute("BEGIN IMMEDIATE")
         row = conn.execute(
-            "SELECT * FROM dispatch_holds WHERE hold_id=? AND repo=? AND run_id=?",
-            (hold_id, repo, run_id),
+            "SELECT * FROM dispatch_holds WHERE hold_id=? AND job_id=?",
+            (hold_id, int(job["id"])),
         ).fetchone()
         if row is None:
             return {"schema": SCHEMA, "ok": False, "reason": "dispatch_hold_not_found"}
@@ -2259,10 +2303,16 @@ def cancel_dispatch_hold(
     db = db_path or default_db_path()
     now = time.time()
     with _managed_connect(db) as conn:
+        job, lookup_reason = _logical_job_row(conn, canonical_repo, run_id)
+        if job is None:
+            return {
+                "schema": SCHEMA, "ok": False,
+                "reason": lookup_reason or "dispatch_hold_not_found",
+            }
         conn.execute("BEGIN IMMEDIATE")
         row = conn.execute(
-            "SELECT * FROM dispatch_holds WHERE hold_id=? AND repo=? AND run_id=?",
-            (hold_id, repo, run_id),
+            "SELECT * FROM dispatch_holds WHERE hold_id=? AND job_id=?",
+            (hold_id, int(job["id"])),
         ).fetchone()
         if row is None:
             return {"schema": SCHEMA, "ok": False, "reason": "dispatch_hold_not_found"}
@@ -4496,9 +4546,7 @@ def resume(
     # other state is refused without changing budgets, wall-clock origin, PID
     # ownership, backoff or error evidence.
     with _managed_connect(db) as conn:
-        existing = conn.execute(
-            "SELECT * FROM jobs WHERE repo=? AND run_id=?", (repo, run_id)
-        ).fetchone()
+        existing, lookup_reason = _logical_job_row(conn, canonical_repo, run_id)
     if existing is None:
         return {
             "schema": SCHEMA,
@@ -4593,16 +4641,15 @@ def resume(
     previous_generation = str(existing["runtime_generation"] or "")
     sets.append("runtime_generation=?")
     params.append(_current_runtime_generation())
-    params.extend([repo, run_id, previous_generation])
+    params.extend([int(existing["id"]), previous_generation])
     with _managed_connect(db) as conn:
         cur = conn.execute(
             f"UPDATE jobs SET {', '.join(sets)} "
-            "WHERE repo=? AND run_id=? AND status='QUARANTINED' "
-            "AND runtime_generation=?",
+            "WHERE id=? AND status='QUARANTINED' AND runtime_generation=?",
             params,
         )
         row = conn.execute(
-            "SELECT * FROM jobs WHERE repo=? AND run_id=?", (repo, run_id)
+            "SELECT * FROM jobs WHERE id=?", (int(existing["id"]),)
         ).fetchone()
         if cur.rowcount != 1:
             result = _job_dict(row, db) if row is not None else {
@@ -4671,9 +4718,7 @@ def retire(
     db = db_path or default_db_path()
     now = time.time()
     with _managed_connect(db) as conn:
-        existing = conn.execute(
-            "SELECT * FROM jobs WHERE repo=? AND run_id=?", (repo, run_id)
-        ).fetchone()
+        existing, lookup_reason = _logical_job_row(conn, canonical_repo, run_id)
     if existing is None:
         return {
             "schema": SCHEMA,
@@ -4752,13 +4797,13 @@ def retire(
             """UPDATE jobs SET
                  status='RETIRED',
                  updated_at=?
-               WHERE repo=? AND run_id=? AND status='QUARANTINED'""",
-            (now, repo, run_id),
+               WHERE id=? AND status='QUARANTINED'""",
+            (now, int(existing["id"])),
         )
         if cur.rowcount != 1:
             # Concurrent transition lost; refuse without rewriting state.
             row = conn.execute(
-                "SELECT * FROM jobs WHERE repo=? AND run_id=?", (repo, run_id)
+                "SELECT * FROM jobs WHERE id=?", (int(existing["id"]),)
             ).fetchone()
             result = _job_dict(row, db) if row is not None else {
                 "schema": SCHEMA, "ok": False, "status": "NOT_ENQUEUED",
