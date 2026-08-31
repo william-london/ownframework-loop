@@ -143,4 +143,79 @@ assert_eq "$SORTED_REVIEW_REPLAY" "false true " "single review has one fresh and
 assert_eq "$(jq -r '.review_pass_count' "$T4/.ownframework-loop/$RID4/STATE.json")" "1" "single review consumes one pass"
 rm -f "$O41" "$O42"
 
+# ---------------------------------------------------------------------------
+# 5. Same Git repo, distinct frozen baseline refs, checkout parked elsewhere.
+# ---------------------------------------------------------------------------
+T5="$(make_tmp_repo)"
+git -C "$T5" branch website
+git -C "$T5" branch webhooks
+
+git -C "$T5" checkout -q website
+mkdir -p "$T5/src"
+printf 'website\n' > "$T5/src/website.txt"
+git -C "$T5" add src/website.txt
+git -C "$T5" commit -qm "website baseline"
+WEBSITE_SHA="$(git -C "$T5" rev-parse HEAD)"
+RID51="$(make_approved_run_unapproved "$T5" FEATURE low "v090-multibaseline-website" website)"
+
+git -C "$T5" checkout -q webhooks
+mkdir -p "$T5/src"
+printf 'webhooks\n' > "$T5/src/webhooks.txt"
+git -C "$T5" add src/webhooks.txt
+git -C "$T5" commit -qm "webhooks baseline"
+WEBHOOKS_SHA="$(git -C "$T5" rev-parse HEAD)"
+RID52="$(make_approved_run_unapproved "$T5" FEATURE low "v090-multibaseline-webhooks" webhooks)"
+
+# The visible checkout is deliberately neither run's baseline.
+git -C "$T5" checkout -q master
+
+python3 - "$T5" "$RID51" "$RID52" "$WEBSITE_SHA" "$WEBHOOKS_SHA" <<'PY'
+import sys
+from pathlib import Path
+from ownframework_loop import build_prepare, execution_start, git_checks
+
+repo = Path(sys.argv[1])
+rid_website, rid_webhooks = sys.argv[2], sys.argv[3]
+sha_website, sha_webhooks = sys.argv[4], sys.argv[5]
+
+assert git_checks.current_branch(repo) == "master"
+execution_start.ensure_executable(
+    canonical_repo=repo, run_id=rid_website,
+    actor="v090-multibaseline", binding_method="build_start",
+)
+execution_start.ensure_executable(
+    canonical_repo=repo, run_id=rid_webhooks,
+    actor="v090-multibaseline", binding_method="build_start",
+)
+website = build_prepare.prepare(canonical_repo=repo, run_id=rid_website)
+webhooks = build_prepare.prepare(canonical_repo=repo, run_id=rid_webhooks)
+
+assert website["baseline_sha"] == sha_website, website
+assert webhooks["baseline_sha"] == sha_webhooks, webhooks
+assert website["candidate_branch"] != webhooks["candidate_branch"], (website, webhooks)
+assert website["builder_worktree"] != webhooks["builder_worktree"], (website, webhooks)
+assert git_checks.current_branch(repo) == "master"
+print("MULTI_BASELINE_SAME_REPO=PASS")
+print("CANONICAL_CHECKOUT_POSITION_NOT_GLOBAL_MUTEX=PASS")
+print("CANDIDATE_ANCESTRY_PRESERVED=PASS")
+PY
+
+# Moving the frozen website branch ref must still be detected even though the
+# visible checkout remains on master.
+git -C "$T5" branch -f website master >/dev/null
+python3 - "$T5" "$RID51" <<'PY'
+import sys
+from pathlib import Path
+from ownframework_loop import build_prepare
+
+try:
+    build_prepare.prepare(canonical_repo=Path(sys.argv[1]), run_id=sys.argv[2])
+except Exception as exc:
+    text = str(exc)
+    assert "baseline" in text and ("drift" in text or "invalid" in text), text
+else:
+    raise AssertionError("baseline ref drift was not refused")
+print("BASELINE_REF_DRIFT_STILL_REFUSED=PASS")
+PY
+
 echo "V054_EXECUTION_START_HARDENING=PASS"
