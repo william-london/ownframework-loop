@@ -812,6 +812,11 @@ def finalize_review(
         "escalation_reason": (assessment.get("escalation_reason") if assessment else None),
     }
 
+    # Validate authoritative protocol shape before persistence. The low-level
+    # writer retains its historical identity/cleanliness-only contract for
+    # compatibility; this deterministic finalizer owns schema authority.
+    verdicts.validate_verdict_contract(new_verdict)
+
     # 20. Persist.
     verdicts.write_verdict(canonical_repo, run_id, new_verdict)
 

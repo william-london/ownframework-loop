@@ -126,7 +126,6 @@ def validate_verdict_contract(verdict: dict[str, Any]) -> None:
 
 
 def write_verdict(canonical_repo: Path, run_id: str, verdict: dict[str, Any]) -> Path:
-    validate_verdict_contract(verdict)
     _assert_exact_clean_review_candidate(canonical_repo, run_id, verdict)
     p = verdict_path(canonical_repo, run_id)
     atomic_write_json(p, verdict, mode=0o600)

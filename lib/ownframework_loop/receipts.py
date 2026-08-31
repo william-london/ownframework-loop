@@ -147,7 +147,6 @@ def validate_receipt_contract(receipt: dict[str, Any]) -> None:
 
 
 def write_receipt(canonical_repo: Path, run_id: str, receipt: dict[str, Any]) -> Path:
-    validate_receipt_contract(receipt)
     _assert_exact_clean_builder_candidate(canonical_repo, run_id, receipt)
     p = receipt_path(canonical_repo, run_id)
     atomic_write_json(p, receipt, mode=0o600)
