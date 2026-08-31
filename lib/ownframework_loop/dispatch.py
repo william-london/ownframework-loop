@@ -18,6 +18,7 @@ from typing import Any
 
 from . import (
     approval as approval_mod,
+    assessment as assessment_mod,
     git_checks as git_checks_mod,
     packet as packet_mod,
     program as program_mod,
@@ -50,6 +51,7 @@ _RETRYABLE_SEMANTIC_RESULT_REASONS = frozenset({
     "builder_outcome_invalid",
     "builder_summary_empty",
     "builder_completion_evidence_empty",
+    "builder_semantic_shape_invalid",
     "review_schema_mismatch",
     "review_candidate_mismatch",
     "review_recommendation_invalid",
@@ -59,6 +61,9 @@ _RETRYABLE_SEMANTIC_RESULT_REASONS = frozenset({
     "review_non_goal_coverage_incomplete",
     "review_acceptance_result_incomplete",
     "review_non_goal_result_incomplete",
+    "review_acceptance_result_invalid",
+    "review_non_goal_result_invalid",
+    "review_escalation_invalid",
 })
 
 
@@ -132,6 +137,31 @@ def semantic_result_ready(work_order: dict[str, Any]) -> tuple[bool, str]:
         outcome = data.get("outcome_requested")
         if outcome not in BUILD_OUTCOMES:
             return False, "builder_outcome_invalid"
+        if (
+            not isinstance(data.get("work_unit_id"), str)
+            or not data.get("work_unit_id", "").strip()
+        ):
+            return False, "builder_semantic_shape_invalid"
+        if "summary" in data and not isinstance(data.get("summary"), str):
+            return False, "builder_semantic_shape_invalid"
+        if "evidence" in data and not isinstance(data.get("evidence"), dict):
+            return False, "builder_semantic_shape_invalid"
+        for field in ("blocker_reason", "escalation_reason", "notes"):
+            value = data.get(field)
+            if value is not None and not isinstance(value, str):
+                return False, "builder_semantic_shape_invalid"
+        if (
+            "escalation_recommended" in data
+            and not isinstance(data.get("escalation_recommended"), bool)
+        ):
+            return False, "builder_semantic_shape_invalid"
+        for field in ("unit_ids_completed", "acceptance_addressed"):
+            value = data.get(field)
+            if (
+                not isinstance(value, list)
+                or any(not isinstance(x, str) or not x for x in value)
+            ):
+                return False, "builder_semantic_shape_invalid"
         summary = str(data.get("summary") or "").strip()
         if outcome == "candidate_ready":
             addressed = data.get("acceptance_addressed") or []
@@ -182,8 +212,16 @@ def semantic_result_ready(work_order: dict[str, Any]) -> tuple[bool, str]:
         return False, "review_candidate_mismatch"
     if data.get("recommended_verdict") not in REVIEW_VERDICTS:
         return False, "review_recommendation_invalid"
-    if not isinstance(data.get("findings"), list):
+    if assessment_mod.validate_findings(data.get("findings")):
         return False, "review_findings_invalid"
+    if (
+        "escalation_recommended" in data
+        and not isinstance(data.get("escalation_recommended"), bool)
+    ):
+        return False, "review_escalation_invalid"
+    escalation_reason = data.get("escalation_reason")
+    if escalation_reason is not None and not isinstance(escalation_reason, str):
+        return False, "review_escalation_invalid"
 
     repo = Path(str(work_order.get("canonical_repo") or "")).resolve(strict=False)
     if not repo.is_dir():
@@ -267,6 +305,16 @@ def semantic_result_ready(work_order: dict[str, Any]) -> tuple[bool, str]:
         if isinstance(item, dict)
     ):
         return False, "review_non_goal_result_incomplete"
+    _, ac_result_errors = assessment_mod.canonicalize_result_rows(
+        ac, kind="acceptance"
+    )
+    if ac_result_errors:
+        return False, "review_acceptance_result_invalid"
+    _, ng_result_errors = assessment_mod.canonicalize_result_rows(
+        ng, kind="non_goal"
+    )
+    if ng_result_errors:
+        return False, "review_non_goal_result_invalid"
     return True, "ready"
 
 

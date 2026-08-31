@@ -1,5 +1,9 @@
 {
-  "_comment": "Deterministic skeleton for REVIEW_AGENT_ASSESSMENT.json. The reviewer agent MUST copy this file verbatim into the per-run scratch path, then fill in the values. Every required field name, casing, and enum value is part of the contract — do not rename, lowercase, or omit. The deterministic review finalizer refuses any assessment that does not validate against this shape.",
+  "_comment": "Deterministic skeleton for REVIEW_AGENT_ASSESSMENT.json. The reviewer agent MUST copy this file verbatim into the per-run scratch path, then fill in the values. Every required field name, casing, and enum value is part of the contract. The deterministic review finalizer refuses any assessment that does not validate against this shape.",
+  "_acceptance_result_enum": "Every acceptance_results[].result must be exactly: pass | fail | inconclusive.",
+  "_non_goal_result_enum": "Every non_goal_results[].result must be exactly: preserved | violated | inconclusive. SATISFIED is not a protocol value.",
+  "_finding_contract": "Each finding must contain finding_id(F-...), severity(critical|high|medium|low|info), classification(must_fix|advisory), title, description; optional file string and line integer >= 1 only.",
+  "_boolean_contract": "escalation_recommended must be a JSON boolean, never a quoted string.",
 
   "schema": "ownframework-loop-review-agent-assessment/v1",
   "run_id": "<fill: run-...Z-...>",

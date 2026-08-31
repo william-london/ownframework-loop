@@ -121,7 +121,15 @@ print-mode role prompt and controls the pass through its wall-clock budget.
    `unit_ids_completed`, `acceptance_addressed`, `notes`, `timestamp`.
 10. Do not rename/add fixed identity keys. Do not supply `candidate_sha`; Git is
    authoritative.
-11. Stop. The parent calls the deterministic finalizer.
+11. Before stopping, re-read and parse `agent_result_path`. Verify
+    `outcome_requested` is one of the exact lowercase enum values below;
+    `summary` and `notes` are strings; `evidence` is an object;
+    `blocker_reason` / `escalation_reason` are string-or-null;
+    `escalation_recommended` is a JSON boolean, never the strings
+    `"true"` / `"false"`; and `unit_ids_completed` / `acceptance_addressed`
+    are arrays containing only non-empty strings. Repair the same semantic
+    artifact if any check fails.
+12. Stop. The parent calls the deterministic finalizer.
 
 `outcome_requested` is exactly one of:
 `candidate_ready`, `blocked`, `stopped`.

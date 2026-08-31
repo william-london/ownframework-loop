@@ -64,23 +64,30 @@ and controls the pass through its wall-clock budget.
    produce exactly one result for every packet acceptance-criterion id.
 4. Produce exactly one result for every supplied `non_goal_ids` entry when
    non-goals exist. Do not retain example, prior-pass, or future-checkpoint IDs.
-5. Record stable, specific must-fix findings.
-6. Run required validations where permitted; never fabricate results.
-7. Fill only semantic/runtime fields in the existing skeleton. The assessment
+5. Use the exact machine vocabulary for every semantic row:
+   - every acceptance_results[].result is exactly lowercase pass, fail, or inconclusive;
+   - every non_goal_results[].result is exactly lowercase preserved, violated, or inconclusive.
+   Do not emit synonyms such as PASS, SATISFIED, OK, UNCHANGED, or prose in a result field.
+6. Record findings only in the exact authoritative-compatible shape: finding_id (F-...), severity (critical|high|medium|low|info), classification (must_fix|advisory), title, description, with optional string file and optional integer line >= 1. Do not add other finding keys.
+7. Run required validations where permitted; never fabricate results.
+8. Fill only semantic/runtime fields in the existing skeleton. The assessment
    path is outside restricted built-in file-tool scope, so write exactly that
    file with sandboxed Bash:
    `validation_results`, `acceptance_results`, `non_goal_results`,
    `findings`, `recommended_verdict`, `escalation_recommended`,
    `escalation_reason`, and `timestamp`.
-8. Leave all pre-populated identity fields unchanged.
-9. Before stopping, re-read and parse the exact `assessment_path` with
+9. Leave all pre-populated identity fields unchanged.
+10. Before stopping, re-read and parse the exact `assessment_path` with
    sandboxed Bash/Python and verify: JSON is valid; run/candidate identity is
    unchanged; acceptance IDs exactly equal the supplied
    `acceptance_criterion_ids`; non-goal IDs exactly equal supplied
-   `non_goal_ids`; every result has non-empty evidence; `findings` is a
-   list; and `recommended_verdict` is one allowed uppercase enum. Repair the
+   `non_goal_ids`; every acceptance result is exactly pass|fail|inconclusive;
+   every non-goal result is exactly preserved|violated|inconclusive; every
+   result has non-empty evidence; every finding has the exact shape above;
+   `escalation_recommended` is a JSON boolean, never a string; and
+   `recommended_verdict` is one allowed uppercase enum. Repair the
    same assessment file if any check fails. Do not call the finalizer.
-10. Stop. The parent calls the deterministic finalizer.
+11. Stop. The parent calls the deterministic finalizer.
 
 Recommended verdict is exactly one of `APPROVED`, `CHANGES_REQUESTED`,
 `BLOCKED`, `HUMAN_REVIEW_REQUIRED`, `STALE_CANDIDATE`. It is semantic

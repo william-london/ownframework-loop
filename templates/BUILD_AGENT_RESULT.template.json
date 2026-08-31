@@ -1,5 +1,6 @@
 {
-  "_comment": "Deterministic skeleton for BUILD_AGENT_RESULT.json. The builder agent MUST copy this file verbatim into the per-run scratch path, then fill in the values. Every required field name, casing, and enum value is part of the contract — do not rename, lowercase, or omit. The deterministic build finalizer refuses any agent result that does not validate against this shape.",
+  "_comment": "Deterministic skeleton for BUILD_AGENT_RESULT.json. The builder agent MUST copy this file verbatim into the per-run scratch path, then fill in the values. Every required field name, casing, enum value, and JSON type is part of the contract. The deterministic build finalizer refuses any agent result that does not validate against this shape.",
+  "_field_contract": "summary/notes are strings; evidence is an object; blocker_reason/escalation_reason are string-or-null; escalation_recommended is a JSON boolean; unit_ids_completed/acceptance_addressed are arrays of non-empty strings.",
 
   "schema": "ownframework-loop-build-agent-result/v1",
   "run_id": "<fill: run-...Z-...>",

@@ -227,6 +227,30 @@ def _build_agent_result_schema_ok(result: dict[str, Any]) -> tuple[bool, list[st
         errors.append(f"schema must be {SCHEMA_AGENT_RESULT}")
     if result.get("outcome_requested") not in AGENT_RESULT_ALLOWED_OUTCOMES:
         errors.append(f"outcome_requested must be one of {sorted(AGENT_RESULT_ALLOWED_OUTCOMES)}")
+    if (
+        not isinstance(result.get("work_unit_id"), str)
+        or not str(result.get("work_unit_id") or "").strip()
+    ):
+        errors.append("work_unit_id must be a non-empty string")
+    if "summary" in result and not isinstance(result.get("summary"), str):
+        errors.append("summary must be a string")
+    if "evidence" in result and not isinstance(result.get("evidence"), dict):
+        errors.append("evidence must be an object")
+    for field in ("blocker_reason", "escalation_reason", "notes"):
+        value = result.get(field)
+        if value is not None and not isinstance(value, str):
+            errors.append(f"{field} must be a string or null")
+    if (
+        "escalation_recommended" in result
+        and not isinstance(result.get("escalation_recommended"), bool)
+    ):
+        errors.append("escalation_recommended must be a boolean")
+    for field in ("unit_ids_completed", "acceptance_addressed"):
+        value = result.get(field)
+        if not isinstance(value, list):
+            errors.append(f"{field} must be a list")
+        elif any(not isinstance(item, str) or not item for item in value):
+            errors.append(f"{field} must contain only non-empty strings")
     return (not errors), errors
 
 
@@ -689,9 +713,14 @@ def finalize_build(
         "next_state": next_state,
         "agent_summary": (agent_result.get("summary") if agent_result else None),
         "blocker_reason": (agent_result.get("blocker_reason") if agent_result else None),
-        "escalation_recommended": bool(agent_result.get("escalation_recommended")) if agent_result else False,
+        "escalation_recommended": agent_result.get("escalation_recommended") is True,
         "escalation_reason": (agent_result.get("escalation_reason") if agent_result else None),
     }
+
+    # Validate the complete authoritative artifact before either persistence
+    # path. The identity-reproof breach path intentionally bypasses the clean
+    # worktree assertion, but it must never bypass the public receipt schema.
+    receipts.validate_receipt_contract(receipt)
 
     # 21. Persist atomically. An identity-reproof failure is written
     # directly: the clean-candidate assertion inside receipts.write_receipt

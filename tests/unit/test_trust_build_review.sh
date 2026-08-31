@@ -267,7 +267,7 @@ cat > "$ASSESS26" <<JSON
   "schema": "ownframework-loop-review-agent-assessment/v1",
   "run_id": "$RID8",
   "candidate_sha_claimed": "0000000000000000000000000000000000000000",
-  "acceptance_results": [{"id": "AC-1", "result": "pass"}],
+  "acceptance_results": [{"id": "AC-1", "result": "pass", "evidence": "synthetic identity refusal fixture"}],
   "non_goal_results": [],
   "findings": [],
   "recommended_verdict": "APPROVED"
@@ -283,7 +283,7 @@ cat > "$ASSESS27" <<JSON
   "schema": "ownframework-loop-review-agent-assessment/v1",
   "run_id": "$RID8",
   "candidate_sha_claimed": "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
-  "acceptance_results": [{"id": "AC-1", "result": "pass"}],
+  "acceptance_results": [{"id": "AC-1", "result": "pass", "evidence": "synthetic identity refusal fixture"}],
   "non_goal_results": [],
   "findings": [],
   "recommended_verdict": "APPROVED"
@@ -299,7 +299,7 @@ cat > "$ASSESS28" <<JSON
   "schema": "ownframework-loop-review-agent-assessment/v1",
   "run_id": "$RID8",
   "candidate_sha_claimed": "DIFFERENT_SHA_FROM_RECEIPT",
-  "acceptance_results": [{"id": "AC-1", "result": "pass"}],
+  "acceptance_results": [{"id": "AC-1", "result": "pass", "evidence": "synthetic identity refusal fixture"}],
   "non_goal_results": [],
   "findings": [],
   "recommended_verdict": "APPROVED"
@@ -643,7 +643,7 @@ cat > "$A16" <<JSON
   "schema": "ownframework-loop-review-agent-assessment/v1",
   "run_id": "$RID16",
   "candidate_sha_claimed": "$BR16",
-  "acceptance_results": [{"id": "AC-1", "result": "pass", "notes": "ok"}],
+  "acceptance_results": [{"id": "AC-1", "result": "pass", "evidence": "fsm transition fixture"}],
   "non_goal_results": [],
   "findings": [],
   "recommended_verdict": "APPROVED"

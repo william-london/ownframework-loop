@@ -52,13 +52,30 @@ import json,sys
 from pathlib import Path
 p=Path(sys.argv[1]); d=json.loads(p.read_text())
 d["validation_results"]=[]
-d["acceptance_results"]=[{"id":"AC-1","result":"pass","evidence":"exact-SHA synthetic contract proof"}]
+d["acceptance_results"]=[{"id":"AC-1","result":"SATISFIED","evidence":"synthetic invalid vocabulary"}]
 d["non_goal_results"]=[]
 d["findings"]=[]
 d["recommended_verdict"]="APPROVED"
 p.write_text(json.dumps(d,indent=2,sort_keys=True)+"\n")
 PY
+BAD_READY="$(RORDER_JSON="$RORDER" python3 - <<'PY'
+import json,os
+from ownframework_loop import dispatch
+ready,reason=dispatch.semantic_result_ready(json.loads(os.environ["RORDER_JSON"]))
+print(f"{ready}|{reason}")
+PY
+)"
+assert_eq "$BAD_READY" "False|review_acceptance_result_invalid" "semantic synonym rejected before finalizer"
+
+python3 - "$RSEM" <<'PY'
+import json,sys
+from pathlib import Path
+p=Path(sys.argv[1]); d=json.loads(p.read_text())
+d["acceptance_results"]=[{"id":"AC-1","result":"PASS","evidence":"exact-SHA synthetic contract proof"}]
+p.write_text(json.dumps(d,indent=2,sort_keys=True)+"\n")
+PY
 "$OFLOOP_BIN" dispatch finalize "$SINGLE" "$RID" REVIEW "$RSEM" >/dev/null
+assert_eq "$(jq -r '.acceptance_results[0].result' "$SINGLE/.ownframework-loop/$RID/REVIEW_VERDICT.json")" "pass" "authoritative verdict canonicalizes case-only semantic result"
 validate_run "$SINGLE" "$RID" "SINGLE_REVIEW"
 
 PROGRAM_REPO="$(make_tmp_repo)"
@@ -102,6 +119,62 @@ from ownframework_loop import execution_start
 execution_start.ensure_executable(canonical_repo=Path(sys.argv[1]),run_id=sys.argv[2],actor="schema-contract")
 PY
 validate_run "$PROGRAM_REPO" "$PRID" "PROGRAM_START"
+
+python3 - <<'PY'
+from ownframework_loop import assessment
+from ownframework_loop.build_finalize import _build_agent_result_schema_ok
+
+rows, errors = assessment.canonicalize_result_rows(
+    [{"id":"AC-1","result":" PASS ","evidence":"x"}], kind="acceptance"
+)
+assert not errors and rows[0]["result"] == "pass", (rows, errors)
+rows, errors = assessment.canonicalize_result_rows(
+    [{"id":"NG-1","result":"PRESERVED","evidence":"x"}], kind="non_goal"
+)
+assert not errors and rows[0]["result"] == "preserved", (rows, errors)
+_, errors = assessment.canonicalize_result_rows(
+    [{"id":"NG-1","result":"SATISFIED","evidence":"x"}], kind="non_goal"
+)
+assert errors, "non-goal SATISFIED must not be guessed into preserved"
+_, errors = assessment.canonicalize_result_rows(
+    [{"id":"AC-1","result":"pass","evidence":"x","notes":"extra"}], kind="acceptance"
+)
+assert errors, "semantic row extra keys must be refused"
+
+valid_finding={
+    "finding_id":"F-contract",
+    "severity":"medium",
+    "classification":"must_fix",
+    "title":"contract",
+    "description":"synthetic contract finding",
+}
+assert assessment.validate_findings([valid_finding]) == []
+assert assessment.validate_findings([{**valid_finding,"extra":"forbidden"}])
+
+base={
+    "schema":"ownframework-loop-build-agent-result/v1",
+    "run_id":"run-contract",
+    "work_unit_id":"UNIT-1",
+    "outcome_requested":"candidate_ready",
+    "summary":"ok",
+    "evidence":{},
+    "blocker_reason":None,
+    "escalation_recommended":False,
+    "escalation_reason":None,
+    "unit_ids_completed":["UNIT-1"],
+    "acceptance_addressed":["AC-1"],
+    "notes":"",
+}
+ok, errors = _build_agent_result_schema_ok(base)
+assert ok, errors
+bad=dict(base); bad["escalation_recommended"]="false"
+ok, errors = _build_agent_result_schema_ok(bad)
+assert not ok and any("boolean" in e for e in errors), errors
+bad=dict(base); bad["unit_ids_completed"]="UNIT-1"
+ok, errors = _build_agent_result_schema_ok(bad)
+assert not ok and any("unit_ids_completed" in e for e in errors), errors
+print("SEMANTIC_ARTIFACT_BOUNDARY=PASS")
+PY
 
 python3 - "$ROOT_DIR" <<'PY'
 import sys

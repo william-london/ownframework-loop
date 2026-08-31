@@ -68,8 +68,9 @@ d.update({"run_id": rid, "validation_results": [],
           "acceptance_results": [{"id": "AC-1", "result": "pass",
                                    "evidence": "synthetic review"}],
           "non_goal_results": [], "findings": [] if verdict == "APPROVED" else [{
-              "id": "CANARY-REPAIR", "severity": "must_fix",
-              "summary": "remove CANARY_REPAIR_REQUIRED"}],
+              "finding_id": "F-CANARY-REPAIR", "severity": "medium",
+              "classification": "must_fix", "title": "repair sentinel",
+              "description": "remove CANARY_REPAIR_REQUIRED"}],
           "recommended_verdict": verdict})
 p.write_text(json.dumps(d, indent=2, sort_keys=True) + "\n")
 PY

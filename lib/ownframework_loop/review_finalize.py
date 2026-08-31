@@ -219,12 +219,38 @@ def _assessment_schema_ok(assessment: dict[str, Any]) -> tuple[bool, list[str]]:
         errors.append(f"schema must be {SCHEMA_AGENT_ASSESSMENT}")
     if assessment.get("recommended_verdict") not in ASSESSMENT_ALLOWED_VERDICTS:
         errors.append(f"recommended_verdict must be one of {sorted(ASSESSMENT_ALLOWED_VERDICTS)}")
-    if not isinstance(assessment.get("acceptance_results"), list):
-        errors.append("acceptance_results must be a list")
-    if not isinstance(assessment.get("non_goal_results"), list):
-        errors.append("non_goal_results must be a list")
-    if not isinstance(assessment.get("findings"), list):
-        errors.append("findings must be a list")
+
+    for key, kind in (
+        ("acceptance_results", "acceptance"),
+        ("non_goal_results", "non_goal"),
+    ):
+        rows = assessment.get(key)
+        if not isinstance(rows, list):
+            errors.append(f"{key} must be a list")
+            continue
+        _, row_errors = assessment_mod.canonicalize_result_rows(rows, kind=kind)
+        errors.extend(row_errors)
+        for idx, row in enumerate(rows):
+            if not isinstance(row, dict):
+                continue
+            evidence = row.get("evidence")
+            if not isinstance(evidence, str) or not evidence.strip():
+                errors.append(f"{key}[{idx}].evidence must be a non-empty string")
+
+    errors.extend(assessment_mod.validate_findings(assessment.get("findings")))
+    if (
+        "escalation_recommended" in assessment
+        and not isinstance(assessment.get("escalation_recommended"), bool)
+    ):
+        errors.append("escalation_recommended must be a boolean")
+    escalation_reason = assessment.get("escalation_reason")
+    if escalation_reason is not None and not isinstance(escalation_reason, str):
+        errors.append("escalation_reason must be a string or null")
+    if (
+        "validation_results" in assessment
+        and not isinstance(assessment.get("validation_results"), list)
+    ):
+        errors.append("validation_results must be a list")
     return (not errors), errors
 
 
@@ -568,13 +594,22 @@ def finalize_review(
     if cap_review is not None and new_review_pass_count > cap_review:
         raise RuntimeError(f"review_pass_count={new_review_pass_count} above cap={cap_review}")
 
-    # 15. Acceptance criteria semantic check.
-    ac_results = assessment.get("acceptance_results") or []
-    if not isinstance(ac_results, list):
-        ac_results = []
-    ng_results = assessment.get("non_goal_results") or []
-    if not isinstance(ng_results, list):
-        ng_results = []
+    # 15. Acceptance criteria semantic check. Canonicalize only case/outer
+    # whitespace before these model-authored rows cross into the authoritative
+    # verdict; semantic synonyms are rejected, never guessed.
+    raw_ac_results = assessment.get("acceptance_results") or []
+    raw_ng_results = assessment.get("non_goal_results") or []
+    ac_results, ac_normalization_errors = assessment_mod.canonicalize_result_rows(
+        raw_ac_results, kind="acceptance"
+    )
+    ng_results, ng_normalization_errors = assessment_mod.canonicalize_result_rows(
+        raw_ng_results, kind="non_goal"
+    )
+    semantic_row_errors = ac_normalization_errors + ng_normalization_errors
+    if semantic_row_errors:
+        raise RuntimeError(
+            "assessment semantic result invalid: " + "; ".join(semantic_row_errors)
+        )
 
     def _expected_ids(items: list[Any], prefix: str) -> list[str]:
         out: list[str] = []
@@ -773,7 +808,7 @@ def finalize_review(
         "timestamp": util.utc_now_iso(),
         "recommended_next_state": next_state,
         "failure_reason": failure_reason,
-        "escalation_recommended": bool(assessment.get("escalation_recommended")) if assessment else False,
+        "escalation_recommended": assessment.get("escalation_recommended") is True,
         "escalation_reason": (assessment.get("escalation_reason") if assessment else None),
     }
 

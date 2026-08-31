@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from . import git_checks, worktrees
+from . import git_checks, schema_validate, worktrees
 from .util import (
     atomic_write_json, builder_worktree, run_dir, run_subprocess,
     short_sha, utc_now_iso,
@@ -138,7 +138,16 @@ def _assert_exact_clean_builder_candidate(
         )
 
 
+def validate_receipt_contract(receipt: dict[str, Any]) -> None:
+    errors = schema_validate.validate_receipt(receipt)
+    if errors:
+        raise RuntimeError(
+            "refusing BUILD_RECEIPT: schema invalid: " + "; ".join(errors[:20])
+        )
+
+
 def write_receipt(canonical_repo: Path, run_id: str, receipt: dict[str, Any]) -> Path:
+    validate_receipt_contract(receipt)
     _assert_exact_clean_builder_candidate(canonical_repo, run_id, receipt)
     p = receipt_path(canonical_repo, run_id)
     atomic_write_json(p, receipt, mode=0o600)

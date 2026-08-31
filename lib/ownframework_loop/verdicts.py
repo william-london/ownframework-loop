@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from . import git_checks, worktrees
+from . import git_checks, schema_validate, worktrees
 from .util import atomic_write_json, reviewer_worktree, run_dir, utc_now_iso
 
 
@@ -117,7 +117,16 @@ def _assert_exact_clean_review_candidate(
         )
 
 
+def validate_verdict_contract(verdict: dict[str, Any]) -> None:
+    errors = schema_validate.validate_verdict(verdict)
+    if errors:
+        raise RuntimeError(
+            "refusing REVIEW_VERDICT: schema invalid: " + "; ".join(errors[:20])
+        )
+
+
 def write_verdict(canonical_repo: Path, run_id: str, verdict: dict[str, Any]) -> Path:
+    validate_verdict_contract(verdict)
     _assert_exact_clean_review_candidate(canonical_repo, run_id, verdict)
     p = verdict_path(canonical_repo, run_id)
     atomic_write_json(p, verdict, mode=0o600)

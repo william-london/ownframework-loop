@@ -26,6 +26,7 @@ will still refuse.
 from __future__ import annotations
 
 import json
+import re
 import shutil
 from pathlib import Path
 from typing import Any
@@ -62,6 +63,119 @@ ALLOWED_RECOMMENDED_VERDICTS: frozenset[str] = frozenset(
         "STALE_CANDIDATE",
     }
 )
+
+ACCEPTANCE_RESULT_VALUES: frozenset[str] = frozenset(
+    {"pass", "fail", "inconclusive"}
+)
+NON_GOAL_RESULT_VALUES: frozenset[str] = frozenset(
+    {"preserved", "violated", "inconclusive"}
+)
+FINDING_SEVERITIES: frozenset[str] = frozenset(
+    {"critical", "high", "medium", "low", "info"}
+)
+FINDING_CLASSIFICATIONS: frozenset[str] = frozenset(
+    {"must_fix", "advisory"}
+)
+FINDING_REQUIRED_KEYS: frozenset[str] = frozenset(
+    {"finding_id", "severity", "classification", "title", "description"}
+)
+FINDING_ALLOWED_KEYS: frozenset[str] = frozenset(
+    {*FINDING_REQUIRED_KEYS, "file", "line"}
+)
+SEMANTIC_ROW_ALLOWED_KEYS: frozenset[str] = frozenset(
+    {"id", "result", "evidence"}
+)
+
+
+def canonicalize_result_rows(
+    rows: Any,
+    *,
+    kind: str,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Normalize case-only variance and reject semantic or shape ambiguity."""
+    if kind == "acceptance":
+        allowed = ACCEPTANCE_RESULT_VALUES
+    elif kind == "non_goal":
+        allowed = NON_GOAL_RESULT_VALUES
+    else:
+        raise ValueError(f"unsupported semantic result kind: {kind!r}")
+
+    if not isinstance(rows, list):
+        return [], [f"{kind}_results must be a list"]
+
+    normalized: list[dict[str, Any]] = []
+    errors: list[str] = []
+    for idx, row in enumerate(rows):
+        if not isinstance(row, dict):
+            errors.append(f"{kind}_results[{idx}] must be an object")
+            continue
+        unknown = sorted(set(row) - SEMANTIC_ROW_ALLOWED_KEYS)
+        if unknown:
+            errors.append(
+                f"{kind}_results[{idx}] has unsupported keys: {','.join(unknown)}"
+            )
+            continue
+        item_id = row.get("id")
+        if not isinstance(item_id, str) or not item_id.strip():
+            errors.append(f"{kind}_results[{idx}].id must be a non-empty string")
+            continue
+        raw = row.get("result")
+        if not isinstance(raw, str) or not raw.strip():
+            errors.append(f"{kind}_results[{idx}].result must be a non-empty string")
+            continue
+        value = raw.strip().lower()
+        if value not in allowed:
+            errors.append(
+                f"{kind}_results[{idx}].result={raw!r} must be one of {sorted(allowed)}"
+            )
+            continue
+        item: dict[str, Any] = {"id": item_id, "result": value}
+        if "evidence" in row:
+            item["evidence"] = row.get("evidence")
+        normalized.append(item)
+    return normalized, errors
+
+
+def validate_findings(findings: Any) -> list[str]:
+    """Validate model-authored finding rows before they become authority."""
+    if not isinstance(findings, list):
+        return ["findings must be a list"]
+
+    errors: list[str] = []
+    for idx, finding in enumerate(findings):
+        prefix = f"findings[{idx}]"
+        if not isinstance(finding, dict):
+            errors.append(f"{prefix} must be an object")
+            continue
+        unknown = sorted(set(finding) - FINDING_ALLOWED_KEYS)
+        if unknown:
+            errors.append(f"{prefix} has unsupported keys: {','.join(unknown)}")
+        for key in FINDING_REQUIRED_KEYS:
+            value = finding.get(key)
+            if not isinstance(value, str) or not value.strip():
+                errors.append(f"{prefix}.{key} must be a non-empty string")
+        finding_id = finding.get("finding_id")
+        if isinstance(finding_id, str) and finding_id.strip():
+            if re.fullmatch(r"F-[A-Za-z0-9_-]+", finding_id) is None:
+                errors.append(f"{prefix}.finding_id has invalid format")
+        severity = finding.get("severity")
+        if isinstance(severity, str) and severity not in FINDING_SEVERITIES:
+            errors.append(
+                f"{prefix}.severity={severity!r} must be one of {sorted(FINDING_SEVERITIES)}"
+            )
+        classification = finding.get("classification")
+        if isinstance(classification, str) and classification not in FINDING_CLASSIFICATIONS:
+            errors.append(
+                f"{prefix}.classification={classification!r} must be one of "
+                f"{sorted(FINDING_CLASSIFICATIONS)}"
+            )
+        if "file" in finding and not isinstance(finding.get("file"), str):
+            errors.append(f"{prefix}.file must be a string")
+        if "line" in finding:
+            line = finding.get("line")
+            if isinstance(line, bool) or not isinstance(line, int) or line < 1:
+                errors.append(f"{prefix}.line must be an integer >= 1")
+    return errors
 
 
 def template_path(source_root: Path) -> Path:
