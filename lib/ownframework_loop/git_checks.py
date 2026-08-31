@@ -22,10 +22,33 @@ def git_toplevel(path: Path) -> Path | None:
 
 
 def git_common_dir(path: Path) -> Path | None:
-    r = run_subprocess(["git", "-C", str(path), "rev-parse", "--git-common-dir"], timeout=10)
+    """Return the resolved Git common directory for a main or linked worktree."""
+    base = Path(path).expanduser().resolve(strict=False)
+    r = run_subprocess(["git", "-C", str(base), "rev-parse", "--git-common-dir"], timeout=10)
+    raw = r.stdout.strip()
+    if r.returncode != 0 or not raw:
+        return None
+    common = Path(raw)
+    if not common.is_absolute():
+        common = base / common
+    try:
+        return common.resolve(strict=False)
+    except OSError:
+        return None
+
+
+def branch_head(path: Path, branch: str) -> str | None:
+    """Resolve one exact local branch ref to a commit SHA, independent of checkout."""
+    if not is_valid_branch_name(branch):
+        return None
+    r = run_subprocess(
+        ["git", "-C", str(path), "rev-parse", "--verify", f"refs/heads/{branch}^{{commit}}"],
+        timeout=10,
+    )
     if r.returncode != 0:
         return None
-    return Path(r.stdout.strip())
+    value = r.stdout.strip()
+    return value or None
 
 
 def current_branch(path: Path) -> str | None:
