@@ -195,7 +195,13 @@ print("  PASS: T3 stale verdict + failed build receipt -> receipt-sourced repair
     "failure_reason": "acceptance_criterion_failed",
     "acceptance_results": [{"id": "AC-1", "result": "fail", "evidence": "no"}],
     "non_goal_results": [],
-    "findings": [{"classification": "must_fix", "title": "broken"}],
+    "findings": [{
+        "finding_id": "F-T3",
+        "severity": "medium",
+        "classification": "must_fix",
+        "title": "broken",
+        "description": "synthetic repair-context finding",
+    }],
     "validation_results": [],
 }), encoding="utf-8")
 ctx2 = dispatch._repair_context_for_build(canonical_repo=repo, run_id=rid, state_doc=state)
@@ -285,7 +291,13 @@ from pathlib import Path
 p = Path(sys.argv[1]); d = json.loads(p.read_text())
 d["acceptance_results"] = [{"id": "AC-1", "result": "pass", "evidence": "ok"}]
 d["non_goal_results"] = []
-d["findings"] = [{"classification": "must_fix", "title": "needs repair"}]
+d["findings"] = [{
+    "finding_id": "F-T4",
+    "severity": "medium",
+    "classification": "must_fix",
+    "title": "needs repair",
+    "description": "synthetic pass-cap repair finding",
+}]
 d["recommended_verdict"] = "CHANGES_REQUESTED"
 p.write_text(json.dumps(d, indent=2, sort_keys=True) + "\n")
 PY
@@ -381,9 +393,11 @@ p = Path(sys.argv[1]); d = json.loads(p.read_text())
 d["acceptance_results"] = [{"id": "AC-1", "result": "pass", "evidence": "ok"}]
 d["non_goal_results"] = []
 d["findings"] = [{
+    "finding_id": "F-T5",
+    "severity": "medium",
     "classification": "must_fix",
     "title": "identical structural finding",
-    "detail": "the same must-fix finding, repeated verbatim",
+    "description": "the same must-fix finding, repeated verbatim",
 }]
 d["recommended_verdict"] = "CHANGES_REQUESTED"
 p.write_text(json.dumps(d, indent=2, sort_keys=True) + "\n")
