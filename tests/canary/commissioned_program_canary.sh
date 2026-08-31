@@ -174,15 +174,24 @@ start(){
   current="$(field "$PROVENANCE" runtime_generation)"
   [[ "$prepared" == "$current" ]] || die "runtime_generation_changed_before_start"
   python3 "$WATCHER_HELPER" check "$1" || die "restart_watcher_not_armed"
-  "$OFLOOP_BIN" supervisor enqueue "$REPO" "$RID" >"$1/enqueue.json"
-  local bound
-  bound="$(python3 - "$1/enqueue.json" <<'PY'
+  "$OFLOOP_BIN" supervisor enqueue "$REPO" "$RID" \
+    --dispatch-hold-kind PROGRAM_CHECKPOINT_BOUNDARY \
+    --dispatch-hold-previous-checkpoint CP-1 \
+    --dispatch-hold-next-checkpoint CP-2 >"$1/enqueue.json"
+  local bound hold_id hold_kind hold_state
+  read -r bound hold_id hold_kind hold_state <<<"$(python3 - "$1/enqueue.json" <<'PY'
 import json,sys
-print(json.load(open(sys.argv[1])).get("runtime_generation",""))
+doc=json.load(open(sys.argv[1]))
+hold=doc.get("dispatch_hold") or {}
+print(doc.get("runtime_generation",""), hold.get("hold_id",""), hold.get("kind",""), hold.get("state",""))
 PY
 )"
   [[ -n "$bound" && "$bound" == "$prepared" ]] || die "enqueue_generation_mismatch"
-  update_control "$CONTROL" "status=STARTED" "started_at=$(now)" "runtime_generation_started=$bound"
+  [[ -n "$hold_id" ]] || die "dispatch_hold_missing_after_atomic_enqueue"
+  [[ "$hold_kind" == "PROGRAM_CHECKPOINT_BOUNDARY" ]] || die "dispatch_hold_kind_mismatch"
+  [[ "$hold_state" == "ARMED" ]] || die "dispatch_hold_not_armed_after_atomic_enqueue"
+  update_control "$CONTROL" "status=STARTED" "started_at=$(now)" "runtime_generation_started=$bound" \
+    "dispatch_hold_id=$hold_id" "dispatch_hold_kind=$hold_kind" "dispatch_hold_state=$hold_state"
   echo "CANARY_STATE=STARTED"
   echo "RUN_ID=$RID"
   echo "REAL_MODEL_EXECUTION=commissioned_service_now_authorized"
@@ -276,6 +285,20 @@ try:
     assert restart["service_label"]==c["service_label"]
     assert restart["watcher_id"]==c["watcher_id"]
     assert restart["runtime_generation_before"]==restart["runtime_generation_after"]==c["runtime_generation_started"]
+
+    conn=sqlite3.connect(f"file:{Path(c['db']).resolve()}?mode=ro",uri=True)
+    conn.row_factory=sqlite3.Row
+    hold_id=c.get("dispatch_hold_id")
+    assert hold_id, "dispatch hold identity missing"
+    hold=conn.execute("SELECT * FROM dispatch_holds WHERE hold_id=? AND job_id=?", (hold_id, job["id"])).fetchone()
+    assert hold is not None, "dispatch hold ledger row missing"
+    assert hold["kind"]=="PROGRAM_CHECKPOINT_BOUNDARY"
+    assert hold["state"]=="RELEASED", dict(hold)
+    assert restart.get("dispatch_hold_id")==hold_id
+    assert restart.get("dispatch_hold_state")=="HELD"
+    assert restart.get("cp2_attempts_at_hold")==0
+    assert restart.get("proof_written_before_hold_release") is True
+    conn.close()
 
     meta,_=packet_mod.parse_packet_file(rd/"WORK_PACKET.md")
     assert meta.get("network_read_allowlist")==[]

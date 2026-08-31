@@ -352,6 +352,26 @@ def db_probe(c: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+def hold_probe(c: dict[str, Any]) -> str:
+    """Return the durable hold state without mutating either authority."""
+    hold_id = str(c.get("dispatch_hold_id") or "")
+    if not hold_id:
+        return "NO_HOLD"
+    db = Path(c["db"])
+    try:
+        conn = sqlite3.connect(f"file:{db.resolve()}?mode=ro", uri=True)
+        row = conn.execute(
+            "SELECT state FROM dispatch_holds WHERE hold_id=? AND repo=? AND run_id=?",
+            (hold_id, str(Path(c["repo"]).resolve()), c["run_id"]),
+        ).fetchone()
+        conn.close()
+    except sqlite3.Error:
+        return "WAIT"
+    if row is None:
+        return "WAIT"
+    return str(row[0])
+
+
 def boundary_probe(c: dict[str, Any]) -> str:
     state_path = Path(c["repo"]) / ".ownframework-loop" / c["run_id"] / "STATE.json"
     if not state_path.is_file():
@@ -433,12 +453,46 @@ def write_proof(c: dict[str, Any], before: str, after: str, pid: int | None) -> 
         "watcher_pid": pid,
         "watcher_log": str(log_path(c)),
     }
+    if c.get("dispatch_hold_id"):
+        proof.update({
+            "dispatch_hold_id": str(c["dispatch_hold_id"]),
+            "dispatch_hold_kind": str(c.get("dispatch_hold_kind") or ""),
+            "dispatch_hold_state": "HELD",
+            "cp2_attempts_at_hold": 0,
+            "proof_written_before_hold_release": True,
+        })
     if not proof["service_active_after_restart"]:
         raise RuntimeError("service_not_active_after_restart")
     if not proof["runtime_generation_stable"]:
         raise RuntimeError("runtime_generation_changed_on_restart")
     proof_path = Path(c["canary_root"]) / "restart-proof.json"
     atomic_write(proof_path, proof)
+
+
+def release_hold(c: dict[str, Any]) -> None:
+    hold_id = str(c.get("dispatch_hold_id") or "")
+    if not hold_id:
+        return
+    command = os.environ.get("OFLOOP_CANARY_TEST_RELEASE_COMMAND") if manager(c) == "test" else None
+    if command:
+        result = subprocess.run(command, shell=True, check=False)
+    else:
+        result = subprocess.run(
+            [str(c["ofloop_bin"]), "supervisor", "hold", "release",
+             str(Path(c["repo"]).resolve()), str(c["run_id"]), hold_id,
+             "--db", str(Path(c["db"]).resolve())],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    if result.returncode:
+        detail = getattr(result, "stderr", "") or getattr(result, "stdout", "")
+        append_log(c, f"DISPATCH_HOLD_RELEASE_ERROR={str(detail).strip()[:500]}")
+        raise RuntimeError(f"dispatch_hold_release_failed:{str(detail).strip()[:500]}")
+    append_log(c, "DISPATCH_HOLD_RELEASE_RESPONSE=ok")
+    c = load(Path(c["control"])) if c.get("control") else c
+    if hold_probe(c) != "RELEASED":
+        raise RuntimeError("dispatch_hold_release_not_durable")
 
 
 def generation(c: dict[str, Any]) -> str:
@@ -454,7 +508,31 @@ def watch(root: Path) -> int:
     append_log(c, f"WATCHER_STATE=WAITING watcher_id={watcher_id(c)} pid={pid}")
     deadline = time.monotonic() + WAIT_SECONDS
     while time.monotonic() < deadline:
-        result = boundary_probe(c)
+        result = hold_probe(c)
+        if result == "NO_HOLD":
+            if c.get("status") == "STARTED":
+                update_control(control, watcher_status="FAILED", watcher_result="DISPATCH_HOLD_MISSING_AFTER_START", watcher_durable=False)
+                append_log(c, "WATCHER_RESULT=DISPATCH_HOLD_MISSING_AFTER_START")
+                cleanup(load(control) | {"control": str(control)})
+                return 1
+            # Backward-compatible fixture mode for the pre-hold watcher test;
+            # commissioned START always records a hold id and uses HELD as the
+            # scheduler-owned trigger.
+            result = boundary_probe(c)
+        elif result == "ARMED":
+            result = "WAIT"
+        elif result == "RELEASED":
+            update_control(control, watcher_status="FAILED", watcher_result="HOLD_RELEASED_BEFORE_PROOF", watcher_durable=False)
+            append_log(c, "WATCHER_RESULT=HOLD_RELEASED_BEFORE_PROOF")
+            cleanup(load(control) | {"control": str(control)})
+            return 1
+        elif result == "CANCELLED":
+            update_control(control, watcher_status="FAILED", watcher_result="HOLD_CANCELLED", watcher_durable=False)
+            append_log(c, "WATCHER_RESULT=HOLD_CANCELLED")
+            cleanup(load(control) | {"control": str(control)})
+            return 1
+        elif result == "HELD":
+            result = "BOUNDARY"
         if result == "WAIT":
             time.sleep(POLL_SECONDS)
             continue
@@ -470,7 +548,14 @@ def watch(root: Path) -> int:
             return 1
         # Re-probe immediately before restarting.  If CP-2 was claimed in the
         # small observation window, fail closed and never manufacture recovery.
-        if boundary_probe(load(control) | {"control": str(control)}) != "BOUNDARY":
+        current_control = load(control) | {"control": str(control)}
+        if current_control.get("dispatch_hold_id"):
+            if hold_probe(current_control) != "HELD":
+                update_control(control, watcher_status="FAILED", watcher_result="DISPATCH_HOLD_NOT_HELD", watcher_durable=False)
+                append_log(c, "WATCHER_RESULT=DISPATCH_HOLD_NOT_HELD")
+                cleanup(load(control) | {"control": str(control)})
+                return 1
+        if boundary_probe(current_control) != "BOUNDARY":
             update_control(control, watcher_status="FAILED", watcher_result="RESTART_BOUNDARY_MISSED", watcher_durable=False)
             append_log(c, "WATCHER_RESULT=RESTART_BOUNDARY_MISSED")
             cleanup(load(control) | {"control": str(control)})
@@ -478,6 +563,8 @@ def watch(root: Path) -> int:
         c = load(control)
         c["control"] = str(control)
         update_control(control, watcher_status="BOUNDARY_OBSERVED", watcher_pid=pid, watcher_durable=True)
+        if c.get("dispatch_hold_id"):
+            update_control(control, dispatch_hold_state="HELD")
         append_log(c, f"WATCHER_STATE=BOUNDARY_OBSERVED watcher_id={watcher_id(c)}")
         before = generation(c)
         try:
@@ -487,8 +574,21 @@ def watch(root: Path) -> int:
             if not service_active(c):
                 raise RuntimeError("service_not_active_after_restart")
             after = generation(c)
+            # The hold is the durable scheduling hand-off.  Re-probe it and
+            # the authoritative boundary after service recovery, before the
+            # proof can be published or the hold can be released.
+            if c.get("dispatch_hold_id"):
+                current = load(control)
+                current["control"] = str(control)
+                if hold_probe(current) != "HELD":
+                    raise RuntimeError("dispatch_hold_not_held_after_restart")
+                if boundary_probe(current) != "BOUNDARY":
+                    raise RuntimeError("restart_boundary_not_verified_after_restart")
             write_proof(c, before, after, pid)
+            release_hold(c)
             update_control(control, watcher_status="PROOF_WRITTEN", watcher_result="RESTARTED", watcher_durable=False, watcher_finished_at=now())
+            if c.get("dispatch_hold_id"):
+                update_control(control, dispatch_hold_state="RELEASED")
             append_log(c, "WATCHER_STATE=PROOF_WRITTEN SERVICE_RESTARTED=yes")
             cleanup(load(control) | {"control": str(control)})
             print("CANARY_RESTART_PROOF=RECORDED boundary=CP-2_READY runtime_generation_stable=yes")

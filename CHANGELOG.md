@@ -105,6 +105,18 @@ lifecycle parity, cover unresolved-attempt retirement refusal, validate
 vendor-neutral core install/discovery/uninstall, and exercise Linux systemd-user
 commissioning alongside macOS launchd parity.
 
+### Durable commissioned restart coordination
+
+- a typed, per-run `PROGRAM_CHECKPOINT_BOUNDARY` dispatch hold is enrolled
+  atomically with the supervisor job and remains separate from the engineering
+  state machine and `jobs.status` lifecycle;
+- the supervisor evaluates authoritative verified PROGRAM state before job
+  claim, semantic-attempt reservation, provider release, or worker launch;
+- the one-shot hold survives supervisor restart, prevents CP-2 reservation at
+  the CP-1-approved boundary, and is released only after durable restart proof;
+- the commissioned canary watcher consumes the held ledger state, records
+  atomic restart evidence, and preserves terminal hold history.
+
 ## 0.8.3 - Supervisor Enrollment Retirement (2026-08-29)
 
 ### Operator lifecycle for durable historical evidence

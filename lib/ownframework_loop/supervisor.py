@@ -26,9 +26,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import dispatch as dispatch_mod, packet as packet_mod, runtime_env, state as state_mod, util, runtime_identity
+from . import dispatch as dispatch_mod, dispatch_hold as dispatch_hold_mod, packet as packet_mod, runtime_env, state as state_mod, util, runtime_identity
 
 SCHEMA = "ownframework-loop-supervisor/v1"
+DISPATCH_HOLD_KIND = "PROGRAM_CHECKPOINT_BOUNDARY"
+DISPATCH_HOLD_STATES = frozenset({"ARMED", "HELD", "RELEASED", "CANCELLED"})
 # Per-pass runaway fuse fallback. A semantic worker that neither declared a
 # packet budget nor got an operational narrowing is bounded to one hour so a
 # stuck worker cannot hold the single global execution slot indefinitely.
@@ -499,7 +501,7 @@ def worker_log_paths(
 # Historical rows may carry the old $25 / unlimited-token / 8h fingerprint,
 # but that tuple is indistinguishable from an operator explicitly selecting it.
 # Preserve it and mark ambiguity rather than inventing intent.
-SCHEMA_DATA_VERSION = 3
+SCHEMA_DATA_VERSION = 4
 _LEGACY_BUDGET_DEFAULT_FINGERPRINT = (25.0, 0, 28800)
 
 
@@ -514,6 +516,9 @@ def _apply_data_migrations(conn: sqlite3.Connection) -> None:
                  AND max_wall_seconds=?""",
             _LEGACY_BUDGET_DEFAULT_FINGERPRINT,
         )
+        conn.execute("PRAGMA user_version = 3")
+        version = 3
+    if version < 4:
         conn.execute(f"PRAGMA user_version = {SCHEMA_DATA_VERSION}")
         conn.commit()
 
@@ -604,6 +609,25 @@ def _connect(path: Path) -> sqlite3.Connection:
         );
         CREATE INDEX IF NOT EXISTS semantic_attempts_job_idx
           ON semantic_attempts(job_id, started_at);
+        CREATE TABLE IF NOT EXISTS dispatch_holds (
+          hold_id TEXT PRIMARY KEY,
+          job_id INTEGER NOT NULL UNIQUE,
+          repo TEXT NOT NULL,
+          run_id TEXT NOT NULL,
+          kind TEXT NOT NULL,
+          previous_checkpoint_id TEXT NOT NULL,
+          next_checkpoint_id TEXT NOT NULL,
+          state TEXT NOT NULL,
+          armed_at REAL NOT NULL,
+          held_at REAL,
+          released_at REAL,
+          cancelled_at REAL,
+          last_error TEXT,
+          updated_at REAL NOT NULL,
+          UNIQUE(repo, run_id, kind)
+        );
+        CREATE INDEX IF NOT EXISTS dispatch_holds_state_idx
+          ON dispatch_holds(state, updated_at);
         """
     )
     columns = {
@@ -1289,6 +1313,47 @@ def _recover_stale_running(conn: sqlite3.Connection) -> int:
     return recovered
 
 
+def _validate_dispatch_hold_request(
+    kind: str | None,
+    previous_checkpoint_id: str | None,
+    next_checkpoint_id: str | None,
+) -> None:
+    supplied = (kind, previous_checkpoint_id, next_checkpoint_id)
+    if not any(value is not None for value in supplied):
+        return
+    if kind != DISPATCH_HOLD_KIND:
+        raise ValueError(f"unsupported dispatch hold kind: {kind!r}")
+    if not previous_checkpoint_id or not next_checkpoint_id:
+        raise ValueError("PROGRAM_CHECKPOINT_BOUNDARY requires previous and next checkpoint ids")
+
+
+def _hold_row(conn: sqlite3.Connection, job_id: int) -> sqlite3.Row | None:
+    return conn.execute(
+        "SELECT * FROM dispatch_holds WHERE job_id=?", (int(job_id),)
+    ).fetchone()
+
+
+def _hold_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
+    return dict(row) if row is not None else None
+
+
+def _hold_matches_before_claim(
+    conn: sqlite3.Connection,
+    row: sqlite3.Row,
+) -> tuple[sqlite3.Row | None, str]:
+    hold = _hold_row(conn, int(row["id"]))
+    if hold is None or str(hold["state"]) in {"RELEASED", "CANCELLED"}:
+        return hold, "NO_ACTIVE_HOLD"
+    if str(hold["state"]) not in DISPATCH_HOLD_STATES:
+        return hold, "invalid_hold_state"
+    if str(hold["state"]) == "HELD":
+        return hold, "HELD"
+    matches, reason = dispatch_hold_mod.engineering_boundary_matches(
+        repo=Path(str(row["repo"])), run_id=str(row["run_id"]), hold=hold
+    )
+    return hold, "MATCH" if matches else reason
+
+
 def enqueue(
     *,
     canonical_repo: Path,
@@ -1302,6 +1367,9 @@ def enqueue(
     max_total_tokens: int | None = None,
     max_wall_seconds: int | None = None,
     runtime_generation: str | None = None,
+    dispatch_hold_kind: str | None = None,
+    dispatch_hold_previous_checkpoint_id: str | None = None,
+    dispatch_hold_next_checkpoint_id: str | None = None,
 ) -> dict[str, Any]:
     """Create or refresh one enqueued run's operational envelope.
 
@@ -1331,6 +1399,11 @@ def enqueue(
     -> wall clock) before calling this; explicit operator flags win.
     """
     state_mod.validate_run_id(run_id)
+    _validate_dispatch_hold_request(
+        dispatch_hold_kind,
+        dispatch_hold_previous_checkpoint_id,
+        dispatch_hold_next_checkpoint_id,
+    )
     repo = str(Path(canonical_repo).resolve(strict=False))
     db = db_path or default_db_path()
     now = time.time()
@@ -1448,7 +1521,52 @@ def enqueue(
         row = conn.execute(
             "SELECT * FROM jobs WHERE repo=? AND run_id=?", (repo, run_id)
         ).fetchone()
-    return _job_dict(row, db)
+        hold = _hold_row(conn, int(row["id"])) if row is not None else None
+        if dispatch_hold_kind is not None:
+            if row is None:
+                raise RuntimeError("dispatch hold enrollment lost job row")
+            if hold is None:
+                hold = {
+                    "hold_id": uuid.uuid4().hex,
+                    "job_id": int(row["id"]),
+                    "repo": repo,
+                    "run_id": run_id,
+                    "kind": dispatch_hold_kind,
+                    "previous_checkpoint_id": dispatch_hold_previous_checkpoint_id,
+                    "next_checkpoint_id": dispatch_hold_next_checkpoint_id,
+                    "state": "ARMED",
+                    "armed_at": now,
+                    "held_at": None,
+                    "released_at": None,
+                    "cancelled_at": None,
+                    "last_error": None,
+                    "updated_at": now,
+                }
+                conn.execute(
+                    """INSERT INTO dispatch_holds
+                       (hold_id, job_id, repo, run_id, kind,
+                        previous_checkpoint_id, next_checkpoint_id, state,
+                        armed_at, held_at, released_at, cancelled_at,
+                        last_error, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, 'ARMED', ?, NULL, NULL,
+                               NULL, NULL, ?)""",
+                    (
+                        hold["hold_id"], hold["job_id"], hold["repo"], hold["run_id"],
+                        hold["kind"], hold["previous_checkpoint_id"],
+                        hold["next_checkpoint_id"], hold["armed_at"], hold["updated_at"],
+                    ),
+                )
+                hold = _hold_row(conn, int(row["id"]))
+            else:
+                if (
+                    str(hold["kind"]) != dispatch_hold_kind
+                    or str(hold["previous_checkpoint_id"]) != str(dispatch_hold_previous_checkpoint_id)
+                    or str(hold["next_checkpoint_id"]) != str(dispatch_hold_next_checkpoint_id)
+                ):
+                    raise ValueError("dispatch hold intent conflicts with existing job hold")
+        result = _job_dict(row, db)
+        result["dispatch_hold"] = _hold_dict(hold)
+    return result
 
 
 def status(
@@ -1488,6 +1606,127 @@ def status(
             "db_path": str(db),
         }
     return _job_dict(row, db)
+
+
+def dispatch_hold_status(
+    *,
+    canonical_repo: Path,
+    run_id: str,
+    hold_id: str | None = None,
+    db_path: Path | None = None,
+) -> dict[str, Any]:
+    state_mod.validate_run_id(run_id)
+    repo = str(Path(canonical_repo).resolve(strict=False))
+    db = db_path or default_db_path()
+    if not Path(db).expanduser().is_file():
+        return {"schema": SCHEMA, "ok": False, "reason": "ledger_missing"}
+    with _connect_readonly(db) as conn:
+        row = conn.execute(
+            """SELECT h.*, j.status AS job_status, j.worker_pid,
+                      j.worker_role, j.worker_attempt_id
+               FROM dispatch_holds h JOIN jobs j ON j.id=h.job_id
+               WHERE h.repo=? AND h.run_id=?
+                 AND (? IS NULL OR h.hold_id=?)""",
+            (repo, run_id, hold_id, hold_id),
+        ).fetchone()
+    if row is None:
+        return {
+            "schema": SCHEMA,
+            "ok": False,
+            "repo": repo,
+            "run_id": run_id,
+            "reason": "dispatch_hold_not_found",
+            "db_path": str(db),
+        }
+    result = dict(row)
+    result.update({"schema": SCHEMA, "ok": True, "db_path": str(db)})
+    return result
+
+
+def release_dispatch_hold(
+    *,
+    canonical_repo: Path,
+    run_id: str,
+    hold_id: str,
+    db_path: Path | None = None,
+) -> dict[str, Any]:
+    state_mod.validate_run_id(run_id)
+    repo = str(Path(canonical_repo).resolve(strict=False))
+    db = db_path or default_db_path()
+    now = time.time()
+    with _connect(db) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT * FROM dispatch_holds WHERE hold_id=? AND repo=? AND run_id=?",
+            (hold_id, repo, run_id),
+        ).fetchone()
+        if row is None:
+            return {"schema": SCHEMA, "ok": False, "reason": "dispatch_hold_not_found"}
+        if row["state"] == "RELEASED":
+            out = _hold_dict(row) or {}
+            out.update({"schema": SCHEMA, "ok": True, "idempotent": True})
+            return out
+        if row["state"] != "HELD":
+            out = _hold_dict(row) or {}
+            out.update({"schema": SCHEMA, "ok": False, "reason": "release_requires_held"})
+            return out
+        cur = conn.execute(
+            """UPDATE dispatch_holds
+               SET state='RELEASED', released_at=?, updated_at=?
+               WHERE hold_id=? AND job_id=? AND state='HELD'""",
+            (now, now, hold_id, int(row["job_id"])),
+        )
+        if cur.rowcount != 1:
+            return {"schema": SCHEMA, "ok": False, "reason": "release_lost_hold_race"}
+        updated = conn.execute(
+            "SELECT * FROM dispatch_holds WHERE hold_id=?", (hold_id,)
+        ).fetchone()
+    out = _hold_dict(updated) or {}
+    out.update({"schema": SCHEMA, "ok": True, "released": True})
+    return out
+
+
+def cancel_dispatch_hold(
+    *,
+    canonical_repo: Path,
+    run_id: str,
+    hold_id: str,
+    db_path: Path | None = None,
+) -> dict[str, Any]:
+    state_mod.validate_run_id(run_id)
+    repo = str(Path(canonical_repo).resolve(strict=False))
+    db = db_path or default_db_path()
+    now = time.time()
+    with _connect(db) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT * FROM dispatch_holds WHERE hold_id=? AND repo=? AND run_id=?",
+            (hold_id, repo, run_id),
+        ).fetchone()
+        if row is None:
+            return {"schema": SCHEMA, "ok": False, "reason": "dispatch_hold_not_found"}
+        if row["state"] == "CANCELLED":
+            out = _hold_dict(row) or {}
+            out.update({"schema": SCHEMA, "ok": True, "idempotent": True})
+            return out
+        if row["state"] == "RELEASED":
+            out = _hold_dict(row) or {}
+            out.update({"schema": SCHEMA, "ok": False, "reason": "cancel_refuses_released"})
+            return out
+        cur = conn.execute(
+            """UPDATE dispatch_holds
+               SET state='CANCELLED', cancelled_at=?, updated_at=?
+               WHERE hold_id=? AND job_id=? AND state IN ('ARMED','HELD')""",
+            (now, now, hold_id, int(row["job_id"])),
+        )
+        if cur.rowcount != 1:
+            return {"schema": SCHEMA, "ok": False, "reason": "cancel_lost_hold_race"}
+        updated = conn.execute(
+            "SELECT * FROM dispatch_holds WHERE hold_id=?", (hold_id,)
+        ).fetchone()
+    out = _hold_dict(updated) or {}
+    out.update({"schema": SCHEMA, "ok": True, "cancelled": True})
+    return out
 
 
 def _run_git_readonly(repo: Path, args: list[str], *, timeout: int = 10) -> dict[str, Any]:
@@ -1810,6 +2049,11 @@ def _job_dict(row: sqlite3.Row, db: Path) -> dict[str, Any]:
                 (int(row["id"]),),
             ).fetchall()
         d["attempt_history"] = [dict(item) for item in history]
+        with _connect_readonly(db) as hold_conn:
+            hold = hold_conn.execute(
+                "SELECT * FROM dispatch_holds WHERE job_id=?", (int(row["id"]),)
+            ).fetchone()
+        d["dispatch_hold"] = _hold_dict(hold)
     except sqlite3.Error as exc:
         d["attempt_snapshot_error"] = type(exc).__name__
     if int(d.get("legacy_budget_ambiguous") or 0):
@@ -2566,40 +2810,110 @@ def _apply_failure_policy(
 
 def _take_next_job(conn: sqlite3.Connection) -> sqlite3.Row | None:
     _recover_stale_running(conn)
-    now = time.time()
-    conn.execute("BEGIN IMMEDIATE")
-    already_running = conn.execute(
-        "SELECT id FROM jobs WHERE status='RUNNING' LIMIT 1"
-    ).fetchone()
-    if already_running is not None:
-        conn.commit()
-        return None
-    row = conn.execute(
-        """
-        SELECT * FROM jobs
-        WHERE status IN ('QUEUED','BACKOFF') AND next_attempt_at <= ?
-        ORDER BY created_at, id
-        LIMIT 1
-        """,
-        (now,),
-    ).fetchone()
-    if row is None:
-        conn.commit()
-        return None
-    conn.execute(
-        """
-        UPDATE jobs SET
-          status='RUNNING',
-          worker_pid=?,
-          worker_started_at=?,
-          worker_role='dispatching',
-          updated_at=?
-        WHERE id=?
-        """,
-        (os.getpid(), now, now, row["id"]),
-    )
-    conn.commit()
-    return conn.execute("SELECT * FROM jobs WHERE id=?", (row["id"],)).fetchone()
+    while True:
+        now = time.time()
+        if conn.execute(
+            "SELECT id FROM jobs WHERE status='RUNNING' LIMIT 1"
+        ).fetchone() is not None:
+            return None
+        candidates = conn.execute(
+            """
+            SELECT * FROM jobs
+            WHERE status IN ('QUEUED','BACKOFF') AND next_attempt_at <= ?
+            ORDER BY created_at, id
+            """,
+            (now,),
+        ).fetchall()
+        if not candidates:
+            return None
+
+        retry_candidates = False
+        for candidate in candidates:
+            hold, decision = _hold_matches_before_claim(conn, candidate)
+            if decision == "HELD":
+                # A held job remains QUEUED and is intentionally skipped so a
+                # different repository/run may use the operational slot.
+                continue
+            if decision in {"invalid_hold_state", "unsupported_hold_kind"}:
+                # A malformed operational hold is never interpreted as an
+                # absent hold.  Leave the job queued and fail closed; the
+                # diagnostic remains inspectable through hold status.
+                continue
+            if decision.startswith("engineering_state_unavailable"):
+                # A hold whose engineering truth cannot be verified is never
+                # treated as released. Leave the job queued and fail closed.
+                continue
+            if decision == "MATCH":
+                # The slow authoritative read happened outside SQLite write
+                # ownership. Revalidate both rows before the CAS transition.
+                conn.execute("BEGIN IMMEDIATE")
+                current = conn.execute(
+                    "SELECT * FROM jobs WHERE id=?", (int(candidate["id"]),)
+                ).fetchone()
+                current_hold = _hold_row(conn, int(candidate["id"]))
+                running = conn.execute(
+                    "SELECT id FROM jobs WHERE status='RUNNING' LIMIT 1"
+                ).fetchone()
+                if (
+                    current is None
+                    or current["status"] not in ("QUEUED", "BACKOFF")
+                    or float(current["next_attempt_at"] or 0) > time.time()
+                    or current_hold is None
+                    or current_hold["state"] != "ARMED"
+                    or running is not None
+                ):
+                    conn.commit()
+                    retry_candidates = True
+                    break
+                held_at = time.time()
+                conn.execute(
+                    """UPDATE dispatch_holds
+                       SET state='HELD', held_at=?, updated_at=?, last_error=NULL
+                       WHERE hold_id=? AND job_id=? AND state='ARMED'""",
+                    (held_at, held_at, current_hold["hold_id"], int(candidate["id"])),
+                )
+                conn.commit()
+                # Re-scan in case another queued job can safely run while
+                # this run waits for its explicit operational release.
+                retry_candidates = True
+                break
+
+            # Normal no-hold or predicate-false claim. Revalidate the job
+            # after the out-of-transaction hold observation.
+            conn.execute("BEGIN IMMEDIATE")
+            current = conn.execute(
+                "SELECT * FROM jobs WHERE id=?", (int(candidate["id"]),)
+            ).fetchone()
+            running = conn.execute(
+                "SELECT id FROM jobs WHERE status='RUNNING' LIMIT 1"
+            ).fetchone()
+            if (
+                current is None
+                or current["status"] not in ("QUEUED", "BACKOFF")
+                or float(current["next_attempt_at"] or 0) > time.time()
+                or running is not None
+            ):
+                conn.commit()
+                retry_candidates = True
+                break
+            conn.execute(
+                """
+                UPDATE jobs SET
+                  status='RUNNING',
+                  worker_pid=?,
+                  worker_started_at=?,
+                  worker_role='dispatching',
+                  updated_at=?
+                WHERE id=? AND status IN ('QUEUED','BACKOFF')
+                """,
+                (os.getpid(), now, now, int(candidate["id"])),
+            )
+            conn.commit()
+            return conn.execute(
+                "SELECT * FROM jobs WHERE id=?", (int(candidate["id"]),)
+            ).fetchone()
+        if not retry_candidates:
+            return None
 
 
 def _reserve_semantic_attempt(
@@ -3369,6 +3683,11 @@ __all__ = [
     "RunnerReadiness",
     "default_db_path",
     "default_worker_log_dir",
+    "DISPATCH_HOLD_KIND",
+    "DISPATCH_HOLD_STATES",
+    "dispatch_hold_status",
+    "release_dispatch_hold",
+    "cancel_dispatch_hold",
     "enqueue",
     "register_runner",
     "resume",

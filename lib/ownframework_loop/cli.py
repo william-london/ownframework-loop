@@ -1698,6 +1698,9 @@ def _build_parser() -> argparse.ArgumentParser:
             max_total_cost_usd=args.max_cost_usd,
             max_total_tokens=args.max_total_tokens,
             max_wall_seconds=max_wall_seconds,
+            dispatch_hold_kind=args.dispatch_hold_kind,
+            dispatch_hold_previous_checkpoint_id=args.dispatch_hold_previous_checkpoint,
+            dispatch_hold_next_checkpoint_id=args.dispatch_hold_next_checkpoint,
         )
         _emit(out, exit_code=0 if out.get("ok", True) else 2)
 
@@ -1706,6 +1709,36 @@ def _build_parser() -> argparse.ArgumentParser:
         out = supervisor_mod.status(
             canonical_repo=repo,
             run_id=args.run_id,
+            db_path=Path(args.db).expanduser() if args.db else None,
+        )
+        _emit(out, exit_code=0 if out.get("ok") else 2)
+
+    def cmd_supervisor_hold_status(args: argparse.Namespace) -> None:
+        repo = _repo_path(args.repo)
+        out = supervisor_mod.dispatch_hold_status(
+            canonical_repo=repo,
+            run_id=args.run_id,
+            hold_id=args.hold_id,
+            db_path=Path(args.db).expanduser() if args.db else None,
+        )
+        _emit(out, exit_code=0 if out.get("ok") else 2)
+
+    def cmd_supervisor_hold_release(args: argparse.Namespace) -> None:
+        repo = _repo_path(args.repo)
+        out = supervisor_mod.release_dispatch_hold(
+            canonical_repo=repo,
+            run_id=args.run_id,
+            hold_id=args.hold_id,
+            db_path=Path(args.db).expanduser() if args.db else None,
+        )
+        _emit(out, exit_code=0 if out.get("ok") else 2)
+
+    def cmd_supervisor_hold_cancel(args: argparse.Namespace) -> None:
+        repo = _repo_path(args.repo)
+        out = supervisor_mod.cancel_dispatch_hold(
+            canonical_repo=repo,
+            run_id=args.run_id,
+            hold_id=args.hold_id,
             db_path=Path(args.db).expanduser() if args.db else None,
         )
         _emit(out, exit_code=0 if out.get("ok") else 2)
@@ -1800,12 +1833,37 @@ def _build_parser() -> argparse.ArgumentParser:
              "defaults to packet risk_budget.max_runtime_seconds when declared, "
              "otherwise disabled (<=0 disables)",
     )
+    s_enq.add_argument(
+        "--dispatch-hold-kind", default=None,
+        help="typed per-run dispatch hold kind (currently PROGRAM_CHECKPOINT_BOUNDARY)",
+    )
+    s_enq.add_argument(
+        "--dispatch-hold-previous-checkpoint", default=None,
+        help="previous checkpoint for PROGRAM_CHECKPOINT_BOUNDARY",
+    )
+    s_enq.add_argument(
+        "--dispatch-hold-next-checkpoint", default=None,
+        help="next checkpoint for PROGRAM_CHECKPOINT_BOUNDARY",
+    )
     s_enq.set_defaults(func=cmd_supervisor_enqueue)
     s_ss = sup_sub.add_parser("status", help="show supervisor operational state")
     s_ss.add_argument("repo")
     s_ss.add_argument("run_id")
     s_ss.add_argument("--db", default=None)
     s_ss.set_defaults(func=cmd_supervisor_status)
+    s_hold = sup_sub.add_parser("hold", help="manage one-shot per-run dispatch holds")
+    s_hold_sub = s_hold.add_subparsers(dest="hold_cmd", required=True)
+    for name, handler, help_text in (
+        ("status", cmd_supervisor_hold_status, "show one dispatch hold read-only"),
+        ("release", cmd_supervisor_hold_release, "release a HELD dispatch hold"),
+        ("cancel", cmd_supervisor_hold_cancel, "cancel an ARMED or HELD dispatch hold"),
+    ):
+        h = s_hold_sub.add_parser(name, help=help_text)
+        h.add_argument("repo")
+        h.add_argument("run_id")
+        h.add_argument("hold_id")
+        h.add_argument("--db", default=None)
+        h.set_defaults(func=handler)
     s_srv = sup_sub.add_parser("serve", help="run the durable supervisor execution clock")
     s_srv.add_argument("--db", default=None)
     s_srv.add_argument("--poll-seconds", type=float, default=2.0)
