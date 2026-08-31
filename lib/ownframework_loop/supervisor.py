@@ -23,6 +23,7 @@ import stat
 import subprocess
 import time
 import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -452,7 +453,7 @@ def _cleanup_done_runtime_caches(db_path: Path | None = None) -> list[dict[str, 
     db = db_path or default_db_path()
     if not db.exists():
         return []
-    with _connect_readonly(db) as conn:
+    with _managed_connect_readonly(db) as conn:
         rows = conn.execute(
             "SELECT repo,run_id FROM jobs WHERE status='DONE' ORDER BY id"
         ).fetchall()
@@ -803,6 +804,22 @@ def _connect(path: Path) -> sqlite3.Connection:
     return conn
 
 
+@contextmanager
+def _managed_connect(path: Path):
+    """Commit/rollback through sqlite's context protocol, then close it.
+
+    ``sqlite3.Connection`` implements transaction context management but does
+    not close itself on ``__exit__``. This distinction becomes a descriptor
+    leak when multiple execution lanes repeatedly open their own connections.
+    """
+    conn = _connect(path)
+    try:
+        with conn:
+            yield conn
+    finally:
+        conn.close()
+
+
 def _connect_readonly(path: Path) -> sqlite3.Connection:
     """Open an existing supervisor ledger without schema/data mutation."""
     p = Path(path).expanduser().resolve(strict=False)
@@ -811,6 +828,15 @@ def _connect_readonly(path: Path) -> sqlite3.Connection:
     conn = sqlite3.connect(f"file:{p}?mode=ro", uri=True, timeout=5)
     conn.row_factory = sqlite3.Row
     return conn
+
+
+@contextmanager
+def _managed_connect_readonly(path: Path):
+    conn = _connect_readonly(path)
+    try:
+        yield conn
+    finally:
+        conn.close()
 
 
 def _pid_alive(pid: int | None, worker_started_at: float | None = None) -> bool:
@@ -1524,7 +1550,7 @@ def enqueue(
     # configuration on an existing row. Authorization and mutation share one
     # SQLite write transaction so a concurrent run_one() cannot claim the row
     # between the status/generation check and this upsert.
-    with _connect(db) as conn:
+    with _managed_connect(db) as conn:
         conn.execute("BEGIN IMMEDIATE")
         existing = conn.execute(
             "SELECT * FROM jobs WHERE repo=? AND run_id=?", (repo, run_id)
@@ -1699,7 +1725,7 @@ def status(
         row = None
     else:
         try:
-            with _connect_readonly(db) as conn:
+            with _managed_connect_readonly(db) as conn:
                 row = conn.execute(
                     "SELECT * FROM jobs WHERE repo=? AND run_id=?", (repo, run_id)
                 ).fetchone()
@@ -1731,7 +1757,7 @@ def supervisor_config_get(*, db_path: Path | None = None) -> dict[str, Any]:
     if not Path(db).expanduser().is_file():
         return {"schema": SCHEMA, "ok": True, "max_concurrency": DEFAULT_MAX_CONCURRENCY,
                 "db_path": str(db)}
-    with _connect_readonly(db) as conn:
+    with _managed_connect_readonly(db) as conn:
         row = conn.execute(
             "SELECT value FROM supervisor_config WHERE key=?",
             (_CONFIG_MAX_CONCURRENCY,),
@@ -1745,7 +1771,7 @@ def supervisor_config_set(*, max_concurrency: Any, db_path: Path | None = None) 
     value = _validate_max_concurrency(max_concurrency)
     db = db_path or default_db_path()
     now = time.time()
-    with _connect(db) as conn:
+    with _managed_connect(db) as conn:
         conn.execute("BEGIN IMMEDIATE")
         conn.execute(
             """INSERT INTO supervisor_config(key, value, updated_at) VALUES (?, ?, ?)
@@ -1764,7 +1790,7 @@ def fleet_status(*, db_path: Path | None = None) -> dict[str, Any]:
                 "configured_max_concurrency": DEFAULT_MAX_CONCURRENCY,
                 "active_running": 0, "active_slots": 0, "free_slots": DEFAULT_MAX_CONCURRENCY,
                 "capacity_draining": False, "jobs": []}
-    with _connect_readonly(db) as conn:
+    with _managed_connect_readonly(db) as conn:
         cfg = conn.execute(
             "SELECT value FROM supervisor_config WHERE key=?", (_CONFIG_MAX_CONCURRENCY,)
         ).fetchone()
@@ -1824,7 +1850,7 @@ def dispatch_hold_status(
     db = db_path or default_db_path()
     if not Path(db).expanduser().is_file():
         return {"schema": SCHEMA, "ok": False, "reason": "ledger_missing"}
-    with _connect_readonly(db) as conn:
+    with _managed_connect_readonly(db) as conn:
         row = conn.execute(
             """SELECT h.*, j.status AS job_status, j.worker_pid,
                       j.worker_role, j.worker_attempt_id
@@ -1858,7 +1884,7 @@ def release_dispatch_hold(
     repo = str(Path(canonical_repo).resolve(strict=False))
     db = db_path or default_db_path()
     now = time.time()
-    with _connect(db) as conn:
+    with _managed_connect(db) as conn:
         conn.execute("BEGIN IMMEDIATE")
         row = conn.execute(
             "SELECT * FROM dispatch_holds WHERE hold_id=? AND repo=? AND run_id=?",
@@ -1901,7 +1927,7 @@ def cancel_dispatch_hold(
     repo = str(Path(canonical_repo).resolve(strict=False))
     db = db_path or default_db_path()
     now = time.time()
-    with _connect(db) as conn:
+    with _managed_connect(db) as conn:
         conn.execute("BEGIN IMMEDIATE")
         row = conn.execute(
             "SELECT * FROM dispatch_holds WHERE hold_id=? AND repo=? AND run_id=?",
@@ -2230,7 +2256,7 @@ def _job_dict(row: sqlite3.Row, db: Path) -> dict[str, Any]:
     d["attempt_history"] = []
     try:
         if latest_id:
-            with _connect_readonly(db) as attempt_conn:
+            with _managed_connect_readonly(db) as attempt_conn:
                 attempt_conn.row_factory = sqlite3.Row
                 ar = attempt_conn.execute(
                     "SELECT * FROM semantic_attempts WHERE attempt_id=?",
@@ -2238,7 +2264,7 @@ def _job_dict(row: sqlite3.Row, db: Path) -> dict[str, Any]:
                 ).fetchone()
             if ar is not None:
                 d["latest_attempt"] = dict(ar)
-        with _connect_readonly(db) as history_conn:
+        with _managed_connect_readonly(db) as history_conn:
             history_conn.row_factory = sqlite3.Row
             history = history_conn.execute(
                 """SELECT attempt_id, role, status, started_at, completed_at,
@@ -2253,7 +2279,7 @@ def _job_dict(row: sqlite3.Row, db: Path) -> dict[str, Any]:
                 (int(row["id"]),),
             ).fetchall()
         d["attempt_history"] = [dict(item) for item in history]
-        with _connect_readonly(db) as hold_conn:
+        with _managed_connect_readonly(db) as hold_conn:
             hold = hold_conn.execute(
                 "SELECT * FROM dispatch_holds WHERE job_id=?", (int(row["id"]),)
             ).fetchone()
@@ -3353,7 +3379,7 @@ def _ensure_execution_started(conn: sqlite3.Connection, job_id: int) -> float:
 def run_one(*, db_path: Path | None = None, timeout_seconds: int = 0) -> dict[str, Any]:
     """Execute at most one semantic BUILD/REVIEW action."""
     db = db_path or default_db_path()
-    with _connect(db) as conn:
+    with _managed_connect(db) as conn:
         job = _take_next_job(conn)
         if job is None:
             return {"schema": SCHEMA, "ok": True, "action": "IDLE", "db_path": str(db)}
@@ -3932,7 +3958,7 @@ def serve(
         while True:
             db = db_path or default_db_path()
             try:
-                with _connect_readonly(db) as read_conn:
+                with _managed_connect_readonly(db) as read_conn:
                     cfg = read_conn.execute(
                         "SELECT value FROM supervisor_config WHERE key=?",
                         (_CONFIG_MAX_CONCURRENCY,),
@@ -4036,7 +4062,7 @@ def resume(
     # Resume is exclusively a QUARANTINED -> QUEUED recovery action. Any
     # other state is refused without changing budgets, wall-clock origin, PID
     # ownership, backoff or error evidence.
-    with _connect(db) as conn:
+    with _managed_connect(db) as conn:
         existing = conn.execute(
             "SELECT * FROM jobs WHERE repo=? AND run_id=?", (repo, run_id)
         ).fetchone()
@@ -4135,7 +4161,7 @@ def resume(
     sets.append("runtime_generation=?")
     params.append(_current_runtime_generation())
     params.extend([repo, run_id, previous_generation])
-    with _connect(db) as conn:
+    with _managed_connect(db) as conn:
         cur = conn.execute(
             f"UPDATE jobs SET {', '.join(sets)} "
             "WHERE repo=? AND run_id=? AND status='QUARANTINED' "
@@ -4211,7 +4237,7 @@ def retire(
     repo = str(Path(canonical_repo).resolve(strict=False))
     db = db_path or default_db_path()
     now = time.time()
-    with _connect(db) as conn:
+    with _managed_connect(db) as conn:
         existing = conn.execute(
             "SELECT * FROM jobs WHERE repo=? AND run_id=?", (repo, run_id)
         ).fetchone()
@@ -4243,7 +4269,7 @@ def retire(
     # evidence even when the job-level PID is empty or dead. Retirement must
     # not hide it behind a historical status before crash reconciliation has
     # proven the attempt terminal.
-    with _connect_readonly(db) as attempt_conn:
+    with _managed_connect_readonly(db) as attempt_conn:
         attempt_rows = attempt_conn.execute(
             "SELECT attempt_id,status,worker_pid FROM semantic_attempts "
             "WHERE job_id=? ORDER BY started_at DESC",
@@ -4288,7 +4314,7 @@ def retire(
     preserved_runtime_generation = str(existing["runtime_generation"] or "")
     preserved_cost_usd = float(existing["total_cost_usd"] or 0.0)
     preserved_attempt_id = str(existing["latest_attempt_id"] or "")
-    with _connect(db) as conn:
+    with _managed_connect(db) as conn:
         cur = conn.execute(
             """UPDATE jobs SET
                  status='RETIRED',
