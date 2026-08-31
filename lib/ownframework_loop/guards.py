@@ -244,6 +244,71 @@ SECRET_PATTERNS: list[tuple[re.Pattern[str], str]] = [
 ]
 
 
+_BUILDER_SHARED_GIT_TOPOLOGY_SUBCOMMANDS = frozenset({
+    "switch", "checkout", "update-ref", "symbolic-ref",
+    "stash", "pull", "fetch", "rebase",
+})
+
+
+def _builder_git_topology_mutation(seg: str) -> str | None:
+    """Return a reason when builder Bash would mutate shared Git topology.
+
+    Builder source commits are legitimate inside the assigned candidate
+    worktree. Shared refs/worktree administration are core-owned because
+    concurrent runs in one Git common-dir must not be able to redirect one
+    another through semantic Bash.
+    """
+    try:
+        tokens = shlex.split(seg)
+    except ValueError:
+        return "unparseable git command in builder lane" if "git" in seg else None
+    git_index = None
+    for i, tok in enumerate(tokens):
+        if tok.rsplit("/", 1)[-1] == "git":
+            git_index = i
+            break
+    if git_index is None:
+        return None
+    rest = tokens[git_index + 1:]
+    i = 0
+    # Skip common Git global options only to reach the subcommand. Options
+    # that redirect Git metadata/worktree roots are themselves refused.
+NaN
+        tok = rest[i]
+        if tok.startswith("--git-dir") or tok.startswith("--work-tree") or tok.startswith("--namespace"):
+            return f"builder may not redirect shared Git topology with {tok}"
+        if tok in {"-C", "-c"}:
+            i += 2
+        else:
+            i += 1
+    if i >= len(rest):
+        return None
+    sub = rest[i]
+    args = rest[i + 1:]
+    if sub in _BUILDER_SHARED_GIT_TOPOLOGY_SUBCOMMANDS:
+        return f"builder may not run git {sub}; candidate topology is core-owned"
+    if sub == "worktree":
+        if args and args[0] == "list":
+            return None
+        return "builder may not mutate git worktrees; worktree lifecycle is core-owned"
+    if sub == "branch":
+        if not args:
+            return None
+        list_markers = {"--list", "-l", "-a", "--all", "-r", "--remotes", "--contains", "--points-at", "--merged", "--no-merged", "--show-current"}
+        mutating = {"-d", "-D", "-m", "-M", "-c", "-C", "-f", "--delete", "--move", "--copy", "--force", "--edit-description", "--set-upstream-to", "--unset-upstream", "--create-reflog", "--track", "--no-track"}
+        if any(a.split("=", 1)[0] in mutating for a in args):
+            return "builder may not create/move/delete/re-wire candidate branches"
+        if any(a.split("=", 1)[0] in list_markers for a in args):
+            return None
+        return "builder git branch positional form would create or re-wire a branch"
+    if sub == "tag":
+        if not args:
+            return None
+        if args[0] in {"--list", "-l"}:
+            return None
+        return "builder may not create/delete/move shared Git tags"
+    return None
+
 def classify_bash_command(
     command: str,
     *,
@@ -345,7 +410,13 @@ def classify_bash_command(
     # semantic contract is that builders may mutate source but never
     # invoke external actions.
     role_constraints = None
-    if role == "reviewer":
+    if role == "builder":
+        role_constraints = "builder"
+        for seg in segments:
+            reason = _builder_git_topology_mutation(seg)
+            if reason:
+                forbidden.append(f"{reason}: {seg.strip()}")
+    elif role == "reviewer":
         role_constraints = "reviewer"
         for seg in segments:
             if is_reviewer_allowed(seg):
