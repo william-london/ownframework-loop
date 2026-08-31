@@ -50,7 +50,8 @@ transition, budget expansion, or promotion.
 Responsibilities:
 
 - persistent queue;
-- one claimed semantic worker at a time;
+- bounded concurrent semantic workers across distinct candidate workspaces;
+- exactly one active semantic pass per run/workspace;
 - runner selection through the runner registry;
 - exact runtime-generation binding;
 - semantic-attempt ledger;
@@ -64,6 +65,15 @@ Responsibilities:
 
 The supervisor asks deterministic dispatch what action is next. It does not
 invent BUILD/REVIEW transitions itself.
+
+Repository identity is the resolved Git common directory. It groups shared Git
+provenance but is not a global execution mutex. Workspace identity is repository
+identity plus the frozen candidate branch. Distinct workspaces in one repository
+may execute concurrently and may intentionally edit the same logical paths;
+their files/refs remain isolated until human promotion. The same workspace and
+the same run never have overlapping semantic owners. Shared Git worktree
+registration/removal is briefly serialized because it mutates common Git
+administration state.
 
 Canonical unattended sequence:
 

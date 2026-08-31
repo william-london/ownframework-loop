@@ -20,8 +20,7 @@ against schemas/work-packet.schema.json before approval.
     "repo": "<absolute path>",
     "branch": "master",
     "classification": "local_only",
-    "expected_baseline_sha": "<optional 7+ hex>",
-    "candidate_branch_prefix": "factory/candidate/"
+    "expected_baseline_sha": "<optional 7+ hex>"
   },
   "acceptance_criteria": [
     { "id": "AC-1", "text": "<observable>", "verification": "<command + marker>" }

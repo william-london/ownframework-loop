@@ -71,7 +71,8 @@ try:
     m = re.search(r"Source/master release line:\s*\*\*([0-9]+\.[0-9]+\.[0-9]+)\*\*", text)
     readme_ver = m.group(1) if m else ""
     check("README source/master release line", readme_ver == EXPECTED, f"= {readme_ver!r}, expected {EXPECTED!r}")
-    check("README distinguishes published release", "Latest published GitHub Release:" in text and "not yet" in text and "tagged or published" in text)
+    check("README published release truth", "Latest published GitHub Release: **v0.8.4**" in text and "134a7ce543e2d5858b3a4613c49d49959fe0b029" in text)
+    check("README workspace concurrency truth", "execution ownership is that" in text and "run-frozen candidate branch" in text and "may run concurrently" in text)
 except Exception as e:
     check("README readable", False, f"({e})")
     readme_ver = ""
@@ -82,10 +83,21 @@ try:
     m = re.search(r"source/master supported line in this repository is\s*\*\*([0-9]+\.[0-9]+\.[0-9]+)\*\*", text)
     sec_ver = m.group(1) if m else ""
     check("SECURITY source/master supported line", sec_ver == EXPECTED, f"= {sec_ver!r}, expected {EXPECTED!r}")
-    check("SECURITY distinguishes published release", "latest published GitHub Release is" in text and "not yet tagged/published" in text)
+    check("SECURITY published release truth", "latest published GitHub Release is **v0.8.4**" in text and "134a7ce543e2d5858b3a4613c49d49959fe0b029" in text)
 except Exception as e:
     check("SECURITY readable", False, f"({e})")
     sec_ver = ""
+
+# Current v0.9 doctrine/template truth.
+try:
+    arch = open(os.path.join(ROOT, "docs/ARCHITECTURE.md")).read()
+    model = open(os.path.join(ROOT, "docs/architecture/SUPERVISOR_MODEL.md")).read()
+    template = open(os.path.join(ROOT, "templates/WORK_PACKET.md")).read()
+    check("ARCHITECTURE workspace concurrency", "Repository identity is the resolved Git common directory" in arch and "Distinct workspaces in one repository" in arch)
+    check("SUPERVISOR_MODEL bounded workspace concurrency", "configurable bounded host concurrency" in model and "repository-wide\nmutex" in model)
+    check("WORK_PACKET default candidate branch valid-by-omission", '"candidate_branch_prefix": "factory/candidate/"' not in template)
+except Exception as e:
+    check("current v0.9 doctrine surfaces readable", False, f"({e})")
 
 # 6. CHANGELOG.md (most recent entry must equal EXPECTED)
 try:
@@ -101,5 +113,5 @@ print()
 if failures:
     print(f"  VERSION_TRUTH=FAIL ({len(failures)} mismatch(es))")
     sys.exit(1)
-print(f"  VERSION_TRUTH=PASS (all 6 source/master surfaces = {EXPECTED}; published release is separately identified)")
+print(f"  VERSION_TRUTH=PASS (source line = {EXPECTED}; published release = v0.8.4; v0.9 workspace doctrine current)")
 PYEOF

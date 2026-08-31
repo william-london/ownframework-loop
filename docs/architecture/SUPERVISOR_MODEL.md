@@ -101,7 +101,8 @@ unattended execution path.
 The supervisor carries bounded operational policy separately from protocol
 truth. Enqueue defaults currently provide:
 
-- one global active worker per supervisor database;
+- configurable bounded host concurrency (default 1), with one active semantic
+  owner per run/workspace;
 - up to 3 infrastructure failures before quarantine;
 - bounded transient-failure retry/circuit-breaker policy;
 - no wall-clock ceiling by default;
@@ -116,6 +117,12 @@ fuse, and failure-class retry policy), not by resource conservation.
 
 When an operator wants a hard spend line, `--max-wall-seconds`,
 `--max-cost-usd`, and `--max-total-tokens` are configurable at enqueue time.
+Repository common-dir identity is provenance/grouping, not a repository-wide
+mutex. The scheduler excludes only an already-owned candidate workspace.
+Therefore two or more runs may execute concurrently in different candidate
+branches of one repository, including runs that intentionally modify the same
+logical path. Per-run BUILD/REVIEW handoff remains strictly sequential.
+
 `--max-wall-seconds` defaults to the packet's declared
 `risk_budget.max_runtime_seconds` when present, so a human-approved whole-run
 envelope is honored. A ceiling violation sets supervisor state to QUARANTINED;
@@ -127,8 +134,9 @@ only quarantines while a cost ceiling is actually active.
 ## Restart ownership
 
 A RUNNING job records the live worker PID. Worker processes are launched in
-their own process group. A second supervisor process sharing the same SQLite
-database will not start another job while a live RUNNING owner exists.
+their own process group. A second supervisor process sharing the same SQLite database cannot duplicate a
+live RUNNING job owner. Other eligible jobs may still run concurrently up to the
+configured host ceiling when their workspace identities are distinct.
 
 After supervisor restart:
 
@@ -160,9 +168,9 @@ Installation/refresh is guarded by two read-only, fail-closed ledger probes:
 2. **runtime-generation dependency** — every job binds the runtime
    generation that enrolled it (clean Git full SHA, dirty-source SHA-256, or installed-payload SHA-256). Replacement is refused while any non-terminal enrolled
    job (QUEUED, BACKOFF, RUNNING, QUARANTINED-but-resumable) is bound to a
-   generation different from the incoming runtime. Terminal (DONE) jobs
-   never block a normal install, and legacy unbound rows carry no provable
-   dependency (they adopt the serving generation once at first contact).
+   generation different from the incoming runtime. Terminal (DONE/RETIRED) jobs never block a normal install. Legacy unfinished
+   rows whose generation cannot be proven fail closed until an explicit
+   operator re-enqueue/resume binds them to the intended runtime generation.
 
 A sealed unfinished PROGRAM can therefore never silently switch runtime
 generations between passes. Deliberate migration is explicit and clearly

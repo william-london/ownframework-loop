@@ -2,9 +2,9 @@
 
 Source/master release line: **0.9.0**
 
-Latest published GitHub Release: **v0.6.0**. The 0.8.x source line is not yet
-tagged or published; publication follows integration, exact-head hosted CI, and
-the commissioned PROGRAM canary.
+Latest published GitHub Release: **v0.8.4** at
+`134a7ce543e2d5858b3a4613c49d49959fe0b029`. The 0.9.0 source line is current
+development and is not a published release until its promotion gates close.
 
 OwnFramework Loop is a vendor-neutral, execution-sealed engineering runtime for
 autonomous coding agents.
@@ -19,6 +19,16 @@ state, exact candidate SHA, evidence, retry/repair budgets, runtime-generation
 binding, and promotion boundaries. Agent hosts are adapters.
 
 ## Canonical operating model
+
+v0.9 concurrency is workspace-scoped. Repository identity is the resolved Git
+common directory used for provenance/grouping; execution ownership is that
+repository identity plus the run-frozen candidate branch. Different candidate
+workspaces in the same Git repository may run concurrently—even when they
+modify the same logical paths. One run still owns exactly one semantic pass at
+a time, and shared `git worktree` administration is briefly serialized.
+`max_concurrency` is the operator's bounded host-resource ceiling. Human
+promotion decides how divergent candidate histories are integrated.
+
 
 ```text
 human SPEC
