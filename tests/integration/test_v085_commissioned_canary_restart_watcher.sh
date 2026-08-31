@@ -227,7 +227,10 @@ run_state = root / "repo" / ".ownframework-loop" / run / "STATE.json"
 write(run_state, state)
 wait_for(lambda: (root / "restart-proof.json").is_file(), timeout=5)
 assert int(count.read_text().strip()) == 1
-assert control(root)["watcher_status"] == "PROOF_WRITTEN"
+# restart-proof.json is intentionally made durable before the watcher records
+# its terminal control status. Wait for that second durable fact instead of
+# racing the correct proof-before-status ordering on fast CI runners.
+wait_for(lambda: control(root).get("watcher_status") == "PROOF_WRITTEN", timeout=5)
 subprocess.run(["bash", str(harness), "destroy", str(root)], env=e, check=True, stdout=subprocess.DEVNULL)
 print("CANARY_RESTART_WATCHER_IGNORES_CP1_FINALIZER_WORKER=PASS")
 
