@@ -5,6 +5,7 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PACKET_RENDERER="$HERE/commissioned_program_packet.py"
+WATCHER_HELPER="$HERE/commissioned_program_restart_watcher.py"
 
 die(){ echo "CANARY_STATE=TERMINAL_FAIL reason=$*" >&2; exit 1; }
 now(){ date -u +%Y-%m-%dT%H:%M:%SZ; }
@@ -59,6 +60,7 @@ service_active(){
   case "$SERVICE_MANAGER" in
     launchd) launchctl print "gui/$(id -u)/$SERVICE_LABEL" >/dev/null 2>&1 ;;
     systemd-user) systemctl --user is-active --quiet "$SERVICE_LABEL" ;;
+    test) [[ -n "${OFLOOP_CANARY_TEST_SERVICE_ACTIVE_FILE:-}" && -f "$OFLOOP_CANARY_TEST_SERVICE_ACTIVE_FILE" ]] ;;
     *) return 1 ;;
   esac
 }
@@ -67,6 +69,7 @@ restart_service(){
   case "$SERVICE_MANAGER" in
     launchd) launchctl kickstart -k "gui/$(id -u)/$SERVICE_LABEL" ;;
     systemd-user) systemctl --user restart "$SERVICE_LABEL" ;;
+    test) die "test_service_restart_must_use_watcher_helper" ;;
     *) die "unsupported_service_manager_$SERVICE_MANAGER" ;;
   esac
 }
@@ -170,6 +173,7 @@ start(){
   prepared="$(field "$CONTROL" runtime_generation_prepared)"
   current="$(field "$PROVENANCE" runtime_generation)"
   [[ "$prepared" == "$current" ]] || die "runtime_generation_changed_before_start"
+  python3 "$WATCHER_HELPER" check "$1" || die "restart_watcher_not_armed"
   "$OFLOOP_BIN" supervisor enqueue "$REPO" "$RID" >"$1/enqueue.json"
   local bound
   bound="$(python3 - "$1/enqueue.json" <<'PY'
@@ -185,62 +189,33 @@ PY
 }
 
 arm_restart(){
-  load_control "$1"
-  local deadline=$(( $(date +%s) + ${OFLOOP_CANARY_RESTART_WAIT_SECONDS:-14400} ))
-  echo "CANARY_RESTART_WATCH=ARMED target=CP-1_APPROVED_to_CP-2_READY"
-  while (( $(date +%s) < deadline )); do
-    local probe
-    probe="$(python3 - "$REPO" "$RID" <<'PY'
-import json,sys
-from pathlib import Path
-p=Path(sys.argv[1])/".ownframework-loop"/sys.argv[2]/"STATE.json"
-if not p.is_file():
-    print("WAIT"); raise SystemExit
-s=json.load(open(p))
-prog=s.get("program") or {}
-fin={x.get("id"):x.get("terminal_state") for x in prog.get("finalized_checkpoints",[])}
-cur=prog.get("current_checkpoints") or []
-if fin.get("CP-1")=="APPROVED" and cur==["CP-2"] and s.get("state")=="READY_TO_BUILD":
-    print("BOUNDARY")
-elif s.get("state") in ("BLOCKED","STOPPED"):
-    print("TERMINAL_FAIL")
-else:
-    print("WAIT")
-PY
-)"
-    [[ "$probe" != "TERMINAL_FAIL" ]] || die "run_terminal_before_restart_boundary"
-    if [[ "$probe" == "BOUNDARY" ]]; then
-      local before after
-      before="$(field "$PROVENANCE" runtime_generation)"
-      restart_service >/dev/null
-      sleep 1
-      service_active || die "service_not_active_after_restart"
-      after="$(field "$PROVENANCE" runtime_generation)"
-      [[ "$before" == "$after" ]] || die "runtime_generation_changed_on_restart"
-      BEFORE="$before" AFTER="$after" AT="$(now)" python3 - "$1/restart-proof.json" <<'PY'
-import json,os,sys
-from pathlib import Path
-Path(sys.argv[1]).write_text(json.dumps({
- "observed_top_state":"READY_TO_BUILD",
- "observed_current_checkpoints":["CP-2"],
- "cp1_terminal":"APPROVED",
- "runtime_generation_before":os.environ["BEFORE"],
- "runtime_generation_after":os.environ["AFTER"],
- "restarted_at":os.environ["AT"],
-},indent=2,sort_keys=True)+"\n")
-PY
-      chmod 0600 "$1/restart-proof.json"
-      echo "CANARY_RESTART_PROOF=RECORDED boundary=CP-2_READY runtime_generation_stable=yes"
-      return 0
-    fi
-    sleep 0.05
-  done
-  die "restart_boundary_timeout"
+  [[ -x "$WATCHER_HELPER" || -f "$WATCHER_HELPER" ]] || die "restart_watcher_helper_missing"
+  python3 "$WATCHER_HELPER" arm "$1" "$WATCHER_HELPER"
 }
 
 verify(){
   load_control "$1"
-  [[ -f "$1/restart-proof.json" ]] || die "restart_proof_missing"
+  if [[ ! -f "$1/restart-proof.json" ]]; then
+    local reason
+    reason="$(python3 - "$CONTROL" <<'PY'
+import json,sys
+c=json.load(open(sys.argv[1],encoding="utf-8"))
+status=c.get("watcher_status")
+result=c.get("watcher_result")
+if result == "RESTART_BOUNDARY_MISSED":
+    print("restart_boundary_missed")
+elif isinstance(result, str) and result.startswith("RESTART_FAILED:"):
+    print("restart_failed")
+elif status in {"ARMED","WAITING","BOUNDARY_OBSERVED","RESTARTING"}:
+    print("watcher_died")
+elif not c.get("watcher_id"):
+    print("watcher_not_armed")
+else:
+    print("restart_proof_missing")
+PY
+)"
+    die "$reason"
+  fi
   PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$INSTALL_ROOT/lib" python3 -B -     "$CONTROL" "$1/restart-proof.json" <<'PY'
 import json,sqlite3,sys
 from pathlib import Path
@@ -289,8 +264,17 @@ try:
     assert len({x["attempt_id"] for x in attempts})==6
 
     restart=json.loads(restart_path.read_text())
+    assert restart["schema"]=="ownframework-loop-commissioned-canary-restart-proof/v1"
+    assert restart["observed_cp1_terminal"]=="APPROVED"
     assert restart["observed_top_state"]=="READY_TO_BUILD"
     assert restart["observed_current_checkpoints"]==["CP-2"]
+    assert restart["no_active_cp2_worker"] is True
+    assert restart["service_restarted"] is True
+    assert restart["service_active_after_restart"] is True
+    assert restart["runtime_generation_stable"] is True
+    assert restart["service_manager"]==c["service_manager"]
+    assert restart["service_label"]==c["service_label"]
+    assert restart["watcher_id"]==c["watcher_id"]
     assert restart["runtime_generation_before"]==restart["runtime_generation_after"]==c["runtime_generation_started"]
 
     meta,_=packet_mod.parse_packet_file(rd/"WORK_PACKET.md")
@@ -362,6 +346,7 @@ destroy(){
   if [[ "$statusv" != "PREPARED" && "$statusv" != "TERMINAL_PASS" && "$statusv" != "TERMINAL_FAIL" ]]; then
     die "destroy_refuses_active_canary_status_$statusv"
   fi
+  python3 "$WATCHER_HELPER" cleanup "$1" >/dev/null 2>&1 || true
   rm -rf "$1"
   echo "CANARY_DESTROYED=yes durable_supervisor_ledger_preserved=yes"
 }

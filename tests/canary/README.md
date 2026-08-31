@@ -46,9 +46,10 @@ Run later, after integration and commissioning:
 # Model-free preparation.
 bash tests/canary/commissioned_program_canary.sh prepare
 
-# In a second terminal, arm the checkpoint-boundary restart watcher using the
-# CANARY_ROOT printed above. This is control-plane recovery testing, not
-# semantic intervention.
+# Register the checkpoint-boundary restart watcher with the native user service
+# manager using the CANARY_ROOT printed above. The command returns only after a
+# distinct, durable watcher is owned by that manager; this is control-plane
+# recovery testing, not semantic intervention.
 bash tests/canary/commissioned_program_canary.sh arm-restart <CANARY_ROOT>
 
 # Deliberate paid-model start. This enrolls the prepared run into the already

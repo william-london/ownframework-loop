@@ -58,6 +58,11 @@ grep -Fq '.ownframework-loop-managed' "$HARNESS" || fail "canary does not requir
 grep -Fq 'runtime-provenance.json' "$HARNESS" || fail "canary does not bind runtime provenance"
 grep -Fq 'launchctl kickstart -k' "$HARNESS" || fail "canary lacks launchd restart path"
 grep -Fq 'systemctl --user restart' "$HARNESS" || fail "canary lacks systemd-user restart path"
+grep -Fq 'WATCHER_DURABLE=yes' "$ROOT_DIR/tests/canary/commissioned_program_restart_watcher.py" || fail "canary lacks durable watcher contract"
+grep -Fq 'restart_watcher_not_armed' "$HARNESS" || fail "start does not fail closed without watcher"
+grep -Fq 'restart_boundary_missed' "$HARNESS" || fail "verifier lacks missed-boundary diagnostic"
+grep -Fq 'restart-proof.json' "$HARNESS" || fail "canary lacks restart proof"
+grep -Fq 'atomic_write' "$ROOT_DIR/tests/canary/commissioned_program_restart_watcher.py" || fail "restart proof is not atomic"
 for marker in PREPARED STARTED IN_PROGRESS TERMINAL_PASS TERMINAL_FAIL; do
   grep -Fq "CANARY_STATE=$marker" "$HARNESS" || fail "canary lifecycle marker missing: $marker"
 done
