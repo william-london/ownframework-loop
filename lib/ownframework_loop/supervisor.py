@@ -29,7 +29,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import dispatch as dispatch_mod, dispatch_hold as dispatch_hold_mod, packet as packet_mod, runtime_env, state as state_mod, util, runtime_identity
+from . import branch_resolver as branch_resolver_mod, dispatch as dispatch_mod, dispatch_hold as dispatch_hold_mod, packet as packet_mod, runtime_env, state as state_mod, util, runtime_identity
 
 SCHEMA = "ownframework-loop-supervisor/v1"
 DISPATCH_HOLD_KIND = "PROGRAM_CHECKPOINT_BOUNDARY"
@@ -531,7 +531,7 @@ def worker_log_paths(
 # Historical rows may carry the old $25 / unlimited-token / 8h fingerprint,
 # but that tuple is indistinguishable from an operator explicitly selecting it.
 # Preserve it and mark ambiguity rather than inventing intent.
-SCHEMA_DATA_VERSION = 6
+SCHEMA_DATA_VERSION = 7
 _LEGACY_BUDGET_DEFAULT_FINGERPRINT = (25.0, 0, 28800)
 DEFAULT_MAX_CONCURRENCY = 1
 IMPLEMENTATION_MAX_CONCURRENCY = 64
@@ -567,6 +567,36 @@ def _repository_scheduling_identity(repo: Path) -> tuple[str, bool]:
         # directory with mocked dispatch. Preserve that narrow path-scoped
         # identity without weakening real Git enrollment.
         return f"path:{resolved}", resolved.exists()
+
+
+def _workspace_scheduling_identity(
+    repo: Path,
+    run_id: str,
+    *,
+    repository_key: str,
+    repository_proven: bool,
+) -> tuple[str, str, bool]:
+    """Return candidate branch, workspace key, and proof status.
+
+    Git common-dir remains repository provenance, not a global execution mutex.
+    Concurrent ownership is isolated by the run-frozen candidate branch, so
+    different branches/worktrees in one repository may execute in parallel.
+    """
+    if not repository_proven or not repository_key:
+        return "", "", False
+    try:
+        branch = branch_resolver_mod.resolve_candidate_branch(repo, run_id)
+    except Exception:
+        return "", "", False
+    if not isinstance(branch, str) or not branch.strip():
+        return "", "", False
+    branch = branch.strip()
+    key = json.dumps(
+        {"repository": repository_key, "candidate_branch": branch},
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return branch, key, True
 
 
 def _packet_execution_mode(repo: Path, run_id: str) -> str:
@@ -643,6 +673,45 @@ def _apply_data_migrations(conn: sqlite3.Connection) -> None:
                     WHERE id=?""",
                 (key, int(proven), mode, int(row["id"])),
             )
+        conn.execute("PRAGMA user_version = 6")
+        version = 6
+        conn.commit()
+    if version < 7:
+        rows = conn.execute(
+            """SELECT id, repo, run_id, status,
+                      repository_scheduling_key, repository_identity_proven
+                 FROM jobs"""
+        ).fetchall()
+        for row in rows:
+            if str(row["status"] or "") in {"DONE", "RETIRED"}:
+                continue
+            repo = Path(str(row["repo"] or "")).expanduser().resolve(strict=False)
+            if not repo.exists():
+                conn.execute(
+                    """UPDATE jobs
+                          SET repository_identity_proven=0,
+                              workspace_identity_proven=0
+                        WHERE id=?""",
+                    (int(row["id"]),),
+                )
+                continue
+            repository_key = str(row["repository_scheduling_key"] or "")
+            repository_proven = bool(int(row["repository_identity_proven"] or 0))
+            if not repository_key or not repository_proven:
+                repository_key, repository_proven = _repository_scheduling_identity(repo)
+            candidate_branch, workspace_key, workspace_proven = _workspace_scheduling_identity(
+                repo, str(row["run_id"]), repository_key=repository_key,
+                repository_proven=repository_proven,
+            )
+            conn.execute(
+                """UPDATE jobs
+                      SET repository_scheduling_key=?, repository_identity_proven=?,
+                          candidate_branch=?, workspace_scheduling_key=?,
+                          workspace_identity_proven=?
+                    WHERE id=?""",
+                (repository_key, int(repository_proven), candidate_branch,
+                 workspace_key, int(workspace_proven), int(row["id"])),
+            )
         conn.execute(f"PRAGMA user_version = {SCHEMA_DATA_VERSION}")
         conn.commit()
 
@@ -698,6 +767,9 @@ def _connect(path: Path) -> sqlite3.Connection:
           legacy_budget_ambiguous INTEGER NOT NULL DEFAULT 0,
           repository_scheduling_key TEXT NOT NULL DEFAULT '',
           repository_identity_proven INTEGER NOT NULL DEFAULT 0,
+          candidate_branch TEXT NOT NULL DEFAULT '',
+          workspace_scheduling_key TEXT NOT NULL DEFAULT '',
+          workspace_identity_proven INTEGER NOT NULL DEFAULT 0,
           execution_mode TEXT NOT NULL DEFAULT 'SINGLE',
           dispatch_count INTEGER NOT NULL DEFAULT 0,
           last_dispatch_sequence INTEGER NOT NULL DEFAULT 0,
@@ -806,6 +878,9 @@ def _connect(path: Path) -> sqlite3.Connection:
         "legacy_budget_ambiguous": "ALTER TABLE jobs ADD COLUMN legacy_budget_ambiguous INTEGER NOT NULL DEFAULT 0",
         "repository_scheduling_key": "ALTER TABLE jobs ADD COLUMN repository_scheduling_key TEXT NOT NULL DEFAULT ''",
         "repository_identity_proven": "ALTER TABLE jobs ADD COLUMN repository_identity_proven INTEGER NOT NULL DEFAULT 0",
+        "candidate_branch": "ALTER TABLE jobs ADD COLUMN candidate_branch TEXT NOT NULL DEFAULT ''",
+        "workspace_scheduling_key": "ALTER TABLE jobs ADD COLUMN workspace_scheduling_key TEXT NOT NULL DEFAULT ''",
+        "workspace_identity_proven": "ALTER TABLE jobs ADD COLUMN workspace_identity_proven INTEGER NOT NULL DEFAULT 0",
         "execution_mode": "ALTER TABLE jobs ADD COLUMN execution_mode TEXT NOT NULL DEFAULT 'SINGLE'",
         "dispatch_count": "ALTER TABLE jobs ADD COLUMN dispatch_count INTEGER NOT NULL DEFAULT 0",
         "last_dispatch_sequence": "ALTER TABLE jobs ADD COLUMN last_dispatch_sequence INTEGER NOT NULL DEFAULT 0",
@@ -1616,6 +1691,10 @@ def enqueue(
     )
     repo = str(Path(canonical_repo).resolve(strict=False))
     scheduling_key, identity_proven = _repository_scheduling_identity(Path(repo))
+    candidate_branch, workspace_key, workspace_proven = _workspace_scheduling_identity(
+        Path(repo), run_id, repository_key=scheduling_key,
+        repository_proven=identity_proven,
+    )
     execution_mode = _packet_execution_mode(Path(repo), run_id)
     db = db_path or default_db_path()
     now = time.time()
@@ -1665,10 +1744,15 @@ def enqueue(
                     })
                     return out
                 existing_key = str(existing["repository_scheduling_key"] or "")
+                existing_workspace_key = str(existing["workspace_scheduling_key"] or "")
+                existing_candidate_branch = str(existing["candidate_branch"] or "")
                 existing_mode = str(existing["execution_mode"] or "SINGLE")
                 if (
                     int(existing["repository_identity_proven"] or 0) != 1
+                    or int(existing["workspace_identity_proven"] or 0) != 1
                     or existing_key != str(scheduling_key)
+                    or existing_workspace_key != str(workspace_key)
+                    or existing_candidate_branch != str(candidate_branch)
                     or existing_mode != str(execution_mode)
                 ):
                     out = dict(existing)
@@ -1718,8 +1802,11 @@ def enqueue(
                max_total_cost_usd, max_total_tokens, max_wall_seconds,
                runtime_generation, legacy_budget_ambiguous,
                repository_scheduling_key, repository_identity_proven,
+
+               candidate_branch, workspace_scheduling_key, workspace_identity_proven,
+
                execution_mode, created_at, updated_at)
-            VALUES (?, ?, ?, 'QUEUED', 0, ?, 0, ?, 0, ?, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, 'QUEUED', 0, ?, 0, ?, 0, ?, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(repo, run_id) DO UPDATE SET
               runner=excluded.runner,
               max_infra_failures=excluded.max_infra_failures,
@@ -1732,6 +1819,9 @@ def enqueue(
               legacy_budget_ambiguous=excluded.legacy_budget_ambiguous,
               repository_scheduling_key=excluded.repository_scheduling_key,
               repository_identity_proven=excluded.repository_identity_proven,
+              candidate_branch=excluded.candidate_branch,
+              workspace_scheduling_key=excluded.workspace_scheduling_key,
+              workspace_identity_proven=excluded.workspace_identity_proven,
               execution_mode=excluded.execution_mode,
               updated_at=excluded.updated_at
             """,
@@ -1749,6 +1839,9 @@ def enqueue(
                 int(eff_legacy_ambiguous),
                 scheduling_key,
                 int(identity_proven),
+                candidate_branch,
+                workspace_key,
+                int(workspace_proven),
                 execution_mode,
                 now,
                 now,
@@ -1894,33 +1987,42 @@ def fleet_status(*, db_path: Path | None = None) -> dict[str, Any]:
                FROM jobs j LEFT JOIN dispatch_holds h ON h.job_id=j.id
                ORDER BY j.id"""
         ).fetchall()
-        running_keys = {str(r["repository_scheduling_key"] or "") for r in rows if r["status"] == "RUNNING"}
+        running_repository_keys = {str(r["repository_scheduling_key"] or "") for r in rows if r["status"] == "RUNNING"}
+        running_workspace_keys = {str(r["workspace_scheduling_key"] or "") for r in rows if r["status"] == "RUNNING"}
         active = sum(1 for r in rows if r["status"] == "RUNNING")
         projected: list[dict[str, Any]] = []
         for row in rows:
             hold_state = str(row["hold_state"] or "")
             status_value = str(row["status"])
-            repo_blocked = (
+            workspace_blocked = (
                 status_value in {"QUEUED", "BACKOFF"}
-                and str(row["repository_scheduling_key"] or "") in running_keys
+                and str(row["workspace_scheduling_key"] or "") in running_workspace_keys
+            )
+            repository_peer_running = (
+                status_value in {"QUEUED", "BACKOFF"}
+                and str(row["repository_scheduling_key"] or "") in running_repository_keys
             )
             blocked = (
                 status_value in {"QUEUED", "BACKOFF"}
-                and (hold_state == "HELD" or repo_blocked)
+                and (hold_state == "HELD" or workspace_blocked)
             )
             due = float(row["next_attempt_at"] or 0) <= time.time()
             identity_proven = int(row["repository_identity_proven"] or 0) == 1
+            workspace_proven = int(row["workspace_identity_proven"] or 0) == 1
             effective = (
                 status_value in {"QUEUED", "BACKOFF"}
                 and not blocked
                 and due
                 and identity_proven
+                and workspace_proven
                 and active < configured
             )
             item = dict(row)
             item.update({
                 "effective_schedulability": bool(effective),
-                "repo_blocked": bool(repo_blocked),
+                "workspace_blocked": bool(workspace_blocked),
+                "repo_blocked": bool(workspace_blocked),
+                "repository_peer_running": bool(repository_peer_running),
                 "held": hold_state == "HELD",
                 "active_slot": status_value == "RUNNING",
                 "scheduler_class": str(row["execution_mode"] or "SINGLE"),
@@ -3235,10 +3337,10 @@ def _take_next_job(conn: sqlite3.Connection) -> sqlite3.Row | None:
                 max_concurrency = _validate_max_concurrency(
                     config[0] if config is not None else DEFAULT_MAX_CONCURRENCY
                 )
-                same_repo = conn.execute(
-                    """SELECT id FROM jobs WHERE status='RUNNING'
-                       AND repository_scheduling_key=? LIMIT 1""",
-                    (str(candidate["repository_scheduling_key"] or ""),),
+                same_workspace = conn.execute(
+                    """SELECT id FROM jobs WHERE status=\'RUNNING\'
+                       AND workspace_scheduling_key=? LIMIT 1""",
+                    (str(candidate["workspace_scheduling_key"] or ""),),
                 ).fetchone()
                 if (
                     current is None
@@ -3247,8 +3349,9 @@ def _take_next_job(conn: sqlite3.Connection) -> sqlite3.Row | None:
                     or current_hold is None
                     or current_hold["state"] != "ARMED"
                     or active >= max_concurrency
-                    or same_repo is not None
+                    or same_workspace is not None
                     or int(current["repository_identity_proven"] or 0) != 1
+                    or int(current["workspace_identity_proven"] or 0) != 1
                 ):
                     conn.commit()
                     continue
@@ -3294,18 +3397,19 @@ def _take_next_job(conn: sqlite3.Connection) -> sqlite3.Row | None:
                 conn.commit()
                 retry_candidates = True
                 break
-            same_repo = conn.execute(
-                """SELECT id FROM jobs WHERE status='RUNNING'
-                   AND repository_scheduling_key=? LIMIT 1""",
-                (str(candidate["repository_scheduling_key"] or ""),),
+            same_workspace = conn.execute(
+                """SELECT id FROM jobs WHERE status=\'RUNNING\'
+                   AND workspace_scheduling_key=? LIMIT 1""",
+                (str(candidate["workspace_scheduling_key"] or ""),),
             ).fetchone()
             if (
                 current is None
                 or current["status"] not in ("QUEUED", "BACKOFF")
                 or float(current["next_attempt_at"] or 0) > time.time()
                 or active >= max_concurrency
-                or same_repo is not None
+                or same_workspace is not None
                 or int(current["repository_identity_proven"] or 0) != 1
+                or int(current["workspace_identity_proven"] or 0) != 1
             ):
                 conn.commit()
                 continue
