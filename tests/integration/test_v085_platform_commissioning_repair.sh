@@ -45,7 +45,19 @@ OUT="$(PATH="$BADBIN:$PATH" "$A" -B "$ROOT_DIR/scripts/launch-commissioned-super
   --probe "$ROOT_DIR/scripts/probe-supervisor-runtime-dependencies.py" --ofloop "$DUMMY")"
 grep -Fx 'reason=safe' <<<"$OUT" >/dev/null || fail "commissioned launcher did not prove ledger safe before exec: $OUT"
 LAUNCHED_PY="$(tail -n1 <<<"$OUT")"
-[[ "$LAUNCHED_PY" == "$A" ]] || fail "commissioned launcher used wrong Python: $LAUNCHED_PY expected=$A"
+LAUNCHED_PY_REAL="$(python3 -B - "$LAUNCHED_PY" <<'PY'
+import sys
+from pathlib import Path
+print(Path(sys.argv[1]).resolve(strict=False))
+PY
+)"
+A_REAL="$(python3 -B - "$A" <<'PY'
+import sys
+from pathlib import Path
+print(Path(sys.argv[1]).resolve(strict=False))
+PY
+)"
+[[ "$LAUNCHED_PY_REAL" == "$A_REAL" ]] || fail "commissioned launcher used wrong Python: $LAUNCHED_PY_REAL expected=$A_REAL"
 
 # Create source-tree release copies with distinct semantic versions for an A->B
 # cross-version rollback.  No .git means install.sh consumes exactly these bytes.
