@@ -169,24 +169,33 @@ RID52="$(make_approved_run_unapproved "$T5" FEATURE low "v090-multibaseline-webh
 # The visible checkout is deliberately neither run's baseline.
 git -C "$T5" checkout -q master
 
+python3 - "$T5" "$RID51" "$RID52" <<'PY'
+import sys
+from pathlib import Path
+from ownframework_loop import execution_start, git_checks
+
+repo = Path(sys.argv[1])
+rid_website, rid_webhooks = sys.argv[2], sys.argv[3]
+assert git_checks.current_branch(repo) == "master"
+for rid in (rid_website, rid_webhooks):
+    execution_start.ensure_executable(
+        canonical_repo=repo, run_id=rid,
+        actor="v090-multibaseline", binding_method="build_start",
+    )
+PY
+
+"$OFLOOP_BIN" build claim "$T5" "$RID51" --actor builder >/dev/null
+"$OFLOOP_BIN" build claim "$T5" "$RID52" --actor builder >/dev/null
+
 python3 - "$T5" "$RID51" "$RID52" "$WEBSITE_SHA" "$WEBHOOKS_SHA" <<'PY'
 import sys
 from pathlib import Path
-from ownframework_loop import build_prepare, execution_start, git_checks
+from ownframework_loop import build_prepare, git_checks
 
 repo = Path(sys.argv[1])
 rid_website, rid_webhooks = sys.argv[2], sys.argv[3]
 sha_website, sha_webhooks = sys.argv[4], sys.argv[5]
 
-assert git_checks.current_branch(repo) == "master"
-execution_start.ensure_executable(
-    canonical_repo=repo, run_id=rid_website,
-    actor="v090-multibaseline", binding_method="build_start",
-)
-execution_start.ensure_executable(
-    canonical_repo=repo, run_id=rid_webhooks,
-    actor="v090-multibaseline", binding_method="build_start",
-)
 website = build_prepare.prepare(canonical_repo=repo, run_id=rid_website)
 webhooks = build_prepare.prepare(canonical_repo=repo, run_id=rid_webhooks)
 
@@ -200,10 +209,28 @@ print("CANONICAL_CHECKOUT_POSITION_NOT_GLOBAL_MUTEX=PASS")
 print("CANDIDATE_ANCESTRY_PRESERVED=PASS")
 PY
 
-# Moving the frozen website branch ref must still be detected even though the
-# visible checkout remains on master.
-git -C "$T5" branch -f website master >/dev/null
-python3 - "$T5" "$RID51" <<'PY'
+# A separate frozen baseline proves that moving the branch ref after execution
+# authority and build-pass claim is still rejected, without colliding with an
+# already-materialized candidate worktree.
+git -C "$T5" branch drift-baseline master
+git -C "$T5" checkout -q drift-baseline
+RID53="$(make_approved_run_unapproved "$T5" FEATURE low "v090-baseline-drift" drift-baseline)"
+git -C "$T5" checkout -q master
+
+python3 - "$T5" "$RID53" <<'PY'
+import sys
+from pathlib import Path
+from ownframework_loop import execution_start
+execution_start.ensure_executable(
+    canonical_repo=Path(sys.argv[1]), run_id=sys.argv[2],
+    actor="v090-baseline-drift", binding_method="build_start",
+)
+PY
+"$OFLOOP_BIN" build claim "$T5" "$RID53" --actor builder >/dev/null
+
+# Move only the frozen baseline ref. The visible checkout remains on master.
+git -C "$T5" branch -f drift-baseline webhooks >/dev/null
+python3 - "$T5" "$RID53" <<'PY'
 import sys
 from pathlib import Path
 from ownframework_loop import build_prepare
