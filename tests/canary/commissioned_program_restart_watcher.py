@@ -341,11 +341,21 @@ def db_probe(c: dict[str, Any]) -> dict[str, Any]:
             result["job"] = row[0]
             result["active_worker"] = bool(row[1] or row[2] or row[3])
             attempts = conn.execute(
-                "select role,status from semantic_attempts where job_id=? order by started_at",
+                "select attempt_id,role,status from semantic_attempts where job_id=? order by started_at",
                 (row[0],),
             ).fetchall()
             result["attempt_count"] = len(attempts)
-            result["cp2_attempted"] = len(attempts) > 4 or any(a[1] in {"STARTED", "RUNNING", "CLAIMED"} for a in attempts[4:])
+            cp2_attempts = attempts[4:]
+            result["cp2_attempted"] = bool(cp2_attempts)
+            # The CP-1 finalizer can still be unwinding when it publishes the
+            # authoritative CP-2 boundary.  That worker is not a CP-2
+            # semantic worker and must not make the boundary look missed.
+            active_attempt_id = row[3]
+            result["active_worker"] = bool(
+                (row[1] or row[2] or row[3])
+                and active_attempt_id
+                and any(a[0] == active_attempt_id for a in cp2_attempts)
+            )
         conn.close()
     except sqlite3.Error:
         return result
@@ -508,6 +518,12 @@ def watch(root: Path) -> int:
     append_log(c, f"WATCHER_STATE=WAITING watcher_id={watcher_id(c)} pid={pid}")
     deadline = time.monotonic() + WAIT_SECONDS
     while time.monotonic() < deadline:
+        # ARM happens before START, so refresh the control plane on every
+        # iteration.  Once START has atomically recorded the hold identity,
+        # commissioned mode must consume the durable hold rather than falling
+        # back to a timing-sensitive state poll.
+        c = load(control)
+        c["control"] = str(control)
         result = hold_probe(c)
         if result == "NO_HOLD":
             if c.get("status") == "STARTED":

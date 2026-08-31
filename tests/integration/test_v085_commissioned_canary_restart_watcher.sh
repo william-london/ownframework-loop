@@ -30,7 +30,7 @@ def write(path, value):
     path.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
-def fixture(name, missed=False):
+def fixture(name, missed=False, cp1_active=False):
     root = tmp / name
     repo = root / "repo"
     run = "run-watcher-" + name
@@ -76,9 +76,12 @@ def fixture(name, missed=False):
         );
         """
     )
+    active_pid = 101 if (missed or cp1_active) else None
+    active_role = "builder" if missed else ("reviewer" if cp1_active else None)
+    active_attempt = "builder-3" if missed else ("reviewer-2" if cp1_active else None)
     conn.execute(
         "INSERT INTO jobs(id, repo, run_id, worker_pid, worker_role, worker_attempt_id) VALUES(1, ?, ?, ?, ?, ?)",
-        (str(repo.resolve()), run, 101 if missed else None, "builder" if missed else None, "builder-3" if missed else None),
+        (str(repo.resolve()), run, active_pid, active_role, active_attempt),
     )
     for index, (attempt_id, role, status) in enumerate(attempts):
         conn.execute(
@@ -213,6 +216,20 @@ assert "CANARY_RESTART_WATCH=ALREADY_COMPLETE" in duplicate.stdout
 assert count.read_text().strip() == "1"
 subprocess.run(["bash", str(harness), "destroy", str(root)], env=e, check=True, stdout=subprocess.DEVNULL)
 print("CANARY_RESTART_WATCHER_EXACTLY_ONCE=PASS")
+
+# A CP-1 reviewer may still be unwinding while it publishes the authoritative
+# CP-1 -> CP-2 boundary.  It is not a CP-2 worker and must not make the watcher
+# falsely report a missed boundary.
+root, run, state, count, active = fixture("cp1-finalizer-worker", cp1_active=True)
+e = env(count, active)
+subprocess.run(["bash", str(harness), "arm-restart", str(root)], env=e, check=True, stdout=subprocess.DEVNULL)
+run_state = root / "repo" / ".ownframework-loop" / run / "STATE.json"
+write(run_state, state)
+wait_for(lambda: (root / "restart-proof.json").is_file(), timeout=5)
+assert int(count.read_text().strip()) == 1
+assert control(root)["watcher_status"] == "PROOF_WRITTEN"
+subprocess.run(["bash", str(harness), "destroy", str(root)], env=e, check=True, stdout=subprocess.DEVNULL)
+print("CANARY_RESTART_WATCHER_IGNORES_CP1_FINALIZER_WORKER=PASS")
 
 # If CP-2 is already claimed, the watcher fails closed and never restarts.
 root, run, state, count, active = fixture("missed-boundary", missed=True)
