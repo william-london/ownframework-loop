@@ -66,17 +66,15 @@ hook_expect_allow() {
 
 # F1: classifier import crash must fail CLOSED, never ALLOW.
 ROOT_CRASH="$TMP/root-crash"
-mkdir -p "$ROOT_CRASH/lib/ownframework_loop"
-cp "$LIB_DIR/ownframework_loop/role_context.py" "$ROOT_CRASH/lib/ownframework_loop/"
-echo '"""stub"""' > "$ROOT_CRASH/lib/ownframework_loop/__init__.py"
+mkdir -p "$ROOT_CRASH/lib"
+cp -R "$LIB_DIR/ownframework_loop" "$ROOT_CRASH/lib/"
 printf 'raise RuntimeError("boom: classifier broken")\n' > "$ROOT_CRASH/lib/ownframework_loop/external_action.py"
 hook_expect_block "classifier import crash fails closed" "Bash" "git push origin master" "$ROOT_CRASH"
 
 # F1: a classifier returning an unrecognized decision must fail CLOSED.
 ROOT_GARBAGE="$TMP/root-garbage"
-mkdir -p "$ROOT_GARBAGE/lib/ownframework_loop"
-cp "$LIB_DIR/ownframework_loop/role_context.py" "$ROOT_GARBAGE/lib/ownframework_loop/"
-echo '"""stub"""' > "$ROOT_GARBAGE/lib/ownframework_loop/__init__.py"
+mkdir -p "$ROOT_GARBAGE/lib"
+cp -R "$LIB_DIR/ownframework_loop" "$ROOT_GARBAGE/lib/"
 printf 'def classify_tool_call(**kwargs):\n    return "GARBAGE_DECISION"\n' > "$ROOT_GARBAGE/lib/ownframework_loop/external_action.py"
 hook_expect_block "garbage classifier decision fails closed" "Bash" "git push origin master" "$ROOT_GARBAGE"
 
