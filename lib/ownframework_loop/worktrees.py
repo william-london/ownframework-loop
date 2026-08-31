@@ -78,6 +78,43 @@ def _worktree_admin_lock_path(canonical_repo: Path) -> Path:
     return lock_dir / "worktree-admin.lock"
 
 
+BUILDER_OWNERSHIP_FILENAME = "BUILDER_WORKSPACE_OWNERSHIP.json"
+
+
+def _builder_ownership_path(canonical_repo: Path, run_id: str) -> Path:
+    return canonical_repo / ".ownframework-loop" / run_id / BUILDER_OWNERSHIP_FILENAME
+
+
+def _load_builder_ownership(canonical_repo: Path, run_id: str) -> dict[str, Any] | None:
+    p = _builder_ownership_path(canonical_repo, run_id)
+    if not p.is_file():
+        return None
+    try:
+        import json
+        value = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def _record_builder_ownership(
+    canonical_repo: Path, run_id: str, *, branch: str, base_sha: str
+) -> None:
+    p = _builder_ownership_path(canonical_repo, run_id)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write_json(
+        p,
+        {
+            "schema": "ownframework-loop-builder-workspace-ownership/v1",
+            "run_id": run_id,
+            "candidate_branch": branch,
+            "initial_base_sha": base_sha,
+            "created_by": "ownframework-loop",
+            "recorded_at": utc_now_iso(),
+        },
+        mode=0o600,
+    )
+
 def _require_builder_branch(wt: Path, expected_branch: str) -> str:
     """Return actual branch or fail closed on detached/mismatched worktree."""
     actual = current_branch(wt)
@@ -115,6 +152,16 @@ def add_builder_worktree(
             if head is None:
                 raise WorktreeError("builder worktree HEAD is not resolvable")
             actual_branch = _require_builder_branch(wt, branch)
+            ownership = _load_builder_ownership(canonical_repo, run_id)
+            if ownership is None:
+                _record_builder_ownership(
+                    canonical_repo, run_id, branch=branch,
+                    base_sha=(base_sha or head),
+                )
+            elif str(ownership.get("candidate_branch") or "") != branch:
+                raise WorktreeError(
+                    "builder workspace ownership marker branch mismatch"
+                )
             return {
                 "path": str(wt), "branch": branch, "head": head,
                 "actual_branch": actual_branch, "existed": True,
@@ -125,16 +172,29 @@ def add_builder_worktree(
         if base_sha is None:
             raise WorktreeError("cannot create builder worktree: canonical repo has no HEAD")
 
-        # If the frozen candidate branch survived while only its disposable
-        # worktree disappeared, reattach that branch instead of trying to
-        # recreate it with -b. Git itself refuses if another worktree already
-        # owns the branch, preserving single-workspace ownership.
-        if branch_exists(canonical_repo, branch):
+        ownership = _load_builder_ownership(canonical_repo, run_id)
+        branch_already_exists = branch_exists(canonical_repo, branch)
+        if branch_already_exists:
+            if (
+                ownership is None
+                or str(ownership.get("run_id") or "") != run_id
+                or str(ownership.get("candidate_branch") or "") != branch
+                or str(ownership.get("created_by") or "") != "ownframework-loop"
+            ):
+                raise WorktreeError(
+                    f"candidate branch {branch!r} already exists without exact "
+                    "same-run Loop ownership provenance; refusing adoption"
+                )
             cmd = [
                 "git", "-C", str(canonical_repo), "worktree", "add",
                 str(wt), branch,
             ]
         else:
+            if ownership is not None:
+                raise WorktreeError(
+                    f"candidate branch {branch!r} disappeared despite preserved "
+                    "same-run ownership evidence; refusing history recreation"
+                )
             cmd = [
                 "git", "-C", str(canonical_repo), "worktree", "add",
                 "-b", branch, str(wt), base_sha,
@@ -160,6 +220,10 @@ def add_builder_worktree(
 
         head = current_head(wt)
         actual_branch = _require_builder_branch(wt, branch)
+        if not branch_already_exists:
+            _record_builder_ownership(
+                canonical_repo, run_id, branch=branch, base_sha=base_sha,
+            )
         return {
             "path": str(wt), "branch": branch, "head": head,
             "actual_branch": actual_branch, "existed": False,
