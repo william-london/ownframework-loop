@@ -59,6 +59,8 @@ import os
 import re
 import sys
 from pathlib import Path
+
+from . import git_checks
 from typing import Any
 
 SCHEMA = "of-loop/semantic-context/v1"
@@ -234,27 +236,6 @@ def apply_context_to_env(
     return env
 
 
-def _git_common_dir(path: Path) -> Path | None:
-    """Return the canonical Git common-dir for a main or linked worktree."""
-    import subprocess as _sp
-    try:
-        r = _sp.run(
-            ["git", "-C", str(path), "rev-parse", "--git-common-dir"],
-            capture_output=True, text=True, check=False, timeout=5,
-        )
-    except (OSError, _sp.TimeoutExpired):
-        return None
-    if r.returncode != 0 or not r.stdout.strip():
-        return None
-    common = Path(r.stdout.strip())
-    if not common.is_absolute():
-        common = path / common
-    try:
-        return common.resolve(strict=False)
-    except OSError:
-        return None
-
-
 def context_canonical_repo_matches(
     ctx: dict[str, str], cwd: str | Path
 ) -> bool:
@@ -273,8 +254,8 @@ def context_canonical_repo_matches(
         return False
     if not ctx_repo.is_dir() or not cwd_path.exists():
         return False
-    cwd_common = _git_common_dir(cwd_path)
-    repo_common = _git_common_dir(ctx_repo)
+    cwd_common = git_checks.git_common_dir(cwd_path)
+    repo_common = git_checks.git_common_dir(ctx_repo)
     return cwd_common is not None and repo_common is not None and cwd_common == repo_common
 
 
