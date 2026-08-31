@@ -106,7 +106,7 @@ def prepare(
       - canonical repo is not a git repo
       - WORK_PACKET.md missing or invalid
       - APPROVAL.json missing or invalid
-      - canonical HEAD drifted off approved baseline_sha
+      - frozen baseline branch ref drifted off approved baseline_sha
       - branch resolution ambiguous
     """
     canonical_repo = Path(canonical_repo).resolve(strict=False)
@@ -153,13 +153,16 @@ def prepare(
     if not bind_ok:
         raise PrepareRefused(f"approval-binding invalid: {bind_msg}")
 
-    # Canonical HEAD drift guard.
-    cur_head = git_checks.current_head(canonical_repo)
+    # Baseline ref drift guard. The operator's visible checkout may be on a
+    # different branch; execution authority is the frozen local branch ref/SHA.
+    cur_head = git_checks.branch_head(canonical_repo, baseline_branch)
     if not cur_head:
-        raise PrepareRefused("canonical repo has no HEAD")
+        raise PrepareRefused(
+            f"baseline branch {baseline_branch!r} is missing or not resolvable"
+        )
     if cur_head != baseline_sha:
         raise PrepareRefused(
-            f"canonical HEAD {cur_head} drifted from approved "
+            f"baseline branch ref {cur_head} drifted from approved "
             f"baseline {baseline_sha}"
         )
 
