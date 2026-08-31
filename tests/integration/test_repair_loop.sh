@@ -59,7 +59,13 @@ d = json.loads(p.read_text())
 d["validation_results"] = []
 d["acceptance_results"] = [{"id": "AC-1", "result": "fail", "evidence": "needs repair"}]
 d["non_goal_results"] = []
-d["findings"] = [{"id": "F-1", "severity": "must_fix", "summary": "needs repair"}]
+d["findings"] = [{
+    "finding_id": "F-1",
+    "severity": "medium",
+    "classification": "must_fix",
+    "title": "repair required",
+    "description": "needs repair",
+}]
 d["recommended_verdict"] = "CHANGES_REQUESTED"
 p.write_text(json.dumps(d, indent=2, sort_keys=True) + "\n")
 PY
@@ -97,7 +103,7 @@ assert_eq "$(printf '%s' "$BUILD2" | jq -r '.repair_context.schema')" "ownframew
 assert_eq "$(printf '%s' "$BUILD2" | jq -r '.repair_context.verdict')" "CHANGES_REQUESTED" "repair context carries prior verdict"
 assert_eq "$(printf '%s' "$BUILD2" | jq -r '.repair_context.candidate_sha_reviewed')" "$SHA1" "repair context exact reviewed SHA"
 assert_eq "$(printf '%s' "$BUILD2" | jq -r '.repair_context.failed_acceptance_results[0].id')" "AC-1" "repair context carries failed AC"
-assert_eq "$(printf '%s' "$BUILD2" | jq -r '.repair_context.findings[0].summary')" "needs repair" "repair context carries reviewer finding"
+assert_eq "$(printf '%s' "$BUILD2" | jq -r '.repair_context.findings[0].description')" "needs repair" "repair context carries reviewer finding"
 BSEM2="$(printf '%s' "$BUILD2" | jq -r '.semantic_path')"
 python3 - "$BSEM2" "$RUN_ID" <<'PY'
 import json, sys

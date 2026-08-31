@@ -18,7 +18,7 @@ from typing import Any
 
 from .util import sha256_text
 from .integrity import canonical_json_dumps
-from . import git_checks
+from . import git_checks, schema_validate
 
 
 SCHEMA_VERSION = "ownframework-work-packet/v2"
@@ -361,13 +361,23 @@ def validate_packet_self_consistency(meta: dict[str, Any]) -> list[str]:
 
 
 def validate_packet_for_approval(meta: dict[str, Any]) -> list[str]:
-    """Combined metadata + self-consistency validator used pre-approval.
+    """Fail-closed admission validator for packets entering execution.
 
-    Returns the concatenated errors of ``validate_packet_metadata`` and
-    ``validate_packet_self_consistency``. Use this in every code path that
-    admits a packet into the lifecycle (spec approve, build finalize,
-    review finalize, approval binding).
+    Current v2/v3 packets must first satisfy the checked-in structural JSON
+    schema. Only after that proof do the handwritten deterministic checks own
+    higher-level executable/business invariants (authority, path safety,
+    budgets, PROGRAM graph consistency, and packet/source consistency).
+
+    Legacy v1 packets have no current published schema file and retain their
+    historical handwritten parse/audit path; they still cannot become a modern
+    execution seal without the surrounding compatibility rules.
     """
+    schema = meta.get("schema")
+    if schema in (SCHEMA_VERSION, PROGRAM_SCHEMA_VERSION):
+        structural = schema_validate.validate_packet(meta)
+        if structural:
+            return [f"schema: {err}" for err in structural]
+
     errors: list[str] = list(validate_packet_metadata(meta))
     errors.extend(validate_packet_self_consistency(meta))
     return errors

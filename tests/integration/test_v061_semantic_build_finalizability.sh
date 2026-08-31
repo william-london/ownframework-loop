@@ -137,7 +137,7 @@ d = {
   "run_id": rid,
   "candidate_sha_claimed": "",
   "summary": "v0.6.1 finalizability synthetic builder",
-  "evidence": ["synthetic"],
+  "evidence": {"source": "synthetic", "finalizable": True},
   "outcome_requested": "candidate_ready",
   "unit_ids_completed": ["UNIT-1"], "work_unit_id": "UNIT-1",
   "acceptance_addressed": ["AC-1"],
@@ -404,6 +404,55 @@ echo "$T7_OUT"
 echo "$T7_OUT" | grep -Fq "builder_worktree_missing" \
   || fail "TEST 7: missing builder worktree was not refused"
 pass "TEST 7 — completed result cannot replay-finalize without exact builder worktree"
+
+# -----------------------------------------------------------------------------
+# TEST 8 — MALFORMED SEMANTIC TRANSPORT REUSES THE SAME CLAIMED PASS
+# -----------------------------------------------------------------------------
+echo ""
+echo "=== TEST 8: MALFORMED SEMANTIC TRANSPORT SAME-PASS RECOVERY ==="
+IFS='|' read -r REPO8 RID8 WT8 < <(make_unfinalized_build_pass "clean")
+SEM8="$REPO8/.ownframework-loop/$RID8/scratch/builder/pass-0001/BUILD_AGENT_RESULT.json"
+PRE_PASS8="$(jq -r '.build_pass_count' "$REPO8/.ownframework-loop/$RID8/STATE.json")"
+PRE_REPAIR8="$(jq -r '.repair_round' "$REPO8/.ownframework-loop/$RID8/STATE.json")"
+python3 - "$SEM8" <<'PY'
+import json,sys
+from pathlib import Path
+p=Path(sys.argv[1]); d=json.loads(p.read_text())
+d["evidence"]=["malformed-positive-fixture"]
+p.write_text(json.dumps(d,indent=2,sort_keys=True)+"\n")
+PY
+MALFORMED8="$(PYTHONPATH="$LIB_DIR" python3 - "$REPO8" "$RID8" "$WT8" "$SEM8" <<'PY'
+import sys
+from ownframework_loop import dispatch
+repo,rid,wt,semantic=sys.argv[1:]
+work_order={
+    "schema":dispatch.SCHEMA,
+    "decision":"BUILD",
+    "role":"builder",
+    "run_id":rid,
+    "canonical_repo":repo,
+    "worktree":wt,
+    "semantic_path":semantic,
+}
+print("|".join(map(str,dispatch.semantic_result_ready(work_order))))
+PY
+)"
+assert_eq "$MALFORMED8" "False|builder_semantic_shape_invalid" "malformed builder transport rejected before finalizer"
+assert_eq "$(jq -r '.build_pass_count' "$REPO8/.ownframework-loop/$RID8/STATE.json")" "$PRE_PASS8" "malformed builder transport preserves claimed pass"
+assert_eq "$(jq -r '.repair_round' "$REPO8/.ownframework-loop/$RID8/STATE.json")" "$PRE_REPAIR8" "malformed builder transport does not fund repair"
+[[ ! -e "$REPO8/.ownframework-loop/$RID8/BUILD_RECEIPT.json" ]] || fail "malformed builder transport must not create authoritative receipt"
+python3 - "$SEM8" <<'PY'
+import json,sys
+from pathlib import Path
+p=Path(sys.argv[1]); d=json.loads(p.read_text())
+d["evidence"]={"source":"same-pass-repair"}
+p.write_text(json.dumps(d,indent=2,sort_keys=True)+"\n")
+PY
+"$OFLOOP" dispatch finalize "$REPO8" "$RID8" BUILD "$SEM8" >/dev/null
+assert_eq "$(jq -r '.build_pass_count' "$REPO8/.ownframework-loop/$RID8/STATE.json")" "$PRE_PASS8" "repaired semantic transport finalizes same pass"
+assert_eq "$(jq -r '.repair_round' "$REPO8/.ownframework-loop/$RID8/STATE.json")" "$PRE_REPAIR8" "same-pass semantic repair leaves repair_round unchanged"
+[[ -e "$REPO8/.ownframework-loop/$RID8/BUILD_RECEIPT.json" ]] || fail "same-pass semantic repair did not create receipt"
+pass "TEST 8 — malformed semantic transport is retryable on the same claimed pass"
 
 echo ""
 echo "V061_SEMANTIC_BUILD_FINALIZABILITY_RECOVERY=PASS"

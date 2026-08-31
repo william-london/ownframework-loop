@@ -117,7 +117,13 @@ if verdict == "APPROVED":
     d["findings"] = []
 else:
     d["acceptance_results"] = [{"id": "AC-1", "result": "fail", "evidence": "needs repair"}]
-    d["findings"] = [{"id": "F-1", "severity": "must_fix", "summary": "needs repair"}]
+    d["findings"] = [{
+        "finding_id": "F-1",
+        "severity": "medium",
+        "classification": "must_fix",
+        "title": "repair required",
+        "description": "needs repair",
+    }]
 d["non_goal_results"] = []
 d["recommended_verdict"] = verdict
 p.write_text(json.dumps(d, indent=2, sort_keys=True) + "\n")

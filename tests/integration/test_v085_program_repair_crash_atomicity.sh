@@ -71,7 +71,13 @@ p=Path(sys.argv[1]); d=json.loads(p.read_text()); label=sys.argv[2]
 d["validation_results"]=[]
 d["acceptance_results"]=[{"id":"AC-1","result":"fail","evidence":"repair required "+label}]
 d["non_goal_results"]=[]
-d["findings"]=[{"id":"F-A03","severity":"must_fix","summary":"repair required "+label}]
+d["findings"]=[{
+    "finding_id":"F-A03",
+    "severity":"medium",
+    "classification":"must_fix",
+    "title":"PROGRAM repair required",
+    "description":"repair required "+label,
+}]
 d["recommended_verdict"]="CHANGES_REQUESTED"
 p.write_text(json.dumps(d,indent=2,sort_keys=True)+"\n")
 PY

@@ -58,13 +58,12 @@ from . import (
 )
 
 
-SCHEMA_AGENT_RESULT = "ownframework-loop-build-agent-result/v1"
+SCHEMA_AGENT_RESULT = build_agent_mod.SCHEMA_AGENT_RESULT
 
-# Hard schema for the semantic agent result.
-AGENT_RESULT_REQUIRED = (
-    "schema", "run_id", "work_unit_id", "outcome_requested",
-)
-AGENT_RESULT_ALLOWED_OUTCOMES = {"candidate_ready", "blocked", "stopped"}
+# Compatibility aliases for existing tests/callers; the semantic contract is
+# owned in build_agent.py and shared with dispatch readiness.
+AGENT_RESULT_REQUIRED = tuple(sorted(build_agent_mod.REQUIRED_RESULT_KEYS))
+AGENT_RESULT_ALLOWED_OUTCOMES = set(build_agent_mod.ALLOWED_OUTCOMES)
 
 
 def _read_json(path: Path, default: Any = None) -> Any:

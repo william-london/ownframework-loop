@@ -19,6 +19,7 @@ from typing import Any
 from . import (
     approval as approval_mod,
     assessment as assessment_mod,
+    build_agent as build_agent_mod,
     git_checks as git_checks_mod,
     packet as packet_mod,
     program as program_mod,
@@ -78,9 +79,9 @@ class SemanticResultIncomplete(DispatchError):
         )
 
 
-BUILD_AGENT_SCHEMA = "ownframework-loop-build-agent-result/v1"
+BUILD_AGENT_SCHEMA = build_agent_mod.SCHEMA_AGENT_RESULT
 REVIEW_AGENT_SCHEMA = "ownframework-loop-review-agent-assessment/v1"
-BUILD_OUTCOMES = {"candidate_ready", "blocked", "stopped"}
+BUILD_OUTCOMES = set(build_agent_mod.ALLOWED_OUTCOMES)
 REVIEW_VERDICTS = {
     "APPROVED",
     "CHANGES_REQUESTED",
@@ -137,33 +138,8 @@ def semantic_result_ready(work_order: dict[str, Any]) -> tuple[bool, str]:
         outcome = data.get("outcome_requested")
         if outcome not in BUILD_OUTCOMES:
             return False, "builder_outcome_invalid"
-        if (
-            not isinstance(data.get("work_unit_id"), str)
-            or not data.get("work_unit_id", "").strip()
-        ):
+        if build_agent_mod.validate_agent_result_contract(data):
             return False, "builder_semantic_shape_invalid"
-        if "summary" in data and not isinstance(data.get("summary"), str):
-            return False, "builder_semantic_shape_invalid"
-        if "evidence" in data and not isinstance(data.get("evidence"), dict):
-            return False, "builder_semantic_shape_invalid"
-        for field in ("blocker_reason", "escalation_reason", "notes"):
-            value = data.get(field)
-            if value is not None and not isinstance(value, str):
-                return False, "builder_semantic_shape_invalid"
-        if (
-            "escalation_recommended" in data
-            and not isinstance(data.get("escalation_recommended"), bool)
-        ):
-            return False, "builder_semantic_shape_invalid"
-        for field in ("unit_ids_completed", "acceptance_addressed"):
-            if field not in data:
-                continue
-            value = data.get(field)
-            if (
-                not isinstance(value, list)
-                or any(not isinstance(x, str) or not x for x in value)
-            ):
-                return False, "builder_semantic_shape_invalid"
         summary = str(data.get("summary") or "").strip()
         if outcome == "candidate_ready":
             addressed = data.get("acceptance_addressed") or []

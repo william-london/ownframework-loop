@@ -121,4 +121,67 @@ PY
 )"
 printf '%s\n' "$LARGE_RESULT"
 
+# A durable provider envelope above the explicit unattended-runtime ceiling
+# must fail closed before the supervisor reads it into memory. The ceiling is
+# intentionally orders of magnitude above the historical 64 KiB diagnostic
+# limit, so this does not regress legitimate large Claude JSON.
+OVERSIZE_FAKE="$TMP/oversize-claude"
+cat > "$OVERSIZE_FAKE" <<'PY'
+#!/usr/bin/env python3
+import json
+import sys
+
+payload = {
+    "is_error": False,
+    "subtype": "success",
+    "result": "x" * ((8 * 1024 * 1024) + 4096),
+    "total_cost_usd": 7.5,
+    "usage": {"input_tokens": 10, "output_tokens": 20},
+}
+sys.stdout.write(json.dumps(payload) + "\n")
+PY
+chmod +x "$OVERSIZE_FAKE"
+OVERSIZE_RESULT="$(OFLOOP_CLAUDE_BIN="$OVERSIZE_FAKE" python3 - "$TMP" <<'PY'
+import sys
+from pathlib import Path
+from ownframework_loop import supervisor
+
+root = Path(sys.argv[1])
+repo = root / "oversize-repo"
+worktree = root / "oversize-worktree"
+repo.mkdir()
+worktree.mkdir()
+out = root / "oversize.out"
+err = root / "oversize.err"
+result = supervisor.ClaudeCodeRunner().run(
+    {
+        "schema": supervisor.SCHEMA,
+        "decision": "BUILD",
+        "role": "builder",
+        "run_id": "run-oversize-durable-output",
+        "state": "BUILDING",
+        "replayed": False,
+        "canonical_repo": str(repo),
+        "worktree": str(worktree),
+        "semantic_path": str(worktree / "result.json"),
+        "network_read_allowlist": [],
+    },
+    timeout_seconds=30,
+    durable_files=(out, err),
+)
+assert out.stat().st_size > supervisor.CLAUDE_PROVIDER_ENVELOPE_MAX_BYTES
+assert result.ok is False
+assert result.cost_known is False
+assert result.tokens_known is False
+assert "provider envelope exceeds deterministic ceiling" in result.stderr
+assert len(result.stderr) <= supervisor.RUNNER_DIAGNOSTIC_MAX_CHARS
+assert supervisor._parse_cost_from_durable_stdout(str(out)) is None
+assert supervisor._parse_token_usage_from_durable_stdout(str(out)) is None
+print("OVERSIZE_DURABLE_STDOUT_FAILS_CLOSED=PASS")
+print("PROVIDER_ENVELOPE_MEMORY_BOUND=PASS")
+print("RECOVERY_ENVELOPE_MEMORY_BOUND=PASS")
+PY
+)"
+printf '%s\n' "$OVERSIZE_RESULT"
+
 echo "V061_RUNNER_COST_PROOF=PASS"

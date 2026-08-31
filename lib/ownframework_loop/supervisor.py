@@ -205,6 +205,32 @@ os.execvpe(argv[0], argv, os.environ)
 # command/code/web tools unless explicitly named. Available from v2.1.248.
 MIN_SECURE_CLAUDE_CODE_VERSION = (2, 1, 248)
 
+# Claude print-mode JSON is authoritative runner transport. Commissioned runs
+# spool it to disk, so bound every subsequent in-memory parse without regressing
+# legitimate >64 KiB responses. 8 MiB is intentionally far above diagnostic
+# retention while preventing accidental/malicious unbounded supervisor reads.
+CLAUDE_PROVIDER_ENVELOPE_MAX_BYTES = 8 * 1024 * 1024
+RUNNER_DIAGNOSTIC_MAX_CHARS = 65536
+
+
+def _read_durable_provider_envelope(path: Path) -> str:
+    size = path.stat().st_size
+    if size > CLAUDE_PROVIDER_ENVELOPE_MAX_BYTES:
+        raise ValueError(
+            "claude provider envelope exceeds deterministic ceiling "
+            f"({size} > {CLAUDE_PROVIDER_ENVELOPE_MAX_BYTES} bytes)"
+        )
+    return path.read_text(encoding="utf-8", errors="replace")
+
+
+def _read_durable_diagnostic_tail(path: Path) -> str:
+    with path.open("rb") as fh:
+        fh.seek(0, os.SEEK_END)
+        size = fh.tell()
+        fh.seek(max(0, size - RUNNER_DIAGNOSTIC_MAX_CHARS), os.SEEK_SET)
+        data = fh.read(RUNNER_DIAGNOSTIC_MAX_CHARS)
+    return data.decode("utf-8", errors="replace")[-RUNNER_DIAGNOSTIC_MAX_CHARS:]
+
 # Extra arguments are operator convenience only. They must never be able to
 # replace the unattended worker's tool boundary, sandbox, project-root, or
 # settings-source authority.
@@ -1213,8 +1239,8 @@ def _parse_cost_from_durable_stdout(path: str | None) -> float | None:
     if not p.is_file():
         return None
     try:
-        payload = json.loads(p.read_text(encoding="utf-8", errors="replace"))
-    except (OSError, json.JSONDecodeError):
+        payload = json.loads(_read_durable_provider_envelope(p))
+    except (OSError, ValueError, json.JSONDecodeError):
         return None
     if not isinstance(payload, dict) or "total_cost_usd" not in payload:
         return None
@@ -1238,8 +1264,8 @@ def _parse_token_usage_from_durable_stdout(path: str | None) -> dict[str, int] |
     if not p.is_file():
         return None
     try:
-        payload = json.loads(p.read_text(encoding="utf-8", errors="replace"))
-    except (OSError, json.JSONDecodeError):
+        payload = json.loads(_read_durable_provider_envelope(p))
+    except (OSError, ValueError, json.JSONDecodeError):
         return None
     if not isinstance(payload, dict):
         return None
@@ -3196,28 +3222,47 @@ class ClaudeCodeRunner:
             except Exception:
                 pass
             out_path, err_path = durable_files
+            envelope_error = ""
             try:
                 # The complete durable provider envelope is authoritative for
-                # parsing and usage extraction. Bound only the diagnostic
-                # copies returned below; truncating before json.loads corrupts
-                # otherwise valid large Claude responses.
-                stdout_data = out_path.read_text(encoding="utf-8", errors="replace")
+                # parsing and usage extraction, but commissioned unattended
+                # execution must not read an unbounded file into supervisor
+                # memory. The ceiling remains far above the diagnostic limit.
+                stdout_data = _read_durable_provider_envelope(out_path)
+            except ValueError as exc:
+                stdout_data = ""
+                envelope_error = str(exc)
             except Exception:
                 stdout_data = ""
+                envelope_error = "claude provider envelope could not be read"
             try:
-                stderr_data = err_path.read_text(encoding="utf-8", errors="replace")
+                stderr_data = _read_durable_diagnostic_tail(err_path)
             except Exception:
                 stderr_data = ""
 
         if timed_out:
+            if durable_files is not None and envelope_error:
+                stderr_data = (stderr_data or "") + "\n" + envelope_error
             return RunnerResult(
                 ok=False,
                 returncode=124,
                 cost_usd=0.0,
-                stdout=(stdout_data or "")[-65536:],
-                stderr=((stderr_data or "") + "\nclaude runner timed out")[-65536:],
+                stdout=(stdout_data or "")[-RUNNER_DIAGNOSTIC_MAX_CHARS:],
+                stderr=((stderr_data or "") + "\nclaude runner timed out")[-RUNNER_DIAGNOSTIC_MAX_CHARS:],
                 pid=int(proc.pid),
                 cost_known=False,
+            )
+
+        if durable_files is not None and envelope_error:
+            return RunnerResult(
+                ok=False,
+                returncode=int(proc.returncode or 0),
+                cost_usd=0.0,
+                stdout="",
+                stderr=((stderr_data or "") + "\n" + envelope_error)[-RUNNER_DIAGNOSTIC_MAX_CHARS:],
+                pid=int(proc.pid),
+                cost_known=False,
+                tokens_known=False,
             )
 
         cost = 0.0
@@ -3283,8 +3328,8 @@ class ClaudeCodeRunner:
             ok=bool(claude_ok and (parsed is not None)),
             returncode=int(proc.returncode or 0),
             cost_usd=cost,
-            stdout=(stdout_data or "")[-65536:],
-            stderr=(stderr_data or "")[-65536:],
+            stdout=(stdout_data or "")[-RUNNER_DIAGNOSTIC_MAX_CHARS:],
+            stderr=(stderr_data or "")[-RUNNER_DIAGNOSTIC_MAX_CHARS:],
             pid=int(proc.pid),
             cost_known=cost_known,
             input_tokens=input_tokens,

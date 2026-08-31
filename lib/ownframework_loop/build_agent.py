@@ -80,6 +80,57 @@ FILLABLE_KEYS: frozenset[str] = frozenset(
 ALLOWED_OUTCOMES: frozenset[str] = frozenset(
     {"candidate_ready", "blocked", "stopped"}
 )
+REQUIRED_RESULT_KEYS: frozenset[str] = frozenset(
+    {"schema", "run_id", "work_unit_id", "outcome_requested"}
+)
+
+
+def validate_agent_result_contract(result: Any) -> list[str]:
+    """Validate shared builder semantic JSON shape without completion policy.
+
+    Dispatch adds readiness requirements such as non-empty summary/evidence of
+    completion and clean exact worktree. The deterministic finalizer adds
+    identity/SHA/protocol checks. Both layers share this type/enum contract so
+    they cannot disagree on the same model-authored field shape.
+    """
+    if not isinstance(result, dict):
+        return ["builder semantic result must be an object"]
+
+    errors: list[str] = []
+    for field in sorted(REQUIRED_RESULT_KEYS):
+        if field not in result:
+            errors.append(f"missing required field: {field}")
+    if result.get("schema") != SCHEMA_AGENT_RESULT:
+        errors.append(f"schema must be {SCHEMA_AGENT_RESULT}")
+    if not isinstance(result.get("run_id"), str) or not str(result.get("run_id") or "").strip():
+        errors.append("run_id must be a non-empty string")
+    if not isinstance(result.get("work_unit_id"), str) or not str(result.get("work_unit_id") or "").strip():
+        errors.append("work_unit_id must be a non-empty string")
+    if result.get("outcome_requested") not in ALLOWED_OUTCOMES:
+        errors.append(f"outcome_requested must be one of {sorted(ALLOWED_OUTCOMES)}")
+
+    if "summary" in result and not isinstance(result.get("summary"), str):
+        errors.append("summary must be a string")
+    if "evidence" in result and not isinstance(result.get("evidence"), dict):
+        errors.append("evidence must be an object")
+    for field in ("blocker_reason", "escalation_reason", "notes"):
+        value = result.get(field)
+        if value is not None and not isinstance(value, str):
+            errors.append(f"{field} must be a string or null")
+    if (
+        "escalation_recommended" in result
+        and not isinstance(result.get("escalation_recommended"), bool)
+    ):
+        errors.append("escalation_recommended must be a boolean")
+    for field in ("unit_ids_completed", "acceptance_addressed"):
+        if field not in result:
+            continue
+        value = result.get(field)
+        if not isinstance(value, list):
+            errors.append(f"{field} must be a list")
+        elif any(not isinstance(item, str) or not item for item in value):
+            errors.append(f"{field} must contain only non-empty strings")
+    return errors
 
 
 def template_path(source_root: Path) -> Path:
