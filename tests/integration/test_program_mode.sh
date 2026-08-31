@@ -33,17 +33,17 @@ packet = {
         "execution_order": ["CP-1", "CP-2"],
         "checkpoints": [
             {"id": "CP-1", "title": "foundation", "scope": "create first feature slice",
-             "depends_on": [], "acceptance_criterion_ids": ["AC-FOUNDATION"],
+             "depends_on": [], "acceptance_criterion_ids": ["AC-1"],
              "risk_budget": {"max_build_passes": 2, "max_review_passes": 2, "max_repair_rounds": 1}},
             {"id": "CP-2", "title": "extension", "scope": "extend same candidate",
-             "depends_on": ["CP-1"], "acceptance_criterion_ids": ["AC-EXTENSION"],
+             "depends_on": ["CP-1"], "acceptance_criterion_ids": ["AC-2"],
              "risk_budget": {"max_build_passes": 2, "max_review_passes": 2, "max_repair_rounds": 1}}
         ]
     },
     "promotion_policy": "human_gate",
     "acceptance_criteria": [
-        {"id": "AC-FOUNDATION", "text": "foundation checkpoint is correct"},
-        {"id": "AC-EXTENSION", "text": "extension checkpoint is correct"}
+        {"id": "AC-1", "text": "foundation checkpoint is correct"},
+        {"id": "AC-2", "text": "extension checkpoint is correct"}
     ],
     "non_goals": [],
     "allowed_paths": ["src/"],
@@ -146,7 +146,7 @@ PY
   assert_eq "$(jq -r '.expected_acceptance_criterion_ids[0]' "$REPO/.ownframework-loop/$RUN_ID/REVIEW_VERDICT.json")" "$ac_id" "$cp verdict scoped AC"
 }
 
-run_checkpoint "CP-1" "one" "AC-FOUNDATION"
+run_checkpoint "CP-1" "one" "AC-1"
 python3 - "$REPO" "$RUN_ID" <<'PY'
 import json, sys
 from pathlib import Path
@@ -157,7 +157,7 @@ assert [x["id"] for x in s["program"]["finalized_checkpoints"]] == ["CP-1"], s["
 print("PASS CP-1 advanced deterministically to CP-2")
 PY
 
-run_checkpoint "CP-2" "two" "AC-EXTENSION"
+run_checkpoint "CP-2" "two" "AC-2"
 TERMINAL="$("$OFLOOP" dispatch claim "$REPO" "$RUN_ID")"
 assert_eq "$(printf '%s' "$TERMINAL" | jq -r '.decision')" "TERMINAL" "PROGRAM dispatch terminal"
 assert_eq "$(printf '%s' "$TERMINAL" | jq -r '.state')" "APPROVED" "PROGRAM terminal APPROVED"
