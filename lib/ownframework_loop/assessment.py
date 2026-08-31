@@ -86,6 +86,86 @@ SEMANTIC_ROW_ALLOWED_KEYS: frozenset[str] = frozenset(
     {"id", "result", "evidence"}
 )
 
+REQUIRED_ASSESSMENT_KEYS: frozenset[str] = frozenset(
+    {
+        "schema",
+        "run_id",
+        "candidate_sha_claimed",
+        "acceptance_results",
+        "non_goal_results",
+        "findings",
+        "recommended_verdict",
+    }
+)
+
+
+def validate_assessment_contract(assessment: Any) -> list[str]:
+    """Validate the shared reviewer semantic JSON shape.
+
+    Dispatch owns readiness/worktree/coverage policy. The deterministic review
+    finalizer owns identity/SHA/protocol authority. Both consume this same
+    model-authored shape contract so a pass cannot be declared ready and then
+    rejected only because the two layers disagree about JSON types/enums.
+    """
+    if not isinstance(assessment, dict):
+        return ["review assessment must be an object"]
+
+    errors: list[str] = []
+    for field in sorted(REQUIRED_ASSESSMENT_KEYS):
+        if field not in assessment:
+            errors.append(f"missing required field: {field}")
+    if assessment.get("schema") != SCHEMA_AGENT_ASSESSMENT:
+        errors.append(f"schema must be {SCHEMA_AGENT_ASSESSMENT}")
+    if not isinstance(assessment.get("run_id"), str) or not str(
+        assessment.get("run_id") or ""
+    ).strip():
+        errors.append("run_id must be a non-empty string")
+    if not isinstance(assessment.get("candidate_sha_claimed"), str) or not str(
+        assessment.get("candidate_sha_claimed") or ""
+    ).strip():
+        errors.append("candidate_sha_claimed must be a non-empty string")
+    if assessment.get("recommended_verdict") not in ALLOWED_RECOMMENDED_VERDICTS:
+        errors.append(
+            "recommended_verdict must be one of "
+            f"{sorted(ALLOWED_RECOMMENDED_VERDICTS)}"
+        )
+
+    for key, kind in (
+        ("acceptance_results", "acceptance"),
+        ("non_goal_results", "non_goal"),
+    ):
+        rows = assessment.get(key)
+        if not isinstance(rows, list):
+            errors.append(f"{key} must be a list")
+            continue
+        _, row_errors = canonicalize_result_rows(rows, kind=kind)
+        errors.extend(row_errors)
+        for idx, row in enumerate(rows):
+            if not isinstance(row, dict):
+                continue
+            evidence = row.get("evidence")
+            if not isinstance(evidence, str) or not evidence.strip():
+                errors.append(
+                    f"{key}[{idx}].evidence must be a non-empty string"
+                )
+
+    errors.extend(validate_findings(assessment.get("findings")))
+
+    if (
+        "escalation_recommended" in assessment
+        and not isinstance(assessment.get("escalation_recommended"), bool)
+    ):
+        errors.append("escalation_recommended must be a boolean")
+    escalation_reason = assessment.get("escalation_reason")
+    if escalation_reason is not None and not isinstance(escalation_reason, str):
+        errors.append("escalation_reason must be a string or null")
+    if (
+        "validation_results" in assessment
+        and not isinstance(assessment.get("validation_results"), list)
+    ):
+        errors.append("validation_results must be a list")
+    return errors
+
 
 def canonicalize_result_rows(
     rows: Any,

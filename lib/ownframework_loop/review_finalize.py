@@ -211,46 +211,7 @@ def _must_fix_fingerprint(must_fix: list[dict[str, Any]]) -> str:
 
 
 def _assessment_schema_ok(assessment: dict[str, Any]) -> tuple[bool, list[str]]:
-    errors: list[str] = []
-    for f in ASSESSMENT_REQUIRED:
-        if f not in assessment:
-            errors.append(f"missing required field: {f}")
-    if assessment.get("schema") != SCHEMA_AGENT_ASSESSMENT:
-        errors.append(f"schema must be {SCHEMA_AGENT_ASSESSMENT}")
-    if assessment.get("recommended_verdict") not in ASSESSMENT_ALLOWED_VERDICTS:
-        errors.append(f"recommended_verdict must be one of {sorted(ASSESSMENT_ALLOWED_VERDICTS)}")
-
-    for key, kind in (
-        ("acceptance_results", "acceptance"),
-        ("non_goal_results", "non_goal"),
-    ):
-        rows = assessment.get(key)
-        if not isinstance(rows, list):
-            errors.append(f"{key} must be a list")
-            continue
-        _, row_errors = assessment_mod.canonicalize_result_rows(rows, kind=kind)
-        errors.extend(row_errors)
-        for idx, row in enumerate(rows):
-            if not isinstance(row, dict):
-                continue
-            evidence = row.get("evidence")
-            if not isinstance(evidence, str) or not evidence.strip():
-                errors.append(f"{key}[{idx}].evidence must be a non-empty string")
-
-    errors.extend(assessment_mod.validate_findings(assessment.get("findings")))
-    if (
-        "escalation_recommended" in assessment
-        and not isinstance(assessment.get("escalation_recommended"), bool)
-    ):
-        errors.append("escalation_recommended must be a boolean")
-    escalation_reason = assessment.get("escalation_reason")
-    if escalation_reason is not None and not isinstance(escalation_reason, str):
-        errors.append("escalation_reason must be a string or null")
-    if (
-        "validation_results" in assessment
-        and not isinstance(assessment.get("validation_results"), list)
-    ):
-        errors.append("validation_results must be a list")
+    errors = assessment_mod.validate_assessment_contract(assessment)
     return (not errors), errors
 
 

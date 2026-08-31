@@ -65,6 +65,7 @@ _RETRYABLE_SEMANTIC_RESULT_REASONS = frozenset({
     "review_acceptance_result_invalid",
     "review_non_goal_result_invalid",
     "review_escalation_invalid",
+    "review_semantic_shape_invalid",
 })
 
 
@@ -293,6 +294,13 @@ def semantic_result_ready(work_order: dict[str, Any]) -> tuple[bool, str]:
     )
     if ng_result_errors:
         return False, "review_non_goal_result_invalid"
+
+    # The detailed checks above retain stable refusal classifications. This
+    # shared residual gate catches any remaining shape/type drift (for example
+    # validation_results as an object) before a paid pass reaches a finalizer
+    # that would reject the same semantic artifact.
+    if assessment_mod.validate_assessment_contract(data):
+        return False, "review_semantic_shape_invalid"
     return True, "ready"
 
 

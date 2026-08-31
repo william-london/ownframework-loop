@@ -76,7 +76,27 @@ python3 - "$RSEM" <<'PY'
 import json,sys
 from pathlib import Path
 p=Path(sys.argv[1]); d=json.loads(p.read_text())
+d["acceptance_results"]=[{"id":"AC-1","result":"pass","evidence":"shape parity proof"}]
+d["validation_results"]={"wrong":"type"}
+p.write_text(json.dumps(d,indent=2,sort_keys=True)+"\n")
+PY
+SHAPE_READY="$(RORDER_JSON="$RORDER" python3 - <<'PY'
+import json,os
+from ownframework_loop import dispatch
+ready,reason=dispatch.semantic_result_ready(json.loads(os.environ["RORDER_JSON"]))
+print(f"{ready}|{reason}")
+PY
+)"
+assert_eq "$SHAPE_READY" "False|review_semantic_shape_invalid" "review dispatch catches finalizer-shape drift before paid finalization"
+assert_eq "$(jq -r '.review_pass_count' "$SINGLE/.ownframework-loop/$RID/STATE.json")" "$REVIEW_PASS_BEFORE_BAD" "review shape drift preserves same pass"
+[[ ! -e "$SINGLE/.ownframework-loop/$RID/REVIEW_VERDICT.json" ]] || fail "review shape drift must not create authoritative verdict"
+
+python3 - "$RSEM" <<'PY'
+import json,sys
+from pathlib import Path
+p=Path(sys.argv[1]); d=json.loads(p.read_text())
 d["acceptance_results"]=[{"id":"AC-1","result":"PASS","evidence":"exact-SHA synthetic contract proof"}]
+d["validation_results"]=[]
 p.write_text(json.dumps(d,indent=2,sort_keys=True)+"\n")
 PY
 "$OFLOOP_BIN" dispatch finalize "$SINGLE" "$RID" REVIEW "$RSEM" >/dev/null
@@ -310,6 +330,24 @@ with tempfile.TemporaryDirectory() as td:
     ok, final_errors=_build_agent_result_schema_ok(terminal)
     assert not ok and any("evidence" in e for e in final_errors), final_errors
 print("DISPATCH_FINALIZER_BUILDER_CONTRACT_PARITY=PASS")
+
+review={
+    "schema":assessment.SCHEMA_AGENT_ASSESSMENT,
+    "run_id":"run-review-contract",
+    "candidate_sha_claimed":"a"*40,
+    "validation_results":[],
+    "acceptance_results":[{"id":"AC-1","result":"pass","evidence":"x"}],
+    "non_goal_results":[],
+    "findings":[],
+    "escalation_recommended":False,
+    "escalation_reason":None,
+    "recommended_verdict":"APPROVED",
+}
+assert assessment.validate_assessment_contract(review) == []
+review_bad=dict(review); review_bad["validation_results"]={"wrong":"type"}
+errors=assessment.validate_assessment_contract(review_bad)
+assert any("validation_results must be a list" in e for e in errors), errors
+print("DISPATCH_FINALIZER_REVIEWER_CONTRACT_PARITY=PASS")
 print("SEMANTIC_ARTIFACT_BOUNDARY=PASS")
 PY
 
