@@ -477,6 +477,41 @@ repaired = __import__("json").loads(repaired_path.read_text())
 assert repaired["acceptance_results"][0]["id"] == "AC-2", repaired
 print("MALFORMED_REVIEW_SCRATCH_REBUILT_SAME_PASS=PASS")
 
+# High configured capacity may not create an idle probe storm. The projection
+# limits only executor submissions; SQLite claim transactions remain authority.
+idle_db = tmp / "idle-budget.sqlite3"
+with supervisor._connect(idle_db):
+    pass
+assert supervisor._scheduler_submission_budget(
+    db_path=idle_db, configured=64, local_inflight=0
+) == 0
+budget_jobs = [
+    supervisor.enqueue(
+        canonical_repo=repo(f"budget-{i}"),
+        run_id=f"budget-{i}",
+        db_path=idle_db,
+        runtime_generation="test-generation",
+    )
+    for i in range(3)
+]
+assert supervisor._scheduler_submission_budget(
+    db_path=idle_db, configured=64, local_inflight=0
+) == 3
+with supervisor._connect(idle_db) as c:
+    c.execute(
+        "UPDATE jobs SET status='RUNNING', worker_pid=?, worker_started_at=?, worker_role='builder' WHERE id=?",
+        (os.getpid(), time.time(), budget_jobs[0]["id"]),
+    )
+    c.execute("UPDATE jobs SET status='DONE' WHERE id IN (?, ?)", (budget_jobs[1]["id"], budget_jobs[2]["id"]))
+    c.commit()
+# No free durable slot at configured=1, but the RUNNING row has no local
+# Future after a simulated supervisor restart, so one reconciliation probe
+# must still be funded.
+assert supervisor._scheduler_submission_budget(
+    db_path=idle_db, configured=1, local_inflight=0
+) == 1
+print("HIGH_CAPACITY_BACKGROUND_PROBE_BUDGET=PASS")
+
 print("MODEL_FREE_CONCURRENCY_FAILURES=0")
 PY
 pass "bounded concurrency, repository exclusion, fairness, draining, hold isolation, and fleet contract"
