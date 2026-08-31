@@ -208,19 +208,10 @@ def validate_approval_shape(approval: dict[str, Any]) -> list[str]:
 
 
 def _resolve_baseline_sha(canonical_repo: Path, expected_branch: str) -> str | None:
-    """Resolve the current HEAD of the expected branch on the canonical repo."""
+    """Resolve the exact local baseline branch ref independent of checkout."""
     if not git_checks.is_git_repo(canonical_repo):
         return None
-    branch = git_checks.current_branch(canonical_repo)
-    if branch != expected_branch:
-        # The repo must be checked out at the expected branch for the
-        # approval to bind deterministically. The build finalizer will
-        # re-verify this is the canonical branch's HEAD later.
-        # For approval capture, we record the resolved SHA even if it
-        # required a detached checkout — but we still require branch
-        # identity match.
-        return None
-    return git_checks.current_head(canonical_repo)
+    return git_checks.branch_head(canonical_repo, expected_branch)
 
 
 def validate_approval_binding(
@@ -278,22 +269,21 @@ def validate_approval_binding(
             f"approval baseline_branch={approval['baseline_branch']!r} "
             f"!= packet target.branch={expected_branch!r}"
         )
-    current_head = git_checks.current_head(canonical_repo)
+    current_head = git_checks.branch_head(canonical_repo, expected_branch)
     if current_head is None:
-        return False, "canonical repo has no HEAD"
+        return False, "baseline branch ref is missing or not resolvable"
     # Audit v0.3.0: full SHA equality (not 7-char prefix match). A 7-char
     # prefix is ambiguous (birthday collision ~1/2^28) and asymmetric
     # (current_head could equal just the prefix substring). Full equality
     # is the only way to bind an approval to a specific historical commit.
     if current_head != approval["baseline_sha"]:
         return False, (
-            f"canonical HEAD {current_head} does not match "
+            f"baseline branch ref {current_head} does not match "
             f"approval baseline_sha {approval['baseline_sha']}"
         )
     try:
-        expected_candidate_branch = (
-            ((packet.get("target") or {}).get("candidate_branch_prefix") or "")
-            or branch_resolver.default_candidate_branch(run_id)
+        expected_candidate_branch = branch_resolver.resolve_candidate_branch(
+            canonical_repo, run_id, packet=packet,
         )
     except Exception as exc:
         return False, f"candidate branch could not be derived: {exc}"
@@ -354,24 +344,19 @@ def request_human_approval(
     target_branch = (meta.get("target") or {}).get("branch")
     if not target_branch:
         raise RuntimeError("packet target.branch missing")
-    if git_checks.current_branch(canonical_repo) != target_branch:
-        raise RuntimeError(
-            f"canonical repo is on branch "
-            f"{git_checks.current_branch(canonical_repo)!r}, "
-            f"packet expects {target_branch!r}"
-        )
-    baseline_sha = git_checks.current_head(canonical_repo)
+    baseline_sha = git_checks.branch_head(canonical_repo, target_branch)
     if not baseline_sha:
-        raise RuntimeError("canonical repo has no HEAD")
+        raise RuntimeError(
+            f"packet target branch {target_branch!r} is missing or not resolvable"
+        )
     canonical_repo_str = str(canonical_repo.resolve(strict=False))
     # v0.4.3: freeze the candidate branch in APPROVAL.json so every
     # later consumer (program init, build prepare, build finalize,
     # review finalize, receipts) reads the SAME value from a single
     # authoritative source. Priority: packet-declared prefix, else the
     # deterministic default factory/candidate/<run-id>.
-    candidate_branch = (
-        (meta.get("target") or {}).get("candidate_branch_prefix")
-        or branch_resolver.default_candidate_branch(run_id)
+    candidate_branch = branch_resolver.resolve_candidate_branch(
+        canonical_repo, run_id, packet=meta,
     )
     if not isinstance(candidate_branch, str) or not candidate_branch.strip():
         raise RuntimeError("could not resolve candidate_branch for run {run_id}")
