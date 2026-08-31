@@ -8,7 +8,7 @@ TMP_ROOT="$TMP" PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$LIB_DIR" python3 -B - <<'
 import os, subprocess, tempfile, time
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
-from ownframework_loop import dispatch, supervisor
+from ownframework_loop import dispatch, supervisor, worktrees
 
 tmp = Path(os.environ["TMP_ROOT"]); db = tmp / "supervisor.sqlite3"
 def git(repo, *args):
@@ -152,7 +152,29 @@ with supervisor._connect(db) as c:
 assert first is not None and second is None
 print("SAME_CANDIDATE_BRANCH_EXCLUSION=PASS")
 
+# Shared Git worktree bookkeeping is serialized briefly, but isolated run
+# worktrees must all materialize correctly under concurrent setup.
 for j in (collision_a, collision_b): reset(j)
+wt_repo = repo("parallel-worktrees")
+wt_head = subprocess.run(
+    ["git", "-C", str(wt_repo), "rev-parse", "HEAD"],
+    check=True, capture_output=True, text=True,
+).stdout.strip()
+def make_wt(i):
+    rid = f"wt-run-{i}"
+    branch = f"factory/candidate/{rid}"
+    return worktrees.add_builder_worktree(
+        wt_repo, rid, branch=branch, base_sha=wt_head
+    )
+with ThreadPoolExecutor(max_workers=4) as pool:
+    wt_results = list(pool.map(make_wt, range(4)))
+assert len({x["path"] for x in wt_results}) == 4, wt_results
+assert all(x["actual_branch"] == x["branch"] for x in wt_results), wt_results
+assert all(worktrees.is_registered_worktree(wt_repo, Path(x["path"])) for x in wt_results)
+for i in range(4):
+    ok, _ = worktrees.cleanup_builder_worktree(wt_repo, f"wt-run-{i}")
+    assert ok
+print("SAME_REPOSITORY_PARALLEL_WORKTREE_SETUP=PASS")
 four = []
 for i in range(4):
     try:
