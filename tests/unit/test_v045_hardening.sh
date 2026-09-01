@@ -143,10 +143,12 @@ PY
 PREPO="$(make_tmp_repo)"
 PRID="run-v045-repair-cap"
 mkdir -p "$PREPO/.ownframework-loop/$PRID"
-PREPO="$PREPO" PRID="$PRID" python3 -B <<'PY'
-import os
+PREPO="$PREPO" PRID="$PRID" ROOT_DIR="$ROOT_DIR" python3 -B <<'PY'
+import os, sys
 from pathlib import Path
 from ownframework_loop import program, state as state_mod
+sys.path.insert(0, str(Path(os.environ["ROOT_DIR"]) / "tests" / "helpers"))
+from state_seed import seed_state
 repo=Path(os.environ["PREPO"]); rid=os.environ["PRID"]
 packet={
  "schema":"ownframework-work-packet/v3","execution_mode":"program",
@@ -161,7 +163,7 @@ state["program"]=program.materialise_initial_program_state(packet, baseline_sha=
 state["program"]["checkpoints"][0]["repair_round_count"]=1
 state["program"]["cumulative_counters"]["repair_round_count"]=1
 state["repair_round"]=1
-state_mod.save(repo,rid,state)
+seed_state(repo, rid, state, reason="fixture PROGRAM repair-cap crash state")
 try:
     program.claim_repair_round(canonical_repo=repo,run_id=rid,packet=packet,source_evidence_sha="e"*40)
 except program.ClaimRefused:

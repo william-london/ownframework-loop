@@ -495,35 +495,82 @@ def _verify_mutation_integrity_locked(canonical_repo: Path, run_id: str) -> None
 
 
 def _validate_initial_state_payload(run_id: str, payload: dict[str, Any]) -> None:
-    """Validate creation-time STATE identity before any durable bytes exist."""
+    """Validate the COMPLETE creation-time STATE contract.
+
+    A creation-only writer is not permission to mint arbitrary authoritative
+    fields. The payload must be exactly initial_state(run_id), optionally plus
+    the all-or-nothing SPEC source snapshot owned by spec creation.
+    """
     validate_run_id(run_id)
     if not isinstance(payload, dict):
         raise ValueError("initial state payload must be an object")
-    if payload.get("run_id") != run_id:
-        raise ValueError("initial state payload run_id mismatch")
-    if payload.get("schema") != SCHEMA_VERSION:
-        raise ValueError("initial state payload must use the single-run state schema")
-    if payload.get("state") != "AWAITING_APPROVAL":
-        raise ValueError("initial state must begin in AWAITING_APPROVAL")
-    if int(payload.get("transitions_count", -1)) != 0:
-        raise ValueError("initial state transitions_count must be zero")
-    for key in ("build_pass_count", "review_pass_count", "repair_round", "no_progress_streak"):
-        if int(payload.get(key, -1)) != 0:
-            raise ValueError(f"initial state {key} must be zero")
-    if payload.get("last_candidate_sha") not in ("", None):
-        raise ValueError("initial state may not pre-bind a candidate SHA")
-    if payload.get("terminal_reason") not in ("", None):
-        raise ValueError("initial state may not carry a terminal reason")
-    if payload.get("program") is not None:
-        raise ValueError("PROGRAM authority is materialized only after packet approval")
+
+    required = set(initial_state(run_id))
+    snapshot_fields = {
+        "spec_baseline_branch", "spec_baseline_sha", "spec_snapshot_at",
+    }
+    missing = required - set(payload)
+    unknown = set(payload) - required - snapshot_fields
+    if missing:
+        raise ValueError(
+            "initial state payload missing required fields: "
+            + ", ".join(sorted(missing))
+        )
+    if unknown:
+        raise ValueError(
+            "initial state payload has unsupported fields: "
+            + ", ".join(sorted(unknown))
+        )
+    present_snapshot = set(payload).intersection(snapshot_fields)
+    if present_snapshot and present_snapshot != snapshot_fields:
+        raise ValueError(
+            "initial state source snapshot must supply branch, sha, and timestamp together"
+        )
+
+    structural = {
+        "schema": SCHEMA_VERSION,
+        "run_id": run_id,
+        "state": "AWAITING_APPROVAL",
+        "transitions_count": 0,
+        "build_pass_count": 0,
+        "review_pass_count": 0,
+        "repair_round": 0,
+        "no_progress_streak": 0,
+        "last_actor": "spec",
+        "terminal_reason": "",
+        "last_candidate_sha": "",
+    }
+    for key, expected in structural.items():
+        if payload.get(key) != expected:
+            raise ValueError(
+                f"initial state field {key!r} must be {expected!r}, "
+                f"got {payload.get(key)!r}"
+            )
+
+    started_at = payload.get("started_at")
+    if (
+        not isinstance(started_at, str) or not started_at
+        or payload.get("updated_at") != started_at
+    ):
+        raise ValueError(
+            "initial state started_at/updated_at must be one non-empty timestamp"
+        )
     history = payload.get("state_history")
-    if not isinstance(history, list) or len(history) != 1:
-        raise ValueError("initial state must contain exactly one creation history entry")
-    first = history[0]
-    if not isinstance(first, dict) or first.get("from") not in ("", None) or first.get("to") != "AWAITING_APPROVAL":
-        raise ValueError("initial state history must record creation into AWAITING_APPROVAL")
-    if payload.get("started_at") != payload.get("updated_at"):
-        raise ValueError("initial state started_at and updated_at must match")
+    expected_history = [{
+        "from": "",
+        "to": "AWAITING_APPROVAL",
+        "at": started_at,
+        "actor": "spec",
+        "reason": "run created",
+    }]
+    if history != expected_history:
+        raise ValueError("initial state history does not match the creation contract")
+
+    if present_snapshot:
+        if not all(isinstance(payload.get(k), str) for k in snapshot_fields):
+            raise ValueError("initial state source snapshot fields must be strings")
+        if not payload.get("spec_snapshot_at"):
+            raise ValueError("initial state spec_snapshot_at must be non-empty")
 
 
 def save(canonical_repo: Path, run_id: str, payload: dict[str, Any]) -> None:
@@ -1221,43 +1268,18 @@ def increment_counter(
     packet: dict[str, Any] | None = None,
     hard_cap: bool = True,
 ) -> int:
-    """Legacy helper retained only for non-claim diagnostics.
+    """Retired generic counter-mutation seam.
 
-    Claim counters are structurally owned by claim_single_pass()/PROGRAM claim
-    owners and cannot be incremented through this generic API.
+    All protocol counters have deterministic owners. SINGLE build/review pass
+    entitlement is owned by claim_single_pass(); PROGRAM counters by the
+    unified PROGRAM claim owner; repair/no-progress counters by their dedicated
+    funding/finalization owners. The compatibility symbol remains fail-closed
+    so an old caller cannot silently regain generic STATE write authority.
     """
-    if counter in {"build_pass_count", "review_pass_count", "repair_round"}:
-        raise ValueError(
-            f"counter {counter!r} has a typed claim/funding owner and cannot "
-            "be incremented generically"
-        )
-    if counter not in limits_mod.COUNTER_LIMITS:
-        raise ValueError(f"unsupported counter: {counter!r}")
-    sp = state_path(canonical_repo, run_id)
-    with flock_exclusive(lock_path(canonical_repo, run_id)):
-        _verify_mutation_integrity_locked(canonical_repo, run_id)
-        current = read_json(sp)
-        if current is None or current == {}:
-            raise FileNotFoundError(f"STATE.json missing for run {run_id}")
-        if hard_cap:
-            limits_mod.enforce(counter, int(current.get(counter, 0) or 0), packet)
-        new = dict(current)
-        new[counter] = int(current.get(counter, 0)) + 1
-        new["updated_at"] = utc_now_iso()
-        new["last_actor"] = actor
-        _commit_state_event_locked(
-            canonical_repo, run_id, new,
-            event_type="counter_incremented",
-            old_state=None, new_state=None,
-            actor=actor,
-            reason=None,
-            extras={
-                "counter": counter,
-                "new_value": new[counter],
-                "cap": limits_mod.effective_cap(counter, packet),
-            },
-        )
-    return new[counter]
+    raise ValueError(
+        "increment_counter() is retired; protocol counters require their "
+        "deterministic claim/funding/finalization owner"
+    )
 
 
 def current_counter(canonical_repo: Path, run_id: str, counter: str) -> int | None:

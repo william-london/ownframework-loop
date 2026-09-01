@@ -739,24 +739,13 @@ def cmd_build_claim(args: argparse.Namespace) -> None:
         })
         return
 
-    # SINGLE mode: v0.5.2 atomic per-run claim lock. Two concurrent
-    # single-mode build claims must converge on one pass.
+    # SINGLE mode: the STATE_TXN claim owner is also the replay/recovery
+    # authority. Never decide replay from a raw STATE read: historical
+    # transition->counter half-claims must be verified/healed under the run
+    # flock before semantic work can proceed.
     claim_lock = state_mod.run_dir(repo, args.run_id) / "BUILD_CLAIM_LOCK"
     try:
         with locking.flock_exclusive(claim_lock, blocking=True, timeout_seconds=30):
-            cur = state_mod.load(repo, args.run_id)
-            cur_state = cur.get("state")
-            if cur_state not in ("READY_TO_BUILD", "CHANGES_REQUESTED", "BUILDING"):
-                _emit_error(f"cannot claim in state {cur_state!r}", exit_code=2)
-            if cur_state == "BUILDING":
-                _emit({
-                    "ok": True,
-                    "run_id": args.run_id,
-                    "state": "BUILDING",
-                    "build_pass_count": int(cur.get("build_pass_count") or 0),
-                    "replayed": True,
-                })
-                return
             try:
                 claim = state_mod.claim_single_pass(
                     repo, args.run_id,
@@ -783,6 +772,7 @@ def cmd_build_claim(args: argparse.Namespace) -> None:
             return
     except locking.LockBusyError as e:
         _emit_error(f"build claim lock contention: {e}", exit_code=4)
+
 def cmd_review_claim(args: argparse.Namespace) -> None:
     """Claim a review pass. The single durable owner of review_pass_count.
 
@@ -830,24 +820,10 @@ def cmd_review_claim(args: argparse.Namespace) -> None:
         })
         return
 
-    # SINGLE mode: v0.5.2 atomic per-run claim lock. Two concurrent
-    # single-mode review claims must converge on one pass.
+    # SINGLE mode: verified claim owner decides replay/recovery atomically.
     claim_lock = state_mod.run_dir(repo, args.run_id) / "REVIEW_CLAIM_LOCK"
     try:
         with locking.flock_exclusive(claim_lock, blocking=True, timeout_seconds=30):
-            cur = state_mod.load(repo, args.run_id)
-            cur_state = cur.get("state")
-            if cur_state not in ("READY_FOR_REVIEW", "CHANGES_REQUESTED", "REVIEWING"):
-                _emit_error(f"cannot claim in state {cur_state!r}", exit_code=2)
-            if cur_state == "REVIEWING":
-                _emit({
-                    "ok": True,
-                    "run_id": args.run_id,
-                    "state": "REVIEWING",
-                    "review_pass_count": int(cur.get("review_pass_count") or 0),
-                    "replayed": True,
-                })
-                return
             try:
                 claim = state_mod.claim_single_pass(
                     repo, args.run_id,
@@ -874,6 +850,7 @@ def cmd_review_claim(args: argparse.Namespace) -> None:
             return
     except locking.LockBusyError as e:
         _emit_error(f"review claim lock contention: {e}", exit_code=4)
+
 def cmd_build_transition(args: argparse.Namespace) -> None:
     repo = _repo_path(args.repo)
     if args.to == "CHANGES_REQUESTED":

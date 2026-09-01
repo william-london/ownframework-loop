@@ -37,7 +37,7 @@ def simple_run(repo,rid,state_name):
          "candidate_branch":f"factory/candidate/{rid}","packet_schema":"ownframework-work-packet/v2",
          "approval_method":"tty_confirmation","confirmation_token":approval.derive_confirmation_token(sha)}
     (run/"APPROVAL.json").write_text(json.dumps(app))
-    s=state_mod.initial_state(rid); s["state"]=state_name; state_mod.save(repo,rid,s)
+    s=state_mod.initial_state(rid); s["state"]=state_name; seed_state(repo,rid,s)
     return run,app
 
 # 1. Wrong-lane claims and counter-mirror drift are refused atomically.
@@ -48,7 +48,7 @@ packet={"schema":"ownframework-work-packet/v3","execution_mode":"program",
  "risk_budget":{"max_build_passes":3,"max_review_passes":3,"max_repair_rounds":1}}]}}
 ps=program.materialise_initial_program_state(packet,baseline_sha="a"*40,candidate_branch="factory/candidate/x")
 s=state_mod.initial_state(rid); s.update({"schema":state_mod.PROGRAM_STATE_SCHEMA_VERSION,"program":ps,"state":"READY_FOR_REVIEW"})
-state_mod.save(repo,rid,s)
+seed_state(repo,rid,s)
 try: program.claim_build_pass(canonical_repo=repo,run_id=rid,packet=packet)
 except program.ClaimRefused: pass
 else: raise AssertionError("wrong-lane build claim accepted")
@@ -112,7 +112,7 @@ def program_fixture(two=True, verdict="APPROVED"):
     (run/"APPROVAL.json").write_text(json.dumps(app))
     ps=program.materialise_initial_program_state(packet,baseline_sha=base,candidate_branch=branch)
     cp=ps["checkpoints"][0]; cp["build_pass_count"]=1; cp["review_pass_count"]=1; ps["cumulative_counters"]["build_pass_count"]=1; ps["cumulative_counters"]["review_pass_count"]=1
-    state=state_mod.initial_state(rid); state.update({"schema":state_mod.PROGRAM_STATE_SCHEMA_VERSION,"state":"REVIEWING","program":ps,"build_pass_count":1,"review_pass_count":1,"last_candidate_sha":base}); state_mod.save(repo,rid,state)
+    state=state_mod.initial_state(rid); state.update({"schema":state_mod.PROGRAM_STATE_SCHEMA_VERSION,"state":"REVIEWING","program":ps,"build_pass_count":1,"review_pass_count":1,"last_candidate_sha":base}); seed_state(repo,rid,state)
     next_state="APPROVED" if verdict=="APPROVED" else "CHANGES_REQUESTED"
     (run/"REVIEW_VERDICT.json").write_text(json.dumps({"packet_sha256":sha,"review_pass_number":1,"verdict":verdict,"recommended_next_state":next_state,"candidate_sha_reviewed":base}))
     return repo,rid

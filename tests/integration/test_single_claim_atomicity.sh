@@ -41,6 +41,16 @@ assert healed["build_pass_count"]==1, healed
 r=state.claim_single_pass(repo,rid,pass_kind="build",actor="test",packet=meta)
 assert r["replayed"] is True and r["claimed_pass_number"]==1, r
 
+# Creation-only state writer cannot mint extra/malformed authority.
+repo_bad=repo.parent/"bad-initial"; repo_bad.mkdir()
+rid_bad="bad-initial"
+bad=state.initial_state(rid_bad); bad["unexpected_authority"]="x"
+try:
+    state.save(repo_bad,rid_bad,bad)
+    raise AssertionError("creation-only save accepted an unknown authority field")
+except ValueError:
+    pass
+
 # Historical transition->counter crash is deterministically healed.
 repo2=repo.parent/"legacy"; repo2.mkdir()
 os.system(f"git -C {repo2} init -q")
@@ -56,6 +66,44 @@ state.transition(repo2,rid2,to_state="BUILDING",actor="old-source")
 r2=state.claim_single_pass(repo2,rid2,pass_kind="build",actor="recovery",packet=meta)
 assert r2["recovered"] is True and r2["claimed_pass_number"]==1, r2
 assert state.load_verified(repo2,rid2)["build_pass_count"]==1
+
+# The actual CLI must route in-flight replay through the same verified owner.
+repo_cli=repo.parent/"legacy-cli"
+repo_cli.mkdir()
+os.system(f"git -C {repo_cli} init -q")
+os.system(f"git -C {repo_cli} config user.email test@example.com")
+os.system(f"git -C {repo_cli} config user.name test")
+(repo_cli/"src").mkdir(); (repo_cli/"src"/"a.py").write_text("x")
+os.system(f"git -C {repo_cli} add . && git -C {repo_cli} commit -qm src")
+PY
+RID_CLI="$(make_approved_run "$T/../legacy-cli" BUG low "legacy-cli-claim")"
+python3 - "$T/../legacy-cli" "$RID_CLI" <<'PY'
+import os,sys
+from pathlib import Path
+sys.path.insert(0, os.environ["OFLOOP_LIB"])
+from ownframework_loop import state
+repo=Path(sys.argv[1]); rid=sys.argv[2]
+# Reproduce old source's half-claim: transitioned BUILDING, counter still zero.
+state.transition(repo,rid,to_state="BUILDING",actor="old-source")
+assert state.load_verified(repo,rid)["build_pass_count"]==0
+PY
+CLI_OUT="$("$OFLOOP_BIN" build claim "$T/../legacy-cli" "$RID_CLI")"
+python3 - "$CLI_OUT" "$T/../legacy-cli" "$RID_CLI" <<'PY'
+import json,os,sys
+from pathlib import Path
+from ownframework_loop import state
+doc=json.loads(sys.argv[1]); repo=Path(sys.argv[2]); rid=sys.argv[3]
+assert doc["recovered"] is True and doc["build_pass_count"]==1, doc
+cur=state.load_verified(repo,rid)
+assert cur["state"]=="BUILDING" and cur["build_pass_count"]==1, cur
+PY
+python3 - "$T" "$RID" <<'PY'
+import os,sys
+from pathlib import Path
+sys.path.insert(0, os.environ["OFLOOP_LIB"])
+from ownframework_loop import packet, state, limits
+repo=Path(sys.argv[1]); rid=sys.argv[2]
+meta,_=packet.parse_packet_file(repo/".ownframework-loop"/rid/"WORK_PACKET.md")
 
 # REVIEW may not be claimed directly from CHANGES_REQUESTED in SINGLE mode.
 repo3=repo.parent/"review"; repo3.mkdir()
