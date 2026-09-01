@@ -89,7 +89,11 @@ def _provider_identity(name: str, entry: dict[str, Any]) -> dict[str, Any]:
 
 
 def commission_capability(
-    name: str, *, manifest_path: Path | None = None, evidence_dir: Path | None = None
+    name: str,
+    *,
+    manifest_path: Path | None = None,
+    evidence_dir: Path | None = None,
+    timeout_seconds: float = 30.0,
 ) -> dict[str, Any]:
     from . import capabilities as cap
     if name not in _CANARY_KINDS:
@@ -103,13 +107,27 @@ def commission_capability(
     )
     provider = _provider_identity(name, entry)
     fingerprint = cap.semantic_runtime_fingerprint()
-    proc = subprocess.run(
-        [
-            canary_path, "--ofloop-capability-canary", name, fingerprint,
-            _CANARY_KINDS[name], cap.CAPABILITY_CONTRACT_REVISION,
-        ],
-        capture_output=True, text=True, check=False, timeout=30,
-    )
+    # Canary launch failures and timeouts must fail closed THROUGH the
+    # commissioning error contract — never as raw subprocess exceptions and
+    # never with partial evidence (evidence is only written after the full
+    # contract match below).
+    try:
+        proc = subprocess.run(
+            [
+                canary_path, "--ofloop-capability-canary", name, fingerprint,
+                _CANARY_KINDS[name], cap.CAPABILITY_CONTRACT_REVISION,
+            ],
+            capture_output=True, text=True, check=False, timeout=timeout_seconds,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise CommissioningError(
+            f"privileged canary timed out after {timeout_seconds}s: {name}"
+        ) from exc
+    except (OSError, subprocess.SubprocessError, ValueError) as exc:
+        raise CommissioningError(
+            f"privileged canary launch failed for {name}: "
+            f"{type(exc).__name__}: {exc}"
+        ) from exc
     if proc.returncode != 0:
         raise CommissioningError(
             f"privileged canary failed rc={proc.returncode}: {(proc.stderr or proc.stdout)[-1000:]}"
