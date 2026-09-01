@@ -51,11 +51,17 @@ real_popen = supervisor.subprocess.Popen
 class FakePopen:
     def __init__(self, cmd, **kw):
         if (
-            len(cmd) >= 5
-            and cmd[0] == "git"
-            and cmd[1] == "-C"
-            and cmd[-2:] == ["rev-parse", "--git-common-dir"]
+            (
+                len(cmd) >= 5
+                and cmd[0] == "git"
+                and cmd[1] == "-C"
+                and cmd[-2:] == ["rev-parse", "--git-common-dir"]
+            )
+            or cmd == ["/bin/sh", "--version"]
         ):
+            # v0.9.1 capability binding fingerprints the exact semantic
+            # runtime before launch. Delegate that read-only version probe;
+            # this fixture is intercepting only the actual provider child.
             self._delegate = real_popen(cmd, **kw)
             return
         captured["cmd"] = list(cmd)
@@ -92,6 +98,7 @@ try:
         "canonical_repo": str(repo),
         "worktree": str(worktree),
         "semantic_path": str(semantic),
+        "attempt_id": "attempt-secure-build",
     }
     try:
         supervisor.ClaudeCodeRunner().run(order, timeout_seconds=1)
@@ -289,6 +296,7 @@ try:
         "state": "REVIEWING",
         "worktree": str(review_wt),
         "semantic_path": str(review_sem),
+        "attempt_id": "attempt-secure-review",
     })
     try:
         supervisor.ClaudeCodeRunner().run(review_order, timeout_seconds=1)
