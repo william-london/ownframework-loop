@@ -1423,6 +1423,15 @@ def _account_attempt_cost(
     return float(row[0] or 0.0)
 
 
+def _remaining_funded_cost_budget(max_total_cost_usd: float, spent_cost_usd: float) -> float | None:
+    """Return the authoritative native per-pass cap; None means unfunded."""
+    maximum = float(max_total_cost_usd or 0.0)
+    spent = float(spent_cost_usd or 0.0)
+    if maximum <= 0:
+        return None
+    return max(0.0, maximum - spent)
+
+
 def _unknown_cost_attempt_count(conn: sqlite3.Connection, job_id: int) -> int:
     row = conn.execute(
         """SELECT COUNT(*) FROM semantic_attempts
@@ -3142,6 +3151,19 @@ class ClaudeCodeRunner:
         )
 
         claude_bin = os.environ.get("OFLOOP_CLAUDE_BIN", "claude")
+        pass_budget_raw = work_order.get("max_budget_usd")
+        pass_budget: float | None = None
+        if pass_budget_raw is not None:
+            try:
+                pass_budget = float(pass_budget_raw)
+            except (TypeError, ValueError) as exc:
+                raise capabilities_mod.CapabilityResolutionError(
+                    "invalid supervisor per-pass model budget"
+                ) from exc
+            if not math.isfinite(pass_budget) or pass_budget <= 0:
+                raise capabilities_mod.CapabilityResolutionError(
+                    "supervisor per-pass model budget must be finite and positive"
+                )
         extra = shlex.split(os.environ.get("OFLOOP_CLAUDE_EXTRA_ARGS", ""))
         _validate_claude_extra_args(extra)
         # Tool availability is product authority, not an environment-tunable
@@ -3194,6 +3216,10 @@ class ClaudeCodeRunner:
             *(
                 ["--effort", str(runner_profile["effort"])]
                 if runner_profile.get("effort") else []
+            ),
+            *(
+                ["--max-budget-usd", f"{pass_budget:.12g}"]
+                if pass_budget is not None else []
             ),
             *extra,
             "--settings",
@@ -3553,6 +3579,13 @@ def _classify_runner_failure(result: RunnerResult) -> tuple[str, str]:
     if result.returncode == 124 or "runner timed out" in text:
         return "timeout", "runner_timeout"
 
+    budget_markers = (
+        "max budget", "max_budget_usd", "budget limit",
+        "budget exceeded", "maximum budget", "reached the budget",
+    )
+    if any(marker in text for marker in budget_markers):
+        return "usage_ceiling", "pass_budget_exhausted"
+
     configuration_markers = (
         "not authenticated",
         "authentication failed",
@@ -3644,6 +3677,7 @@ def _apply_failure_policy(
         "invariant",
         "usage_unknown",
         "timeout_usage_unknown",
+        "usage_ceiling",
     }
     infra_failures = int(row["infra_failures"] or 0)
     transient_failures = int(row["transient_failures"] or 0)
@@ -4286,6 +4320,7 @@ def run_one(*, db_path: Path | None = None, timeout_seconds: int = 0) -> dict[st
             max_wall = int(job["max_wall_seconds"] or 0)
             max_cost = float(job["max_total_cost_usd"] or 0.0)
             spent = float(job["total_cost_usd"] or 0.0)
+            remaining_cost_budget = _remaining_funded_cost_budget(max_cost, spent)
             if max_cost > 0:
                 unknown_cost_attempts = _unknown_cost_attempt_count(
                     conn, int(job["id"])
@@ -4406,6 +4441,8 @@ def run_one(*, db_path: Path | None = None, timeout_seconds: int = 0) -> dict[st
             runner_work_order = dict(work_order)
             runner_work_order["attempt_id"] = attempt_id
             runner_work_order["allow_capability_binding_create"] = binding_create_allowed
+            if remaining_cost_budget is not None:
+                runner_work_order["max_budget_usd"] = remaining_cost_budget
             result = _runner(str(job["runner"])).run(
                 runner_work_order,
                 timeout_seconds=semantic_timeout_seconds,
