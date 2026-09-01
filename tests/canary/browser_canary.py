@@ -2,21 +2,37 @@
 """Minimal Playwright Chromium browser canary (physical commissioning only).
 
 This is the REAL browser canary used to runtime-prove the
-`browser.playwright.chromium` capability during PHYSICAL commissioning. It
-launches a headless Chromium through Playwright, verifies the browser can
-navigate and evaluate JavaScript, and — with ``--write-proof`` — persists a
-durable browser-runtime-proof evidence record that `ofloop capabilities probe`
-reads to report the capability as ``runtime_proven`` / ``available``.
+`browser.playwright.chromium` capability during PHYSICAL commissioning.
 
-The source/CI suite NEVER launches a real browser. This canary is invoked only
-by an operator commissioning a physical host, mirroring how the privileged
-Docker/local-binding canaries are commissioned.
+It proves the EXACT browser runtime Loop will hand to semantic workers: the
+launch is forced through the shared immutable asset root
+(`capabilities.default_browser_asset_dir()`) via PLAYWRIGHT_BROWSERS_PATH,
+never through the operator's ambient Playwright cache. On success (and with
+``--write-proof``) it persists a private, freshness-bound runtime proof that
+binds:
 
-Usage:
-  python3 tests/canary/browser_canary.py            # prove, print result
-  python3 tests/canary/browser_canary.py --write-proof   # prove + persist
+  * the CURRENT platform identity and semantic runtime fingerprint,
+  * the exact Playwright/browser versions,
+  * the exact browser asset tree (Merkle digest of the asset root).
 
-Exit code 0 only when the browser was empirically launched and verified.
+Any later drift — platform, Claude/runtime bytes, or asset bytes — stales
+the proof automatically; `ofloop capabilities probe` then reports the
+capability as provisionable/resolvable but NOT runtime-proven until the
+canary is re-run.
+
+The source/CI suite NEVER launches a real browser. This canary is invoked
+only by an operator commissioning a physical host:
+
+  # one-time provisioning into the shared immutable asset root
+  # (print the root with: python3 -c "import sys; sys.path.insert(0,'lib');
+  #  from ownframework_loop import capabilities;
+  #  print(capabilities.default_browser_asset_dir())"):
+  PLAYWRIGHT_BROWSERS_PATH="<asset-root>" python3 -m playwright install chromium
+  # empirical proof (+ durable proof record):
+  python3 tests/canary/browser_canary.py --write-proof
+
+Exit code 0 only when the browser was empirically launched and verified from
+the exact asset root workers receive.
 """
 from __future__ import annotations
 
@@ -35,13 +51,31 @@ def _lib_dir() -> str:
 
 def main() -> int:
     write_proof = "--write-proof" in sys.argv[1:]
+    sys.path.insert(0, _lib_dir())
+    from ownframework_loop import capabilities as cap_mod
+
+    asset_root = cap_mod.default_browser_asset_dir()
     result = {
         "schema": CANARY_SCHEMA,
         "capability": CAPABILITY,
         "ok": False,
         "browser": "chromium",
         "headless": True,
+        "browser_asset_root": str(asset_root),
     }
+
+    if asset_root.is_symlink() or not asset_root.is_dir() or not any(asset_root.iterdir()):
+        result["error"] = (
+            "browser asset root missing or empty; provision it exactly once with: "
+            f"PLAYWRIGHT_BROWSERS_PATH={asset_root} python3 -m playwright install chromium"
+        )
+        print(json.dumps(result, sort_keys=True))
+        return 1
+
+    # Prove the EXACT runtime workers receive: force the Playwright registry
+    # at the shared immutable asset root BEFORE importing/launching
+    # Playwright, so no operator-ambient cache can satisfy the proof.
+    os.environ["PLAYWRIGHT_BROWSERS_PATH"] = str(asset_root)
 
     try:
         from playwright.sync_api import sync_playwright
@@ -78,11 +112,21 @@ def main() -> int:
     result["playwright_version"] = playwright_version
     result["browser_version"] = browser_version
 
+    if result.get("ok"):
+        # Byte-bind the exact asset tree the launch just used.
+        try:
+            merkle = cap_mod.browser_asset_merkle_sha256(asset_root)
+        except Exception as exc:  # noqa: BLE001
+            result["ok"] = False
+            result["error"] = f"browser asset identity failed: {type(exc).__name__}: {exc}"
+            merkle = ""
+        result["browser_asset_merkle_sha256"] = merkle
+
     if write_proof and result.get("ok"):
-        sys.path.insert(0, _lib_dir())
-        from ownframework_loop import capabilities as cap_mod
         proof = cap_mod.write_browser_runtime_proof(
             CAPABILITY,
+            asset_root=str(asset_root),
+            asset_merkle_sha256=result.get("browser_asset_merkle_sha256") or "",
             playwright_version=playwright_version,
             browser_version=browser_version,
         )

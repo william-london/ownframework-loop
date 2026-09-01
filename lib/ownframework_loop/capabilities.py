@@ -81,13 +81,18 @@ BUILTIN_CAPABILITIES: dict[str, CapabilityDefinition] = {
     "browser.playwright.chromium": CapabilityDefinition(
         "browser.playwright.chromium", "browser",
         # Current Playwright Chromium downloads can use the Playwright CDN,
-        # Microsoft's fallback CDN, and Chrome-for-Testing redirects.
+        # Microsoft's fallback CDN, and Chrome-for-Testing redirects. These
+        # domains serve the ONE-TIME operator provisioning of the shared
+        # immutable asset root; runtime-proven workers consume the assets
+        # read-only and never re-download them per pass.
         network_domains=(
             "cdn.playwright.dev",
             "playwright.download.prss.microsoft.com",
             "storage.googleapis.com",
         ),
-        cache_key="playwright-browsers", cache_env="PLAYWRIGHT_BROWSERS_PATH",
+        # No per-role cache_key: browser binaries are NOT a mutable cache.
+        # Resolution wires default_browser_asset_dir() read-only instead.
+        cache_env="PLAYWRIGHT_BROWSERS_PATH",
     ),
     "local.http-service": CapabilityDefinition(
         "local.http-service", "local-service", requires_commissioned_provider=True,
@@ -403,6 +408,7 @@ def resolve_capabilities(
     ephemeral_cache_root: Path | None = None,
     packet_network_allowlist: list[str] | None = None,
     manifest_path: Path | None = None,
+    browser_asset_root: Path | None = None,
 ) -> dict[str, Any]:
     requested = list(requested or [])
     errors = validate_capability_names(requested)
@@ -513,6 +519,7 @@ def resolve_capabilities(
 
         cache_path: str | None = None
         cache_scope: str | None = None
+        browser_binding: dict[str, Any] | None = None
         trusted_asset = entry.get("trusted_asset_path")
         if trusted_asset is not None:
             if not isinstance(trusted_asset, str):
@@ -528,6 +535,28 @@ def resolve_capabilities(
             cache_scope = "trusted_read_only"
             allow_read.add(cache_path)
             stable_allow_read.add(cache_path)
+        elif definition.kind == "browser":
+            # Immutable commissioned browser assets: ONE shared read-only root
+            # for every role. Never a per-role mutable cache — the proven
+            # browser is not re-downloaded per pass, and builder/reviewer
+            # writes never touch the binaries (the reviewer's mutable state
+            # stays in its pass-ephemeral scratch; PLAYWRIGHT_SKIP_BROWSER_GC
+            # below additionally protects the shared install from GC writes).
+            root = (browser_asset_root or default_browser_asset_dir())
+            root = root.expanduser().resolve(strict=False)
+            proven, proof_reason = _browser_runtime_proven(definition.name)
+            provisionable, _pw_ref = _playwright_resolvable()
+            browser_binding = {
+                "browser_asset_root": str(root),
+                "runtime_proven": bool(proven),
+                "provisionable": bool(provisionable),
+                "proof_status": "" if proven else proof_reason,
+            }
+            if root.is_dir() and not root.is_symlink():
+                allow_read.add(str(root))
+                stable_allow_read.add(str(root))
+            cache_path = str(root)
+            cache_scope = "commissioned_shared_read_only"
         elif definition.cache_key:
             cache_base = repo_cache_root if role == "builder" else ephemeral_cache_root
             cache = (cache_base / definition.cache_key).resolve(strict=False)
@@ -552,10 +581,13 @@ def resolve_capabilities(
             allow_write.add(str(npm_cache))
             environment.setdefault("npm_config_cache", str(npm_cache))
 
-        if definition.name == "browser.playwright.chromium" and role == "reviewer":
+        if definition.name == "browser.playwright.chromium":
+            # The shared asset root is immutable for workers of BOTH roles:
+            # never let Playwright's browser GC delete or rewrite the
+            # commissioned binaries underneath a run.
             environment["PLAYWRIGHT_SKIP_BROWSER_GC"] = "1"
 
-        resolved.append({
+        resolved_item = {
             "name": name,
             "kind": definition.kind,
             "privileged": definition.privileged,
@@ -567,7 +599,13 @@ def resolve_capabilities(
             "cache_scope": cache_scope,
             "trusted_asset_identity": identity if trusted_asset is not None else None,
             "network_domains": effective_domains,
-        })
+        }
+        if browser_binding is not None:
+            # Explicit provisionable-vs-runtime-proven semantics for consumers
+            # (binding, probe, preflight): resolution wires the shared asset
+            # root either way and never certifies an unproven browser.
+            resolved_item["browser"] = browser_binding
+        resolved.append(resolved_item)
 
     # Never allow capability resolution to widen a worker by smuggling a daemon
     # socket. Docker is broker-only and local-service has a separate explicit
@@ -600,7 +638,7 @@ def resolve_capabilities(
     }
 
 
-BROWSER_RUNTIME_PROOF_SCHEMA = "ownframework-loop-browser-runtime-proof/v1"
+BROWSER_RUNTIME_PROOF_SCHEMA = "ownframework-loop-browser-runtime-proof/v2"
 
 
 def browser_runtime_proof_path(
@@ -613,6 +651,51 @@ def browser_runtime_proof_path(
     return base.expanduser().resolve(strict=False) / (
         name.replace(".", "_") + "_runtime_proof.json"
     )
+
+
+def default_browser_asset_dir() -> Path:
+    """Shared immutable browser asset root (commissioned host artifact).
+
+    The browser binaries Loop gives semantic workers live here ONCE per host,
+    commissioned and runtime-proven by the browser canary. Both roles consume
+    this root READ-ONLY; it is deliberately NOT a per-role or per-pass cache,
+    so Chromium is never re-downloaded per pass and reviewer writes cannot
+    touch the proven binaries.
+    """
+    from . import commissioning as commissioning_mod
+    base = commissioning_mod.default_evidence_dir()
+    return (base.parent / "browser-assets" / "playwright-chromium").resolve(strict=False)
+
+
+def browser_asset_merkle_sha256(asset_root: Path) -> str:
+    """Deterministic content identity of one browser asset tree.
+
+    Merkle-style digest over sorted relative paths and per-file SHA-256s.
+    Symlinks inside the asset root are refused: the commissioned browser must
+    be exactly the bytes on disk, no redirects.
+    """
+    if asset_root.is_symlink() or not asset_root.is_dir():
+        raise CapabilityResolutionError(
+            f"browser asset root is not a real directory: {asset_root}"
+        )
+    entries: list[tuple[str, str]] = []
+    for dirpath, dirnames, filenames in os.walk(asset_root, followlinks=False):
+        dirnames.sort()
+        for fn in sorted(filenames):
+            p = Path(dirpath) / fn
+            if p.is_symlink():
+                raise CapabilityResolutionError(
+                    "browser asset root contains a symlink; refusing identity"
+                )
+            fh = hashlib.sha256()
+            with open(p, "rb") as f:
+                for chunk in iter(lambda: f.read(1 << 20), b""):
+                    fh.update(chunk)
+            entries.append((p.relative_to(asset_root).as_posix(), fh.hexdigest()))
+    h = hashlib.sha256()
+    for rel, digest in entries:
+        h.update(rel.encode("utf-8") + b"\0" + digest.encode("ascii") + b"\0")
+    return h.hexdigest()
 
 
 def _playwright_resolvable() -> tuple[bool, str]:
@@ -641,10 +724,18 @@ def _browser_runtime_proven(
     name: str, evidence_dir: Path | None = None
 ) -> tuple[bool, str]:
     """Return (proven, reason). Proven only if a valid canary-written runtime
-    proof attests this exact capability; anything else fails closed."""
+    proof attests THIS capability against the CURRENT platform/runtime and the
+    EXACT browser assets workers receive; anything else fails closed and the
+    proof is automatically stale on any drift."""
     p = browser_runtime_proof_path(name, evidence_dir)
     if not p.is_file() or p.is_symlink():
         return False, "no browser runtime proof commissioned"
+    try:
+        mode = p.stat().st_mode
+    except OSError:
+        return False, "browser runtime proof unreadable"
+    if mode & 0o077:
+        return False, "browser runtime proof is not private"
     try:
         doc = json.loads(p.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
@@ -660,12 +751,36 @@ def _browser_runtime_proven(
     ).hexdigest()
     if not claimed or recomputed != claimed:
         return False, "browser runtime proof digest mismatch"
+    # Freshness: the proof is bound to the exact platform and semantic
+    # runtime that commissioned it. Any drift (OS, Claude bytes, runtime
+    # generation) stales the proof automatically.
+    if doc.get("platform_identity") != platform_identity():
+        return False, "browser runtime proof stale: platform identity drift"
+    if doc.get("semantic_runtime_fingerprint") != semantic_runtime_fingerprint():
+        return False, "browser runtime proof stale: runtime fingerprint drift"
+    # Exact-asset binding: the proof must attest the SAME browser asset tree
+    # the resolver hands to workers, byte for byte.
+    asset_root_value = doc.get("browser_asset_root")
+    if not isinstance(asset_root_value, str) or not asset_root_value:
+        return False, "browser runtime proof missing asset root binding"
+    asset_root = Path(asset_root_value)
+    if asset_root.is_symlink() or not asset_root.is_dir():
+        return False, "browser asset root missing or not a real directory"
+    claimed_merkle = doc.get("browser_asset_merkle_sha256") or ""
+    try:
+        actual_merkle = browser_asset_merkle_sha256(asset_root)
+    except (OSError, CapabilityResolutionError):
+        return False, "browser asset root unreadable"
+    if claimed_merkle != actual_merkle:
+        return False, "browser runtime proof stale: browser asset drift"
     return True, ""
 
 
 def write_browser_runtime_proof(
     name: str = "browser.playwright.chromium",
     *,
+    asset_root: str,
+    asset_merkle_sha256: str,
     playwright_version: str = "",
     browser_version: str = "",
     evidence_dir: Path | None = None,
@@ -673,13 +788,26 @@ def write_browser_runtime_proof(
     """Persist a canary-attested browser runtime proof (physical commissioning).
 
     Called by the real browser canary after it has empirically launched the
-    browser. Not invoked by the source/CI suite.
+    browser FROM the exact shared asset root workers will receive. The proof
+    is private (0600/0700), freshness-bound to the current platform/runtime
+    fingerprint, and byte-bound to the exact browser asset tree; any drift
+    stales it automatically. Not invoked by the source/CI suite.
     """
     from . import util as _util_mod
+    root = Path(asset_root).expanduser()
+    if not root.is_absolute() or root.is_symlink() or not root.is_dir():
+        raise CapabilityResolutionError(
+            f"browser asset root must be an absolute real directory: {asset_root}"
+        )
+    if not asset_merkle_sha256 or len(asset_merkle_sha256) != 64:
+        raise CapabilityResolutionError("browser asset merkle digest must be a sha256 hex")
     body = {
         "schema": BROWSER_RUNTIME_PROOF_SCHEMA,
         "capability": name,
         "ok": True,
+        "browser_asset_root": str(root.resolve(strict=False)),
+        "browser_asset_merkle_sha256": asset_merkle_sha256,
+        "browser_cache_env": "PLAYWRIGHT_BROWSERS_PATH",
         "playwright_version": playwright_version,
         "browser_version": browser_version,
         "platform_identity": platform_identity(),
@@ -739,18 +867,25 @@ def probe_host_capabilities(
                 if name == "container.docker":
                     item.update(commissioned["provider_identity"])
             elif definition.kind == "browser":
-                # Truthful browser inventory: distinguish PROVISIONABLE/
-                # RESOLVABLE (Playwright tooling present) from EMPIRICALLY
-                # RUNTIME-PROVEN (a canary actually launched the browser).
-                # `available` reflects the stronger runtime proof only, so the
-                # inventory never claims a browser works before it is proven.
+                # Truthful browser inventory with three explicit tiers:
+                # PROVISIONABLE/RESOLVABLE (Playwright tooling present),
+                # ASSETS-INSTALLED (the shared immutable asset root exists),
+                # and EMPIRICALLY RUNTIME-PROVEN (a canary launched the exact
+                # browser from the exact asset root under the current
+                # platform/runtime). `available` reflects the strongest tier
+                # only, so the inventory never claims a browser works before
+                # it is proven.
                 resolvable, resolved_ref = _playwright_resolvable()
                 proven, proven_reason = _browser_runtime_proven(name)
+                asset_root = default_browser_asset_dir()
                 item.update({
                     "available": bool(proven),
+                    "provisionable": bool(resolvable),
                     "resolvable": bool(resolvable),
+                    "assets_installed": asset_root.is_dir() and not asset_root.is_symlink(),
                     "runtime_proven": bool(proven),
                     "provider": "project_runtime",
+                    "browser_asset_root": str(asset_root),
                 })
                 if resolved_ref:
                     item["playwright_ref"] = resolved_ref
@@ -837,6 +972,20 @@ def verify_resolution_integrity(resolution: dict[str, Any]) -> None:
     for item in resolution.get("resolved") or []:
         if not isinstance(item, dict):
             continue
+        if item.get("kind") == "browser":
+            # A resolved browser must STILL be runtime-proven at pre-provider
+            # time: re-prove freshness (current platform/runtime, exact asset
+            # bytes). Resolution never certifies an unproven browser.
+            browser_meta = item.get("browser") or {}
+            if not browser_meta.get("runtime_proven"):
+                raise CapabilityResolutionError(
+                    f"browser capability resolved without runtime proof: {item.get('name')}"
+                )
+            proven_now, proof_reason = _browser_runtime_proven(str(item.get("name") or ""))
+            if not proven_now:
+                raise CapabilityResolutionError(
+                    f"browser runtime proof no longer valid after resolution: {proof_reason}"
+                )
         executable = item.get("executable")
         digest = item.get("executable_sha256")
         if executable and digest and _file_sha256(str(executable)) != digest:

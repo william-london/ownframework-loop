@@ -31,11 +31,21 @@ launched; the model cannot widen its own host authority.
 
 ## Cache model
 
-Per-pass scratch remains under the runtime cache. Durable package/browser
-caches are repository-scoped so repeated passes do not repeatedly download the
-same artifacts. Cross-repository writable caches are intentionally forbidden:
+Per-pass scratch remains under the runtime cache. Durable package caches are
+repository-scoped so repeated passes do not repeatedly download the same
+artifacts. Cross-repository writable caches are intentionally forbidden:
 a compromised client repository must not be able to poison another client's
 future executable/package cache.
+
+Browser binaries are NOT a cache. They live in one shared immutable asset
+root (`default_browser_asset_dir()`), provisioned exactly once by the
+operator and runtime-proven by the real browser canary. Every role consumes
+that root READ-ONLY (PLAYWRIGHT_BROWSERS_PATH bound to it, browser GC
+disabled for workers), so Chromium is never re-downloaded per pass and no
+worker write can touch the proven binaries. The runtime proof is private and
+freshness-bound to the current platform/runtime fingerprint and the exact
+asset bytes (Merkle digest); any drift stales it automatically until the
+canary re-proves it.
 
 A host manifest may point a capability at a trusted global asset store. Those
 assets are read-only to semantic workers.
@@ -139,9 +149,15 @@ existing run.
 
 ## Reviewer cache isolation
 
-Builder package/browser caches are durable but repository-scoped. Reviewers use
+Builder package caches are durable but repository-scoped. Reviewers use
 pass-ephemeral writable caches so exact-SHA validation cannot persist poisoned
-tool state into a later attempt. Trusted global assets remain read-only.
+tool state into a later attempt. Trusted global assets — including the shared
+immutable browser asset root, which builder and reviewer BOTH read — remain
+read-only for every role; the reviewer's own mutable metadata stays ephemeral.
+Inventory, preflight, and resolution all distinguish PROVISIONABLE/RESOLVABLE
+(Playwright tooling present, assets installable) from RUNTIME-PROVEN (the
+canary empirically launched the exact browser from the exact shared asset
+root under the current platform/runtime); `available` means the latter only.
 
 ## Host IPC environment
 
