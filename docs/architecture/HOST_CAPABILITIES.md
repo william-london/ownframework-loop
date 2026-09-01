@@ -182,3 +182,25 @@ that runs and receipts privileged canary evidence. Resolution includes
 executable/version/digest, filesystem/cache, effective network, canary evidence,
 runner profile, and HOME-access checks. A missing
 capability therefore fails before provider execution.
+
+
+## Strict runner-profile commissioning
+
+A runner profile that names a model is quality-strict and must use a pinned
+provider model identity; moving Claude aliases such as `sonnet`, `opus`,
+`haiku`, `best`, `default`, `opusplan`, and `[1m]` selectors are not
+immutable model identity and are refused in strict profiles.
+
+A profile that also requests explicit effort requires a current-runtime
+attestation before execution:
+
+```bash
+ofloop capabilities attest-effort <profile>
+ofloop capabilities preflight /path/to/repo <capability>... --runner-profile <profile>
+```
+
+The attestation is private and binds the exact runner-profile identity plus the
+current byte-bound Claude runtime fingerprint. A Claude update or profile change
+stales it and requires explicit re-attestation. Preflight is execution-ready
+proof: requested browser capabilities must already have a valid exact-asset
+runtime canary proof, and strict effort must already be attested.

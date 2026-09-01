@@ -18,6 +18,10 @@ MANIFEST_SCHEMA = "ownframework-loop-runner-profiles/v1"
 CONTRACT_REVISION = "runner-profile-contract/v1"
 PROFILE_NAME_RE = re.compile(r"^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$")
 _ALLOWED_EFFORT = frozenset({"low", "medium", "high", "xhigh", "max"})
+_MOVING_MODEL_ALIASES = frozenset({
+    "default", "best", "sonnet", "opus", "haiku",
+    "sonnet[1m]", "opus[1m]", "opusplan",
+})
 
 
 class RunnerProfileError(RuntimeError):
@@ -88,6 +92,13 @@ def _validated(name: str, raw: dict[str, Any], provider: str) -> dict[str, Any]:
         or any(ch.isspace() or ord(ch) < 32 for ch in model)
     ):
         raise RunnerProfileError(f"runner profile {name!r} has invalid model")
+    if isinstance(model, str) and (
+        model in _MOVING_MODEL_ALIASES or model.endswith("[1m]")
+    ):
+        raise RunnerProfileError(
+            f"runner profile {name!r} explicit model must be a pinned provider "
+            "model identity, not a moving Claude alias/context selector"
+        )
     effort = raw.get("effort")
     if effort is not None and effort not in _ALLOWED_EFFORT:
         raise RunnerProfileError(
@@ -148,7 +159,7 @@ def verify_profile_integrity(profile: dict[str, Any]) -> None:
 # a silent quality substitution is never certified as the requested profile.
 # ---------------------------------------------------------------------------
 
-EFFORT_ATTESTATION_SCHEMA = "ownframework-loop-runner-effort-attestation/v1"
+EFFORT_ATTESTATION_SCHEMA = "ownframework-loop-runner-effort-attestation/v2"
 
 
 def effort_attestation_path(name: str) -> Path:
@@ -159,35 +170,44 @@ def effort_attestation_path(name: str) -> Path:
 
 
 def write_effort_attestation(
-    *, name: str, provider: str, model: str | None, effort: str, actor: str = "operator"
+    *,
+    name: str,
+    provider: str = "claude-code",
+    model: str | None = None,
+    effort: str | None = None,
+    actor: str = "operator",
+    manifest_path: Path | None = None,
 ) -> dict[str, Any]:
-    """Operator commissioning artifact for one strict-effort runner profile.
-
-    Private (0600/0700) and digest-bound; verified field-by-field before any
-    provider call for a strict profile.
-    """
-    from . import util as _util_mod
-    errors = validate_profile_name(name)
-    if errors:
-        raise RunnerProfileError("; ".join(errors))
-    if effort not in _ALLOWED_EFFORT:
+    """Commission one strict-effort profile for the CURRENT Claude runtime."""
+    from . import capabilities as _cap_mod, util as _util_mod
+    profile = resolve_profile(name, provider=provider, manifest_path=manifest_path)
+    profile_effort = profile.get("effort")
+    if profile_effort is None:
         raise RunnerProfileError(
-            f"effort attestation effort must be one of {sorted(_ALLOWED_EFFORT)}"
+            f"runner profile {name!r} has no explicit effort to attest"
         )
-    if not provider:
-        raise RunnerProfileError("effort attestation requires a provider")
+    if model is not None and str(model or "") != str(profile.get("model") or ""):
+        raise RunnerProfileError("effort attestation model does not match resolved profile")
+    if effort is not None and effort != profile_effort:
+        raise RunnerProfileError("effort attestation effort does not match resolved profile")
     body = {
         "schema": EFFORT_ATTESTATION_SCHEMA,
         "profile": name,
         "provider": provider,
-        "model": str(model or ""),
-        "effort": effort,
+        "model": str(profile.get("model") or ""),
+        "effort": str(profile_effort),
+        "profile_identity_sha256": str(profile.get("identity_sha256") or ""),
+        "semantic_runtime_fingerprint": _cap_mod.semantic_runtime_fingerprint(),
         "attested_actor": actor,
         "attested_at": _util_mod.utc_now_iso(),
     }
     body["attestation_sha256"] = hashlib.sha256(_canonical(body)).hexdigest()
     path = effort_attestation_path(name)
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    try:
+        os.chmod(path.parent, 0o700)
+    except OSError:
+        pass
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(json.dumps(body, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     os.chmod(tmp, 0o600)
@@ -196,15 +216,11 @@ def write_effort_attestation(
 
 
 def verify_effort_attestation(profile: dict[str, Any]) -> None:
-    """Fail closed unless a commissioned attestation proves the strict effort.
-
-    Profiles without an explicit `effort` are not effort-strict and pass.
-    Anything else — missing file, symlink, non-private/non-regular file,
-    schema/digest/field mismatch — refuses before any model call.
-    """
+    """Fail closed unless current runtime/profile identity matches attestation."""
     effort = profile.get("effort")
     if effort is None:
         return
+    from . import capabilities as _cap_mod
     name = str(profile.get("name") or "")
     path = effort_attestation_path(name)
     if path.is_symlink() or not path.is_file():
@@ -229,15 +245,17 @@ def verify_effort_attestation(profile: dict[str, Any]) -> None:
     body = {k: v for k, v in doc.items() if k != "attestation_sha256"}
     if not claimed or hashlib.sha256(_canonical(body)).hexdigest() != claimed:
         raise RunnerProfileError("effort attestation digest mismatch")
-    if doc.get("profile") != name or doc.get("provider") != profile.get("provider"):
-        raise RunnerProfileError("effort attestation does not bind this profile/provider")
-    if doc.get("effort") != effort:
-        raise RunnerProfileError(
-            f"effort attestation binds {doc.get('effort')!r}, not requested {effort!r}"
-        )
-    if doc.get("model") != str(profile.get("model") or ""):
-        raise RunnerProfileError("effort attestation does not bind this model")
-
+    checks = {
+        "profile": name,
+        "provider": profile.get("provider"),
+        "model": str(profile.get("model") or ""),
+        "effort": effort,
+        "profile_identity_sha256": profile.get("identity_sha256"),
+        "semantic_runtime_fingerprint": _cap_mod.semantic_runtime_fingerprint(),
+    }
+    for key, expected in checks.items():
+        if doc.get(key) != expected:
+            raise RunnerProfileError(f"effort attestation stale or mismatched: {key}")
 
 def public_summary(profile: dict[str, Any]) -> dict[str, Any]:
     out = {k: profile.get(k) for k in (

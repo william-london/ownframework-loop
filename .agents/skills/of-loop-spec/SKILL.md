@@ -109,8 +109,11 @@ Before a v3 PROGRAM is considered ready:
   packet domains, not necessarily zero domains when a declared package/browser
   capability requires narrow download endpoints;
 - choose `runner_profile` only from trusted profiles exposed by
-  `ofloop capabilities profile <name>`; profile identity is run-bound and may
-  select semantic model/effort only, never sandbox/tool/MCP/session authority;
+  `ofloop capabilities profile <name>`; explicit models must be pinned provider
+  model IDs rather than moving Claude aliases. An explicit effort also requires
+  `ofloop capabilities attest-effort <name>` on the current Claude runtime.
+  Profile identity is run-bound and may select semantic model/effort only,
+  never sandbox/tool/MCP/session authority;
 - validate packet budgets against executable ceilings before first execution;
 - treat top-level build/review/repair values as cumulative PROGRAM envelopes;
 - unless intentionally throttling the whole PROGRAM, fund those global

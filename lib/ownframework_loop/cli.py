@@ -1694,6 +1694,23 @@ def _build_parser() -> argparse.ArgumentParser:
         out["ok"] = True
         _emit(out)
 
+    def cmd_capabilities_attest_effort(args: argparse.Namespace) -> None:
+        try:
+            out = runner_profiles_mod.write_effort_attestation(
+                name=args.profile,
+                provider=args.provider,
+                actor=args.actor,
+                manifest_path=(
+                    Path(args.profile_manifest).expanduser()
+                    if args.profile_manifest else None
+                ),
+            )
+        except runner_profiles_mod.RunnerProfileError as exc:
+            _emit({"ok": False, "error": str(exc)}, exit_code=2)
+            return
+        out["ok"] = True
+        _emit(out)
+
     def cmd_capabilities_preflight(args: argparse.Namespace) -> None:
         repo = _repo_path(args.repo)
         manifest = Path(args.manifest).expanduser() if args.manifest else None
@@ -1719,8 +1736,15 @@ def _build_parser() -> argparse.ArgumentParser:
             return
         try:
             profile = runner_profiles_mod.resolve_profile(
-                args.runner_profile, provider="claude-code"
+                args.runner_profile,
+                provider="claude-code",
+                manifest_path=(
+                    Path(args.profile_manifest).expanduser()
+                    if args.profile_manifest else None
+                ),
             )
+            runner_profiles_mod.verify_profile_integrity(profile)
+            runner_profiles_mod.verify_effort_attestation(profile)
         except runner_profiles_mod.RunnerProfileError as exc:
             _emit({"ok": False, "error": str(exc)}, exit_code=2)
             return
@@ -1761,6 +1785,15 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     cap_commission.add_argument("--manifest", default=None)
     cap_commission.set_defaults(func=cmd_capabilities_commission)
+    cap_attest = cap_sub.add_parser(
+        "attest-effort",
+        help="commission one strict-effort runner profile for the current Claude runtime",
+    )
+    cap_attest.add_argument("profile")
+    cap_attest.add_argument("--provider", default="claude-code")
+    cap_attest.add_argument("--profile-manifest", default=None)
+    cap_attest.add_argument("--actor", default="operator")
+    cap_attest.set_defaults(func=cmd_capabilities_attest_effort)
     cap_pre = cap_sub.add_parser(
         "preflight",
         help="resolve an exact capability set for a repository without a model call",
@@ -1771,6 +1804,7 @@ def _build_parser() -> argparse.ArgumentParser:
     cap_pre.add_argument("--network-host", action="append", default=[])
     cap_pre.add_argument("--manifest", default=None)
     cap_pre.add_argument("--runner-profile", default="default")
+    cap_pre.add_argument("--profile-manifest", default=None)
     cap_pre.set_defaults(func=cmd_capabilities_preflight)
 
     # supervisor — durable machine execution clock. Protocol truth remains in core artifacts.

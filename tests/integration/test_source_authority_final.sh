@@ -55,13 +55,25 @@ with tempfile.TemporaryDirectory() as td:
     manifest.write_text(json.dumps({
         "schema": runner_profiles.MANIFEST_SCHEMA,
         "profiles": {
-            "stricty": {"provider": "claude-code", "model": "sonnet", "effort": "high"},
+            "stricty": {"provider": "claude-code", "model": "claude-sonnet-4-6", "effort": "high"},
             "plain": {"provider": "claude-code"},
         },
     }))
     manifest.chmod(0o600)
     stricty = runner_profiles.resolve_profile("stricty", provider="claude-code")
     plain = runner_profiles.resolve_profile("plain", provider="claude-code")
+    # Moving aliases cannot masquerade as immutable strict model identity.
+    bad_manifest = json.loads(manifest.read_text())
+    bad_manifest["profiles"]["alias"] = {"provider": "claude-code", "model": "sonnet"}
+    manifest.write_text(json.dumps(bad_manifest)); manifest.chmod(0o600)
+    try:
+        runner_profiles.resolve_profile("alias", provider="claude-code")
+        raise SystemExit("moving strict model alias accepted")
+    except runner_profiles.RunnerProfileError:
+        pass
+    # restore the manifest used by the already-resolved profile integrity checks
+    del bad_manifest["profiles"]["alias"]
+    manifest.write_text(json.dumps(bad_manifest)); manifest.chmod(0o600)
     assert runner_profiles.public_summary(stricty)["strict_quality"] is True
     assert runner_profiles.public_summary(plain)["strict_quality"] is False
 
@@ -75,10 +87,23 @@ with tempfile.TemporaryDirectory() as td:
         assert "attestation" in str(exc)
     # Operator commissions the attestation; then it verifies.
     runner_profiles.write_effort_attestation(
-        name="stricty", provider="claude-code", model="sonnet", effort="high"
+        name="stricty", provider="claude-code", model="claude-sonnet-4-6", effort="high"
     )
     runner_profiles.verify_effort_attestation(stricty)
     p = runner_profiles.effort_attestation_path("stricty")
+    # Attestation is runtime-fresh: changing Claude/runtime identity stales it.
+    from ownframework_loop import capabilities
+    real_fp = capabilities.semantic_runtime_fingerprint
+    capabilities.semantic_runtime_fingerprint = lambda: "f" * 64
+    try:
+        try:
+            runner_profiles.verify_effort_attestation(stricty)
+            raise SystemExit("stale runtime effort attestation accepted")
+        except runner_profiles.RunnerProfileError as exc:
+            assert "runtime" in str(exc) or "fingerprint" in str(exc)
+    finally:
+        capabilities.semantic_runtime_fingerprint = real_fp
+    runner_profiles.verify_effort_attestation(stricty)
     assert p.is_file() and not p.is_symlink()
     assert (p.stat().st_mode & 0o077) == 0
     # A tampered attestation digest fails closed.
@@ -92,7 +117,7 @@ with tempfile.TemporaryDirectory() as td:
         pass
     # Rewrite valid but for the WRONG effort: binding mismatch refused.
     runner_profiles.write_effort_attestation(
-        name="stricty", provider="claude-code", model="sonnet", effort="max"
+        name="stricty", provider="claude-code", model="claude-sonnet-4-6", effort="max"
     )
     try:
         runner_profiles.verify_effort_attestation(stricty)
@@ -266,6 +291,31 @@ with tempfile.TemporaryDirectory() as td:
     assert not proven and "asset root" in reason, (proven, reason)
     moved.rename(asset_root)
 
+    # Directory symlinks are part of the authority tree and must be refused.
+    link_target = root / "link-target"; link_target.mkdir()
+    linkdir = chromium_dir / "linked-dir"; os.symlink(link_target, linkdir)
+    try:
+        capabilities.browser_asset_merkle_sha256(asset_root)
+        raise SystemExit("browser directory symlink accepted")
+    except capabilities.CapabilityResolutionError:
+        pass
+    linkdir.unlink()
+
+    # A proof for asset A can never authorize resolution to asset B.
+    other_root = root / "other-browser-assets"; other_root.mkdir()
+    (other_root / "chrome").write_bytes(b"other")
+    try:
+        capabilities.resolve_capabilities(
+            ["browser.playwright.chromium"],
+            canonical_repo=repo, role="builder",
+            repo_cache_root=root / "cache-other",
+            packet_network_allowlist=[],
+            browser_asset_root=other_root,
+        )
+        raise SystemExit("browser proof A authorized asset B")
+    except capabilities.CapabilityResolutionError as exc:
+        assert "different asset root" in str(exc) or "not execution-ready" in str(exc), exc
+
     # Resolution wires ONE shared immutable asset root for BOTH roles:
     # read-only authority, PLAYWRIGHT_BROWSERS_PATH bound to it, never a
     # per-role mutable browser cache, explicit proven/provisionable flags.
@@ -282,12 +332,20 @@ with tempfile.TemporaryDirectory() as td:
         assert item["cache_path"] == str(asset_root), item
         assert browser_meta["runtime_proven"] is True, browser_meta
         assert browser_meta["browser_asset_root"] == str(asset_root), browser_meta
+        assert browser_meta["browser_asset_merkle_sha256"] == merkle, browser_meta
+        assert browser_meta["browser_proof_sha256"], browser_meta
         assert "provisionable" in browser_meta, browser_meta
         assert res["environment"]["PLAYWRIGHT_BROWSERS_PATH"] == str(asset_root)
         assert res["environment"]["PLAYWRIGHT_SKIP_BROWSER_GC"] == "1"
         assert str(asset_root) in res["filesystem"]["allowRead"]
         assert str(asset_root) not in res["filesystem"]["allowWrite"]
         assert str(asset_root) in res["stable_filesystem"]["allowRead"]
+    # Browser identity participates in the immutable run binding.
+    from ownframework_loop import capability_binding, runner_profiles
+    projection = capability_binding.stable_projection(
+        res, runner_profiles.resolve_profile("default", provider="claude-code")
+    )
+    assert projection["capabilities"][0]["browser"]["browser_asset_merkle_sha256"] == merkle
 print("3 browser proof freshness + shared read-only wiring ok")
 PY
 pass "browser proof is private, freshness-bound, auto-stale on drift; assets shared read-only"

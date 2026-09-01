@@ -9,7 +9,7 @@ import uuid
 from typing import Any
 
 SCHEMA = "ownframework-loop-capability-binding/v1"
-PROJECTION_REVISION = "capability-binding-projection/v2"
+PROJECTION_REVISION = "capability-binding-projection/v3"
 
 
 class CapabilityBindingError(RuntimeError):
@@ -33,7 +33,7 @@ def stable_projection(resolution: dict[str, Any], runner_profile: dict[str, Any]
     keys = (
         "name", "kind", "privileged", "provider", "executable", "version",
         "executable_sha256", "network_domains", "commissioning_evidence_sha256",
-        "commissioning_canary_kind", "trusted_asset_identity",
+        "commissioning_canary_kind", "trusted_asset_identity", "browser",
     )
     caps = []
     for item in resolution.get("resolved") or []:
