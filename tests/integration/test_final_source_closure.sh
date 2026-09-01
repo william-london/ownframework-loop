@@ -6,8 +6,10 @@
 #   1. Crash-atomic funded repair: no crash window can expose an unfunded
 #      claimable CHANGES_REQUESTED; cap exhaustion seals BLOCKED atomically;
 #      reconciliation completes a crashed post-hook without double-funding.
-#   2. Non-transition saves cannot change transition/run identity.
-#   3. Transition extras cannot override protocol-authoritative fields.
+#   2. save() is creation-only; existing-state mutation is impossible.
+#   3. Structural STATE ownership: generic extras channel closed for all
+#      owners, funded repair has no extras parameter at all, atomic_patch
+#      accepts only enlisted non-authoritative fields.
 #   4. Symlinked capability/profile authority manifests are rejected.
 #   5. Pre-provider runtime/evidence drift is refused by the final re-proof.
 #   6. First capability binding is allowed after proven pre-provider attempts
@@ -75,7 +77,6 @@ repo, rid = Path(sys.argv[1]), sys.argv[2]
 meta, _ = packet_mod.parse_packet_file(state_mod.run_dir(repo, rid) / "WORK_PACKET.md")
 res = state_mod.transition_funded_repair(
     repo, rid, packet=meta, actor="test", commit_sha="",
-    extras={"no_progress_streak": 0},
     allowed_sources=frozenset({"BUILDING", "REVIEWING"}),
     claimed_reason="test funded repair",
 )
@@ -148,7 +149,7 @@ print("1c cap exhaustion seals BLOCKED atomically ok")
 PY
 pass "repair cap exhaustion seals BLOCKED atomically (no unfunded claimable state)"
 
-# ---------- 2. non-transition saves cannot change identity ----------
+# ---------- 2. save() is creation-only: no existing-state mutation at all ----------
 python3 - "$T" "$RID" <<'PY'
 import sys, os
 from pathlib import Path
@@ -170,31 +171,71 @@ try:
     raise SystemExit("save() changed run_id")
 except ValueError:
     pass
-# A legitimate non-identity save still works.
-ok_patch = dict(cur); ok_patch["no_progress_streak"] = 0
-state_mod.save(repo, rid, ok_patch)
+# Creation-only is structural: even an EXACT identity-preserving save of the
+# current document is refused once durable state exists. Later mutations go
+# through the transition owners with typed parameters, never through save().
+exact = dict(cur)
+try:
+    state_mod.save(repo, rid, exact)
+    raise SystemExit("save() accepted an existing-state write")
+except ValueError:
+    pass
 assert state_mod.load_verified(repo, rid)["state"] == cur["state"]
-print("2 non-transition save identity guard ok")
+print("2 creation-only save ok")
 PY
-pass "non-transition saves cannot change transition/run identity"
+pass "save() is creation-only; existing-state mutation is impossible"
 
-# ---------- 3. extras cannot override authoritative fields ----------
+# ---------- 3. structural STATE ownership: no generic extras channel ----------
 python3 - "$T" "$RID" <<'PY'
-import sys, os
+import inspect, sys, os
 from pathlib import Path
 sys.path.insert(0, os.environ.get("OFLOOP_LIB"))
 from ownframework_loop import state as state_mod
 repo, rid = Path(sys.argv[1]), sys.argv[2]
-for field in ("state", "run_id", "transitions_count", "state_history", "started_at"):
+# Every protocol-authoritative field is refused as a transition extra.
+for field in sorted(state_mod.STATE_OWNER_FIELDS):
     try:
         state_mod.transition(repo, rid, to_state="READY_TO_BUILD", actor="t",
                              reason="x", extras={field: "evil"})
-        raise SystemExit(f"extras overrode {field}")
+        raise SystemExit(f"extras overrode owner field {field}")
     except ValueError:
         pass
-print("3 extras reserved-field guard ok")
+# Structurally, NO generic extras can mutate STATE.json at all: even an
+# unknown non-owner key is refused (allow-list, not blacklist).
+try:
+    state_mod.transition(repo, rid, to_state="READY_TO_BUILD", actor="t",
+                         reason="x", extras={"diagnostic_note": "evil"})
+    raise SystemExit("generic extras accepted a foreign key")
+except ValueError:
+    pass
+# The funded-repair owner has NO generic extras channel in its signature.
+fr_params = inspect.signature(state_mod.transition_funded_repair).parameters
+assert "extras" not in fr_params, "funded repair still exposes generic extras"
+assert "identical_finding_streak" in fr_params
+assert "last_must_fix_fingerprint" in fr_params
+# atomic_patch field classes: owner fields refused, foreign keys refused,
+# empty patches refused.
+for field in ("state", "repair_round", "program", "last_candidate_sha",
+              "no_progress_streak"):
+    try:
+        state_mod.atomic_patch(repo, rid, {field: "evil"}, actor="t", reason="x")
+        raise SystemExit(f"atomic_patch wrote owner field {field}")
+    except ValueError:
+        pass
+try:
+    state_mod.atomic_patch(repo, rid, {"unlisted": 1}, actor="t", reason="x")
+    raise SystemExit("atomic_patch accepted a non-enlisted field")
+except ValueError:
+    pass
+try:
+    state_mod.atomic_patch(repo, rid, {}, actor="t", reason="x")
+    raise SystemExit("atomic_patch accepted an empty patch")
+except ValueError:
+    pass
+assert state_mod.load_verified(repo, rid)["state"] is not None
+print("3 structural state ownership ok")
 PY
-pass "transition extras cannot override protocol-authoritative fields"
+pass "STATE ownership is structural: extras channel closed, owners typed, patch field-classed"
 
 # ---------- 4. symlinked authority manifests rejected ----------
 python3 - <<'PY'

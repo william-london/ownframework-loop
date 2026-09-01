@@ -836,17 +836,16 @@ def finalize_review(
             # The rejection state and its repair entitlement are one
             # STATE_TXN-backed mutation. A crash can no longer expose a
             # build-claimable CHANGES_REQUESTED without charging the round.
+            # no_progress_streak is reset BY the funding owner itself; the
+            # review fuses travel through typed owner parameters.
             repair_transition = state_mod.transition_review_rejection_with_repair(
                 canonical_repo,
                 run_id,
                 packet=meta,
                 actor=actor,
                 commit_sha=receipt_candidate_sha,
-                extras={
-                    "identical_finding_streak": identical_finding_streak,
-                    "last_must_fix_fingerprint": must_fix_fp,
-                    "no_progress_streak": 0,
-                },
+                identical_finding_streak=identical_finding_streak,
+                last_must_fix_fingerprint=must_fix_fp,
             )
             next_state = str(repair_transition["state"])
         else:
@@ -856,10 +855,8 @@ def finalize_review(
                 actor=actor,
                 reason=f"finalizer verdict={verdict}",
                 commit_sha=receipt_candidate_sha,
-                extras={
-                    "identical_finding_streak": identical_finding_streak,
-                    "last_must_fix_fingerprint": must_fix_fp,
-                },
+                identical_finding_streak=identical_finding_streak,
+                last_must_fix_fingerprint=must_fix_fp,
             )
         if next_state == "CHANGES_REQUESTED":
             # Single-mode post-hook: transition CHANGES_REQUESTED back to

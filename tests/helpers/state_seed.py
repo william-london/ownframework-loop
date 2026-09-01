@@ -5,8 +5,9 @@ Fixtures sometimes need to simulate the exact durable state a crashed or
 interrupted protocol run would have left behind: states unreachable by one
 legal transition from the fixture start point, drifted pass counters, or
 checkpoint boundaries. Production code NEVER uses this seam: the protocol
-library's `state.save()` cannot change transition/run identity, and state
-changes go exclusively through the transition owners.
+library's `state.save()` is creation-only, generic transition extras cannot
+write STATE.json at all, and authoritative updates go exclusively through the
+transition owners' typed parameters.
 
 This helper therefore lives in tests/, not in the protocol library. It does
 NOT bypass integrity: it still verifies the existing event chain under the

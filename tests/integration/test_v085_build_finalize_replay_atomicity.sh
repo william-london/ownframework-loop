@@ -93,13 +93,12 @@ original_streak=int(before.get("no_progress_streak",0) or 0)
 
 real_transition=state.transition
 fired={"v":False}
-def crash_transition(canonical_repo, run_id, *, to_state, actor, reason=None, commit_sha=None, extras=None):
+def crash_transition(canonical_repo, run_id, *, to_state, **owner_kwargs):
     if to_state=="READY_FOR_REVIEW" and not fired["v"]:
         fired["v"]=True
         raise RuntimeError("A09 injected before atomic finalizer-state publication")
     return real_transition(
-        canonical_repo, run_id, to_state=to_state, actor=actor,
-        reason=reason, commit_sha=commit_sha, extras=extras,
+        canonical_repo, run_id, to_state=to_state, **owner_kwargs,
     )
 state.transition=crash_transition
 try:

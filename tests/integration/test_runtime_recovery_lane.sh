@@ -21,6 +21,10 @@ from ownframework_loop import state
 from ownframework_loop import supervisor
 
 root = Path(sys.argv[1])
+# Crash-state seeding is a TEST-ONLY seam: production save() is creation-only.
+sys.path.insert(0, str(root / "tests" / "helpers"))
+from state_seed import seed_state
+
 tmp = Path(tempfile.mkdtemp(prefix="ofloop-runtime-recovery-"))
 
 def new_repo(name: str) -> Path:
@@ -521,7 +525,7 @@ repo3b = new_repo("repair-cap")
 reviewing_run(repo3b, "run-repair-cap")
 cur = state.load_verified(repo3b, "run-repair-cap")
 cur["repair_round"] = 1
-state.save(repo3b, "run-repair-cap", cur)
+seed_state(repo3b, "run-repair-cap", cur, reason="fixture repair-cap pre-fund")
 cap_out = state.transition_review_rejection_with_repair(
     repo3b, "run-repair-cap",
     packet=packet, actor="review-finalize",
@@ -557,11 +561,8 @@ try:
             to_state="READY_FOR_REVIEW",
             actor="build-finalize",
             commit_sha="c" * 40,
-            extras={
-                "no_progress_streak": 0,
-                "last_candidate_sha": "c" * 40,
-                "build_pass_count": 1,
-            },
+            no_progress_streak=0,
+            build_pass_count=1,
         )
     except RuntimeError as exc:
         assert "synthetic crash" in str(exc)

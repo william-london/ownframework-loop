@@ -84,27 +84,96 @@ _EVENT_AUTHORITATIVE_FIELDS = frozenset({
 _EVENT_CALLER_RESERVED_FIELDS = _EVENT_AUTHORITATIVE_FIELDS | {"state_txn_id"}
 
 
-# Protocol-authoritative state fields. Caller-supplied transition extras are
-# diagnostic/counter transport and may NEVER replace fields that the FSM,
-# run identity, or the integrity chain own. Allowing extras to override
-# `state` would let a caller land any to_state (e.g. APPROVED) regardless of
-# the validated transition; overriding run_id/transitions_count/state_history
-# would desync the event-chain SHA binding on the next verified read.
-_STATE_RESERVED_EXTRA_KEYS = frozenset({
-    "state", "run_id", "transitions_count", "state_history",
-    "updated_at", "last_actor", "started_at",
+# Protocol-authoritative state fields, defined structurally: these are owned
+# by the FSM, run identity, integrity chain, claim/finalize owners, and the
+# frozen run-authority objects. Generic caller extras may NEVER write any of
+# them — authoritative updates flow exclusively through the explicit typed
+# owner parameters of the transition owners (or the dedicated claim/finalize
+# owners). Allowing extras to override `state` would let a caller land any
+# to_state (e.g. APPROVED) regardless of the validated transition; overriding
+# run_id/transitions_count/state_history would desync the event-chain SHA
+# binding on the next verified read; overriding last_candidate_sha, counters,
+# fuses or the frozen `program` object would forge run authority.
+STATE_OWNER_FIELDS = frozenset({
+    # Document identity + integrity chain.
+    "schema", "run_id", "state", "state_history", "transitions_count",
+    "started_at", "updated_at", "last_actor",
+    # FSM/finalize-owned counters and review-repetition fuses.
+    "build_pass_count", "review_pass_count", "repair_round",
+    "no_progress_streak", "identical_finding_streak",
+    "last_must_fix_fingerprint",
+    # Candidate identity and termination.
+    "last_candidate_sha", "terminal_reason",
+    # Frozen run authority.
+    "program",
+    "spec_baseline_branch", "spec_baseline_sha", "spec_snapshot_at",
 })
 
+# Generic transition extras are structurally incapable of mutating STATE.json:
+# diagnostic transport belongs in append_event() extras (a separate contract)
+# and authoritative fields belong to the typed owner parameters. This
+# allow-list is intentionally empty; enlisting a key here is a protocol
+# change, not a caller convenience.
+_STATE_EXTRA_ALLOWED_KEYS = frozenset()
 
-def _validate_state_extras(extras: dict[str, Any] | None) -> None:
+# Fields atomic_patch() may write. atomic_patch() is the NON-authoritative
+# read-modify-write owner; every acceptable field must be explicitly enlisted
+# here AND be absent from STATE_OWNER_FIELDS. No state field qualifies today:
+# every meaningful field is owner-controlled, so the enlisted set is empty.
+_STATE_PATCH_ALLOWED_FIELDS = frozenset()
+
+
+def _validate_state_extras(
+    extras: dict[str, Any] | None,
+    *,
+    owner: str = "transition",
+) -> None:
+    """Structurally reject generic state mutation through caller extras.
+
+    Owner-authoritative fields are refused by name first (best diagnostic);
+    ANY other key is refused as well because generic extras may never write
+    STATE.json at all.
+    """
     if not extras:
         return
-    overlap = _STATE_RESERVED_EXTRA_KEYS.intersection(extras)
-    if overlap:
+    owner_overlap = STATE_OWNER_FIELDS.intersection(extras)
+    if owner_overlap:
         raise ValueError(
-            "transition extras may not override protocol-authoritative "
-            "state fields: " + ", ".join(sorted(overlap))
+            f"{owner} extras may not override protocol-authoritative state "
+            "fields: " + ", ".join(sorted(owner_overlap))
         )
+    raise ValueError(
+        f"{owner} extras may not mutate STATE.json; no generic extras are "
+        "accepted (diagnostics belong in append_event; authoritative updates "
+        "use the typed owner parameters): " + ", ".join(sorted(extras))
+    )
+
+
+def _validate_patch_fields(fields: dict[str, Any] | None) -> None:
+    if not fields:
+        raise ValueError("atomic_patch requires at least one field")
+    owner_overlap = STATE_OWNER_FIELDS.intersection(fields)
+    if owner_overlap:
+        raise ValueError(
+            "atomic_patch may not write protocol-authoritative state fields: "
+            + ", ".join(sorted(owner_overlap))
+        )
+    foreign = set(fields) - _STATE_PATCH_ALLOWED_FIELDS
+    if foreign:
+        raise ValueError(
+            "atomic_patch fields must be explicitly enlisted non-authoritative"
+            " fields; refused: " + ", ".join(sorted(foreign))
+        )
+
+
+def _owner_int(name: str, value: Any) -> int:
+    try:
+        out = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"typed owner field {name!r} must be an integer") from exc
+    if out < 0:
+        raise ValueError(f"typed owner field {name!r} must be non-negative")
+    return out
 
 
 def _validate_event_extras(
@@ -426,51 +495,41 @@ def _verify_mutation_integrity_locked(canonical_repo: Path, run_id: str) -> None
 
 
 def save(canonical_repo: Path, run_id: str, payload: dict[str, Any]) -> None:
-    """Persist state under flock and record an integrity event.
+    """Create the initial durable state for a brand-new run. CREATION-ONLY.
 
-    `save()` is reserved for non-transition field updates. It writes
-    STATE.json atomically and appends a `state_saved` event so the SHA
-    chain stays consistent for subsequent `transition()` / `save()` calls.
+    Once STATE.json exists, `save()` refuses unconditionally: no existing-state
+    mutation — identity or otherwise — can flow through it, structurally
+    eliminating stale read-modify-write lost-update windows. Every later
+    mutation has a typed owner:
 
-    A non-transition save can NEVER change transition/run identity: if durable
-    state already exists, `state` and `run_id` must be carried through
-    unchanged. State changes go through transition()/program_transition()/
-    transition_funded_repair(). This also fails closed on a stale
-    read-modify-write: if another writer moved the run between the caller's
-    load and this save, the mismatched `state` is refused rather than
-    clobbered.
+      * FSM/state changes: transition() / program_transition() /
+        transition_funded_repair() with explicit typed owner parameters;
+      * claim counters/fuses: the claim and finalize owners;
+      * diagnostics: append_event() extras (a separate contract).
     """
     actor = str(payload.get("last_actor", "spec"))
     sp = state_path(canonical_repo, run_id)
-    ep = events_path(canonical_repo, run_id)
     with flock_exclusive(lock_path(canonical_repo, run_id)):
         # Existing durable history must verify before it can be overwritten.
         # A brand-new run legitimately has neither STATE nor EVENTS yet.
         _verify_mutation_integrity_locked(canonical_repo, run_id)
-        old = read_json(sp, default={}) if sp.exists() else {}
-        prior_state = (old or {}).get("state")
-        if prior_state is not None and payload.get("state") != prior_state:
+        if sp.exists():
             raise ValueError(
-                "non-transition save() may not change `state` "
-                f"({prior_state!r} -> {payload.get('state')!r}); use the "
-                "transition owners"
-            )
-        prior_run_id = (old or {}).get("run_id")
-        if prior_run_id is not None and payload.get("run_id") != prior_run_id:
-            raise ValueError(
-                f"non-transition save() may not change run_id ({prior_run_id!r} "
-                f"-> {payload.get('run_id')!r})"
+                "save() is creation-only: STATE.json already exists for run "
+                f"{run_id}; state mutations go through the transition owners "
+                "(transition/program_transition/transition_funded_repair) with "
+                "typed owner parameters"
             )
         _commit_state_event_locked(
             canonical_repo,
             run_id,
             payload,
             event_type="state_saved",
-            old_state=(old or {}).get("state") or payload.get("state"),
+            old_state=None,
             new_state=payload.get("state"),
             actor=actor,
             commit_sha=payload.get("last_candidate_sha"),
-            reason="non-transition state save",
+            reason="initial state creation",
         )
     try:
         fsync_dir(sp.parent)
@@ -487,16 +546,17 @@ def atomic_patch(
     reason: str,
     event_type: str = "state_saved",
 ) -> dict[str, Any]:
-    """Crash-atomic read-modify-write of non-identity fields under the run lock.
+    """Crash-atomic read-modify-write of NON-authoritative fields only.
 
-    `fields` may not contain protocol-authoritative identity/FSM keys
-    (state/run_id/transitions_count/state_history/updated_at/last_actor) and
-    can therefore never change transition identity; the current state is
-    carried through unchanged. Because the read, mutation, and commit all
-    happen under one flock + one STATE_TXN, there is no stale read->save
-    lost-update window. Returns the committed payload.
+    `fields` is validated against the structural field classes: every
+    protocol-authoritative field (STATE_OWNER_FIELDS) is refused, and every
+    accepted field must be explicitly enlisted in _STATE_PATCH_ALLOWED_FIELDS.
+    The current state and every owner field are carried through unchanged.
+    Because the read, mutation, and commit all happen under one flock + one
+    STATE_TXN, there is no stale read->save lost-update window. Returns the
+    committed payload.
     """
-    _validate_state_extras(fields)
+    _validate_patch_fields(fields)
     sp = state_path(canonical_repo, run_id)
     with flock_exclusive(lock_path(canonical_repo, run_id)):
         _verify_mutation_integrity_locked(canonical_repo, run_id)
@@ -674,6 +734,11 @@ def transition(
     reason: str | None = None,
     commit_sha: str | None = None,
     extras: dict[str, Any] | None = None,
+    no_progress_streak: int | None = None,
+    build_pass_count: int | None = None,
+    identical_finding_streak: int | None = None,
+    last_must_fix_fingerprint: str | None = None,
+    program_block: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Atomically transition state under flock, appending an event.
 
@@ -685,8 +750,13 @@ def transition(
     Before transitioning, this function loads STATE.json *and* verifies
     its recorded SHA. If the file was edited externally, we raise
     `integrity.TamperingDetected`.
+
+    Authoritative field updates travel ONLY through the typed owner
+    parameters (validated, non-generic). `commit_sha` owns
+    `last_candidate_sha`; terminal states own `terminal_reason`. Generic
+    `extras` are structurally refused: diagnostics belong in append_event().
     """
-    _validate_state_extras(extras)
+    _validate_state_extras(extras, owner="transition")
     sp = state_path(canonical_repo, run_id)
     ep = events_path(canonical_repo, run_id)
 
@@ -713,8 +783,22 @@ def transition(
         history = list(current.get("state_history", []))
         history.append({"from": from_state, "to": to_state, "at": now, "actor": actor, "reason": reason})
         new["state_history"] = history
-        if extras:
-            new.update(extras)
+        if no_progress_streak is not None:
+            new["no_progress_streak"] = _owner_int("no_progress_streak", no_progress_streak)
+        if build_pass_count is not None:
+            new["build_pass_count"] = _owner_int("build_pass_count", build_pass_count)
+        if identical_finding_streak is not None:
+            new["identical_finding_streak"] = _owner_int(
+                "identical_finding_streak", identical_finding_streak
+            )
+        if last_must_fix_fingerprint is not None:
+            new["last_must_fix_fingerprint"] = str(last_must_fix_fingerprint)
+        if program_block is not None:
+            if not isinstance(program_block, dict) or not program_block:
+                raise ValueError("typed owner field 'program_block' must be a non-empty dict")
+            if not is_program_state(current):
+                raise ValueError("program_block supplied for a non-PROGRAM run")
+            new["program"] = program_block
 
         _commit_state_event_locked(
             canonical_repo,
@@ -741,7 +825,8 @@ def transition_funded_repair(
     packet: dict[str, Any],
     actor: str,
     commit_sha: str,
-    extras: dict[str, Any] | None = None,
+    identical_finding_streak: int | None = None,
+    last_must_fix_fingerprint: str | None = None,
     allowed_sources: frozenset[str] = frozenset({"REVIEWING"}),
     claimed_reason: str = "repair entitlement claimed atomically",
 ) -> dict[str, Any]:
@@ -753,8 +838,11 @@ def transition_funded_repair(
     expose an unfunded / claimable CHANGES_REQUESTED state.  This is the single
     crash-atomic funding owner shared by the live review finalizer, crash
     reconciliation, and the foreground repair transition (SINGLE + PROGRAM).
+
+    This owner has NO generic extras channel. Funding a repair round is a new
+    work context, so the owner itself resets `no_progress_streak`; the review
+    fuses travel through the typed parameters.
     """
-    _validate_state_extras(extras)
     sp = state_path(canonical_repo, run_id)
     with flock_exclusive(lock_path(canonical_repo, run_id)):
         _verify_mutation_integrity_locked(canonical_repo, run_id)
@@ -848,8 +936,15 @@ def transition_funded_repair(
         new["state_history"] = history
         if target == "BLOCKED":
             new["terminal_reason"] = reason
-        if extras:
-            new.update(extras)
+        # Owner-owned: a funded repair round is a fresh work context, so the
+        # no-progress fuse resets inside the same atomic mutation.
+        new["no_progress_streak"] = 0
+        if identical_finding_streak is not None:
+            new["identical_finding_streak"] = _owner_int(
+                "identical_finding_streak", identical_finding_streak
+            )
+        if last_must_fix_fingerprint is not None:
+            new["last_must_fix_fingerprint"] = str(last_must_fix_fingerprint)
 
         _commit_state_event_locked(
             canonical_repo,
@@ -881,7 +976,8 @@ def transition_review_rejection_with_repair(
     packet: dict[str, Any],
     actor: str,
     commit_sha: str,
-    extras: dict[str, Any] | None = None,
+    identical_finding_streak: int | None = None,
+    last_must_fix_fingerprint: str | None = None,
 ) -> dict[str, Any]:
     """Atomically fund a rejected review before exposing repair execution.
 
@@ -896,7 +992,8 @@ def transition_review_rejection_with_repair(
         packet=packet,
         actor=actor,
         commit_sha=commit_sha,
-        extras=extras,
+        identical_finding_streak=identical_finding_streak,
+        last_must_fix_fingerprint=last_must_fix_fingerprint,
         allowed_sources=frozenset({"REVIEWING"}),
         claimed_reason="review rejected; repair entitlement claimed atomically",
     )
@@ -983,6 +1080,10 @@ def program_transition(
     reason: str | None = None,
     commit_sha: str | None = None,
     extras: dict[str, Any] | None = None,
+    program_block: dict[str, Any] | None = None,
+    schema_version: str | None = None,
+    identical_finding_streak: int | None = None,
+    last_must_fix_fingerprint: str | None = None,
 ) -> dict[str, Any]:
     """Atomic PROGRAM-mode state transition + event append under one flock.
 
@@ -1004,15 +1105,15 @@ def program_transition(
     program is fully terminated, this function falls back to
     transitions.assert_valid behavior (terminal states cannot be left).
 
-    Use this function instead of state_mod.save() when changing the
-    top-level `state` field. For purely field updates that do NOT
-    change `state` (e.g., bumping the `schema` version or writing a
-    new `program` sub-object after a finalize_checkpoint call that
-    did NOT change `state`), use state_mod.save() directly.
+    This is the sole owner of PROGRAM top-level state changes. PROGRAM
+    sub-object updates travel through the typed `program_block` parameter
+    (validated as a dict) — never through generic extras and never through
+    save(), which is creation-only. Generic `extras` are structurally
+    refused; diagnostics belong in append_event().
 
     Returns the new state document.
     """
-    _validate_state_extras(extras)
+    _validate_state_extras(extras, owner="program_transition")
     sp = state_path(canonical_repo, run_id)
     ep = events_path(canonical_repo, run_id)
     lp = lock_path(canonical_repo, run_id)
@@ -1032,10 +1133,14 @@ def program_transition(
         # validate against that prospective block rather than the stale
         # pre-transition one.
         has_more_cps = False
+        if program_block is not None and (
+            not isinstance(program_block, dict) or not program_block
+        ):
+            raise ValueError(
+                "typed owner field 'program_block' must be a non-empty dict"
+            )
         prospective_program = (
-            extras.get("program")
-            if isinstance(extras, dict) and isinstance(extras.get("program"), dict)
-            else current.get("program")
+            program_block if program_block is not None else current.get("program")
         )
         prog = prospective_program
         if isinstance(prog, dict):
@@ -1100,8 +1205,16 @@ def program_transition(
             "actor": actor, "reason": reason,
         })
         new["state_history"] = history
-        if extras:
-            new.update(extras)
+        if program_block is not None:
+            new["program"] = program_block
+        if schema_version is not None:
+            new["schema"] = str(schema_version)
+        if identical_finding_streak is not None:
+            new["identical_finding_streak"] = _owner_int(
+                "identical_finding_streak", identical_finding_streak
+            )
+        if last_must_fix_fingerprint is not None:
+            new["last_must_fix_fingerprint"] = str(last_must_fix_fingerprint)
 
         # STATE + binding event are one recoverable write-ahead transaction.
         _commit_state_event_locked(

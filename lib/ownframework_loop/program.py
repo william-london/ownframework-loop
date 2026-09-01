@@ -554,6 +554,8 @@ def advance_after_review_approval(
         if next_top_state == "APPROVED"
         else f"checkpoint {cp_id} approved; advancing to {new_cps[0]}"
     )
+    # Typed owner parameters only; terminal_reason is owned by the transition
+    # owner (set from `reason` on terminal targets, cleared on continuation).
     new_top = state_mod.program_transition(
         canonical_repo,
         run_id,
@@ -561,18 +563,11 @@ def advance_after_review_approval(
         actor=actor,
         reason=transition_reason,
         commit_sha=candidate_sha,
-        extras={
-            "program": new_program,
-            "schema": state_mod.PROGRAM_STATE_SCHEMA_VERSION,
-            "terminal_reason": (
-                "all_checkpoints_approved"
-                if next_top_state == "APPROVED"
-                else ""
-            ),
-            # A fresh checkpoint starts with a clean review-repetition fuse.
-            "identical_finding_streak": 0,
-            "last_must_fix_fingerprint": "",
-        },
+        program_block=new_program,
+        schema_version=state_mod.PROGRAM_STATE_SCHEMA_VERSION,
+        # A fresh checkpoint starts with a clean review-repetition fuse.
+        identical_finding_streak=0,
+        last_must_fix_fingerprint="",
     )
     append_event(
         canonical_repo, run_id,

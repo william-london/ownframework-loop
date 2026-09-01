@@ -58,7 +58,7 @@ try: program.claim_review_pass(canonical_repo=repo,run_id=rid,packet=packet)
 except program.ClaimRefused: pass
 else: raise AssertionError("wrong-lane review claim accepted")
 a=state_mod.load(repo,rid); assert a["program"]["cumulative_counters"]["review_pass_count"]==0
-a["build_pass_count"]=1; state_mod.save(repo,rid,a)
+a["build_pass_count"]=1; seed_state(repo,rid,a)
 try: program.claim_build_pass(canonical_repo=repo,run_id=rid,packet=packet)
 except program.ClaimRefused as e: assert "mirror drift" in str(e)
 else: raise AssertionError("counter mirror drift accepted")
@@ -74,7 +74,7 @@ r=reconcile.reconcile_run(canonical_repo=repo,run_id=rid); assert r["ok"] and no
 print("PASS idle states ignore stale run-root artifacts")
 
 repo=mkrepo(); run,app=simple_run(repo,"run-v046-pass","BUILDING"); rid=app["run_id"]
-s=state_mod.load(repo,rid); s["build_pass_count"]=2; state_mod.save(repo,rid,s)
+s=state_mod.load(repo,rid); s["build_pass_count"]=2; seed_state(repo,rid,s)
 (run/"BUILD_RECEIPT.json").write_text(json.dumps({"packet_sha256":app["packet_sha256"],"builder_pass_number":1,"next_state":"READY_FOR_REVIEW","candidate_sha":app["baseline_sha"]}))
 r=reconcile.reconcile_run(canonical_repo=repo,run_id=rid); assert r["ok"] and state_mod.load(repo,rid)["state"]=="BUILDING"; assert any("skip_stale_build_receipt_pass" in x for x in r["actions"])
 s=state_mod.load(repo,rid); s["state"]="REVIEWING"; s["review_pass_count"]=2; seed_state(repo,rid,s)
@@ -84,7 +84,7 @@ print("PASS in-flight recovery requires exact pass identity")
 
 # 3. Exact-current single-mode half-commits still recover.
 repo=mkrepo(); run,app=simple_run(repo,"run-v046-current","BUILDING"); rid=app["run_id"]
-s=state_mod.load(repo,rid); s["build_pass_count"]=1; state_mod.save(repo,rid,s)
+s=state_mod.load(repo,rid); s["build_pass_count"]=1; seed_state(repo,rid,s)
 (run/"BUILD_RECEIPT.json").write_text(json.dumps({"packet_sha256":app["packet_sha256"],"builder_pass_number":1,"next_state":"READY_FOR_REVIEW","candidate_sha":app["baseline_sha"]}))
 r=reconcile.reconcile_run(canonical_repo=repo,run_id=rid); assert r["ok"] and r["artifact_adopted"]; assert state_mod.load(repo,rid)["state"]=="READY_FOR_REVIEW"
 s=state_mod.load(repo,rid); s["state"]="REVIEWING"; s["review_pass_count"]=1; seed_state(repo,rid,s)

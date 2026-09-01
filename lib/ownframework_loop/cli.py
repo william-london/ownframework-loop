@@ -910,12 +910,13 @@ def cmd_build_transition(args: argparse.Namespace) -> None:
         commit_sha = getattr(args, "commit_sha", None) or (
             (state_mod.load_verified(repo, args.run_id) or {}).get("last_candidate_sha") or ""
         )
+        # no_progress_streak is reset BY the funding owner inside the same
+        # atomic mutation; there is no caller-controlled counter transport.
         result = state_mod.transition_funded_repair(
             repo, args.run_id,
             packet=meta,
             actor=args.actor or "of-builder",
             commit_sha=commit_sha,
-            extras={"no_progress_streak": 0},
             allowed_sources=frozenset({"BUILDING", "REVIEWING"}),
             claimed_reason="foreground repair; repair entitlement claimed atomically",
         )

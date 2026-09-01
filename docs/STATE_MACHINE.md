@@ -77,18 +77,25 @@ Every transition acquires an exclusive `fcntl.flock` on
 Concurrent state mutations are serialized; the loser of the race retries on
 the next supervisor dispatch tick or a deliberate foreground supervisor/dispatch invocation.
 
-Transition identity is owned exclusively by the transition owners
-(`state.transition()`, `state.program_transition()`,
-`state.transition_funded_repair()`). `state.save()` is reserved for
-non-transition field updates and refuses — fail-closed — any payload that
-would change `state` or `run_id` against existing durable state, which also
-closes stale read→save lost-update windows. Crash-atomic read-modify-write of
-non-identity fields is `state.atomic_patch()`: one flock hold, one
-write-ahead `STATE_TXN`, no window between read and commit. Funded repair is
-likewise ONE atomic mutation: the rejection state and the repair entitlement
-commit in a single `STATE_TXN`, and repair-cap exhaustion seals `BLOCKED` in
-that same transaction, so an unfunded claimable `CHANGES_REQUESTED` can never
-exist — not even across a crash.
+STATE ownership is structural, not a blacklist. Every protocol-authoritative
+field (`STATE_OWNER_FIELDS`: identity, FSM counters, review fuses, candidate
+SHA, termination, the frozen `program` object, spec baselines) is owned by a
+named owner, and generic caller `extras` are structurally incapable of
+writing STATE.json at all — diagnostics travel through `append_event()`
+extras instead. Authoritative updates flow exclusively through the transition
+owners (`state.transition()`, `state.program_transition()`,
+`state.transition_funded_repair()`) via their explicit typed owner
+parameters; the funded-repair owner has no generic extras channel at all and
+resets the no-progress fuse inside its atomic mutation. `state.save()` is
+CREATION-ONLY: once durable state exists it refuses unconditionally, which
+structurally eliminates stale read→save lost-update windows.
+`state.atomic_patch()` is the crash-atomic read-modify-write owner for
+explicitly enlisted NON-authoritative fields only (one flock hold, one
+write-ahead `STATE_TXN`, no window between read and commit). Funded repair is
+ONE atomic mutation: the rejection state and the repair entitlement commit in
+a single `STATE_TXN`, and repair-cap exhaustion seals `BLOCKED` in that same
+transaction, so an unfunded claimable `CHANGES_REQUESTED` can never exist —
+not even across a crash.
 
 ## Event log
 

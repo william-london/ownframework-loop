@@ -131,7 +131,13 @@ def main(argv: list[str]) -> int:
             "max_repair_rounds": cum_repair,
         }
     )
-    state_mod.save(repo, run_id, current)
+    # save() is creation-only; fixture materialization of the PROGRAM object
+    # on an existing run uses the TEST-ONLY crash-state seed seam, which
+    # commits through the same flock + STATE_TXN machinery as real owners.
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from state_seed import seed_state
+
+    seed_state(repo, run_id, current, reason="fixture PROGRAM materialization")
     return 0
 
 

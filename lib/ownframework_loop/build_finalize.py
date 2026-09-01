@@ -761,18 +761,17 @@ def finalize_build(
     # afterward; a crash between those writes made replay of the same claimed
     # pass increment no_progress_streak a second time.
     cur = state_mod.load_verified(canonical_repo, run_id)
-    transition_extras: dict[str, Any] = {
-        "no_progress_streak": no_progress_streak,
-        "last_candidate_sha": candidate_sha,
-        "build_pass_count": int(new_build_pass_count),
-    }
+    # Authoritative counter/program updates travel through the typed owner
+    # parameters; `commit_sha` owns last_candidate_sha. Generic extras can
+    # never mutate STATE.json.
+    program_block: dict[str, Any] | None = None
     if program_source_check is not None and state_mod.is_program_state(cur):
-        program_block = cur.get("program") or {}
-        counters = program_block.get("cumulative_counters")
+        candidate_block = cur.get("program") or {}
+        counters = candidate_block.get("cumulative_counters")
         if isinstance(counters, dict):
             counters["files_changed_unique"] = program_source_check["files_changed_unique"]
             counters["diff_lines_total"] = program_source_check["diff_lines_total"]
-            transition_extras["program"] = program_block
+            program_block = candidate_block
 
     if cur.get("state") != next_state and transitions.is_valid(cur.get("state"), next_state):
         state_mod.transition(
@@ -781,7 +780,9 @@ def finalize_build(
             actor=actor,
             reason=f"finalizer next_state={next_state}",
             commit_sha=candidate_sha,
-            extras=transition_extras,
+            no_progress_streak=no_progress_streak,
+            build_pass_count=int(new_build_pass_count),
+            program_block=program_block,
         )
 
     if next_state == "CHANGES_REQUESTED":
