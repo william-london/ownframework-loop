@@ -151,3 +151,10 @@ tests/integration/test_v091_capability_runtime.sh
 
 # v0.9.1 read-only capability inventory/preflight CLI
 tests/integration/test_v091_capability_cli.sh
+
+# v0.9.1 immutable run-level capability identity and drift/race proof
+tests/integration/test_v091_capability_binding.sh
+# v0.9.1 actual trusted-canary privileged commissioning evidence
+tests/integration/test_v091_privileged_commissioning.sh
+# v0.9.1 trusted named runner-profile plane
+tests/integration/test_v091_runner_profiles.sh
