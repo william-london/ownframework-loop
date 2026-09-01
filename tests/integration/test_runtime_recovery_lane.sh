@@ -43,6 +43,7 @@ fake = tmp / "fake-claude"
 sentinel = tmp / "model-sentinel"
 fake.write_text(
     "#!/bin/sh\n"
+    "if [ \"${1:-}\" = \"--version\" ]; then printf '%s\\n' '2.1.252 (Claude Code)'; exit 0; fi\n"
     "printf x >> \"$MODEL_SENTINEL\"\n"
     "printf '%s\\n' '{\"is_error\":false,\"total_cost_usd\":0,\"result\":\"ok\",\"usage\":{\"input_tokens\":0,\"output_tokens\":0}}'\n",
     encoding="utf-8",
@@ -61,6 +62,7 @@ work_order = {
     "worktree": str(worktree),
     "semantic_path": str(sem),
     "network_read_allowlist": [],
+    "attempt_id": "attempt-gate-recovery",
 }
 child_code = r'''
 import json, os, sys
