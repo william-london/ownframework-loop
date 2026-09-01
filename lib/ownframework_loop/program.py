@@ -615,17 +615,20 @@ def increment_cp_counter(
         "repair_round_count": "max_repair_rounds",
     }[counter]
     cap = int(packet_cp["risk_budget"][cap_key])
+    cum_cap = new["cumulative_ceilings"][cap_key]
+    # Check BEFORE incrementing (same contract as _bump_counter_one): a
+    # raised exception must never leave the returned state over-cap, so an
+    # error handler persisting the returned dict cannot breach a ceiling.
     if cp[counter] >= cap:
         raise ProgramStateError(
             f"per-checkpoint cap reached for {counter} on {cp_id}: {cp[counter]}/{cap}"
         )
-    cp[counter] += 1
-    new["cumulative_counters"][counter] += 1
-    cum_cap = new["cumulative_ceilings"][cap_key]
-    if new["cumulative_counters"][counter] > cum_cap:
+    if new["cumulative_counters"][counter] >= cum_cap:
         raise ProgramStateError(
             f"cumulative cap reached for {counter}: {new['cumulative_counters'][counter]}/{cum_cap}"
         )
+    cp[counter] += 1
+    new["cumulative_counters"][counter] += 1
     return new
 
 
@@ -784,6 +787,22 @@ def _unified_claim_pass(
             raise ClaimRefused(
                 f"{pass_kind} claim refused in top-level state {cur_state!r}; "
                 f"allowed={sorted(allowed_new_states[counter])}"
+            )
+        # The unified claim owner is the sole authority for these claim
+        # edges (including CHANGES_REQUESTED -> BUILDING, which the generic
+        # single-mode FSM table intentionally does not contain). Assert the
+        # exact edge legality here so a future source/target drift fails
+        # closed instead of writing an unvalidated state change.
+        _CLAIM_OWNER_EDGES = {
+            ("READY_TO_BUILD", "BUILDING"),
+            ("CHANGES_REQUESTED", "BUILDING"),
+            ("READY_FOR_REVIEW", "REVIEWING"),
+            ("CHANGES_REQUESTED", "CHANGES_REQUESTED"),
+        }
+        if (cur_state, replay_states[counter]) not in _CLAIM_OWNER_EDGES:
+            raise ClaimRefused(
+                f"{pass_kind} claim edge {cur_state!r} -> "
+                f"{replay_states[counter]!r} is not a legal claim-owner edge"
             )
 
         cp_id = select_next_checkpoint(packet, program_state)

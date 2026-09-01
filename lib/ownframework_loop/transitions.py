@@ -10,16 +10,16 @@ v0.3.7 (F-2-01 / F-2-02 / F-2-03): monotonic terminal precedence.
     from READY_FOR_REVIEW when the verdict and candidate SHA are
     consistent with the bound candidate recorded on the run.
 
-The `assert_valid_program` helper now accepts a `bound_candidate_sha`
-keyword. If the candidate SHA on the transition is non-None and
-differs from the run's `last_candidate_sha`, the transition is
-refused — this prevents a stale review verdict from re-approving a
-candidate that has since been overwritten.
+The bound-candidate TOCTOU defence lives in `state.program_transition`,
+which refuses a transition whose supplied candidate SHA differs from the
+run's recorded `last_candidate_sha` before consulting this FSM. This
+prevents a stale review verdict from re-approving a candidate that has
+since been overwritten.
 """
 
 from __future__ import annotations
 
-from typing import FrozenSet, Mapping, Optional
+from typing import FrozenSet, Mapping
 
 
 # The 9 states from the design contract.
@@ -117,7 +117,6 @@ def assert_valid_program(
     to_state: str,
     *,
     has_more_checkpoints: bool,
-    bound_candidate_sha: Optional[str] = None,
 ) -> None:
     """Validate a PROGRAM-mode transition.
 
@@ -131,13 +130,10 @@ def assert_valid_program(
     program is fully terminated (no more checkpoints), the run is
     terminal and the transition is refused.
 
-    v0.3.7 (F-2-03): the bound_candidate_sha keyword, when non-None,
-    pins the transition to that exact candidate SHA. A stale or
-    different candidate SHA will refuse the transition. This guards
-    against TOCTOU between the finalizer computing its verdict and
-    the state transition committing (the lock spans validation but
-    not finalization; the candidate SHA binding is the second
-    layer of defence).
+    Candidate-SHA pinning (v0.3.7 F-2-03) is enforced by the caller,
+    `state.program_transition`, which owns the run's recorded
+    `last_candidate_sha` and refuses a mismatched transition before
+    this FSM is consulted.
     """
     if from_state not in STATES:
         raise InvalidTransitionError(f"unknown source state: {from_state}")

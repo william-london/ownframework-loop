@@ -259,6 +259,21 @@ def reconcile_run(
                             f"adopt_build_receipt:{cur_state}->{next_state}"
                         )
                         cur_state = next_state
+                        if (
+                            next_state == "CHANGES_REQUESTED"
+                            and not state_mod.is_program_state(state_obj)
+                        ):
+                            # Mirror the live build_finalize single-mode
+                            # post-hook: a build-validation retry must land on
+                            # READY_TO_BUILD so the next claim is reachable.
+                            state_mod.transition(
+                                canonical_repo, run_id,
+                                to_state="READY_TO_BUILD",
+                                actor="reconciler",
+                                reason="build validation retry; ready for next build",
+                            )
+                            cur_state = "READY_TO_BUILD"
+                            actions.append("adopt_build_receipt:ready_to_build")
                     except Exception as e:
                         refused.append(f"build_receipt_transition_failed:{e}")
 
@@ -280,7 +295,7 @@ def reconcile_run(
             candidate_sha = verdict.get("candidate_sha_reviewed")
             if next_state in transitions.STATES and next_state != cur_state:
                 try:
-                    latest = state_mod.load(canonical_repo, run_id) or {}
+                    latest = state_mod.load_verified(canonical_repo, run_id) or {}
                     if state_mod.is_program_state(latest):
                         from . import packet as packet_mod, program as prog_mod
                         meta, _ = packet_mod.parse_packet_file(packet_path)
@@ -299,6 +314,25 @@ def reconcile_run(
                             actions.append(
                                 f"adopt_program_review_approval:REVIEWING->{cur_state}"
                             )
+                        elif next_state == "CHANGES_REQUESTED":
+                            # The rejection state and its repair entitlement are
+                            # ONE atomic mutation (same owner as the live
+                            # review_finalize path). A crash between adoption
+                            # and repair funding can no longer expose an
+                            # unfunded CHANGES_REQUESTED; cap exhaustion seals
+                            # BLOCKED inside the same transaction.
+                            repair_transition = state_mod.transition_review_rejection_with_repair(
+                                canonical_repo, run_id,
+                                packet=meta,
+                                actor="reconciler",
+                                commit_sha=str(candidate_sha or ""),
+                            )
+                            cur_state = str(repair_transition["state"])
+                            actions.append(
+                                f"adopt_program_review_changes_requested:atomic_repair_"
+                                f"{'claimed' if repair_transition['repair_claimed'] else 'refused'}"
+                                f":REVIEWING->{cur_state}"
+                            )
                         else:
                             state_mod.program_transition(
                                 canonical_repo, run_id,
@@ -308,28 +342,43 @@ def reconcile_run(
                                 commit_sha=candidate_sha,
                             )
                             cur_state = next_state
-                            if next_state == "CHANGES_REQUESTED":
-                                try:
-                                    prog_mod.claim_repair_round(
-                                        canonical_repo=canonical_repo,
-                                        run_id=run_id,
-                                        packet=meta,
-                                        source_evidence_sha=str(candidate_sha or "") or None,
-                                    )
-                                    actions.append(
-                                        "adopt_program_review_changes_requested:repair_claimed"
-                                    )
-                                except prog_mod.ClaimRefused as e:
-                                    cur_state = (state_mod.load(canonical_repo, run_id) or {}).get("state")
-                                    actions.append(
-                                        f"adopt_program_review_changes_requested:repair_refused:{e}"
-                                    )
-                            else:
-                                actions.append(
-                                    f"adopt_program_review_verdict:REVIEWING->{next_state}"
-                                )
+                            actions.append(
+                                f"adopt_program_review_verdict:REVIEWING->{next_state}"
+                            )
                     else:
-                        if not transitions.is_valid(cur_state, next_state):
+                        if next_state == "CHANGES_REQUESTED":
+                            # Single-mode adoption must mirror the live
+                            # review_finalize path: fund the repair entitlement
+                            # atomically with the rejection, then return the run
+                            # to READY_TO_BUILD so the next build claim is
+                            # reachable (the generic FSM has no
+                            # CHANGES_REQUESTED -> BUILDING edge).
+                            from . import packet as packet_mod
+                            meta, _ = packet_mod.parse_packet_file(packet_path)
+                            repair_transition = state_mod.transition_review_rejection_with_repair(
+                                canonical_repo, run_id,
+                                packet=meta,
+                                actor="reconciler",
+                                commit_sha=str(candidate_sha or ""),
+                            )
+                            cur_state = str(repair_transition["state"])
+                            actions.append(
+                                f"adopt_review_changes_requested:atomic_repair_"
+                                f"{'claimed' if repair_transition['repair_claimed'] else 'refused'}"
+                                f":REVIEWING->{cur_state}"
+                            )
+                            if cur_state == "CHANGES_REQUESTED":
+                                state_mod.transition(
+                                    canonical_repo, run_id,
+                                    to_state="READY_TO_BUILD",
+                                    actor="reconciler",
+                                    reason="repair_round claimed; ready for next build",
+                                )
+                                cur_state = "READY_TO_BUILD"
+                                actions.append(
+                                    "adopt_review_changes_requested:ready_to_build"
+                                )
+                        elif not transitions.is_valid(cur_state, next_state):
                             actions.append(
                                 f"skip_stale_review_verdict:{cur_state}!->{next_state}"
                             )
@@ -359,6 +408,28 @@ def reconcile_run(
             ok, reason = prog_mod.verify_frozen_graph(meta, state_obj["program"])
             if not ok:
                 refused.append(f"program_graph_drift:{reason}")
+
+    # --- Single-mode CHANGES_REQUESTED is never a resting state.
+    # Every deterministic owner (build finalize validation retry, review
+    # rejection, foreground `build transition`) applies a post-hook back to
+    # READY_TO_BUILD because the generic FSM has no CHANGES_REQUESTED ->
+    # BUILDING edge. If a crash landed the run here between the transition
+    # and its post-hook, complete that post-hook so the next build claim
+    # remains reachable. Program mode legitimately rests in CHANGES_REQUESTED
+    # (the unified claim owner claims the next build directly from it) and is
+    # excluded.
+    if cur_state == "CHANGES_REQUESTED" and not state_mod.is_program_state(state_obj):
+        try:
+            state_mod.transition(
+                canonical_repo, run_id,
+                to_state="READY_TO_BUILD",
+                actor="reconciler",
+                reason="crash_reconcile:complete_single_mode_changes_requested_post_hook",
+            )
+            actions.append("complete_single_mode_changes_requested_post_hook")
+            cur_state = "READY_TO_BUILD"
+        except Exception as e:
+            refused.append(f"single_mode_post_hook_completion_failed:{e}")
 
     return {
         "ok": not refused,

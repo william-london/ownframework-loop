@@ -947,6 +947,25 @@ def cmd_build_transition(args: argparse.Namespace) -> None:
             actor=args.actor or "of-builder",
             extras={"repair_round": new_round},
         )
+        # Single-mode post-hook (mirrors review_finalize): the generic FSM has
+        # no CHANGES_REQUESTED -> BUILDING edge, so the run must return to
+        # READY_TO_BUILD for the next build claim to be reachable. Tolerate
+        # only the idempotent race (already buildable); any other FSM failure
+        # is a real desync and must surface.
+        if args.to == "CHANGES_REQUESTED":
+            now = state_mod.load(repo, args.run_id)
+            if (now or {}).get("state") == "CHANGES_REQUESTED":
+                try:
+                    state_mod.transition(
+                        repo, args.run_id,
+                        to_state="READY_TO_BUILD",
+                        actor=args.actor or "operator",
+                        reason="repair_round claimed; ready for next build",
+                    )
+                except transitions.InvalidTransitionError:
+                    after = state_mod.load(repo, args.run_id)
+                    if (after or {}).get("state") not in ("READY_TO_BUILD", "CHANGES_REQUESTED"):
+                        raise
     _emit({"ok": True, "run_id": args.run_id, "state": args.to})
 
 

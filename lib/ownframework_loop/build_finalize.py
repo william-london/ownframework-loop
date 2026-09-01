@@ -784,4 +784,29 @@ def finalize_build(
             extras=transition_extras,
         )
 
+    if next_state == "CHANGES_REQUESTED":
+        # Single-mode post-hook (mirrors review_finalize): the generic FSM has
+        # no CHANGES_REQUESTED -> BUILDING edge, so a run left resting in
+        # CHANGES_REQUESTED could never be claimed again. Move single-mode
+        # runs back to READY_TO_BUILD so the next build pass is reachable.
+        # BUILD_VALIDATION_RETRY intentionally does not charge repair_round.
+        # PROGRAM runs keep CHANGES_REQUESTED because the unified program
+        # claim owner atomically claims the next build from that state.
+        cur_after = state_mod.load_verified(canonical_repo, run_id)
+        if (
+            not state_mod.is_program_state(cur_after)
+            and cur_after.get("state") == "CHANGES_REQUESTED"
+        ):
+            try:
+                state_mod.transition(
+                    canonical_repo, run_id,
+                    to_state="READY_TO_BUILD",
+                    actor="build_finalize",
+                    reason="build validation retry; ready for next build",
+                )
+            except transitions.InvalidTransitionError:
+                now = state_mod.load_verified(canonical_repo, run_id)
+                if (now or {}).get("state") != "READY_TO_BUILD":
+                    raise
+
     return receipt

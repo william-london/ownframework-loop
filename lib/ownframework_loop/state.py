@@ -84,6 +84,29 @@ _EVENT_AUTHORITATIVE_FIELDS = frozenset({
 _EVENT_CALLER_RESERVED_FIELDS = _EVENT_AUTHORITATIVE_FIELDS | {"state_txn_id"}
 
 
+# Protocol-authoritative state fields. Caller-supplied transition extras are
+# diagnostic/counter transport and may NEVER replace fields that the FSM,
+# run identity, or the integrity chain own. Allowing extras to override
+# `state` would let a caller land any to_state (e.g. APPROVED) regardless of
+# the validated transition; overriding run_id/transitions_count/state_history
+# would desync the event-chain SHA binding on the next verified read.
+_STATE_RESERVED_EXTRA_KEYS = frozenset({
+    "state", "run_id", "transitions_count", "state_history",
+    "updated_at", "last_actor",
+})
+
+
+def _validate_state_extras(extras: dict[str, Any] | None) -> None:
+    if not extras:
+        return
+    overlap = _STATE_RESERVED_EXTRA_KEYS.intersection(extras)
+    if overlap:
+        raise ValueError(
+            "transition extras may not override protocol-authoritative "
+            "state fields: " + ", ".join(sorted(overlap))
+        )
+
+
 def _validate_event_extras(
     extras: dict[str, Any] | None,
     *,
@@ -596,6 +619,7 @@ def transition(
     its recorded SHA. If the file was edited externally, we raise
     `integrity.TamperingDetected`.
     """
+    _validate_state_extras(extras)
     sp = state_path(canonical_repo, run_id)
     ep = events_path(canonical_repo, run_id)
 
@@ -659,6 +683,7 @@ def transition_review_rejection_with_repair(
     mutation seals BLOCKED instead, so no crash boundary can expose an unfunded
     builder state.
     """
+    _validate_state_extras(extras)
     sp = state_path(canonical_repo, run_id)
     with flock_exclusive(lock_path(canonical_repo, run_id)):
         _verify_mutation_integrity_locked(canonical_repo, run_id)
@@ -888,6 +913,7 @@ def program_transition(
 
     Returns the new state document.
     """
+    _validate_state_extras(extras)
     sp = state_path(canonical_repo, run_id)
     ep = events_path(canonical_repo, run_id)
     lp = lock_path(canonical_repo, run_id)
@@ -943,9 +969,7 @@ def program_transition(
         # candidate (`last_candidate_sha`), refuse the transition. This
         # prevents a stale or overwritten candidate from being re-approved
         # across the TOCTOU window between review verdict commit and the
-        # state transition. The transitions.assert_valid_program keyword
-        # is also accepted (see transitions.py:135) for callers that want
-        # to plumb the bound explicitly.
+        # state transition.
         if commit_sha and current.get("last_candidate_sha") and commit_sha != current["last_candidate_sha"]:
             raise transitions.InvalidTransitionError(
                 f"bound_candidate_sha mismatch: provided={commit_sha[:12]} "
@@ -954,7 +978,6 @@ def program_transition(
         transitions.assert_valid_program(
             from_state, to_state,
             has_more_checkpoints=has_more_cps,
-            bound_candidate_sha=commit_sha or None,
         )
 
         now = utc_now_iso()
@@ -967,6 +990,11 @@ def program_transition(
             new["last_candidate_sha"] = commit_sha
         if to_state in ("APPROVED", "BLOCKED", "STOPPED"):
             new["terminal_reason"] = reason
+        elif from_state in ("APPROVED", "BLOCKED", "STOPPED"):
+            # Leaving a terminal state through a PROGRAM continuation
+            # invalidates the prior termination reason; a stale value would
+            # make a continuing run read as still terminated.
+            new["terminal_reason"] = ""
         history = list(current.get("state_history", []))
         history.append({
             "from": from_state, "to": to_state, "at": now,

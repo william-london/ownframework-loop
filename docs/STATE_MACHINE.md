@@ -29,6 +29,7 @@ READY_TO_BUILD    -> BLOCKED
 READY_TO_BUILD    -> STOPPED
 
 BUILDING          -> READY_FOR_REVIEW
+BUILDING          -> CHANGES_REQUESTED   # deterministic build-validation retry
 BUILDING          -> BLOCKED
 BUILDING          -> STOPPED
 
@@ -46,6 +47,16 @@ CHANGES_REQUESTED -> READY_TO_BUILD
 CHANGES_REQUESTED -> BLOCKED
 CHANGES_REQUESTED -> STOPPED
 ```
+
+There is intentionally no generic `CHANGES_REQUESTED -> BUILDING` edge. In
+single-run mode the deterministic finalizers apply a post-hook that returns
+the run to `READY_TO_BUILD` inside the same finalize sequence (with the
+reviewer-funded repair entitlement claimed atomically by
+`transition_review_rejection_with_repair`), so the next build claim always
+starts from a generic-FSM state. In PROGRAM mode the unified claim owner
+performs the claim edge (including `CHANGES_REQUESTED -> BUILDING`) atomically
+under the run lock with explicit claim-edge legality, because the program
+claim is itself serialized transition authority.
 
 `APPROVED` and `BLOCKED` are terminal in single-run mode. PROGRAM continuation is a narrow extension: when unfinished checkpoint work remains, the host run may continue to `READY_TO_BUILD` through `state.program_transition()`. `STOPPED` is always absorbing. Once a PROGRAM has no claimable checkpoint, terminal host states have no outbound edge.
 
