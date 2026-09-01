@@ -48,6 +48,12 @@ subprocess.run(["git", "init", "-q", "-b", "master", str(repo)], check=True)
 
 captured = {}
 real_popen = supervisor.subprocess.Popen
+# This fixture mocks provider process creation and is validating the sealed
+# worker CLI/sandbox surface, not host-runtime fingerprint semantics. Pin a
+# deterministic runtime identity here; v0.9.1 capability-binding tests
+# independently exercise real builder/reviewer projection equality and drift.
+real_runtime_fingerprint = supervisor.capabilities_mod.semantic_runtime_fingerprint
+supervisor.capabilities_mod.semantic_runtime_fingerprint = lambda: "fixture-runtime-fingerprint"
 class FakePopen:
     def __init__(self, cmd, **kw):
         if (
@@ -328,6 +334,8 @@ try:
         raise AssertionError("authority-bearing OFLOOP_CLAUDE_EXTRA_ARGS was accepted")
 finally:
     os.environ.pop("OFLOOP_CLAUDE_EXTRA_ARGS", None)
+
+supervisor.capabilities_mod.semantic_runtime_fingerprint = real_runtime_fingerprint
 
 # Readiness proves the Claude-native --restricted shared-machine baseline.
 # Old or unparseable versions fail closed before a semantic attempt.
