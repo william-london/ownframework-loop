@@ -689,7 +689,7 @@ def resolve_capabilities(
     }
 
 
-BROWSER_RUNTIME_PROOF_SCHEMA = "ownframework-loop-browser-runtime-proof/v3"
+BROWSER_RUNTIME_PROOF_SCHEMA = "ownframework-loop-browser-runtime-proof/v4"
 
 
 def browser_runtime_proof_path(
