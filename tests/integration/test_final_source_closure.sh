@@ -359,4 +359,61 @@ print("7 effective model truth ok")
 PY
 pass "effective model is provable-only; full provider usage preserved (never inferred)"
 
+# ---------- 8. browser proof is bound to exact Playwright client bytes ----------
+python3 - <<'PY'
+import os, sys, tempfile
+from pathlib import Path
+sys.path.insert(0, os.environ.get("OFLOOP_LIB"))
+from ownframework_loop import capabilities
+
+tmp = Path(tempfile.mkdtemp(prefix="ofl_browser_client_"))
+asset = tmp / "asset"
+asset.mkdir()
+(asset / "chromium.bin").write_bytes(b"browser-bytes")
+evidence = tmp / "evidence"
+
+client_a = {
+    "package_root": "/commissioned/playwright",
+    "package_tree_sha256": "a" * 64,
+    "distribution_version": "9.9.9",
+}
+client_b = {
+    **client_a,
+    "package_tree_sha256": "b" * 64,
+}
+original = capabilities.playwright_client_identity
+try:
+    capabilities.playwright_client_identity = lambda: dict(client_a)
+    merkle = capabilities.browser_asset_merkle_sha256(asset)
+    capabilities.write_browser_runtime_proof(
+        asset_root=str(asset),
+        asset_merkle_sha256=merkle,
+        playwright_client=client_a,
+        playwright_version="9.9.9",
+        browser_version="123",
+        evidence_dir=evidence,
+    )
+    ok, reason, identity = capabilities._browser_runtime_proof_status(
+        "browser.playwright.chromium",
+        evidence_dir=evidence,
+        expected_asset_root=asset,
+    )
+    assert ok, reason
+    assert identity["playwright_client_identity"] == client_a
+
+    # Same browser assets/version strings, different Playwright implementation:
+    # the old proof MUST stale rather than silently certify the new client.
+    capabilities.playwright_client_identity = lambda: dict(client_b)
+    ok, reason, _ = capabilities._browser_runtime_proof_status(
+        "browser.playwright.chromium",
+        evidence_dir=evidence,
+        expected_asset_root=asset,
+    )
+    assert not ok and "client drift" in reason.lower(), reason
+finally:
+    capabilities.playwright_client_identity = original
+print("8 Playwright client drift stales browser proof")
+PY
+pass "browser proof binds exact Playwright client implementation, not version strings alone"
+
 echo "OF_LOOP_FINAL_SOURCE_CLOSURE=PASS"
