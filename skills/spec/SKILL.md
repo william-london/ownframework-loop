@@ -27,12 +27,22 @@ This skill is a host adapter over the deterministic ofloop core.
 3. Inspect only enough repository context to draft an accurate bounded packet.
 4. Use ofloop spec new <repo> "<mission>" to create the run.
 5. Draft WORK_PACKET.md using the repository schema and packet conventions.
-   Inspect the project's declared package managers/toolchain and populate
-   `network_read_allowlist` only with exact dependency/read domains the
-   unattended BUILD/REVIEW may legitimately need after sealing (for example
-   `registry.npmjs.org`, `pypi.org`, `files.pythonhosted.org`). Omit or
-   leave empty when dependencies are already provisioned. Never add a broad
-   internet wildcard, scheme, port, path, publish endpoint, or unrelated host.
+   Declare portable `capabilities` for host/tool needs instead of embedding
+   machine paths or manually reconstructing tool-specific network topology
+   (for example `toolchain.python`, `package.uv`,
+   `browser.playwright.chromium`). Use `runner_profile` only as a trusted
+   profile NAME when the mission needs an operator-commissioned model/effort
+   policy; packets never carry raw Claude flags. Use
+   `network_read_allowlist` only for packet-specific extra read hosts not
+   already supplied by a capability contract. Never add a broad wildcard,
+   scheme, port, path, publish endpoint, daemon socket, or unrelated host.
+   Before enqueue, run `ofloop capabilities probe` to inspect the host and
+   `ofloop capabilities preflight <repo> <capability>...` for the exact
+   requested set. If a requested ordinary capability is unavailable, provision
+   or commission it on the host or revise the packet before execution; do not
+   widen HOME/PATH or fall back to unsandboxed execution. Privileged
+   `container.docker` / `local.http-service` additionally require the
+   operator-owned canary commissioning flow.
 6. For PROGRAM packets with checkpoint-specific outcomes, keep the complete
    mission acceptance contract at top level and assign it deterministically
    with each checkpoint's `acceptance_criterion_ids`. If any checkpoint uses
@@ -93,10 +103,15 @@ Before a v3 PROGRAM is considered ready:
 
 - use acceptance_criterion_ids on checkpoints; never emit checkpoint
   acceptance_criteria;
-- derive the smallest `network_read_allowlist` needed by the declared
-  toolchain. This is frozen SPEC authority and maps to the selected runner's
-  strict network-read boundary; the current Claude runner uses its native
-  sandbox allowlist. The default is no outbound network;
+- declare the smallest portable `capabilities` set needed by the mission and
+  preflight it before enqueue. Effective network read authority is the frozen
+  union of packet-specific `network_read_allowlist` hosts and exact
+  capability-derived hosts. An empty packet list therefore means no EXTRA
+  packet domains, not necessarily zero domains when a declared package/browser
+  capability requires narrow download endpoints;
+- choose `runner_profile` only from trusted profiles exposed by
+  `ofloop capabilities profile <name>`; profile identity is run-bound and may
+  select semantic model/effort only, never sandbox/tool/MCP/session authority;
 - validate packet budgets against executable ceilings before first execution;
 - treat top-level build/review/repair values as cumulative PROGRAM envelopes;
 - unless intentionally throttling the whole PROGRAM, fund those global
@@ -122,4 +137,7 @@ Unattended execution is bounded by meaningful-progress protections (pass and
 repair caps, no-progress streak, identical-finding repetition fuse, failure-
 class retry policy), not by token or cost conservation. Operators who want a
 hard spend line may pass `--max-cost-usd` / `--max-total-tokens` /
-`--max-wall-seconds` explicitly at enqueue time.
+`--max-wall-seconds` explicitly at enqueue time. When a positive aggregate
+cost ceiling is funded, the supervisor also narrows each Claude print-mode
+pass with the exact remaining durable run budget; the Loop ledger remains the
+canonical aggregate accounting source.

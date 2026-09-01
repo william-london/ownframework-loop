@@ -16,3 +16,27 @@ worktree, state, candidate, or promotion authority.
 
 Claude skills may use Claude-specific metadata because they live in the Claude
 adapter surface. Portable skills must not assume Claude plugin commands.
+
+
+## Capability-aware specification
+
+Spec adapters should expose portable capability names rather than host paths.
+The normal operator discovery sequence is:
+
+```text
+ofloop capabilities probe
+ofloop capabilities preflight <repo> <capability>...
+ofloop capabilities profile <name>
+```
+
+Packets request `capabilities` and, optionally, a trusted `runner_profile`
+name. Packet `network_read_allowlist` is only the packet-specific portion of
+read authority; capability contracts may add their exact required read hosts.
+The effective union and runner-profile identity are sealed into the immutable
+run-level capability binding before provider execution.
+
+If preflight fails, the adapter must report the unavailable capability and stop
+or revise the unstarted specification. It must never compensate by reopening
+HOME, injecting host paths, weakening the sandbox, or inventing Docker/socket
+authority. Privileged capabilities are available only after explicit
+operator-owned canary commissioning.
