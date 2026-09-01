@@ -27,6 +27,7 @@ import re
 import shutil
 import stat
 import subprocess
+import uuid
 from typing import Any
 
 SCHEMA = "ownframework-loop-capability-resolution/v1"
@@ -707,6 +708,35 @@ def verify_resolution_integrity(resolution: dict[str, Any]) -> None:
                 raise CapabilityResolutionError("commissioning evidence changed after resolution")
 
 
+def _publish_immutable_text(path: Path, encoded: str) -> bool:
+    """Publish an immutable complete file without a visible partial-write window."""
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+    fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(encoded)
+            fh.flush()
+            os.fsync(fh.fileno())
+        try:
+            os.link(tmp, path)
+        except FileExistsError:
+            return False
+        try:
+            dir_fd = os.open(str(path.parent), os.O_RDONLY)
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
+        except OSError:
+            pass
+        return True
+    finally:
+        try:
+            tmp.unlink()
+        except FileNotFoundError:
+            pass
+
+
 def write_resolution_receipt(
     canonical_repo: Path,
     run_id: str,
@@ -744,16 +774,10 @@ def write_resolution_receipt(
         if path.is_symlink() or path.read_text(encoding="utf-8") != encoded:
             raise CapabilityResolutionError("capability receipt collision/overwrite refused")
         return path
-    try:
-        fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    except FileExistsError:
-        if path.is_symlink() or path.read_text(encoding="utf-8") != encoded:
-            raise CapabilityResolutionError("capability receipt race/collision refused")
+    if _publish_immutable_text(path, encoded):
         return path
-    with os.fdopen(fd, "w", encoding="utf-8") as fh:
-        fh.write(encoded)
-        fh.flush()
-        os.fsync(fh.fileno())
+    if path.is_symlink() or path.read_text(encoding="utf-8") != encoded:
+        raise CapabilityResolutionError("capability receipt race/collision refused")
     return path
 
 

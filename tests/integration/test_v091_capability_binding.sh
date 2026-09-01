@@ -93,5 +93,21 @@ with tempfile.TemporaryDirectory() as td:
     for t in threads: t.join()
     assert not errors and len(results)==8 and len(set(results))==1
 
+    # Same-attempt receipt publication is also complete-before-visible and
+    # idempotent under a replay race.
+    receipt_results=[]; receipt_errors=[]
+    def receipt_worker():
+        try:
+            receipt_results.append(str(capabilities.write_resolution_receipt(
+                repo, "r1", "builder", "attempt-receipt-race", restored,
+                run_binding=bound, runner_profile=profile,
+            )))
+        except Exception as exc:
+            receipt_errors.append(exc)
+    receipt_threads=[threading.Thread(target=receipt_worker) for _ in range(8)]
+    for t in receipt_threads: t.start()
+    for t in receipt_threads: t.join()
+    assert not receipt_errors and len(receipt_results)==8 and len(set(receipt_results))==1
+
 print("OF_LOOP_V091_CAPABILITY_BINDING=PASS")
 PY

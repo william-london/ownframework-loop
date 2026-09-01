@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import stat
+import uuid
 from typing import Any
 
 SCHEMA = "ownframework-loop-capability-binding/v1"
@@ -73,6 +74,35 @@ def _read(path: Path) -> dict[str, Any]:
     return doc
 
 
+def _publish_complete_no_replace(path: Path, encoded: str) -> bool:
+    """Publish complete bytes atomically without ever exposing a partial path."""
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+    fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(encoded)
+            fh.flush()
+            os.fsync(fh.fileno())
+        try:
+            os.link(tmp, path)
+        except FileExistsError:
+            return False
+        try:
+            dir_fd = os.open(str(path.parent), os.O_RDONLY)
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
+        except OSError:
+            pass
+        return True
+    finally:
+        try:
+            tmp.unlink()
+        except FileNotFoundError:
+            pass
+
+
 def ensure_run_binding(
     canonical_repo: Path,
     run_id: str,
@@ -96,23 +126,12 @@ def ensure_run_binding(
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     payload = {"schema": SCHEMA, "run_id": run_id, "projection": projection, "binding_sha256": digest}
     encoded = json.dumps(payload, indent=2, sort_keys=True) + "\n"
-    try:
-        fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    except FileExistsError:
-        existing = _read(path)
-        if existing.get("binding_sha256") != digest or existing.get("projection") != projection:
-            raise CapabilityBindingError("concurrent first-attempt capability binding conflict")
-        return existing
-    try:
-        with os.fdopen(fd, "w") as fh:
-            fh.write(encoded)
-            fh.flush()
-            os.fsync(fh.fileno())
-    except BaseException:
-        try: path.unlink()
-        except OSError: pass
-        raise
-    return payload
+    if _publish_complete_no_replace(path, encoded):
+        return payload
+    existing = _read(path)
+    if existing.get("binding_sha256") != digest or existing.get("projection") != projection:
+        raise CapabilityBindingError("concurrent first-attempt capability binding conflict")
+    return existing
 
 
 def verify_run_binding(
