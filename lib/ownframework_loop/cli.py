@@ -39,8 +39,8 @@ from . import (
     locking, packet as packet_mod, program as program_mod, receipts,
     scheduling, state as state_mod, transitions, util, verdicts, worktrees,
     integrity, limits as limits_mod, approval, build_finalize, review_finalize,
-    branch_resolver, capabilities as capabilities_mod, execution_start,
-    dispatch as dispatch_mod, runtime_env, supervisor as supervisor_mod,
+    branch_resolver, capabilities as capabilities_mod, commissioning as commissioning_mod, execution_start,
+    dispatch as dispatch_mod, runner_profiles as runner_profiles_mod, runtime_env, supervisor as supervisor_mod,
 )
 
 
@@ -1680,6 +1680,31 @@ def _build_parser() -> argparse.ArgumentParser:
         out["ok"] = out.get("manifest_error") is None
         _emit(out, exit_code=0 if out["ok"] else 2)
 
+    def cmd_capabilities_profile(args: argparse.Namespace) -> None:
+        try:
+            out = runner_profiles_mod.resolve_profile(
+                args.name,
+                provider=args.provider,
+                manifest_path=Path(args.manifest).expanduser() if args.manifest else None,
+            )
+        except runner_profiles_mod.RunnerProfileError as exc:
+            _emit({"ok": False, "error": str(exc)}, exit_code=2)
+            return
+        out["ok"] = True
+        _emit(out)
+
+    def cmd_capabilities_commission(args: argparse.Namespace) -> None:
+        try:
+            out = commissioning_mod.commission_capability(
+                args.capability,
+                manifest_path=Path(args.manifest).expanduser() if args.manifest else None,
+            )
+        except commissioning_mod.CommissioningError as exc:
+            _emit({"ok": False, "error": str(exc)}, exit_code=2)
+            return
+        out["ok"] = True
+        _emit(out)
+
     def cmd_capabilities_preflight(args: argparse.Namespace) -> None:
         repo = _repo_path(args.repo)
         manifest = Path(args.manifest).expanduser() if args.manifest else None
@@ -1703,6 +1728,14 @@ def _build_parser() -> argparse.ArgumentParser:
                 "error": str(exc),
             }, exit_code=2)
             return
+        try:
+            profile = runner_profiles_mod.resolve_profile(
+                args.runner_profile, provider="claude-code"
+            )
+        except runner_profiles_mod.RunnerProfileError as exc:
+            _emit({"ok": False, "error": str(exc)}, exit_code=2)
+            return
+        out["runner_profile"] = runner_profiles_mod.public_summary(profile)
         out["ok"] = True
         _emit(out)
 
@@ -1722,6 +1755,23 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     cap_probe.add_argument("--manifest", default=None)
     cap_probe.set_defaults(func=cmd_capabilities_probe)
+    cap_profile = cap_sub.add_parser(
+        "profile",
+        help="resolve one trusted named runner profile read-only",
+    )
+    cap_profile.add_argument("name")
+    cap_profile.add_argument("--provider", default="claude-code")
+    cap_profile.add_argument("--manifest", default=None)
+    cap_profile.set_defaults(func=cmd_capabilities_profile)
+    cap_commission = cap_sub.add_parser(
+        "commission",
+        help="run and receipt a trusted privileged-capability canary",
+    )
+    cap_commission.add_argument(
+        "capability", choices=["container.docker", "local.http-service"]
+    )
+    cap_commission.add_argument("--manifest", default=None)
+    cap_commission.set_defaults(func=cmd_capabilities_commission)
     cap_pre = cap_sub.add_parser(
         "preflight",
         help="resolve an exact capability set for a repository without a model call",
@@ -1731,6 +1781,7 @@ def _build_parser() -> argparse.ArgumentParser:
     cap_pre.add_argument("--role", choices=["builder", "reviewer"], default="builder")
     cap_pre.add_argument("--network-host", action="append", default=[])
     cap_pre.add_argument("--manifest", default=None)
+    cap_pre.add_argument("--runner-profile", default="default")
     cap_pre.set_defaults(func=cmd_capabilities_preflight)
 
     # supervisor — durable machine execution clock. Protocol truth remains in core artifacts.
