@@ -45,6 +45,10 @@ with tempfile.TemporaryDirectory() as td:
     second = runtime_env.repo_tool_cache_path(repo)
     assert first == second
     assert cache == first
+    runtime_path = runtime_env.runtime_cache_path(repo, "r1", "builder")
+    runtime_dir = runtime_env.runtime_cache_dir(repo, "r1", "builder")
+    assert runtime_path == runtime_dir
+    assert str(runtime_path) == str(runtime_path.resolve(strict=False))
 
     resolved = capabilities.resolve_capabilities(
         ["toolchain.synthetic"],

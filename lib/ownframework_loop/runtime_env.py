@@ -61,7 +61,10 @@ def _ensure_private_dir(path: Path) -> Path:
 def default_runtime_cache_root() -> Path:
     root = os.environ.get("XDG_STATE_HOME", "").strip()
     base = Path(root).expanduser() if root else Path.home() / ".local" / "state"
-    return base / "ownframework-loop" / "runtime-cache"
+    # Normalize macOS alias roots such as /var -> /private/var at the pure
+    # derivation boundary so path identity never depends on whether a caller
+    # has already created/resolved the directory.
+    return (base / "ownframework-loop" / "runtime-cache").resolve(strict=False)
 
 
 def default_repo_tool_cache_root() -> Path:
@@ -75,11 +78,11 @@ def default_repo_tool_cache_root() -> Path:
     explicit = os.environ.get("OFLOOP_TOOL_CACHE_ROOT", "").strip()
     if explicit:
         return Path(explicit).expanduser().resolve(strict=False)
-    return default_runtime_cache_root().parent / "tool-cache"
+    return (default_runtime_cache_root().parent / "tool-cache").resolve(strict=False)
 
 
 def repo_tool_cache_path(canonical_repo: Path) -> Path:
-    return default_repo_tool_cache_root() / _repo_key(canonical_repo)
+    return (default_repo_tool_cache_root() / _repo_key(canonical_repo)).resolve(strict=False)
 
 
 def repo_tool_cache_dir(canonical_repo: Path) -> Path:
@@ -104,7 +107,12 @@ def runtime_cache_path(
 ) -> Path:
     """Pure path derivation for one run/role cache (does not create it)."""
     safe_role = "builder" if role not in ("builder", "reviewer", "validation") else role
-    return default_runtime_cache_root() / _repo_key(canonical_repo) / _slug(run_id) / safe_role
+    return (
+        default_runtime_cache_root()
+        / _repo_key(canonical_repo)
+        / _slug(run_id)
+        / safe_role
+    ).resolve(strict=False)
 
 
 def runtime_cache_dir(
