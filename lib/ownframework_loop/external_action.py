@@ -92,7 +92,7 @@ _BLOCKED_BASH_PATTERNS: list[tuple[re.Pattern[str], str, str]] = [
     (re.compile(r"\bgh\s+(secret|variable)\s+(set|delete)\b"), "OF_LOOP_EXTERNAL_PROD_MUTATION", "gh secret/variable mutation"),
     (re.compile(r"\bgh\s+api\b[^|;&]*(?:--method\s+|--method=)(POST|PUT|PATCH|DELETE)\b", re.IGNORECASE), "OF_LOOP_EXTERNAL_PR", "gh api mutation"),
     (re.compile(r"\b(?:ssh|scp|sftp)\b"), "OF_LOOP_EXTERNAL_REMOTE", "remote shell/file-transfer command"),
-    (re.compile(r"\brsync\b[^|;&]*(?:[^\s:@]+@[^\s:]+:|[^\s:]+:[^\s])"), "OF_LOOP_EXTERNAL_REMOTE", "remote rsync"),
+    (re.compile(r"\brsync\b[^|;&]*(?:rsync://|[^\s:@]+@[^\s:]+:|[^\s:]+:[^\s])"), "OF_LOOP_EXTERNAL_REMOTE", "remote rsync"),
     # Registry publish / image push (external distribution effects). These are
     # refused here as well as in guards.FORBIDDEN_PATTERNS (defense in depth).
     (re.compile(r"\bnpm\s+publish\b"), "OF_LOOP_EXTERNAL_PUBLISH", "npm publish"),

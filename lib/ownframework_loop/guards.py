@@ -308,6 +308,28 @@ def _builder_git_topology_mutation(seg: str) -> str | None:
         if args[0] in {"--list", "-l"}:
             return None
         return "builder may not create/delete/move shared Git tags"
+    if sub == "submodule":
+        # `git submodule status` is a read-only inspection; add/update/init/
+        # deinit/sync/absorbgitdirs mutate shared repository topology and can
+        # inject externally-fetched content into the candidate tree.
+        if args and args[0] == "status":
+            return None
+        return "builder may not mutate git submodules; submodule topology is core-owned"
+    if sub == "replace":
+        # Replacement refs rewrite the shared object store without moving any
+        # branch tip, so the candidate diff cannot show the mutation. Only the
+        # listing form is read-only.
+        if args and args[0] in {"--list", "-l"}:
+            return None
+        return "builder may not create/delete git replace refs in the shared object store"
+    if sub == "reflog":
+        # Bare `git reflog` / `git reflog show` are reads; expire/delete prune
+        # shared history evidence.
+        if not args or args[0] in {"show", "--all"}:
+            return None
+        if args[0] in {"expire", "delete"}:
+            return "builder may not prune shared git reflog history"
+        return None
     return None
 
 def classify_bash_command(
@@ -574,7 +596,13 @@ def _container_invocations(command: str) -> list[dict[str, Any]]:
     common wrapper/path/env/nested-shell forms that could otherwise route around
     the broker. Mentions in echo/grep/docs are not classified as execution.
     """
-    clients = {"docker", "docker-compose", "podman", "nerdctl", "ctr", "crictl"}
+    # VM-provisioning wrappers (colima/limactl) and Finch are included: they
+    # can stand up or drive a container daemon that bypasses the commissioned
+    # broker, so they are refused as parallel container-control clients.
+    clients = {
+        "docker", "docker-compose", "podman", "nerdctl", "ctr", "crictl",
+        "colima", "finch", "limactl",
+    }
     wrappers = {"command", "builtin", "exec"}
     shells = {"sh", "bash", "zsh", "dash", "ksh"}
     found: list[dict[str, Any]] = []
@@ -670,12 +698,35 @@ def _first_executable_word(segment: str) -> str | None:
 # `echo x > file` matches the `echo` allowlist entry, so write redirects must
 # be refused explicitly. Permitted: stderr capture (`2>`, `2>>`) and fd
 # duplication (`>&2`, `1>&2`, `> &2`). Refused: stdout/both-stream file
-# writes (`> f`, `>> f`, `1> f`, `&> f`, `>& f`) and read-write opens (`<>`).
+# writes (`> f`, `>> f`, `1> f`, `3> f`, `&> f`, `>& f`) and read-write
+# opens (`<>`). The fd-numbered alternative refuses every fd except 2; its
+# trailing lookahead also excludes `>` so `N>&M` fd duplication cannot match
+# via an empty `>>?` backtrack (`1>&2` stays permitted).
 _REVIEWER_MUTATING_REDIRECT = re.compile(
     r"&>>?"                        # bash &> / &>> — both-stream file write
     r"|>&\s*(?![0-9])"             # cmd >& file (both-stream write), not fd dup
-    r"|(?<![0-9&])>>?(?!\s*&)"     # > f / >> f / 1> f; not 2>/..., not N>&M dup
+    r"|(?<![0-9&])>>?(?!\s*&)"     # > f / >> f; not N>..., not >&M dup
+    r"|(?:1|[3-9]|\d{2,})>>?(?!\s*&|\s*>)"  # 1> f / 3> f / 10> f file writes
+    r"|<>"                         # read-write open
 )
+
+# Permitted stderr-capture forms. These are screened out before the mutating
+# scan so the second `>` of `2>>` cannot be read as a bare mutating redirect
+# (its predecessor is `>`, not a digit, so the bare-redirect alternative
+# would otherwise fire).
+_REVIEWER_STDERR_CAPTURE = re.compile(r">>?(?!\s*&)")
+
+
+def _reviewer_redirects_mutating(seg: str) -> bool:
+    """True iff the segment contains a mutating redirect.
+
+    Permitted `2>` / `2>>` file captures are removed first (only when they
+    target a file, never when they are `2>&M` fd duplication).
+    """
+    # The lookbehind refuses to screen the `2>` that is the tail of a larger
+    # fd number (e.g. `12>file`), so higher-fd writes still reach the scan.
+    screened = re.sub(r"(?<![0-9])2" + _REVIEWER_STDERR_CAPTURE.pattern, " ", seg)
+    return bool(_REVIEWER_MUTATING_REDIRECT.search(screened))
 
 # find(1) actions that mutate: deletion and arbitrary command execution.
 # Ordinary find predicates (-name, -type, -path, ...) remain allowed.
@@ -737,7 +788,7 @@ def _reviewer_segment_allowed(seg: str) -> bool:
     candidate-source mutation is refused by the exact-SHA clean-worktree
     proof in the review finalizer.
     """
-    if _REVIEWER_MUTATING_REDIRECT.search(seg):
+    if _reviewer_redirects_mutating(seg):
         return False
     if re.match(r"^\s*git\s+branch\b", seg):
         return _reviewer_git_branch_listing(seg)
