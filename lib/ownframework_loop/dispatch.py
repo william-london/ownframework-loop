@@ -622,6 +622,7 @@ def claim_next(*, canonical_repo: Path, run_id: str) -> dict[str, Any]:
                     "repair_context": repair_context,
                     "network_read_allowlist": list(pmeta.get("network_read_allowlist") or []),
                     "capabilities": list(pmeta.get("capabilities") or []),
+                    "runner_profile": str(pmeta.get("runner_profile") or "default"),
                     "claim": claim,
                     "prepare": prep,
                 }
@@ -662,6 +663,7 @@ def claim_next(*, canonical_repo: Path, run_id: str) -> dict[str, Any]:
                     ],
                     "network_read_allowlist": list(pmeta.get("network_read_allowlist") or []),
                     "capabilities": list(pmeta.get("capabilities") or []),
+                    "runner_profile": str(pmeta.get("runner_profile") or "default"),
                     "claim": claim,
                     "prepare": prep,
                 }

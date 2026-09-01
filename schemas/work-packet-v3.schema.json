@@ -519,6 +519,13 @@
         "maxLength": 128,
         "pattern": "^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$"
       }
+    },
+    "runner_profile": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$",
+      "description": "Optional trusted runner-profile name. Packets cannot inject runner CLI flags; the core/operator registry resolves model/effort."
     }
   }
 }
