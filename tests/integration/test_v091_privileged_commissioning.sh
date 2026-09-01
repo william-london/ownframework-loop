@@ -28,7 +28,7 @@ print(json.dumps({
 }))
 """)
     canary.chmod(0o700)
-    manifest=capabilities.default_host_manifest_path(); manifest.parent.mkdir(parents=True)
+    manifest=capabilities.default_host_manifest_path(); manifest.parent.mkdir(parents=True, exist_ok=True)
 
     def write_manifest(capability):
         entry={"provider":"broker","broker_executable":str(docker),"version_args":["--version"],"canary_executable":str(canary)}
