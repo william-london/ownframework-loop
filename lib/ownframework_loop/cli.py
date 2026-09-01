@@ -105,6 +105,14 @@ def cmd_spec_new(args: argparse.Namespace) -> None:
             classification="BARE_REPOSITORY_UNSUPPORTED",
         )
     cls = git_checks.dirty_classification(repo)
+    if cls.get("status") == "unknown":
+        _emit_error(
+            "git status could not be proven; refusing to create a run against "
+            "an unclassified repository state",
+            exit_code=2,
+            classification="GIT_STATUS_UNPROVEN",
+            dirty=cls,
+        )
     if (cls["has_tracked_modified"] or cls["has_tracked_deleted"] or cls["has_staged"]) and not unsafe:
         _emit_error(
             "tracked dirty state detected; refuse, stash, reset, clean, or "

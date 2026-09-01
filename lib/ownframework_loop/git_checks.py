@@ -170,10 +170,12 @@ def dirty_classification(path: Path) -> dict[str, Any]:
         "has_untracked": False,
         "has_ignored_present": False,
         "porcelain": [],
+        "status": "unknown",
     }
     r = run_subprocess(["git", "-C", str(path), "status", "--porcelain"], timeout=10)
     if r.returncode != 0:
         return out
+    out["status"] = "dirty" if r.stdout.strip() else "clean"
     lines = r.stdout.splitlines()
     out["porcelain"] = lines
     for line in lines:

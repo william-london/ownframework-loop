@@ -77,6 +77,29 @@ finally:
     git_checks.dirty_status = orig_status
 
 assert limits._absolute_cap("build_pass_count") == util.ABSOLUTE_BUDGET_CEILING["max_build_passes"]
+
+# Authority JSON readers refuse symlinks and loose mode.
+private = root / "private.json"
+util.atomic_write_json(private, {"x": 1}, mode=0o600)
+assert util.read_private_json(private)["x"] == 1
+private.chmod(0o644)
+assert util.read_private_json(private, default=None) is None
+private.chmod(0o600)
+target = root / "target.json"; target.write_text('{"x":1}'); target.chmod(0o600)
+private.unlink(); private.symlink_to(target)
+assert util.read_private_json(private, default=None) is None
+
+# dirty_classification preserves an explicit unknown result on probe failure.
+orig_run = git_checks.run_subprocess
+class P:
+    returncode = 1
+    stdout = ""
+    stderr = "boom"
+git_checks.run_subprocess = lambda *a, **k: P()
+try:
+    assert git_checks.dirty_classification(root)["status"] == "unknown"
+finally:
+    git_checks.run_subprocess = orig_run
 PY
 
 # Static guards pin exact-branch and per-validation semantics.

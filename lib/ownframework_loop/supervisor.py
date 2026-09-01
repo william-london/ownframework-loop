@@ -283,13 +283,19 @@ def _claude_cli_version(executable: str) -> tuple[int, int, int] | None:
 
 
 def _validate_claude_extra_args(extra: list[str]) -> None:
-    """Refuse operator extra args that could weaken semantic-worker authority."""
-    for arg in extra:
-        flag = str(arg).split("=", 1)[0]
-        if flag in _CLAUDE_EXTRA_ARG_AUTHORITY_FLAGS:
-            raise RuntimeError(
-                f"OFLOOP_CLAUDE_EXTRA_ARGS may not override semantic-worker authority: {flag}"
-            )
+    """Semantic-worker invocation has no free-form Claude CLI extension point.
+
+    Claude's CLI surface evolves and includes model fallbacks, custom agents,
+    prompt replacement, hooks, cloud execution, worktrees and permission
+    controls. A denylist can only lag that authority surface. Model/effort are
+    typed runner-profile authority and budgets are supervisor-owned; every
+    other semantic invocation flag is core-owned.
+    """
+    if extra:
+        raise RuntimeError(
+            "OFLOOP_CLAUDE_EXTRA_ARGS may not override semantic-worker "
+            "invocation authority; free-form Claude arguments are disabled"
+        )
 
 
 def _parse_adapter_auth_read_paths() -> list[str]:

@@ -7,6 +7,7 @@ import json
 import os
 import re
 import subprocess
+import stat
 import sys
 import time
 import uuid
@@ -104,21 +105,55 @@ def atomic_write_json(path: Path, payload: Any, mode: int = 0o600) -> None:
     contents or the old contents, never a half-written file.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.parent / f".{path.name}.tmp.{os.getpid()}"
+    tmp = path.parent / f".{path.name}.tmp.{os.getpid()}.{uuid.uuid4().hex}"
     data = json.dumps(payload, indent=2, sort_keys=True)
-    with open(tmp, "w", encoding="utf-8") as f:
-        f.write(data)
-        f.flush()
+    fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(data)
+            f.flush()
+            try:
+                os.fsync(f.fileno())
+            except OSError:
+                pass
+        os.replace(tmp, path)
+    finally:
         try:
-            os.fsync(f.fileno())
-        except OSError:
+            tmp.unlink()
+        except FileNotFoundError:
             pass
-    os.replace(tmp, path)
     ensure_mode(path, mode)
     try:
         fsync_dir(path.parent)
     except OSError:
         pass
+
+
+def read_private_json(path: Path, default: Any = None) -> Any:
+    """Read a supervisor-owned private JSON authority artifact.
+
+    Missing, symlinked, non-regular, wrong-owner, loose-mode, or malformed
+    artifacts all return `default`. Authority callers therefore fail closed
+    through their normal missing/invalid-artifact path rather than following
+    filesystem redirections.
+    """
+    p = Path(path)
+    if p.is_symlink() or not p.is_file():
+        return default
+    try:
+        st = p.stat()
+    except OSError:
+        return default
+    if not stat.S_ISREG(st.st_mode):
+        return default
+    if hasattr(os, "getuid") and st.st_uid != os.getuid():
+        return default
+    if stat.S_IMODE(st.st_mode) & 0o077:
+        return default
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return default
 
 
 def fsync_dir(dirpath: Path) -> None:

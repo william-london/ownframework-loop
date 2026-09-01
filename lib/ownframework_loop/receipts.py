@@ -7,7 +7,7 @@ from typing import Any
 
 from . import git_checks, schema_validate, worktrees
 from .util import (
-    atomic_write_json, builder_worktree, run_dir, run_subprocess,
+    atomic_write_json, builder_worktree, read_private_json, run_dir, run_subprocess,
     short_sha, utc_now_iso,
 )
 
@@ -154,11 +154,8 @@ def write_receipt(canonical_repo: Path, run_id: str, receipt: dict[str, Any]) ->
 
 
 def load_receipt(canonical_repo: Path, run_id: str) -> dict[str, Any] | None:
-    p = receipt_path(canonical_repo, run_id)
-    if not p.exists():
-        return None
-    import json
-    return json.loads(p.read_text(encoding="utf-8"))
+    value = read_private_json(receipt_path(canonical_repo, run_id), default=None)
+    return value if isinstance(value, dict) else None
 
 
 def compute_diff_stats(worktree: Path, baseline_sha: str, candidate_sha: str) -> dict[str, int]:

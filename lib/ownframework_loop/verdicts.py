@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from . import git_checks, schema_validate, worktrees
-from .util import atomic_write_json, reviewer_worktree, run_dir, utc_now_iso
+from .util import atomic_write_json, read_private_json, reviewer_worktree, run_dir, utc_now_iso
 
 
 SCHEMA_VERSION = "ownframework-loop-review-verdict/v2"
@@ -133,10 +133,8 @@ def write_verdict(canonical_repo: Path, run_id: str, verdict: dict[str, Any]) ->
 
 
 def load_verdict(canonical_repo: Path, run_id: str) -> dict[str, Any] | None:
-    p = verdict_path(canonical_repo, run_id)
-    if not p.exists():
-        return None
-    return json.loads(p.read_text(encoding="utf-8"))
+    value = read_private_json(verdict_path(canonical_repo, run_id), default=None)
+    return value if isinstance(value, dict) else None
 
 
 def check_stale(

@@ -27,11 +27,15 @@ def is_registered_worktree(canonical_repo: Path, worktree_path: Path) -> bool:
         # lines are key/value pairs (HEAD, branch, detached, etc.).
         if raw.startswith("worktree "):
             entry_path = raw[len("worktree "):].strip()
+            try:
+                entry_path = str(Path(entry_path).expanduser().resolve(strict=False))
+            except (OSError, RuntimeError):
+                continue
             if entry_path == target:
                 return True
     return False
 from .util import (
-    atomic_write_json, builder_worktree, reviewer_worktree,
+    atomic_write_json, builder_worktree, read_private_json, reviewer_worktree,
     run_subprocess, short_sha, utc_now_iso, worktrees_dir,
 )
 from . import git_checks
@@ -86,14 +90,9 @@ def _builder_ownership_path(canonical_repo: Path, run_id: str) -> Path:
 
 
 def _load_builder_ownership(canonical_repo: Path, run_id: str) -> dict[str, Any] | None:
-    p = _builder_ownership_path(canonical_repo, run_id)
-    if not p.is_file():
-        return None
-    try:
-        import json
-        value = json.loads(p.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
+    value = read_private_json(
+        _builder_ownership_path(canonical_repo, run_id), default=None
+    )
     return value if isinstance(value, dict) else None
 
 

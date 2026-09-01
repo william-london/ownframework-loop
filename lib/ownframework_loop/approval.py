@@ -52,13 +52,8 @@ def approval_path(canonical_repo: Path, run_id: str) -> Path:
 
 def load_approval(canonical_repo: Path, run_id: str) -> dict[str, Any] | None:
     """Load the approval artifact if present. Returns None on missing."""
-    p = approval_path(canonical_repo, run_id)
-    if not p.exists():
-        return None
-    try:
-        return json.loads(p.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        return None
+    value = util.read_private_json(approval_path(canonical_repo, run_id), default=None)
+    return value if isinstance(value, dict) else None
 
 
 def approval_artifact_sha256(approval: dict[str, Any]) -> str:
