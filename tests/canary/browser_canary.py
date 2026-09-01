@@ -12,6 +12,7 @@ never through the operator's ambient Playwright cache. On success (and with
 binds:
 
   * the CURRENT platform identity and semantic runtime fingerprint,
+  * the exact imported Python Playwright client package bytes/path/version,
   * the exact Playwright/browser versions,
   * the exact browser asset tree (Merkle digest of the asset root).
 
@@ -113,20 +114,25 @@ def main() -> int:
     result["browser_version"] = browser_version
 
     if result.get("ok"):
-        # Byte-bind the exact asset tree the launch just used.
+        # Byte-bind BOTH authority-bearing halves the launch just used:
+        # Chromium assets and the imported Python Playwright client.
         try:
             merkle = cap_mod.browser_asset_merkle_sha256(asset_root)
+            client_identity = cap_mod.playwright_client_identity()
         except Exception as exc:  # noqa: BLE001
             result["ok"] = False
-            result["error"] = f"browser asset identity failed: {type(exc).__name__}: {exc}"
+            result["error"] = f"browser/client identity failed: {type(exc).__name__}: {exc}"
             merkle = ""
+            client_identity = {}
         result["browser_asset_merkle_sha256"] = merkle
+        result["playwright_client_identity"] = client_identity
 
     if write_proof and result.get("ok"):
         proof = cap_mod.write_browser_runtime_proof(
             CAPABILITY,
             asset_root=str(asset_root),
             asset_merkle_sha256=result.get("browser_asset_merkle_sha256") or "",
+            playwright_client=result.get("playwright_client_identity") or {},
             playwright_version=playwright_version,
             browser_version=browser_version,
         )
