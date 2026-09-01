@@ -9,7 +9,7 @@ import uuid
 from typing import Any
 
 SCHEMA = "ownframework-loop-capability-binding/v1"
-PROJECTION_REVISION = "capability-binding-projection/v1"
+PROJECTION_REVISION = "capability-binding-projection/v2"
 
 
 class CapabilityBindingError(RuntimeError):
@@ -50,7 +50,12 @@ def stable_projection(resolution: dict[str, Any], runner_profile: dict[str, Any]
         "network_domains": list(resolution.get("network_domains") or []),
         "stable_filesystem": resolution.get("stable_filesystem") or {"allowRead": [], "allowWrite": []},
         "sandbox_network": resolution.get("sandbox_network") or {},
-        "runner_profile": {
+        # The REQUESTED runner profile. This binds what the run asked for;
+        # it is deliberately NOT a claim about what the provider effectively
+        # used. The effective model (when the provider reveals it) is recorded
+        # separately on the semantic attempt ledger, so a silent model/effort
+        # substitution is never certified as the requested profile.
+        "requested_runner_profile": {
             k: runner_profile.get(k)
             for k in ("name", "provider", "model", "effort", "identity_sha256")
         },

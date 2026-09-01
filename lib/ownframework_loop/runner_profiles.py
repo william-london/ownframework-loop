@@ -43,11 +43,15 @@ def validate_profile_name(value: Any) -> list[str]:
 
 
 def _load_manifest(path: Path | None = None) -> tuple[dict[str, Any], str | None, str | None]:
-    p = (path or default_manifest_path()).expanduser().resolve(strict=False)
+    raw_path = (path or default_manifest_path()).expanduser()
+    # Refuse a symlinked authority manifest on the UNRESOLVED path. The previous
+    # resolve()-then-is_symlink() ordering followed the link first, so the
+    # check ran against the target and could never fire.
+    if raw_path.is_symlink():
+        raise RunnerProfileError("runner-profile manifest must not be a symlink")
+    p = raw_path.resolve(strict=False)
     if not p.exists():
         return {}, None, None
-    if p.is_symlink():
-        raise RunnerProfileError("runner-profile manifest must not be a symlink")
     st = p.stat()
     if not stat.S_ISREG(st.st_mode):
         raise RunnerProfileError("runner-profile manifest must be a regular file")

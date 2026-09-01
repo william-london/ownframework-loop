@@ -113,15 +113,27 @@ def platform_identity() -> dict[str, str]:
 
 
 def semantic_runtime_fingerprint() -> str:
-    """Fingerprint host + Claude sandbox generation for privileged proof."""
+    """Fingerprint host + Claude sandbox generation for privileged proof.
+
+    The Claude runtime is BYTE-bound: the fingerprint includes the SHA-256 of
+    the resolved Claude executable's bytes, not just its path/version string.
+    A swapped/modified binary that reports the same `--version` therefore
+    changes the fingerprint and invalidates any commissioning evidence bound to
+    the prior runtime.
+    """
     claude_raw = os.environ.get("OFLOOP_CLAUDE_BIN", "claude")
     discovered = shutil.which(claude_raw) if not Path(claude_raw).is_absolute() else claude_raw
     claude_path = ""
     claude_version = "unavailable"
+    claude_sha256 = ""
     if discovered:
         p = Path(discovered).expanduser().resolve(strict=False)
         if p.is_file() and os.access(p, os.X_OK):
             claude_path = str(p)
+            try:
+                claude_sha256 = _file_sha256(claude_path) or ""
+            except OSError:
+                claude_sha256 = ""
             try:
                 proc = subprocess.run(
                     [claude_path, "--version"], capture_output=True, text=True,
@@ -136,6 +148,7 @@ def semantic_runtime_fingerprint() -> str:
         **platform_identity(),
         "claude_path": claude_path,
         "claude_version": claude_version,
+        "claude_sha256": claude_sha256,
     }
     encoded = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
@@ -201,11 +214,15 @@ def validate_capability_names(values: Any) -> list[str]:
 
 
 def _load_host_manifest(path: Path | None = None) -> tuple[dict[str, Any], str | None, str | None]:
-    manifest_path = (path or default_host_manifest_path()).expanduser().resolve(strict=False)
+    raw_path = (path or default_host_manifest_path()).expanduser()
+    # Refuse a symlinked authority manifest on the UNRESOLVED path. The previous
+    # resolve()-then-is_symlink() ordering followed the link first, so the
+    # check ran against the target and could never fire.
+    if raw_path.is_symlink():
+        raise CapabilityResolutionError("host capability manifest must not be a symlink")
+    manifest_path = raw_path.resolve(strict=False)
     if not manifest_path.exists():
         return {}, None, None
-    if manifest_path.is_symlink():
-        raise CapabilityResolutionError("host capability manifest must not be a symlink")
     st = manifest_path.stat()
     if not stat.S_ISREG(st.st_mode):
         raise CapabilityResolutionError("host capability manifest must be a regular file")
@@ -583,6 +600,104 @@ def resolve_capabilities(
     }
 
 
+BROWSER_RUNTIME_PROOF_SCHEMA = "ownframework-loop-browser-runtime-proof/v1"
+
+
+def browser_runtime_proof_path(
+    name: str = "browser.playwright.chromium",
+    evidence_dir: Path | None = None,
+) -> Path:
+    """Durable runtime-proof evidence path for one browser capability."""
+    from . import commissioning as commissioning_mod
+    base = (evidence_dir or commissioning_mod.default_evidence_dir())
+    return base.expanduser().resolve(strict=False) / (
+        name.replace(".", "_") + "_runtime_proof.json"
+    )
+
+
+def _playwright_resolvable() -> tuple[bool, str]:
+    """Discover a Playwright entry point WITHOUT launching a browser.
+
+    Returns (resolvable, reference). Resolvable means the Playwright tooling is
+    present and the capability can be provisioned; it does NOT mean a browser
+    has been empirically launched (that is the separate runtime proof).
+    """
+    exe = shutil.which("playwright")
+    if exe:
+        return True, str(Path(exe).expanduser().resolve(strict=False))
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-m", "playwright", "--version"],
+            capture_output=True, text=True, check=False, timeout=10,
+        )
+        if proc.returncode == 0:
+            return True, f"{sys.executable} -m playwright"
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return False, ""
+
+
+def _browser_runtime_proven(
+    name: str, evidence_dir: Path | None = None
+) -> tuple[bool, str]:
+    """Return (proven, reason). Proven only if a valid canary-written runtime
+    proof attests this exact capability; anything else fails closed."""
+    p = browser_runtime_proof_path(name, evidence_dir)
+    if not p.is_file() or p.is_symlink():
+        return False, "no browser runtime proof commissioned"
+    try:
+        doc = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False, "browser runtime proof unreadable"
+    if not isinstance(doc, dict) or doc.get("schema") != BROWSER_RUNTIME_PROOF_SCHEMA:
+        return False, "browser runtime proof schema mismatch"
+    if doc.get("capability") != name or doc.get("ok") is not True:
+        return False, "browser runtime proof does not attest this capability"
+    claimed = doc.get("proof_sha256")
+    body = {k: v for k, v in doc.items() if k != "proof_sha256"}
+    recomputed = hashlib.sha256(
+        json.dumps(body, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
+    ).hexdigest()
+    if not claimed or recomputed != claimed:
+        return False, "browser runtime proof digest mismatch"
+    return True, ""
+
+
+def write_browser_runtime_proof(
+    name: str = "browser.playwright.chromium",
+    *,
+    playwright_version: str = "",
+    browser_version: str = "",
+    evidence_dir: Path | None = None,
+) -> dict[str, Any]:
+    """Persist a canary-attested browser runtime proof (physical commissioning).
+
+    Called by the real browser canary after it has empirically launched the
+    browser. Not invoked by the source/CI suite.
+    """
+    from . import util as _util_mod
+    body = {
+        "schema": BROWSER_RUNTIME_PROOF_SCHEMA,
+        "capability": name,
+        "ok": True,
+        "playwright_version": playwright_version,
+        "browser_version": browser_version,
+        "platform_identity": platform_identity(),
+        "semantic_runtime_fingerprint": semantic_runtime_fingerprint(),
+        "proven_at": _util_mod.utc_now_iso(),
+    }
+    body["proof_sha256"] = hashlib.sha256(
+        json.dumps(body, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
+    ).hexdigest()
+    path = browser_runtime_proof_path(name, evidence_dir)
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(body, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, path)
+    return {**body, "proof_path": str(path)}
+
+
 def probe_host_capabilities(
     *, manifest_path: Path | None = None,
 ) -> dict[str, Any]:
@@ -623,6 +738,31 @@ def probe_host_capabilities(
                 })
                 if name == "container.docker":
                     item.update(commissioned["provider_identity"])
+            elif definition.kind == "browser":
+                # Truthful browser inventory: distinguish PROVISIONABLE/
+                # RESOLVABLE (Playwright tooling present) from EMPIRICALLY
+                # RUNTIME-PROVEN (a canary actually launched the browser).
+                # `available` reflects the stronger runtime proof only, so the
+                # inventory never claims a browser works before it is proven.
+                resolvable, resolved_ref = _playwright_resolvable()
+                proven, proven_reason = _browser_runtime_proven(name)
+                item.update({
+                    "available": bool(proven),
+                    "resolvable": bool(resolvable),
+                    "runtime_proven": bool(proven),
+                    "provider": "project_runtime",
+                })
+                if resolved_ref:
+                    item["playwright_ref"] = resolved_ref
+                if entry.get("trusted_asset_path"):
+                    item["trusted_asset_identity"] = _trusted_asset_identity(
+                        Path(str(entry["trusted_asset_path"]))
+                    )
+                if not proven:
+                    item["reason"] = (
+                        f"{proven_reason or 'browser not runtime-proven'}; "
+                        "run the browser canary to commission"
+                    )
             elif definition.executable_names:
                 executable, version, digest, _ = _resolve_executable(definition, entry)
                 item.update({
@@ -673,6 +813,21 @@ def public_summary(resolution: dict[str, Any]) -> dict[str, Any]:
 
 
 def verify_resolution_integrity(resolution: dict[str, Any]) -> None:
+    """Final pre-provider re-proof. Re-proves, immediately before the model
+    process is created, that the authority-bearing bytes are EXACTLY what the
+    resolution bound: the current Claude/platform runtime fingerprint, the host
+    manifest identity, every resolved provider executable digest, trusted asset
+    identity, and the commissioning evidence body digest (recomputed, not just
+    compared by its embedded field). Any drift fails closed with zero model
+    calls."""
+    # Re-prove the CURRENT semantic runtime (byte-bound Claude executable +
+    # platform). A swapped Claude binary or platform change after resolution is
+    # refused here even if every other artifact is intact.
+    current_fingerprint = semantic_runtime_fingerprint()
+    if current_fingerprint != resolution.get("semantic_runtime_fingerprint"):
+        raise CapabilityResolutionError(
+            "semantic runtime (Claude binary/platform) changed after resolution"
+        )
     path_value = resolution.get("host_manifest_path")
     _, _, current_manifest = _load_host_manifest(
         Path(str(path_value)) if path_value else None
@@ -706,6 +861,18 @@ def verify_resolution_integrity(resolution: dict[str, Any]) -> None:
                 raise CapabilityResolutionError("commissioning evidence became unreadable") from exc
             if doc.get("evidence_sha256") != evidence_sha:
                 raise CapabilityResolutionError("commissioning evidence changed after resolution")
+            # Recompute the evidence BODY digest (canonical JSON of every field
+            # except evidence_sha256) rather than trusting the embedded field
+            # alone; a body mutation that preserved the embedded field would
+            # otherwise slip through.
+            body = {k: v for k, v in doc.items() if k != "evidence_sha256"}
+            recomputed = hashlib.sha256(
+                json.dumps(body, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
+            ).hexdigest()
+            if recomputed != evidence_sha:
+                raise CapabilityResolutionError(
+                    "commissioning evidence body digest mismatch after resolution"
+                )
 
 
 def _publish_immutable_text(path: Path, encoded: str) -> bool:
@@ -770,7 +937,9 @@ def write_resolution_receipt(
     if run_binding is not None:
         payload["run_binding_sha256"] = run_binding.get("binding_sha256")
     if runner_profile is not None:
-        payload["runner_profile"] = {
+        # Explicitly the REQUESTED profile; the effective model (when the
+        # provider reveals it) is recorded on the semantic attempt ledger.
+        payload["requested_runner_profile"] = {
             k: runner_profile.get(k)
             for k in ("name", "provider", "model", "effort", "identity_sha256")
         }
