@@ -861,7 +861,8 @@ def _connect(path: Path) -> sqlite3.Connection:
           tokens_known INTEGER NOT NULL DEFAULT 0,
           failure_class TEXT,
           failure_reason TEXT,
-          effective_model TEXT NOT NULL DEFAULT ''
+          effective_model TEXT NOT NULL DEFAULT '',
+          model_usage_json TEXT NOT NULL DEFAULT ''
         );
         CREATE INDEX IF NOT EXISTS semantic_attempts_job_idx
           ON semantic_attempts(job_id, started_at);
@@ -963,6 +964,7 @@ def _connect(path: Path) -> sqlite3.Connection:
         "failure_class": "ALTER TABLE semantic_attempts ADD COLUMN failure_class TEXT",
         "failure_reason": "ALTER TABLE semantic_attempts ADD COLUMN failure_reason TEXT",
         "effective_model": "ALTER TABLE semantic_attempts ADD COLUMN effective_model TEXT NOT NULL DEFAULT ''",
+        "model_usage_json": "ALTER TABLE semantic_attempts ADD COLUMN model_usage_json TEXT NOT NULL DEFAULT ''",
     }
     cost_known_added = "cost_known" not in attempt_columns
     for name, statement in attempt_migrations.items():
@@ -1336,47 +1338,98 @@ def _parse_token_usage_from_durable_stdout(path: str | None) -> dict[str, int] |
     return recovered if observed else None
 
 
-def _extract_effective_model_from_durable_stdout(path: str | None) -> str:
-    """Recover the provider-reported effective model from one durable envelope."""
+def _durable_envelope_payload(path: str | None) -> dict[str, Any] | None:
     if not path:
-        return ""
+        return None
     p = Path(path)
     if not p.is_file():
-        return ""
+        return None
     try:
         payload = json.loads(_read_durable_provider_envelope(p))
     except (OSError, ValueError, json.JSONDecodeError):
-        return ""
-    return _extract_effective_model(payload if isinstance(payload, dict) else None)
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _extract_effective_model_from_durable_stdout(path: str | None) -> str:
+    """Recover the provider-reported effective model from one durable envelope."""
+    return _extract_effective_model(_durable_envelope_payload(path))
+
+
+def _extract_model_usage_json_from_durable_stdout(path: str | None) -> str:
+    """Recover the FULL provider-reported model usage from one durable envelope."""
+    return _extract_model_usage_json(_durable_envelope_payload(path))
 
 
 def _extract_effective_model(payload: dict[str, Any] | None) -> str:
-    """Return the model the provider actually reported/billed, or "".
+    """Return the model the provider provably reported, or "" when unprovable.
 
-    The EFFECTIVE model is read from the provider envelope (modelUsage keys or
-    an explicit model field). It is distinguished from the runner profile's
-    REQUESTED model so a substitution/downgrade is never silently certified as
-    the requested profile. Empty string means the envelope did not reveal it.
+    The EFFECTIVE model is read from the provider envelope ONLY when it is
+    provable: an explicit `model` field, or a `modelUsage` with exactly one
+    model. When several models appear in usage the singular effective model
+    is NOT inferred (guessing would certify one provider-reported mix as a
+    single model). Empty string means "not provable from this envelope"; the
+    FULL provider-reported usage is preserved separately by
+    _extract_model_usage_json(). The effective model is always distinguished
+    from the runner profile's REQUESTED model so a substitution/downgrade is
+    never silently certified as the requested profile.
+    """
+    if not isinstance(payload, dict):
+        return ""
+    model = payload.get("model")
+    if isinstance(model, str) and model:
+        return model[:256]
+    usage = payload.get("modelUsage")
+    if isinstance(usage, dict) and len(usage) == 1:
+        return str(next(iter(usage.keys())))[:256]
+    return ""
+
+
+def _strict_profile_model_violation(
+    requested_model: str, *, result_ok: bool, effective_model: str
+) -> str:
+    """Truth gate for quality-strict runner profiles (no inference, no mercy).
+
+    Returns the violation reason, or "" when the attempt may be certified at
+    the requested quality:
+
+      * a non-strict request (no explicit model) certifies anything;
+      * a strict request certifies ONLY a provably identical effective model;
+      * a provably different effective model is a substitution;
+      * an unprovable effective model under a strict request fails closed —
+        absence of proof is never certified as the requested profile.
+    """
+    if not result_ok or not requested_model:
+        return ""
+    if effective_model and effective_model != requested_model:
+        return "runner_profile_model_substitution"
+    if not effective_model:
+        return "runner_profile_quality_unproven"
+    return ""
+
+
+_MODEL_USAGE_JSON_MAX = 8192
+
+
+def _extract_model_usage_json(payload: dict[str, Any] | None) -> str:
+    """Canonical JSON of the FULL provider-reported modelUsage, or "".
+
+    Preserves every model the provider billed (including multi-model mixes)
+    so the ledger never loses usage truth that a singular effective model
+    cannot express.
     """
     if not isinstance(payload, dict):
         return ""
     usage = payload.get("modelUsage")
-    if isinstance(usage, dict) and usage:
-        # Pick the model that accounts for the most output tokens; fall back to
-        # a stable sort of the keys when usage is absent/zero.
-        def _weight(name: str) -> int:
-            entry = usage.get(name)
-            if isinstance(entry, dict):
-                try:
-                    return int(entry.get("outputTokens") or entry.get("output_tokens") or 0)
-                except (TypeError, ValueError):
-                    return 0
-            return 0
-        return str(sorted(usage.keys(), key=lambda n: (-_weight(n), n))[0])[:256]
-    model = payload.get("model")
-    if isinstance(model, str) and model:
-        return model[:256]
-    return ""
+    if not isinstance(usage, dict) or not usage:
+        return ""
+    try:
+        encoded = json.dumps(
+            usage, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+        )
+    except (TypeError, ValueError):
+        return ""
+    return encoded[:_MODEL_USAGE_JSON_MAX]
 
 
 def _account_attempt_cost(
@@ -1395,12 +1448,15 @@ def _account_attempt_cost(
     tokens_known: bool = False,
     manage_transaction: bool = True,
     effective_model: str | None = None,
+    model_usage_json: str | None = None,
 ) -> float:
     """Account one durable semantic attempt exactly once by attempt identity.
 
     Cost and token telemetry share the same attempt-identity fence so retries
-    can never double-count either resource. `effective_model` records the model
-    the provider actually reported, kept distinct from the requested profile.
+    can never double-count either resource. `effective_model` records the
+    model the provider PROVABLY reported ("" when unprovable), kept distinct
+    from the requested profile; `model_usage_json` preserves the FULL
+    provider-reported usage so multi-model mixes are never collapsed.
     """
     if not math.isfinite(float(cost_usd)) or float(cost_usd) < 0:
         raise RuntimeError("semantic attempt cost is not a finite non-negative value")
@@ -1427,7 +1483,8 @@ def _account_attempt_cost(
             """UPDATE semantic_attempts SET status=?, completed_at=?,
                returncode=?, cost_usd=?, cost_accounted=1, cost_known=?,
                input_tokens=?, output_tokens=?, cache_read_tokens=?,
-               cache_creation_tokens=?, tokens_known=?, effective_model=?
+               cache_creation_tokens=?, tokens_known=?, effective_model=?,
+               model_usage_json=?
                WHERE attempt_id=?""",
             (
                 status_value,
@@ -1438,6 +1495,7 @@ def _account_attempt_cost(
                 *usage_values,
                 1 if tokens_known else 0,
                 str(effective_model or ""),
+                str(model_usage_json or ""),
                 attempt_id,
             ),
         )
@@ -1661,6 +1719,7 @@ def _recover_stale_running(conn: sqlite3.Connection) -> int:
         recovered_usage = None
         recovered_cost_known = False
         recovered_effective_model = ""
+        recovered_model_usage_json = ""
         if attempt_id:
             observed_attempt = conn.execute(
                 "SELECT * FROM semantic_attempts WHERE attempt_id=? AND job_id=?",
@@ -1677,6 +1736,9 @@ def _recover_stale_running(conn: sqlite3.Connection) -> int:
                     observed_attempt["stdout_path"]
                 )
                 recovered_effective_model = _extract_effective_model_from_durable_stdout(
+                    observed_attempt["stdout_path"]
+                )
+                recovered_model_usage_json = _extract_model_usage_json_from_durable_stdout(
                     observed_attempt["stdout_path"]
                 )
 
@@ -1809,6 +1871,7 @@ def _recover_stale_running(conn: sqlite3.Connection) -> int:
                     tokens_known=recovered_usage is not None,
                     manage_transaction=False,
                     effective_model=recovered_effective_model,
+                    model_usage_json=recovered_model_usage_json,
                 )
 
         cur = conn.execute(
@@ -3048,10 +3111,13 @@ class RunnerResult:
     cache_creation_tokens: int = 0
     tokens_known: bool = False
     # The model the provider ACTUALLY billed/reported, when the envelope
-    # reveals it. This is the EFFECTIVE model and may differ from the profile's
-    # REQUESTED model (e.g. a substitution/downgrade); it is recorded so the
-    # two are never conflated.
+    # PROVES a singular model. This is the EFFECTIVE model and may differ from
+    # the profile's REQUESTED model (e.g. a substitution/downgrade); it is
+    # recorded so the two are never conflated. Empty when not provable.
     effective_model: str = ""
+    # Canonical JSON of the FULL provider-reported modelUsage. Preserved even
+    # when a singular effective model is not provable (multi-model mixes).
+    model_usage_json: str = ""
 
 
 class ClaudeCodeRunner:
@@ -3353,6 +3419,11 @@ class ClaudeCodeRunner:
         # gate, so any drift here produces zero model calls.
         capabilities_mod.verify_resolution_integrity(capability_resolution)
         runner_profiles_mod.verify_profile_integrity(runner_profile)
+        # Strict-effort profiles fail closed BEFORE any model call unless an
+        # operator commissioned an effort attestation: the provider envelope
+        # can never prove effort, so an unattested strict request must not be
+        # run (and thus never silently certified at a substituted quality).
+        runner_profiles_mod.verify_effort_attestation(runner_profile)
         capability_binding_mod.verify_run_binding(
             canonical_repo,
             str(work_order.get("run_id") or ""),
@@ -3523,6 +3594,7 @@ class ClaudeCodeRunner:
         cache_creation_tokens = 0
         tokens_known = False
         effective_model = ""
+        model_usage_json = ""
         parsed: dict[str, Any] | None = None
         try:
             data = json.loads(stdout_data or "")
@@ -3530,9 +3602,11 @@ class ClaudeCodeRunner:
             data = None
         if isinstance(data, dict):
             parsed = data
-            # The EFFECTIVE model the provider reported (distinct from the
-            # requested profile model); empty when the envelope hides it.
+            # The EFFECTIVE model the provider PROVABLY reported (distinct
+            # from the requested profile model); empty when not provable.
             effective_model = _extract_effective_model(data)
+            # The FULL provider-reported usage is preserved regardless.
+            model_usage_json = _extract_model_usage_json(data)
             # Telemetry extraction degrades independently: a malformed cost
             # or usage value must demote that TELEMETRY to unknown, never
             # discard the semantic result envelope itself (which would turn
@@ -3609,6 +3683,7 @@ class ClaudeCodeRunner:
             cache_creation_tokens=cache_creation_tokens,
             tokens_known=tokens_known,
             effective_model=effective_model,
+            model_usage_json=model_usage_json,
         )
 
 
@@ -4645,9 +4720,37 @@ def run_one(*, db_path: Path | None = None, timeout_seconds: int = 0) -> dict[st
                 cache_creation_tokens=result.cache_creation_tokens,
                 tokens_known=result.tokens_known,
                 effective_model=result.effective_model,
+                model_usage_json=result.model_usage_json,
             )
-            if not result.ok:
-                failure_class, failure_reason = _classify_runner_failure(result)
+
+            # Strict-profile truth: a profile that REQUESTED an explicit model
+            # is certified only when the provider PROVABLY ran that model. A
+            # provable substitution — or an unprovable effective model under a
+            # strict request — fails closed here. The attempt's cost was
+            # already accounted above; the envelope truth (full modelUsage) is
+            # preserved in the ledger either way.
+            strict_failure_reason = ""
+            try:
+                requested_profile = runner_profiles_mod.resolve_profile(
+                    str(work_order.get("runner_profile") or "default"),
+                    provider=str(job["runner"]),
+                )
+            except runner_profiles_mod.RunnerProfileError:
+                requested_profile = None
+            strict_model = str((requested_profile or {}).get("model") or "")
+            strict_failure_reason = _strict_profile_model_violation(
+                strict_model,
+                result_ok=bool(result.ok),
+                effective_model=str(result.effective_model or ""),
+            )
+
+            if not result.ok or strict_failure_reason:
+                if strict_failure_reason:
+                    failure_class, failure_reason = (
+                        "configuration", strict_failure_reason,
+                    )
+                else:
+                    failure_class, failure_reason = _classify_runner_failure(result)
                 detail = (
                     f"runner rc={result.returncode}: "
                     f"{result.stderr or result.stdout}"

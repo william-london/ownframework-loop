@@ -137,14 +137,125 @@ def verify_profile_integrity(profile: dict[str, Any]) -> None:
         raise RunnerProfileError("runner profile changed after resolution")
 
 
+# ---------------------------------------------------------------------------
+# Strict-quality commissioning.
+#
+# A profile that requests an explicit `effort` demands a quality the provider
+# envelope cannot prove empirically (unlike `model`, which the envelope can
+# reveal). Such a profile is therefore only runnable when an operator has
+# COMMISSIONED an effort attestation binding exactly that profile/provider/
+# model/effort. Without it the profile fails closed BEFORE any model call —
+# a silent quality substitution is never certified as the requested profile.
+# ---------------------------------------------------------------------------
+
+EFFORT_ATTESTATION_SCHEMA = "ownframework-loop-runner-effort-attestation/v1"
+
+
+def effort_attestation_path(name: str) -> Path:
+    from . import commissioning as commissioning_mod
+    return commissioning_mod.default_evidence_dir() / (
+        f"runner_profile_{name}_effort_attestation.json"
+    )
+
+
+def write_effort_attestation(
+    *, name: str, provider: str, model: str | None, effort: str, actor: str = "operator"
+) -> dict[str, Any]:
+    """Operator commissioning artifact for one strict-effort runner profile.
+
+    Private (0600/0700) and digest-bound; verified field-by-field before any
+    provider call for a strict profile.
+    """
+    from . import util as _util_mod
+    errors = validate_profile_name(name)
+    if errors:
+        raise RunnerProfileError("; ".join(errors))
+    if effort not in _ALLOWED_EFFORT:
+        raise RunnerProfileError(
+            f"effort attestation effort must be one of {sorted(_ALLOWED_EFFORT)}"
+        )
+    if not provider:
+        raise RunnerProfileError("effort attestation requires a provider")
+    body = {
+        "schema": EFFORT_ATTESTATION_SCHEMA,
+        "profile": name,
+        "provider": provider,
+        "model": str(model or ""),
+        "effort": effort,
+        "attested_actor": actor,
+        "attested_at": _util_mod.utc_now_iso(),
+    }
+    body["attestation_sha256"] = hashlib.sha256(_canonical(body)).hexdigest()
+    path = effort_attestation_path(name)
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(body, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, path)
+    return {**body, "attestation_path": str(path)}
+
+
+def verify_effort_attestation(profile: dict[str, Any]) -> None:
+    """Fail closed unless a commissioned attestation proves the strict effort.
+
+    Profiles without an explicit `effort` are not effort-strict and pass.
+    Anything else — missing file, symlink, non-private/non-regular file,
+    schema/digest/field mismatch — refuses before any model call.
+    """
+    effort = profile.get("effort")
+    if effort is None:
+        return
+    name = str(profile.get("name") or "")
+    path = effort_attestation_path(name)
+    if path.is_symlink() or not path.is_file():
+        raise RunnerProfileError(
+            f"runner profile {name!r} requests effort {effort!r} but no "
+            "commissioned effort attestation exists; refusing before provider call"
+        )
+    st = path.stat()
+    if not stat.S_ISREG(st.st_mode):
+        raise RunnerProfileError("effort attestation must be a regular file")
+    if hasattr(os, "getuid") and st.st_uid != os.getuid():
+        raise RunnerProfileError("effort attestation must be owned by supervisor user")
+    if st.st_mode & 0o077:
+        raise RunnerProfileError("effort attestation must be private")
+    try:
+        doc = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RunnerProfileError(f"effort attestation unreadable: {exc}") from exc
+    if not isinstance(doc, dict) or doc.get("schema") != EFFORT_ATTESTATION_SCHEMA:
+        raise RunnerProfileError("effort attestation schema mismatch")
+    claimed = doc.get("attestation_sha256")
+    body = {k: v for k, v in doc.items() if k != "attestation_sha256"}
+    if not claimed or hashlib.sha256(_canonical(body)).hexdigest() != claimed:
+        raise RunnerProfileError("effort attestation digest mismatch")
+    if doc.get("profile") != name or doc.get("provider") != profile.get("provider"):
+        raise RunnerProfileError("effort attestation does not bind this profile/provider")
+    if doc.get("effort") != effort:
+        raise RunnerProfileError(
+            f"effort attestation binds {doc.get('effort')!r}, not requested {effort!r}"
+        )
+    if doc.get("model") != str(profile.get("model") or ""):
+        raise RunnerProfileError("effort attestation does not bind this model")
+
+
 def public_summary(profile: dict[str, Any]) -> dict[str, Any]:
-    return {k: profile.get(k) for k in (
+    out = {k: profile.get(k) for k in (
         "schema", "name", "provider", "model", "effort", "identity_sha256"
     )}
+    # Truthful strictness marker: a profile requesting an explicit model or
+    # effort is quality-strict and is fail-closed enforced (model proven from
+    # the provider envelope; effort requires a commissioned attestation).
+    out["strict_quality"] = bool(
+        profile.get("model") is not None or profile.get("effort") is not None
+    )
+    return out
 
 
 __all__ = [
-    "CONTRACT_REVISION", "MANIFEST_SCHEMA", "PROFILE_NAME_RE",
-    "RunnerProfileError", "SCHEMA", "default_manifest_path", "public_summary",
-    "resolve_profile", "validate_profile_name", "verify_profile_integrity",
+    "CONTRACT_REVISION", "EFFORT_ATTESTATION_SCHEMA", "MANIFEST_SCHEMA",
+    "PROFILE_NAME_RE", "RunnerProfileError", "SCHEMA", "default_manifest_path",
+    "effort_attestation_path", "public_summary", "resolve_profile",
+    "validate_profile_name", "verify_effort_attestation",
+    "verify_profile_integrity", "write_effort_attestation",
 ]
