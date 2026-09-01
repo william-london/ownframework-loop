@@ -29,7 +29,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import approval as approval_mod, branch_resolver as branch_resolver_mod, capabilities as capabilities_mod, dispatch as dispatch_mod, dispatch_hold as dispatch_hold_mod, git_checks, packet as packet_mod, runtime_env, state as state_mod, util, runtime_identity
+from . import approval as approval_mod, branch_resolver as branch_resolver_mod, capabilities as capabilities_mod, capability_binding as capability_binding_mod, dispatch as dispatch_mod, dispatch_hold as dispatch_hold_mod, git_checks, packet as packet_mod, runner_profiles as runner_profiles_mod, runtime_env, state as state_mod, util, runtime_identity
 
 SCHEMA = "ownframework-loop-supervisor/v1"
 DISPATCH_HOLD_KIND = "PROGRAM_CHECKPOINT_BOUNDARY"
@@ -256,6 +256,9 @@ _CLAUDE_EXTRA_ARG_AUTHORITY_FLAGS = {
     "--teleport",
     "--no-session-persistence",
     "--restricted",
+    "--model",
+    "--effort",
+    "--max-budget-usd",
 }
 
 
@@ -1425,6 +1428,33 @@ def _unknown_cost_attempt_count(conn: sqlite3.Connection, job_id: int) -> int:
         (int(job_id),),
     ).fetchone()
     return int((row[0] if row is not None else 0) or 0)
+
+
+def _capability_binding_creation_allowed(
+    conn: sqlite3.Connection,
+    job_id: int,
+) -> bool:
+    """Allow first binding only when no provider-reachable historical attempt exists."""
+    rows = conn.execute(
+        """SELECT status, failure_reason, cost_accounted, cost_usd
+             FROM semantic_attempts WHERE job_id=?""",
+        (int(job_id),),
+    ).fetchall()
+    if not rows:
+        return True
+    pre_provider = {
+        "worker_launch_failed",
+        "capability_resolution_failed",
+        "capability_binding_failed",
+        "runner_profile_resolution_failed",
+    }
+    return all(
+        str(row["status"] or "") == "FAILED"
+        and str(row["failure_reason"] or "") in pre_provider
+        and int(row["cost_accounted"] or 0) == 1
+        and float(row["cost_usd"] or 0.0) == 0.0
+        for row in rows
+    )
 
 
 def _mark_attempt_launch_failed(
@@ -3065,18 +3095,35 @@ class ClaudeCodeRunner:
                 str(item) for item in (work_order.get("network_read_allowlist") or [])
             ],
         )
+        runner_profile = runner_profiles_mod.resolve_profile(
+            str(work_order.get("runner_profile") or "default"),
+            provider=self.runner_id,
+        )
+        run_binding = capability_binding_mod.ensure_run_binding(
+            canonical_repo,
+            str(work_order.get("run_id") or ""),
+            capability_resolution,
+            runner_profile,
+            allow_create=bool(work_order.get("allow_capability_binding_create", True)),
+        )
         capability_receipt = capabilities_mod.write_resolution_receipt(
             canonical_repo,
             str(work_order.get("run_id") or ""),
             role,
             attempt_id,
             capability_resolution,
+            run_binding=run_binding,
+            runner_profile=runner_profile,
         )
         effective_work_order = dict(work_order)
         effective_work_order["capability_resolution"] = capabilities_mod.public_summary(
             capability_resolution
         )
         effective_work_order["capability_receipt"] = str(capability_receipt)
+        effective_work_order["capability_binding_sha256"] = run_binding["binding_sha256"]
+        effective_work_order["runner_profile_resolution"] = runner_profiles_mod.public_summary(
+            runner_profile
+        )
         payload = json.dumps(effective_work_order, indent=2, sort_keys=True)
         prompt = (
             role_contract
@@ -3137,6 +3184,14 @@ class ClaudeCodeRunner:
             json.dumps({"mcpServers": {}}, separators=(",", ":"), sort_keys=True),
             "--plugin-dir",
             str(_source_root()),
+            *(
+                ["--model", str(runner_profile["model"])]
+                if runner_profile.get("model") else []
+            ),
+            *(
+                ["--effort", str(runner_profile["effort"])]
+                if runner_profile.get("effort") else []
+            ),
             *extra,
             "--settings",
             json.dumps(secure_settings, separators=(",", ":"), sort_keys=True),
@@ -3173,6 +3228,14 @@ class ClaudeCodeRunner:
             if isinstance(item, dict) and item.get("privileged") is True
         )
         worker_env["OFLOOP_PRIVILEGED_CAPABILITIES"] = ",".join(privileged_names)
+        docker_brokers = [
+            str(item.get("executable"))
+            for item in (capability_resolution.get("resolved") or [])
+            if isinstance(item, dict) and item.get("name") == "container.docker"
+        ]
+        worker_env["OFLOOP_CONTAINER_BROKER_EXECUTABLE"] = (
+            docker_brokers[0] if len(docker_brokers) == 1 else ""
+        )
 
         # Do not expose ~/.gitconfig merely so an unattended builder can commit.
         # Give semantic Git a deterministic bot identity and disable terminal
@@ -3184,6 +3247,18 @@ class ClaudeCodeRunner:
         worker_env["GIT_AUTHOR_EMAIL"] = "loop@localhost"
         worker_env["GIT_COMMITTER_NAME"] = "OwnFramework Loop"
         worker_env["GIT_COMMITTER_EMAIL"] = "loop@localhost"
+
+        # Authority-bearing host/profile bytes are rechecked immediately before
+        # child creation. The child is still held behind the durable release
+        # gate, so any drift here produces zero model calls.
+        capabilities_mod.verify_resolution_integrity(capability_resolution)
+        runner_profiles_mod.verify_profile_integrity(runner_profile)
+        capability_binding_mod.verify_run_binding(
+            canonical_repo,
+            str(work_order.get("run_id") or ""),
+            capability_resolution,
+            runner_profile,
+        )
 
         release_r, release_w = os.pipe()
         os.set_inheritable(release_r, True)
@@ -3521,6 +3596,10 @@ def _classify_runner_failure(result: RunnerResult) -> tuple[str, str]:
 def _classify_exception(exc: BaseException) -> tuple[str, str]:
     if isinstance(exc, WorkerLaunchError):
         return "configuration", "worker_launch_failed"
+    if isinstance(exc, capability_binding_mod.CapabilityBindingError):
+        return "configuration", "capability_binding_failed"
+    if isinstance(exc, runner_profiles_mod.RunnerProfileError):
+        return "configuration", "runner_profile_resolution_failed"
     if isinstance(exc, capabilities_mod.CapabilityResolutionError):
         return "configuration", "capability_resolution_failed"
     if isinstance(exc, dispatch_mod.SemanticResultIncomplete):
@@ -4296,6 +4375,9 @@ def run_one(*, db_path: Path | None = None, timeout_seconds: int = 0) -> dict[st
                 }
 
             role = str(work_order.get("role") or "builder")
+            binding_create_allowed = _capability_binding_creation_allowed(
+                conn, int(job["id"])
+            )
             attempt_id, durable_files = _reserve_semantic_attempt(
                 conn, job=job, role=role
             )
@@ -4320,6 +4402,7 @@ def run_one(*, db_path: Path | None = None, timeout_seconds: int = 0) -> dict[st
 
             runner_work_order = dict(work_order)
             runner_work_order["attempt_id"] = attempt_id
+            runner_work_order["allow_capability_binding_create"] = binding_create_allowed
             result = _runner(str(job["runner"])).run(
                 runner_work_order,
                 timeout_seconds=semantic_timeout_seconds,
@@ -4527,7 +4610,13 @@ def run_one(*, db_path: Path | None = None, timeout_seconds: int = 0) -> dict[st
             }
         except Exception as exc:
             if attempt_id and isinstance(
-                exc, (WorkerLaunchError, capabilities_mod.CapabilityResolutionError)
+                exc,
+                (
+                    WorkerLaunchError,
+                    capabilities_mod.CapabilityResolutionError,
+                    capability_binding_mod.CapabilityBindingError,
+                    runner_profiles_mod.RunnerProfileError,
+                ),
             ):
                 _mark_attempt_launch_failed(
                     conn,
@@ -4535,7 +4624,11 @@ def run_one(*, db_path: Path | None = None, timeout_seconds: int = 0) -> dict[st
                     attempt_id=attempt_id,
                     detail=str(exc),
                     failure_reason=(
-                        "capability_resolution_failed"
+                        "capability_binding_failed"
+                        if isinstance(exc, capability_binding_mod.CapabilityBindingError)
+                        else "runner_profile_resolution_failed"
+                        if isinstance(exc, runner_profiles_mod.RunnerProfileError)
+                        else "capability_resolution_failed"
                         if isinstance(exc, capabilities_mod.CapabilityResolutionError)
                         else "worker_launch_failed"
                     ),
