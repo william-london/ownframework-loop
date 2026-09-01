@@ -215,8 +215,9 @@ doc = {
     "confirmation_token": approval.derive_confirmation_token(packet_sha),
     "candidate_branch": branch_resolver.default_candidate_branch(run_id),
 }
-Path(canonical_repo, ".ownframework-loop", run_id, "APPROVAL.json").write_text(
-    json.dumps(doc, indent=2, sort_keys=True) + "\n")
+approval_path = Path(canonical_repo, ".ownframework-loop", run_id, "APPROVAL.json")
+approval_path.write_text(json.dumps(doc, indent=2, sort_keys=True) + "\n")
+approval_path.chmod(0o600)
 cur = state_mod.load(canonical_repo, run_id)
 if cur.get("state") == "AWAITING_APPROVAL":
     state_mod.transition(
