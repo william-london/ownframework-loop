@@ -88,7 +88,7 @@ except Exception as e:
     check("SECURITY readable", False, f"({e})")
     sec_ver = ""
 
-# Current v0.9 doctrine/template truth.
+# Current v0.9.1 doctrine/template truth.
 try:
     arch = open(os.path.join(ROOT, "docs/ARCHITECTURE.md")).read()
     model = open(os.path.join(ROOT, "docs/architecture/SUPERVISOR_MODEL.md")).read()
@@ -97,7 +97,7 @@ try:
     check("SUPERVISOR_MODEL bounded workspace concurrency", "configurable bounded host concurrency" in model and "repository-wide\nmutex" in model)
     check("WORK_PACKET default candidate branch valid-by-omission", '"candidate_branch_prefix": "factory/candidate/"' not in template)
 except Exception as e:
-    check("current v0.9 doctrine surfaces readable", False, f"({e})")
+    check("current v0.9.1 doctrine surfaces readable", False, f"({e})")
 
 # 6. CHANGELOG.md (most recent entry must equal EXPECTED)
 try:
@@ -113,5 +113,5 @@ print()
 if failures:
     print(f"  VERSION_TRUTH=FAIL ({len(failures)} mismatch(es))")
     sys.exit(1)
-print(f"  VERSION_TRUTH=PASS (source line = {EXPECTED}; published release = v0.8.4; v0.9 workspace doctrine current)")
+print(f"  VERSION_TRUTH=PASS (source line = {EXPECTED}; published release = v0.8.4; v0.9.1 workspace doctrine current)")
 PYEOF
