@@ -27,7 +27,7 @@ binding, and promotion boundaries. Agent hosts are adapters.
 
 ## Canonical operating model
 
-v0.9 concurrency is workspace-scoped. Repository identity is the resolved Git
+v0.9.1 concurrency is workspace-scoped. Repository identity is the resolved Git
 common directory used for provenance/grouping; execution ownership is that
 repository identity plus the run-frozen candidate branch. Different candidate
 workspaces in the same Git repository may run concurrently—even when they
