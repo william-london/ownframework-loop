@@ -180,55 +180,81 @@ def _ensure_program_initialized(
         baseline_sha=baseline_sha,
         candidate_branch=candidate_branch,
     )
-    cur = state_mod.load(repo, run_id)
-    if cur is None:
-        raise RuntimeError(f"STATE.json missing for {run_id}")
 
-    existing = cur.get("program")
-    if isinstance(existing, dict):
-        ok, reason = program_mod.verify_frozen_graph(meta, existing)
-        if not ok:
-            raise RuntimeError(f"refusing PROGRAM re-initialization: {reason}")
-        provenance = existing.get("source_sha_provenance") or {}
-        if provenance.get("baseline_sha") not in (None, "", baseline_sha):
-            raise RuntimeError("refusing PROGRAM re-initialization: baseline provenance drift")
-        if provenance.get("candidate_branch") not in (None, "", candidate_branch):
-            raise RuntimeError("refusing PROGRAM re-initialization: candidate branch provenance drift")
-        if cur.get("schema") != state_mod.PROGRAM_STATE_SCHEMA_VERSION:
-            raise RuntimeError("PROGRAM block present under non-PROGRAM state schema")
-        return {
-            "is_program": True,
-            "initialized": False,
-            "program": existing,
-            "candidate_branch": candidate_branch,
-            "baseline_sha": baseline_sha,
-        }
+    # Crash-atomic read-check-write under one run flock + one STATE_TXN. The
+    # previous load()->save() pair had a stale read->save lost-update window:
+    # a concurrent writer between the read and the write could be clobbered.
+    # Holding the lock across the whole decision removes that window, and the
+    # idempotent already-initialized check runs against the same locked bytes
+    # that the write commits.
+    result: dict[str, Any] = {}
+    init_state = None
+    with state_mod._locked_state(repo, run_id) as cur:
+        if cur is None:
+            raise RuntimeError(f"STATE.json missing for {run_id}")
+        existing = cur.get("program")
+        if isinstance(existing, dict):
+            ok, reason = program_mod.verify_frozen_graph(meta, existing)
+            if not ok:
+                raise RuntimeError(f"refusing PROGRAM re-initialization: {reason}")
+            provenance = existing.get("source_sha_provenance") or {}
+            if provenance.get("baseline_sha") not in (None, "", baseline_sha):
+                raise RuntimeError("refusing PROGRAM re-initialization: baseline provenance drift")
+            if provenance.get("candidate_branch") not in (None, "", candidate_branch):
+                raise RuntimeError("refusing PROGRAM re-initialization: candidate branch provenance drift")
+            if cur.get("schema") != state_mod.PROGRAM_STATE_SCHEMA_VERSION:
+                raise RuntimeError("PROGRAM block present under non-PROGRAM state schema")
+            result = {
+                "is_program": True,
+                "initialized": False,
+                "program": existing,
+                "candidate_branch": candidate_branch,
+                "baseline_sha": baseline_sha,
+            }
+        else:
+            new_state = dict(cur)
+            new_state["program"] = expected
+            new_state["schema"] = state_mod.PROGRAM_STATE_SCHEMA_VERSION
+            new_state["updated_at"] = util.utc_now_iso()
+            new_state["last_actor"] = "ofloop-core"
+            state_mod._commit_state_event_locked(
+                repo,
+                run_id,
+                new_state,
+                event_type="state_saved",
+                old_state=cur.get("state"),
+                new_state=cur.get("state"),
+                actor="ofloop-core",
+                commit_sha=new_state.get("last_candidate_sha"),
+                reason="approved v3 PROGRAM graph materialized exactly once",
+            )
+            init_state = cur.get("state")
+            result = {
+                "is_program": True,
+                "initialized": True,
+                "program": expected,
+                "candidate_branch": candidate_branch,
+                "baseline_sha": baseline_sha,
+            }
 
-    new_state = dict(cur)
-    new_state["program"] = expected
-    new_state["schema"] = state_mod.PROGRAM_STATE_SCHEMA_VERSION
-    state_mod.save(repo, run_id, new_state)
-    state_mod.append_event(
-        repo,
-        run_id,
-        event_type="program_initialized",
-        old_state=cur.get("state"),
-        new_state=cur.get("state"),
-        actor="ofloop-core",
-        reason="approved v3 PROGRAM graph materialized exactly once",
-        extras={
-            "checkpoint_graph_sha256": expected.get("checkpoint_graph_sha256"),
-            "candidate_branch": candidate_branch,
-            "baseline_sha": baseline_sha,
-        },
-    )
-    return {
-        "is_program": True,
-        "initialized": True,
-        "program": expected,
-        "candidate_branch": candidate_branch,
-        "baseline_sha": baseline_sha,
-    }
+    if result.get("initialized"):
+        # Diagnostic evidence event; the authoritative state was already
+        # committed atomically above.
+        state_mod.append_event(
+            repo,
+            run_id,
+            event_type="program_initialized",
+            old_state=init_state,
+            new_state=init_state,
+            actor="ofloop-core",
+            reason="approved v3 PROGRAM graph materialized exactly once",
+            extras={
+                "checkpoint_graph_sha256": expected.get("checkpoint_graph_sha256"),
+                "candidate_branch": candidate_branch,
+                "baseline_sha": baseline_sha,
+            },
+        )
+    return result
 
 
 def cmd_program_init(args: argparse.Namespace) -> None:
@@ -866,107 +892,74 @@ def cmd_review_claim(args: argparse.Namespace) -> None:
         _emit_error(f"review claim lock contention: {e}", exit_code=4)
 def cmd_build_transition(args: argparse.Namespace) -> None:
     repo = _repo_path(args.repo)
-    state_mod.transition(
-        repo, args.run_id, to_state=args.to,
-        actor=args.actor or "of-builder",
-        reason=args.reason or "",
-        commit_sha=getattr(args, "commit_sha", None),
-    )
     if args.to == "CHANGES_REQUESTED":
-        # Increment repair round. In program mode, route through the
-        # unified claim owner so per-cp, cumulative, and top-level mirror
-        # counters cannot desync (matches review_finalize.py repair path).
-        # v0.3.5 (F-4-01): pass source_evidence_sha so the replay guard
-        # distinguishes fresh repair rounds from duplicate retries.
-        cur = state_mod.load(repo, args.run_id)
-        if state_mod.is_program_state(cur):
+        # Crash-atomic repair funding + transition (SINGLE and PROGRAM). The
+        # repair entitlement and the CHANGES_REQUESTED transition are ONE
+        # STATE_TXN-backed mutation through the shared transition_funded_repair
+        # owner (the same owner the live review finalizer and crash reconciler
+        # use), so no crash boundary can ever expose an unfunded claimable
+        # CHANGES_REQUESTED. When the repair envelope is exhausted the same
+        # mutation seals BLOCKED instead of funding another pass. This replaces
+        # the old transition-then-increment-then-save sequence, which had a
+        # crash window that could strand an unfunded CHANGES_REQUESTED and a
+        # stale read->save lost-update window on no_progress_streak.
+        try:
             meta, _approval_doc, _packet_path = _require_valid_approval(repo, args.run_id)
-            ev_sha = (
-                getattr(args, "commit_sha", None)
-                or (cur or {}).get("last_candidate_sha")
-                or ""
+        except RuntimeError as e:
+            _emit_error(f"repair refused: {e}", exit_code=4)
+        commit_sha = getattr(args, "commit_sha", None) or (
+            (state_mod.load_verified(repo, args.run_id) or {}).get("last_candidate_sha") or ""
+        )
+        result = state_mod.transition_funded_repair(
+            repo, args.run_id,
+            packet=meta,
+            actor=args.actor or "of-builder",
+            commit_sha=commit_sha,
+            extras={"no_progress_streak": 0},
+            allowed_sources=frozenset({"BUILDING", "REVIEWING"}),
+            claimed_reason="foreground repair; repair entitlement claimed atomically",
+        )
+        final_state = str(result.get("state") or "")
+        if not result.get("repair_claimed"):
+            # Cap exhausted: the atomic mutation already sealed the terminal
+            # state (BLOCKED). Fail closed with the durable final state.
+            _emit_error(
+                f"repair claim refused (run sealed {final_state}): {result.get('reason')}",
+                exit_code=4,
+                classification="OF_LOOP_CLAIM_CAP_EXHAUSTED",
             )
-            try:
-                program_mod.claim_repair_round(
-                    canonical_repo=repo,
-                    run_id=args.run_id,
-                    packet=meta,
-                    source_evidence_sha=ev_sha or None,
-                )
-            except program_mod.ClaimRefused as e:
-                _emit_error(f"repair claim refused: {e}", exit_code=4)
-            # v0.3.5 (F-4-01): post-hook — transition CHANGES_REQUESTED
-            # back to READY_TO_BUILD so the next build pass is not
-            # classified as a replay of the previous repair. Tolerate only
-            # the idempotent races (state already buildable); any other
-            # FSM failure is a real desync and must surface.
-            try:
+        # Single-mode post-hook: the generic FSM has no CHANGES_REQUESTED ->
+        # BUILDING edge, so a funded single-mode run returns to READY_TO_BUILD.
+        # PROGRAM runs stay claimable from CHANGES_REQUESTED via the unified
+        # claim owner and are left there.
+        if final_state == "CHANGES_REQUESTED":
+            cur_after = state_mod.load_verified(repo, args.run_id)
+            if not state_mod.is_program_state(cur_after):
                 state_mod.transition(
                     repo, args.run_id,
                     to_state="READY_TO_BUILD",
                     actor=args.actor or "operator",
                     reason="repair_round claimed; ready for next build",
                 )
-            except transitions.InvalidTransitionError:
-                now = state_mod.load(repo, args.run_id)
-                if (now or {}).get("state") not in ("READY_TO_BUILD", "CHANGES_REQUESTED"):
-                    raise
-            _emit({"ok": True, "run_id": args.run_id, "state": args.to})
-            return
-        # Single-mode V1 path: increment through the capped counter owner so
-        # the repair envelope fails closed at claim time. The build finalizer
-        # no longer blocks on repair_round >= cap (that starved the final
-        # funded repair of its review); when no funded round remains, the run
-        # seals BLOCKED here instead of funding another pass.
-        try:
-            meta, _approval_doc, _packet_path = _require_valid_approval(repo, args.run_id)
-        except RuntimeError:
-            meta = None
-        try:
-            new_round = state_mod.increment_counter(
-                repo, args.run_id, counter="repair_round",
-                actor=args.actor or "of-builder", packet=meta, hard_cap=True,
-            )
-        except limits_mod.RepairLimitExceeded as e:
-            _seal_blocked_on_cap_exhaustion(
-                repo, args.run_id,
-                actor="of-loop-cap-gate",
-                reason=f"repair cap exhausted: {e}",
-            )
-            _emit_error(
-                f"repair claim refused (cap exhausted; run sealed BLOCKED): {e}",
-                exit_code=4,
-                classification="OF_LOOP_CLAIM_CAP_EXHAUSTED",
-            )
-        cur = state_mod.load(repo, args.run_id)
-        cur["no_progress_streak"] = 0
-        state_mod.save(repo, args.run_id, cur)
-        state_mod.append_event(
-            repo, args.run_id, event_type="repair_round_incremented",
-            old_state=None, new_state=None,
-            actor=args.actor or "of-builder",
-            extras={"repair_round": new_round},
-        )
-        # Single-mode post-hook (mirrors review_finalize): the generic FSM has
-        # no CHANGES_REQUESTED -> BUILDING edge, so the run must return to
-        # READY_TO_BUILD for the next build claim to be reachable. Tolerate
-        # only the idempotent race (already buildable); any other FSM failure
-        # is a real desync and must surface.
-        if args.to == "CHANGES_REQUESTED":
-            now = state_mod.load(repo, args.run_id)
-            if (now or {}).get("state") == "CHANGES_REQUESTED":
-                try:
-                    state_mod.transition(
-                        repo, args.run_id,
-                        to_state="READY_TO_BUILD",
-                        actor=args.actor or "operator",
-                        reason="repair_round claimed; ready for next build",
-                    )
-                except transitions.InvalidTransitionError:
-                    after = state_mod.load(repo, args.run_id)
-                    if (after or {}).get("state") not in ("READY_TO_BUILD", "CHANGES_REQUESTED"):
-                        raise
-    _emit({"ok": True, "run_id": args.run_id, "state": args.to})
+                final_state = "READY_TO_BUILD"
+        # Report the ACTUAL durable final state, not the requested --to.
+        _emit({
+            "ok": True,
+            "run_id": args.run_id,
+            "state": final_state,
+            "repair_claimed": bool(result.get("repair_claimed")),
+            "repair_round": int(result.get("repair_round", 0) or 0),
+        })
+        return
+    state_mod.transition(
+        repo, args.run_id, to_state=args.to,
+        actor=args.actor or "of-builder",
+        reason=args.reason or "",
+        commit_sha=getattr(args, "commit_sha", None),
+    )
+    # Report the ACTUAL durable final state after the transition.
+    now = state_mod.load_verified(repo, args.run_id) or {}
+    _emit({"ok": True, "run_id": args.run_id, "state": now.get("state")})
 
 
 def cmd_build_cleanup(args: argparse.Namespace) -> None:
