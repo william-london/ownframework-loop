@@ -180,3 +180,4 @@ tests/integration/test_final_source_closure.sh
 # normalization (timeout/launch), and browser runtime proof privacy/
 # freshness/asset-drift + shared read-only asset wiring.
 tests/integration/test_source_authority_final.sh
+tests/integration/test_single_claim_atomicity.sh

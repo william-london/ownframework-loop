@@ -750,39 +750,27 @@ def cmd_build_claim(args: argparse.Namespace) -> None:
                 })
                 return
             try:
-                state_mod.transition(
-                    repo, args.run_id, to_state="BUILDING",
+                claim = state_mod.claim_single_pass(
+                    repo, args.run_id,
+                    pass_kind="build",
                     actor=args.actor or "of-builder",
-                    reason="claim build pass",
-                )
-                new_pass_count = state_mod.increment_counter(
-                    repo, args.run_id, counter="build_pass_count",
-                    actor="of-builder", packet=meta,
-                    hard_cap=True,
+                    packet=meta,
                 )
             except limits_mod.RepairLimitExceeded as e:
-                _seal_blocked_on_cap_exhaustion(
-                    repo, args.run_id,
-                    actor="of-loop-cap-gate",
-                    reason=f"build cap exhausted: {e}",
-                )
                 _emit_error(
                     f"build claim refused (cap exhausted; run sealed BLOCKED): {e}",
                     exit_code=4,
                     classification="OF_LOOP_CLAIM_CAP_EXHAUSTED",
                 )
-            state_mod.append_event(
-                repo, args.run_id,
-                event_type="build_claimed",
-                old_state=cur_state, new_state="BUILDING",
-                actor=args.actor or "of-builder",
-            )
+            except (RuntimeError, transitions.InvalidTransitionError) as e:
+                _emit_error(f"build claim refused: {e}", exit_code=4)
             _emit({
                 "ok": True,
                 "run_id": args.run_id,
-                "state": "BUILDING",
-                "build_pass_count": new_pass_count,
-                "replayed": False,
+                "state": claim["state"],
+                "build_pass_count": claim["claimed_pass_number"],
+                "replayed": bool(claim["replayed"]),
+                "recovered": bool(claim.get("recovered")),
             })
             return
     except locking.LockBusyError as e:
@@ -853,39 +841,27 @@ def cmd_review_claim(args: argparse.Namespace) -> None:
                 })
                 return
             try:
-                state_mod.transition(
-                    repo, args.run_id, to_state="REVIEWING",
+                claim = state_mod.claim_single_pass(
+                    repo, args.run_id,
+                    pass_kind="review",
                     actor=args.actor or "of-reviewer",
-                    reason="claim review pass",
-                )
-                new_pass_count = state_mod.increment_counter(
-                    repo, args.run_id, counter="review_pass_count",
-                    actor="of-reviewer", packet=meta,
-                    hard_cap=True,
+                    packet=meta,
                 )
             except limits_mod.RepairLimitExceeded as e:
-                _seal_blocked_on_cap_exhaustion(
-                    repo, args.run_id,
-                    actor="of-loop-cap-gate",
-                    reason=f"review cap exhausted: {e}",
-                )
                 _emit_error(
                     f"review claim refused (cap exhausted; run sealed BLOCKED): {e}",
                     exit_code=4,
                     classification="OF_LOOP_CLAIM_CAP_EXHAUSTED",
                 )
-            state_mod.append_event(
-                repo, args.run_id,
-                event_type="review_claimed",
-                old_state=cur_state, new_state="REVIEWING",
-                actor=args.actor or "of-reviewer",
-            )
+            except (RuntimeError, transitions.InvalidTransitionError) as e:
+                _emit_error(f"review claim refused: {e}", exit_code=4)
             _emit({
                 "ok": True,
                 "run_id": args.run_id,
-                "state": "REVIEWING",
-                "review_pass_count": new_pass_count,
-                "replayed": False,
+                "state": claim["state"],
+                "review_pass_count": claim["claimed_pass_number"],
+                "replayed": bool(claim["replayed"]),
+                "recovered": bool(claim.get("recovered")),
             })
             return
     except locking.LockBusyError as e:

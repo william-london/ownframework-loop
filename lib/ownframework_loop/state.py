@@ -494,6 +494,38 @@ def _verify_mutation_integrity_locked(canonical_repo: Path, run_id: str) -> None
             )
 
 
+def _validate_initial_state_payload(run_id: str, payload: dict[str, Any]) -> None:
+    """Validate creation-time STATE identity before any durable bytes exist."""
+    validate_run_id(run_id)
+    if not isinstance(payload, dict):
+        raise ValueError("initial state payload must be an object")
+    if payload.get("run_id") != run_id:
+        raise ValueError("initial state payload run_id mismatch")
+    if payload.get("schema") != SCHEMA_VERSION:
+        raise ValueError("initial state payload must use the single-run state schema")
+    if payload.get("state") != "AWAITING_APPROVAL":
+        raise ValueError("initial state must begin in AWAITING_APPROVAL")
+    if int(payload.get("transitions_count", -1)) != 0:
+        raise ValueError("initial state transitions_count must be zero")
+    for key in ("build_pass_count", "review_pass_count", "repair_round", "no_progress_streak"):
+        if int(payload.get(key, -1)) != 0:
+            raise ValueError(f"initial state {key} must be zero")
+    if payload.get("last_candidate_sha") not in ("", None):
+        raise ValueError("initial state may not pre-bind a candidate SHA")
+    if payload.get("terminal_reason") not in ("", None):
+        raise ValueError("initial state may not carry a terminal reason")
+    if payload.get("program") is not None:
+        raise ValueError("PROGRAM authority is materialized only after packet approval")
+    history = payload.get("state_history")
+    if not isinstance(history, list) or len(history) != 1:
+        raise ValueError("initial state must contain exactly one creation history entry")
+    first = history[0]
+    if not isinstance(first, dict) or first.get("from") not in ("", None) or first.get("to") != "AWAITING_APPROVAL":
+        raise ValueError("initial state history must record creation into AWAITING_APPROVAL")
+    if payload.get("started_at") != payload.get("updated_at"):
+        raise ValueError("initial state started_at and updated_at must match")
+
+
 def save(canonical_repo: Path, run_id: str, payload: dict[str, Any]) -> None:
     """Create the initial durable state for a brand-new run. CREATION-ONLY.
 
@@ -507,6 +539,7 @@ def save(canonical_repo: Path, run_id: str, payload: dict[str, Any]) -> None:
       * claim counters/fuses: the claim and finalize owners;
       * diagnostics: append_event() extras (a separate contract).
     """
+    _validate_initial_state_payload(run_id, payload)
     actor = str(payload.get("last_actor", "spec"))
     sp = state_path(canonical_repo, run_id)
     with flock_exclusive(lock_path(canonical_repo, run_id)):
@@ -999,6 +1032,186 @@ def transition_review_rejection_with_repair(
     )
 
 
+_SINGLE_CLAIM_SPECS: dict[str, tuple[str, str, frozenset[str]]] = {
+    "build": ("build_pass_count", "BUILDING", frozenset({"READY_TO_BUILD", "CHANGES_REQUESTED"})),
+    "review": ("review_pass_count", "REVIEWING", frozenset({"READY_FOR_REVIEW"})),
+}
+
+
+def _single_claim_history_count(current: dict[str, Any], target: str) -> int:
+    history = current.get("state_history") or []
+    if not isinstance(history, list):
+        raise RuntimeError("single claim state_history is malformed")
+    return sum(
+        1 for item in history
+        if isinstance(item, dict) and item.get("to") == target
+    )
+
+
+def claim_single_pass(
+    canonical_repo: Path,
+    run_id: str,
+    *,
+    pass_kind: str,
+    actor: str,
+    packet: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Atomically claim one SINGLE build/review pass.
+
+    State transition, cap check and pass-counter funding are ONE STATE_TXN.
+    A replay is accepted only when the in-flight state has a matching funded
+    transition count. Historical pre-v0.9.1 crashes that persisted the state
+    transition but not its counter are deterministically healed (or BLOCKED
+    when the missing entitlement would exceed the cap).
+    """
+    spec = _SINGLE_CLAIM_SPECS.get(pass_kind)
+    if spec is None:
+        raise ValueError(f"unsupported single pass kind: {pass_kind!r}")
+    counter, target, allowed_sources = spec
+    sp = state_path(canonical_repo, run_id)
+    with flock_exclusive(lock_path(canonical_repo, run_id)):
+        _verify_mutation_integrity_locked(canonical_repo, run_id)
+        current = read_json(sp)
+        if not isinstance(current, dict) or not current:
+            raise FileNotFoundError(f"STATE.json missing for run {run_id}")
+        if is_program_state(current):
+            raise RuntimeError("single-pass claim owner refuses PROGRAM state")
+        cur_state = str(current.get("state") or "")
+        count = int(current.get(counter, 0) or 0)
+        cap = limits_mod.effective_cap(counter, packet)
+        history_claims = _single_claim_history_count(current, target)
+
+        # Idempotent replay, including deterministic recovery of the historical
+        # transition->counter crash window from older source generations.
+        if cur_state == target:
+            if history_claims == count and count > 0:
+                return {
+                    "ok": True, "state": target, "counter": counter,
+                    "claimed_pass_number": count, "cap": cap,
+                    "replayed": True, "recovered": False,
+                }
+            if history_claims == count + 1:
+                if cap is not None and count >= cap:
+                    new = dict(current)
+                    now = utc_now_iso()
+                    reason = (
+                        f"{pass_kind} claim recovery refused: missing entitlement "
+                        f"would exceed cap {count}/{cap}"
+                    )
+                    transitions.assert_valid(cur_state, "BLOCKED")
+                    new["state"] = "BLOCKED"
+                    new["transitions_count"] = int(current.get("transitions_count", 0)) + 1
+                    new["updated_at"] = now
+                    new["last_actor"] = actor
+                    new["terminal_reason"] = reason
+                    history = list(current.get("state_history") or [])
+                    history.append({
+                        "from": cur_state, "to": "BLOCKED", "at": now,
+                        "actor": actor, "reason": reason,
+                    })
+                    new["state_history"] = history
+                    _commit_state_event_locked(
+                        canonical_repo, run_id, new,
+                        event_type="state_transition",
+                        old_state=cur_state, new_state="BLOCKED",
+                        actor=actor, reason=reason,
+                        extras={"claim_counter": counter, "claim_cap": cap},
+                    )
+                    raise limits_mod.RepairLimitExceeded(reason)
+                new = dict(current)
+                new[counter] = count + 1
+                new["updated_at"] = utc_now_iso()
+                new["last_actor"] = actor
+                _commit_state_event_locked(
+                    canonical_repo, run_id, new,
+                    event_type=f"{pass_kind}_claim_recovered",
+                    old_state=target, new_state=target,
+                    actor=actor,
+                    reason="recovered legacy in-flight claim funding",
+                    extras={
+                        "claim_counter": counter,
+                        "claimed_pass_number": count + 1,
+                        "claim_cap": cap,
+                    },
+                )
+                return {
+                    "ok": True, "state": target, "counter": counter,
+                    "claimed_pass_number": count + 1, "cap": cap,
+                    "replayed": False, "recovered": True,
+                }
+            raise RuntimeError(
+                f"{pass_kind} in-flight claim/counter drift: "
+                f"state_history_claims={history_claims} {counter}={count}"
+            )
+
+        if cur_state not in allowed_sources:
+            raise transitions.InvalidTransitionError(
+                f"{pass_kind} claim refused in state {cur_state!r}; "
+                f"allowed={sorted(allowed_sources)}"
+            )
+        if cap is not None and count >= cap:
+            new = dict(current)
+            now = utc_now_iso()
+            reason = f"{pass_kind} claim refused: {counter}={count} reached cap={cap}"
+            transitions.assert_valid(cur_state, "BLOCKED")
+            new["state"] = "BLOCKED"
+            new["transitions_count"] = int(current.get("transitions_count", 0)) + 1
+            new["updated_at"] = now
+            new["last_actor"] = actor
+            new["terminal_reason"] = reason
+            history = list(current.get("state_history") or [])
+            history.append({
+                "from": cur_state, "to": "BLOCKED", "at": now,
+                "actor": actor, "reason": reason,
+            })
+            new["state_history"] = history
+            _commit_state_event_locked(
+                canonical_repo, run_id, new,
+                event_type="state_transition",
+                old_state=cur_state, new_state="BLOCKED",
+                actor=actor, reason=reason,
+                extras={"claim_counter": counter, "claim_cap": cap},
+            )
+            raise limits_mod.RepairLimitExceeded(reason)
+
+        # READY_TO_BUILD -> BUILDING and READY_FOR_REVIEW -> REVIEWING are
+        # ordinary FSM edges. CHANGES_REQUESTED -> BUILDING is a narrow claim-
+        # owner recovery edge for a SINGLE run that crashed before its normal
+        # READY_TO_BUILD post-hook.
+        if not (pass_kind == "build" and cur_state == "CHANGES_REQUESTED"):
+            transitions.assert_valid(cur_state, target)
+
+        now = utc_now_iso()
+        new = dict(current)
+        new["state"] = target
+        new[counter] = count + 1
+        new["transitions_count"] = int(current.get("transitions_count", 0)) + 1
+        new["updated_at"] = now
+        new["last_actor"] = actor
+        history = list(current.get("state_history") or [])
+        history.append({
+            "from": cur_state, "to": target, "at": now,
+            "actor": actor, "reason": f"claim {pass_kind} pass",
+        })
+        new["state_history"] = history
+        _commit_state_event_locked(
+            canonical_repo, run_id, new,
+            event_type="state_transition",
+            old_state=cur_state, new_state=target,
+            actor=actor, reason=f"claim {pass_kind} pass",
+            extras={
+                "claim_counter": counter,
+                "claimed_pass_number": count + 1,
+                "claim_cap": cap,
+            },
+        )
+        return {
+            "ok": True, "state": target, "counter": counter,
+            "claimed_pass_number": count + 1, "cap": cap,
+            "replayed": False, "recovered": False,
+        }
+
+
 def increment_counter(
     canonical_repo: Path,
     run_id: str,
@@ -1008,14 +1221,19 @@ def increment_counter(
     packet: dict[str, Any] | None = None,
     hard_cap: bool = True,
 ) -> int:
-    """Increment a top-level integer counter under flock and return the new value.
+    """Legacy helper retained only for non-claim diagnostics.
 
-    If `hard_cap` is True (default) and the counter is one of the V1-caps
-    list, refuse to increment past the effective cap (V1 max or packet
-    override). Raises `limits_mod.RepairLimitExceeded`.
+    Claim counters are structurally owned by claim_single_pass()/PROGRAM claim
+    owners and cannot be incremented through this generic API.
     """
+    if counter in {"build_pass_count", "review_pass_count", "repair_round"}:
+        raise ValueError(
+            f"counter {counter!r} has a typed claim/funding owner and cannot "
+            "be incremented generically"
+        )
+    if counter not in limits_mod.COUNTER_LIMITS:
+        raise ValueError(f"unsupported counter: {counter!r}")
     sp = state_path(canonical_repo, run_id)
-    ep = events_path(canonical_repo, run_id)
     with flock_exclusive(lock_path(canonical_repo, run_id)):
         _verify_mutation_integrity_locked(canonical_repo, run_id)
         current = read_json(sp)
@@ -1028,14 +1246,10 @@ def increment_counter(
         new["updated_at"] = utc_now_iso()
         new["last_actor"] = actor
         _commit_state_event_locked(
-            canonical_repo,
-            run_id,
-            new,
+            canonical_repo, run_id, new,
             event_type="counter_incremented",
-            old_state=None,
-            new_state=None,
+            old_state=None, new_state=None,
             actor=actor,
-            commit_sha=None,
             reason=None,
             extras={
                 "counter": counter,
