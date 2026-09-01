@@ -97,9 +97,9 @@ approval_doc = {
     "approval_method": "build_start",
     "confirmation_token": token,
 }
-(repo / ".ownframework-loop" / rid / "APPROVAL.json").write_text(
-    json.dumps(approval_doc, indent=2, sort_keys=True) + "\n"
-)
+approval_path = repo / ".ownframework-loop" / rid / "APPROVAL.json"
+approval_path.write_text(json.dumps(approval_doc, indent=2, sort_keys=True) + "\n")
+approval_path.chmod(0o600)
 PY
 
   wt="$repo/.worktrees/ownframework-loop/$rid/builder"
