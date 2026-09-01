@@ -273,15 +273,22 @@ with tempfile.TemporaryDirectory() as td:
     bad["capabilities"] = ["../home"]
     assert any("capabilities" in e for e in packet.validate_packet_metadata(bad))
 
-    browser = capabilities.resolve_capabilities(
-        ["browser.playwright.chromium"],
-        canonical_repo=repo,
-        role="builder",
-        repo_cache_root=cache,
-        packet_network_allowlist=[],
-    )
-    assert browser["resolved"][0]["executable"] is None
-    assert "storage.googleapis.com" in browser["network_domains"]
+    # Packet metadata may request the portable browser capability, but
+    # execution resolution is fail-closed until this host has an exact
+    # runtime-proven commissioned browser asset. Provisionability alone is
+    # inventory truth, not execution authority.
+    try:
+        capabilities.resolve_capabilities(
+            ["browser.playwright.chromium"],
+            canonical_repo=repo,
+            role="builder",
+            repo_cache_root=cache,
+            packet_network_allowlist=[],
+        )
+    except capabilities.CapabilityResolutionError as exc:
+        assert "browser asset root" in str(exc) or "not execution-ready" in str(exc), exc
+    else:
+        raise AssertionError("uncommissioned browser resolved as execution-ready")
 
     manifest.chmod(0o666)
     try:
