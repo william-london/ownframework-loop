@@ -4822,24 +4822,33 @@ def run_one(*, db_path: Path | None = None, timeout_seconds: int = 0) -> dict[st
             # already accounted above; the envelope truth (full modelUsage) is
             # preserved in the ledger either way.
             strict_failure_reason = ""
-            receipt = capabilities_mod.read_resolution_receipt(
-                Path(str(job["repo"])),
-                str(job["run_id"]),
-                role,
-                attempt_id,
-            )
-            requested_profile = receipt.get("requested_runner_profile") or {}
-            strict_model = str(requested_profile.get("model") or "")
-            strict_failure_reason = _strict_profile_model_violation(
-                strict_model,
-                result_ok=bool(result.ok),
-                effective_model=str(result.effective_model or ""),
-            )
+            strict_failure_class = ""
+            if bool(getattr(runner_impl, "requires_capability_receipt", False)):
+                try:
+                    receipt = capabilities_mod.read_resolution_receipt(
+                        Path(str(job["repo"])),
+                        str(job["run_id"]),
+                        role,
+                        attempt_id,
+                    )
+                except capabilities_mod.CapabilityResolutionError:
+                    strict_failure_reason = "semantic_attempt_capability_receipt_invalid"
+                    strict_failure_class = "invariant"
+                else:
+                    requested_profile = receipt.get("requested_runner_profile") or {}
+                    strict_model = str(requested_profile.get("model") or "")
+                    strict_failure_reason = _strict_profile_model_violation(
+                        strict_model,
+                        result_ok=bool(result.ok),
+                        effective_model=str(result.effective_model or ""),
+                    )
+                    if strict_failure_reason:
+                        strict_failure_class = "configuration"
 
             if not result.ok or strict_failure_reason:
                 if strict_failure_reason:
                     failure_class, failure_reason = (
-                        "configuration", strict_failure_reason,
+                        strict_failure_class or "configuration", strict_failure_reason,
                     )
                 else:
                     failure_class, failure_reason = _classify_runner_failure(result)
