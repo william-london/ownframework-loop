@@ -201,14 +201,62 @@ def _trusted_asset_identity(path: Path) -> dict[str, Any]:
     return {"path": str(root), "kind": "directory", "tree_sha256": h.hexdigest()}
 
 
+def _playwright_client_tree_sha256(root: Path) -> str:
+    """Hash Playwright client implementation bytes, excluding Python caches."""
+    raw = Path(root).expanduser()
+    if raw.is_symlink():
+        raise CapabilityResolutionError("Playwright client package root must not be a symlink")
+    package_root = raw.resolve(strict=True)
+    if not package_root.is_dir():
+        raise CapabilityResolutionError("Playwright client package root is not a directory")
+    h = hashlib.sha256()
+    observed = 0
+    for dirpath, dirnames, filenames in os.walk(package_root, followlinks=False):
+        base = Path(dirpath)
+        kept_dirs: list[str] = []
+        for name in sorted(dirnames):
+            if name == "__pycache__":
+                continue
+            p = base / name
+            if p.is_symlink():
+                raise CapabilityResolutionError(
+                    f"Playwright client tree contains directory symlink: {p.relative_to(package_root)}"
+                )
+            kept_dirs.append(name)
+            rel = p.relative_to(package_root).as_posix()
+            h.update(f"d\0{rel}\0{stat.S_IMODE(p.stat().st_mode):o}\0".encode())
+        dirnames[:] = kept_dirs
+        for name in sorted(filenames):
+            if name.endswith((".pyc", ".pyo")):
+                continue
+            p = base / name
+            if p.is_symlink():
+                raise CapabilityResolutionError(
+                    f"Playwright client tree contains file symlink: {p.relative_to(package_root)}"
+                )
+            st = p.stat()
+            if not stat.S_ISREG(st.st_mode):
+                raise CapabilityResolutionError(
+                    f"Playwright client tree contains non-regular entry: {p.relative_to(package_root)}"
+                )
+            rel = p.relative_to(package_root).as_posix()
+            h.update(f"f\0{rel}\0{stat.S_IMODE(st.st_mode):o}\0".encode())
+            h.update((_file_sha256(str(p)) or "").encode("ascii"))
+            h.update(b"\0")
+            observed += 1
+    if observed == 0:
+        raise CapabilityResolutionError("Playwright client package has no implementation files")
+    return h.hexdigest()
+
+
 def playwright_client_identity() -> dict[str, str]:
-    """Byte-bind the exact Python Playwright client implementation in use.
+    """Byte-bind the exact imported Python Playwright client implementation.
 
     Browser asset proof alone is insufficient: the same Chromium tree can be
-    driven by different Playwright Python/client bytes. Bind the resolved
-    package root, its deterministic tree digest, and installed distribution
-    version so a client swap cannot inherit an older runtime proof merely by
-    preserving a version string.
+    driven by different Playwright client bytes. Bind the resolved import root,
+    deterministic implementation-tree digest, and installed distribution
+    version. Python-generated __pycache__/pyc files are excluded so harmless
+    interpreter cache churn cannot stale commissioning evidence.
     """
     try:
         spec = importlib.util.find_spec("playwright")
@@ -224,16 +272,16 @@ def playwright_client_identity() -> dict[str, str]:
             f"Playwright client package has ambiguous roots: {len(roots)}"
         )
     raw_root = roots[0]
-    identity = _trusted_asset_identity(raw_root)
-    if identity.get("kind") != "directory":
-        raise CapabilityResolutionError("Playwright client package root is not a directory")
+    if raw_root.is_symlink():
+        raise CapabilityResolutionError("Playwright client package root must not be a symlink")
+    root = raw_root.resolve(strict=True)
     try:
         version = importlib.metadata.version("playwright")
     except importlib.metadata.PackageNotFoundError:
         version = ""
     return {
-        "package_root": str(identity["path"]),
-        "package_tree_sha256": str(identity["tree_sha256"]),
+        "package_root": str(root),
+        "package_tree_sha256": _playwright_client_tree_sha256(root),
         "distribution_version": str(version),
     }
 
