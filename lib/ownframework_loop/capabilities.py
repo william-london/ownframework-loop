@@ -18,6 +18,8 @@ Security invariants:
 from __future__ import annotations
 
 from dataclasses import dataclass
+import importlib.metadata
+import importlib.util
 import hashlib
 import json
 import os
@@ -197,6 +199,43 @@ def _trusted_asset_identity(path: Path) -> dict[str, Any]:
                 h.update((_file_sha256(str(p)) or "").encode())
             h.update(b"\n")
     return {"path": str(root), "kind": "directory", "tree_sha256": h.hexdigest()}
+
+
+def playwright_client_identity() -> dict[str, str]:
+    """Byte-bind the exact Python Playwright client implementation in use.
+
+    Browser asset proof alone is insufficient: the same Chromium tree can be
+    driven by different Playwright Python/client bytes. Bind the resolved
+    package root, its deterministic tree digest, and installed distribution
+    version so a client swap cannot inherit an older runtime proof merely by
+    preserving a version string.
+    """
+    try:
+        spec = importlib.util.find_spec("playwright")
+    except (ImportError, AttributeError, ValueError) as exc:
+        raise CapabilityResolutionError(
+            f"Playwright client identity is unavailable: {exc}"
+        ) from exc
+    if spec is None or spec.submodule_search_locations is None:
+        raise CapabilityResolutionError("Playwright client package is not importable")
+    roots = [Path(str(p)).expanduser() for p in spec.submodule_search_locations]
+    if len(roots) != 1:
+        raise CapabilityResolutionError(
+            f"Playwright client package has ambiguous roots: {len(roots)}"
+        )
+    raw_root = roots[0]
+    identity = _trusted_asset_identity(raw_root)
+    if identity.get("kind") != "directory":
+        raise CapabilityResolutionError("Playwright client package root is not a directory")
+    try:
+        version = importlib.metadata.version("playwright")
+    except importlib.metadata.PackageNotFoundError:
+        version = ""
+    return {
+        "package_root": str(identity["path"]),
+        "package_tree_sha256": str(identity["tree_sha256"]),
+        "distribution_version": str(version),
+    }
 
 
 def validate_capability_names(values: Any) -> list[str]:
@@ -803,6 +842,16 @@ def _browser_runtime_proof_status(
     if doc.get("semantic_runtime_fingerprint") != semantic_runtime_fingerprint():
         return False, "browser runtime proof stale: runtime fingerprint drift", None
 
+    claimed_client = doc.get("playwright_client_identity")
+    if not isinstance(claimed_client, dict):
+        return False, "browser runtime proof missing Playwright client identity", None
+    try:
+        current_client = playwright_client_identity()
+    except CapabilityResolutionError as exc:
+        return False, f"browser runtime proof stale: {exc}", None
+    if claimed_client != current_client:
+        return False, "browser runtime proof stale: Playwright client drift", None
+
     asset_root_value = doc.get("browser_asset_root")
     if not isinstance(asset_root_value, str) or not asset_root_value:
         return False, "browser runtime proof missing asset root binding", None
@@ -836,6 +885,7 @@ def _browser_runtime_proof_status(
         "browser_asset_root": str(proof_root),
         "browser_asset_merkle_sha256": actual_merkle,
         "browser_proof_sha256": str(claimed),
+        "playwright_client_identity": current_client,
         "playwright_version": str(doc.get("playwright_version") or ""),
         "browser_version": str(doc.get("browser_version") or ""),
     }
@@ -860,6 +910,7 @@ def write_browser_runtime_proof(
     *,
     asset_root: str,
     asset_merkle_sha256: str,
+    playwright_client: dict[str, str],
     playwright_version: str = "",
     browser_version: str = "",
     evidence_dir: Path | None = None,
@@ -884,6 +935,11 @@ def write_browser_runtime_proof(
         raise CapabilityResolutionError(
             "browser asset merkle digest does not match the current commissioned tree"
         )
+    current_client = playwright_client_identity()
+    if playwright_client != current_client:
+        raise CapabilityResolutionError(
+            "Playwright client identity changed between canary launch and proof write"
+        )
     body = {
         "schema": BROWSER_RUNTIME_PROOF_SCHEMA,
         "capability": name,
@@ -891,6 +947,7 @@ def write_browser_runtime_proof(
         "browser_asset_root": str(root),
         "browser_asset_merkle_sha256": asset_merkle_sha256,
         "browser_cache_env": "PLAYWRIGHT_BROWSERS_PATH",
+        "playwright_client_identity": current_client,
         "playwright_version": playwright_version,
         "browser_version": browser_version,
         "platform_identity": platform_identity(),
