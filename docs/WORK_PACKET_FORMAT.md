@@ -54,21 +54,37 @@ All current packets carry:
 v3 PROGRAM packets may additionally define `execution_mode=program` and a
 finite `checkpoint_graph`.
 
-## Read-only network authority
+Optional portable execution declarations are:
 
-`network_read_allowlist` is optional frozen SPEC authority for sandboxed
-semantic Bash. Each entry is an exact lowercase hostname with no scheme, port,
-path, or wildcard. Omit it or use an empty array for zero outbound network.
+- `capabilities`: semantic capability names such as `toolchain.python`,
+  `package.uv`, or `browser.playwright.chromium`; never host paths;
+- `runner_profile`: a trusted operator/core-owned profile name. Profiles may
+  choose semantic model/effort only and cannot express security-authority flags.
 
-Use it only for dependency/download/read endpoints that the declared toolchain
-legitimately needs after sealing. It does not grant WebSearch/WebFetch, MCP,
-push, publish, deploy, or remote mutation authority. The supervisor maps the
-frozen list directly to Claude Code's native sandbox
-`network.allowedDomains` with `strictAllowlist=true`.
+## Read-only network and capability authority
 
-If a sealed run later discovers that it needs an undeclared domain, that is a
-SPEC/bootstrap defect and requires a new run rather than an interactive
-permission prompt.
+`network_read_allowlist` is optional frozen SPEC authority for packet-specific
+sandboxed Bash reads. Each entry is an exact lowercase hostname with no scheme,
+port, path, or wildcard.
+
+Capabilities may contribute additional exact read domains needed by their
+trusted contract (for example package registries or Playwright browser
+downloads). The effective native `allowedDomains` set is:
+
+```text
+packet network_read_allowlist
+UNION
+resolved capability-derived domains
+```
+
+The first semantic execution binds that effective set together with stable
+capability/tool/manifest/privileged-canary and runner-profile identity.
+Every later pass must exact-match before model launch. Cache contents and
+pass-ephemeral cache paths are not execution identity.
+
+Neither source grants WebSearch/WebFetch, MCP, push, publish, deploy or remote
+mutation. A newly required packet domain/capability/profile after sealing
+requires a new mission rather than an interactive permission escalation.
 
 ## Required validation
 

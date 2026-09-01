@@ -2,21 +2,25 @@
 
 All notable source/master release-line changes to OwnFramework Loop are documented here.
 
-**Publication status:** 0.9.0 is the current development source/master line and
+**Publication status:** 0.9.1 is the current development source/master line and
 is not yet a published GitHub Release/tag. 0.8.4 remains the immutable released
 serial baseline. The latest published GitHub Release is **v0.8.4** after the
 commissioning gates below close.
 The complete historical changelog through 0.5.2 is preserved at
 [`docs/history/CHANGELOG-through-0.5.2.md`](docs/history/CHANGELOG-through-0.5.2.md).
 
-## Unreleased - Host Capability Plane (2026-09-01)
+## 0.9.1 - Host Capability Runtime (2026-09-01)
 
 - packets may declare portable semantic `capabilities`; the trusted runtime
   resolves exact host executables, versions, read/write paths and derived
   network authority before the model starts;
-- every semantic attempt receives a durable capability-resolution receipt;
-  `ofloop capabilities probe|preflight|fingerprint` exposes the same host
-  inventory and resolution contract without launching a model;
+- every semantic attempt receives an immutable capability-resolution receipt
+  referencing a run-level `CAPABILITY_BINDING.json`; stable capability,
+  host-manifest, network, privileged-canary and runner-profile identity is
+  exact-matched before every later model launch;
+- `ofloop capabilities probe|preflight|fingerprint|profile|commission`
+  exposes host inventory, named runner profiles, and trusted privileged-canary
+  commissioning without a semantic model call;
 - HOME remains broadly denied and tools discovered under HOME now require
   explicit operator commissioning instead of relying on contradictory PATH
   discovery;
@@ -31,9 +35,14 @@ The complete historical changelog through 0.5.2 is preserved at
   shell-wrapper forms;
 - `local.http-service` is explicit and unavailable until a safe local-binding
   provider is commissioned/proven for the exact host runtime;
-- privileged/local proofs are bound to the current platform/architecture/Claude
-  runtime fingerprint, executable bytes are SHA-256 receipted, and reviewer
-  tool caches are pass-ephemeral;
+- privileged/local authority requires core-receipted trusted canary evidence
+  bound to platform/architecture/Claude runtime, provider/broker identity and
+  executable digests; a copied runtime fingerprint alone is insufficient;
+- trusted named runner profiles can select only model/effort, are frozen into
+  run identity, and cannot override sandbox/tool/MCP/session authority;
+- funded supervisor runs propagate their exact remaining durable cost ceiling
+  to Claude's native print-mode per-pass budget while aggregate Loop accounting
+  remains canonical; reviewer tool caches remain pass-ephemeral;
 - capability-resolution failures are terminalized as proven pre-provider
   semantic attempts instead of leaving a reserved attempt for stale recovery.
 

@@ -31,6 +31,8 @@ against schemas/work-packet.schema.json before approval.
   "relevant_paths": ["src/", "tests/", "docs/"],
   "allowed_paths": ["src/", "tests/", "docs/"],
   "protected_paths": ["AGENTS.md", "CLAUDE.md", ".claude/", ".ownframework-loop/", "state/"],
+  "capabilities": ["toolchain.python", "package.uv"],
+  "runner_profile": "default",
   "network_read_allowlist": [],
   "required_validation": [
     { "name": "fast_tests", "command": "<fast test command>", "kind": "fast", "expected_exit_code": 0 },
@@ -82,3 +84,12 @@ against schemas/work-packet.schema.json before approval.
 - UNIT-1: <title>
   - scope: <sentence>
   - acceptance: AC-1
+
+<!--
+Capability/profile notes:
+- capabilities are portable semantic names, never host paths or daemon sockets.
+- runner_profile is a trusted profile name; packets cannot inject Claude flags.
+- network_read_allowlist adds packet-specific read domains. Capability contracts
+  may derive additional required read domains; the effective union is run-bound.
+- privileged capabilities require operator canary commissioning before execution.
+-->

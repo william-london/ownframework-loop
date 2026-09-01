@@ -35,3 +35,7 @@ remotes:
   block_push: true
   block_merge: true
   block_deploy: true
+
+# Portable execution capability names and runner profiles belong in WORK_PACKET
+# metadata, not this per-repository policy. Host executable paths and privileged
+# commissioning evidence remain operator-owned state outside client packets.

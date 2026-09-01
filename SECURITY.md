@@ -8,10 +8,10 @@ or OS-level containment of arbitrary same-user code.
 
 ## Supported release posture
 
-- The source/master supported line in this repository is **0.9.0**.
+- The source/master supported line in this repository is **0.9.1**.
 - The latest published GitHub Release is **v0.8.4** at
   `134a7ce543e2d5858b3a4613c49d49959fe0b029`.
-- **0.9.0** is the current development line and is not a published release until
+- **0.9.1** is the current development line and is not a published release until
   its promotion gates close.
 - Earlier 0.2.x/0.3.x/0.4.x/0.5.0-0.5.4 behavior remains in Git history for
   compatibility/audit context but is not the current product contract.
@@ -52,7 +52,7 @@ stronger.
 
 Every unattended Claude BUILD/REVIEW pass is launched with Claude Code's Bash
 sandbox enabled and fail-closed. The runtime supplies
-`sandbox.network.strictAllowlist=true` with the frozen packet's `network_read_allowlist` (empty by default),
+`sandbox.network.strictAllowlist=true` with the run-frozen effective domain set (packet `network_read_allowlist` union capability-derived read domains),
 `allowUnsandboxedCommands=false`, and role-specific filesystem write policy.
 `--restricted` is the native shared-machine boundary: user/project/local settings are excluded and built-in file tools are confined to the pass working directory. MCP discovery is strict with an empty explicit MCP configuration. Browser/web research, nested Agent/Task orchestration, Skill, and other non-local built-ins are not exposed through the semantic worker's `--tools` allow-list. Builder and reviewer use different native tool sets; reviewers do not receive Edit/Write/NotebookEdit.
 
@@ -61,6 +61,14 @@ The supervisor uses `--permission-mode dontAsk` together with an explicit pre-ap
 Commissioned service auth/model environment is stored in Loop's private state as `service-env.json` (0600 under a 0700 state directory). launchd/systemd definitions and runtime provenance contain only that file's path, never bearer-token values. On macOS Claude OAuth credentials remain in the encrypted Keychain; the installer does not reopen `~/.claude`. On Linux the installer may reopen only the exact private `.credentials.json` file documented by Claude Code.
 
 The minimum commissioned-runner version is Claude Code 2.1.248 because `--restricted` is part of the boundary. Newer compatible versions are accepted. On Linux/WSL2, supervisor commissioning also proves `bubblewrap`, `socat`, and a usable bubblewrap sandbox before enabling the service. If the version/prerequisites cannot be proven or the sandbox cannot arm, semantic execution fails closed.
+
+A first semantic execution also creates an immutable run-level capability
+binding. Later attempts re-resolve and exact-compare authority-relevant host,
+tool, manifest, privileged-canary, network, sandbox, and runner-profile
+identity before releasing a provider child. Cache contents/pass-ephemeral cache
+paths are deliberately excluded. Privileged Docker authority is broker-only:
+raw daemon sockets, daemon/context selectors, alternate container-control
+clients, and registry publication remain outside the worker envelope.
 
 Adapter hooks remain a second boundary for direct/normalized command forms, and
 the deterministic core re-proves exact source/candidate identity before

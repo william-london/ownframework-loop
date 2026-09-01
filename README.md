@@ -1,9 +1,9 @@
 # OwnFramework Loop
 
-Source/master release line: **0.9.0**
+Source/master release line: **0.9.1**
 
 Latest published GitHub Release: **v0.8.4** at
-`134a7ce543e2d5858b3a4613c49d49959fe0b029`. The 0.9.0 source line is current
+`134a7ce543e2d5858b3a4613c49d49959fe0b029`. The 0.9.1 source line is current
 development and is not a published release until its promotion gates close.
 
 OwnFramework Loop is a vendor-neutral, execution-sealed engineering runtime for
@@ -186,7 +186,10 @@ Commissioned BUILD/REVIEW passes use Claude-native controls:
 - strict MCP isolation;
 - no browser/web/subagent surface;
 - credential scrubbing;
-- packet-bound network read allowlist.
+- packet- and capability-bound effective network allowlist;
+- immutable run-level capability/environment binding;
+- trusted named runner profiles for model/effort only;
+- native per-pass cost narrowing when an operator funds a run ceiling.
 
 Builder tools:
 
@@ -211,29 +214,40 @@ Claude plugin commands such as `/of-loop:build` and `/of-loop:review` remain
 available for foreground/debug work after installing the Claude adapter. They
 are not the canonical unattended scheduling mechanism.
 
-## Network authority
+## Network and host capability authority
 
-`network_read_allowlist` is optional frozen SPEC authority for sandboxed
-semantic Bash.
-
-Example:
+A packet may declare portable capability names and optional extra read-only
+network hosts:
 
 ```json
 {
-  "network_read_allowlist": [
-    "registry.npmjs.org",
-    "pypi.org",
-    "files.pythonhosted.org"
-  ]
+  "capabilities": ["toolchain.python", "package.uv", "browser.playwright.chromium"],
+  "runner_profile": "default",
+  "network_read_allowlist": ["docs.example.com"]
 }
 ```
 
-Only exact lowercase hostnames are accepted. No scheme, port, path, or wildcard
-is allowed. Empty/omitted means zero outbound network.
+Packets never contain Mac/Homebrew/runtime paths. The trusted host capability
+plane resolves exact executables, versions, SHA-256 identities, trusted assets,
+cache policy, privileged commissioning evidence, and capability-required
+download domains before a model process can start.
 
-The list is mapped directly into the semantic runner's native network sandbox.
-It is intended for dependency/download reads, not search, publishing,
-deployment, push, or remote mutation.
+Effective sandbox domains are the union of the packet's exact lowercase
+`network_read_allowlist` and domains derived by the resolved capability
+contracts. That effective set is frozen into `CAPABILITY_BINDING.json` at the
+first semantic execution and must exact-match on every later BUILD/REVIEW/repair
+attempt. Empty packet network authority therefore means "no extra packet
+domains"; a declared package/browser capability may still contribute its
+narrow required read endpoints.
+
+Neither source grants WebSearch/WebFetch, MCP, push, publish, deploy, registry
+publication, or remote mutation authority. Privileged capabilities such as
+`container.docker` require operator-owned canary commissioning and remain
+broker-only.
+
+Use `ofloop capabilities probe`, `preflight`, `profile`, and
+`commission` to inspect/commission the host layer without a semantic model
+call. Physical-host commissioning is separate from source support.
 
 ## Runtime and crash safety
 
