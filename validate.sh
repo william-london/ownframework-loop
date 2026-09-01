@@ -194,7 +194,7 @@ sys.path.insert(0, '$LIB_DIR')
 from ownframework_loop import (
     cli, packet, state, transitions, worktrees, git_checks,
     guards, receipts, verdicts, scheduling, locking, util,
-    integrity, limits, program, reconcile, schema_validate,
+    integrity, limits, program, reconcile, schema_validate, capabilities,
 )
 print('  PASS: Python core library imports cleanly')
 "

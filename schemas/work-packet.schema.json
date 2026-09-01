@@ -24,30 +24,89 @@
     "external_action_authority"
   ],
   "properties": {
-    "schema": { "const": "ownframework-work-packet/v2" },
-    "packet_id": { "type": "string", "pattern": "^[a-zA-Z0-9_-]+$", "minLength": 1, "maxLength": 64 },
-    "created_at": { "type": "string", "format": "date-time" },
+    "schema": {
+      "const": "ownframework-work-packet/v2"
+    },
+    "packet_id": {
+      "type": "string",
+      "pattern": "^[a-zA-Z0-9_-]+$",
+      "minLength": 1,
+      "maxLength": 64
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
     "work_class": {
       "type": "string",
       "enum": [
-        "NEW_REPOSITORY", "FEATURE", "BUG", "DEBUG", "HARDENING",
-        "REFACTOR", "TESTING", "DOCUMENTATION", "CI_REPAIR",
-        "TRACKED_CONTRACT", "RUNTIME_CANDIDATE", "RESEARCH_SPIKE"
+        "NEW_REPOSITORY",
+        "FEATURE",
+        "BUG",
+        "DEBUG",
+        "HARDENING",
+        "REFACTOR",
+        "TESTING",
+        "DOCUMENTATION",
+        "CI_REPAIR",
+        "TRACKED_CONTRACT",
+        "RUNTIME_CANDIDATE",
+        "RESEARCH_SPIKE"
       ]
     },
-    "risk_class": { "type": "string", "enum": ["low", "medium", "high"] },
-    "authority_class": { "type": "string", "enum": ["low", "medium", "high"] },
-    "title": { "type": "string", "minLength": 1, "maxLength": 200 },
+    "risk_class": {
+      "type": "string",
+      "enum": [
+        "low",
+        "medium",
+        "high"
+      ]
+    },
+    "authority_class": {
+      "type": "string",
+      "enum": [
+        "low",
+        "medium",
+        "high"
+      ]
+    },
+    "title": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200
+    },
     "target": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["repo", "branch", "classification"],
+      "required": [
+        "repo",
+        "branch",
+        "classification"
+      ],
       "properties": {
-        "repo": { "type": "string", "minLength": 1 },
-        "branch": { "type": "string", "minLength": 1 },
-        "classification": { "type": "string", "enum": ["local_only", "github_private", "github_public"] },
-        "expected_baseline_sha": { "type": "string", "pattern": "^[a-f0-9]{7,64}$" },
-        "candidate_branch_prefix": { "type": "string" }
+        "repo": {
+          "type": "string",
+          "minLength": 1
+        },
+        "branch": {
+          "type": "string",
+          "minLength": 1
+        },
+        "classification": {
+          "type": "string",
+          "enum": [
+            "local_only",
+            "github_private",
+            "github_public"
+          ]
+        },
+        "expected_baseline_sha": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{7,64}$"
+        },
+        "candidate_branch_prefix": {
+          "type": "string"
+        }
       }
     },
     "acceptance_criteria": {
@@ -56,11 +115,22 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["id", "text"],
+        "required": [
+          "id",
+          "text"
+        ],
         "properties": {
-          "id": { "type": "string", "pattern": "^AC-[0-9]+$" },
-          "text": { "type": "string", "minLength": 1 },
-          "verification": { "type": "string" }
+          "id": {
+            "type": "string",
+            "pattern": "^AC-[0-9]+$"
+          },
+          "text": {
+            "type": "string",
+            "minLength": 1
+          },
+          "verification": {
+            "type": "string"
+          }
         }
       }
     },
@@ -69,20 +139,60 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["id", "text"],
+        "required": [
+          "id",
+          "text"
+        ],
         "properties": {
-          "id": { "type": "string", "pattern": "^NG-[0-9]+$" },
-          "text": { "type": "string", "minLength": 1 }
+          "id": {
+            "type": "string",
+            "pattern": "^NG-[0-9]+$"
+          },
+          "text": {
+            "type": "string",
+            "minLength": 1
+          }
         }
       }
     },
-    "relevant_paths": { "type": "array", "items": { "type": "string" } },
-    "allowed_paths": { "type": "array", "minItems": 1, "items": { "type": "string" } },
-    "protected_paths": { "type": "array", "minItems": 1, "items": { "type": "string" } },
-    "sensitive_paths": { "type": "array", "items": { "type": "string" } },
-    "elevated_allowed_paths": { "type": "array", "items": { "type": "string" } },
-    "sensitive_path_reason": { "type": "string" },
-    "additional_review_required": { "type": "boolean" },
+    "relevant_paths": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "allowed_paths": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "string"
+      }
+    },
+    "protected_paths": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "string"
+      }
+    },
+    "sensitive_paths": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "elevated_allowed_paths": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "sensitive_path_reason": {
+      "type": "string"
+    },
+    "additional_review_required": {
+      "type": "boolean"
+    },
     "network_read_allowlist": {
       "type": "array",
       "maxItems": 64,
@@ -100,13 +210,33 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["name", "command", "kind"],
+        "required": [
+          "name",
+          "command",
+          "kind"
+        ],
         "properties": {
-          "name": { "type": "string" },
-          "command": { "type": "string" },
-          "kind": { "type": "string", "enum": ["fast", "full", "secret", "scope"] },
-          "expected_exit_code": { "type": "integer" },
-          "expected_marker": { "type": "string" }
+          "name": {
+            "type": "string"
+          },
+          "command": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "fast",
+              "full",
+              "secret",
+              "scope"
+            ]
+          },
+          "expected_exit_code": {
+            "type": "integer"
+          },
+          "expected_marker": {
+            "type": "string"
+          }
         }
       }
     },
@@ -114,8 +244,14 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "description": { "type": "string" },
-        "max_runtime_seconds": { "type": "integer", "minimum": 1, "maximum": 1800 }
+        "description": {
+          "type": "string"
+        },
+        "max_runtime_seconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1800
+        }
       }
     },
     "risk_budget": {
@@ -123,15 +259,51 @@
       "description": "Budget maxima must match the executable runtime envelope (packet._validate_risk_budget_envelope / util.ABSOLUTE_BUDGET_CEILING); schema-valid packets that the runtime refuses are a validation lie and are no longer permitted.",
       "additionalProperties": false,
       "properties": {
-        "max_build_passes": { "type": "integer", "minimum": 1, "maximum": 32 },
-        "max_review_passes": { "type": "integer", "minimum": 1, "maximum": 32 },
-        "max_repair_rounds": { "type": "integer", "minimum": 1, "maximum": 32 },
-        "max_diff_lines": { "type": "integer", "minimum": 1, "maximum": 30000 },
-        "max_files_changed": { "type": "integer", "minimum": 1, "maximum": 500 },
-        "max_runtime_seconds": { "type": "integer", "minimum": 60, "maximum": 28800 },
-        "max_pass_runtime_seconds": { "type": "integer", "minimum": 60, "maximum": 7200 },
-        "max_consecutive_no_progress_passes": { "type": "integer", "minimum": 1, "maximum": 8 },
-        "max_identical_finding_repeats": { "type": "integer", "minimum": 1, "maximum": 8 }
+        "max_build_passes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 32
+        },
+        "max_review_passes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 32
+        },
+        "max_repair_rounds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 32
+        },
+        "max_diff_lines": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 30000
+        },
+        "max_files_changed": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 500
+        },
+        "max_runtime_seconds": {
+          "type": "integer",
+          "minimum": 60,
+          "maximum": 28800
+        },
+        "max_pass_runtime_seconds": {
+          "type": "integer",
+          "minimum": 60,
+          "maximum": 7200
+        },
+        "max_consecutive_no_progress_passes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 8
+        },
+        "max_identical_finding_repeats": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 8
+        }
       }
     },
     "work_units": {
@@ -140,43 +312,90 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["id", "title", "scope"],
+        "required": [
+          "id",
+          "title",
+          "scope"
+        ],
         "properties": {
-          "id": { "type": "string", "pattern": "^UNIT-[0-9]+$" },
-          "title": { "type": "string" },
-          "scope": { "type": "string" },
-          "acceptance": { "type": "array", "items": { "type": "string" } }
+          "id": {
+            "type": "string",
+            "pattern": "^UNIT-[0-9]+$"
+          },
+          "title": {
+            "type": "string"
+          },
+          "scope": {
+            "type": "string"
+          },
+          "acceptance": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
         }
       }
     },
-    "rollback_requirements": { "type": "string" },
+    "rollback_requirements": {
+      "type": "string"
+    },
     "product_decisions": {
       "type": "array",
-      "items": { "type": "string" }
+      "items": {
+        "type": "string"
+      }
     },
     "escalation_conditions": {
       "type": "array",
-      "items": { "type": "string" }
+      "items": {
+        "type": "string"
+      }
     },
     "merge_authority": {
       "type": "string",
-      "enum": ["human_only", "delegated"],
+      "enum": [
+        "human_only",
+        "delegated"
+      ],
       "description": "human_only is the only value executable under the current authority contract. 'delegated' is retained solely so historical approved packets remain parseable for audit; dispatch refuses to claim work for it and approval of new packets carrying it is rejected."
     },
     "deploy_authority": {
       "type": "string",
-      "enum": ["human_only", "delegated"],
+      "enum": [
+        "human_only",
+        "delegated"
+      ],
       "description": "human_only is the only value executable under the current authority contract. 'delegated' is retained solely for audit-parseability of historical packets."
     },
     "push_authority": {
       "type": "string",
-      "enum": ["human_only", "delegated"],
+      "enum": [
+        "human_only",
+        "delegated"
+      ],
       "description": "human_only is the only value executable under the current authority contract. 'delegated' is retained solely for audit-parseability of historical packets."
     },
     "external_action_authority": {
       "type": "string",
-      "enum": ["human_only", "delegated", "none"],
+      "enum": [
+        "human_only",
+        "delegated",
+        "none"
+      ],
       "description": "none is the only value executable under the current authority contract. 'human_only'/'delegated' are retained solely for audit-parseability of historical packets."
+    },
+    "capabilities": {
+      "type": "array",
+      "maxItems": 32,
+      "uniqueItems": true,
+      "description": "Optional semantic host capabilities. Packets declare portable names only; the trusted runtime resolves host paths/assets/network authority and fails closed when unavailable. Privileged capabilities require commissioned brokers.",
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 128,
+        "pattern": "^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$"
+      }
     }
   }
 }

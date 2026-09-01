@@ -24,6 +24,14 @@ from typing import Any
 
 SCHEMA = "ownframework-loop-runtime-env/v1"
 
+CAPABILITY_ENV_ALLOWED_KEYS = frozenset({
+    "UV_CACHE_DIR",
+    "PIP_CACHE_DIR",
+    "npm_config_cache",
+    "npm_config_store_dir",
+    "PLAYWRIGHT_BROWSERS_PATH",
+})
+
 
 def _ensure_private_dir(path: Path) -> Path:
     """Create/repair runtime cache directories as 0700 on POSIX."""
@@ -41,6 +49,30 @@ def default_runtime_cache_root() -> Path:
     root = os.environ.get("XDG_STATE_HOME", "").strip()
     base = Path(root).expanduser() if root else Path.home() / ".local" / "state"
     return base / "ownframework-loop" / "runtime-cache"
+
+
+def default_repo_tool_cache_root() -> Path:
+    """Durable repository-scoped tool cache root.
+
+    This is intentionally distinct from the per-pass runtime cache.  Untrusted
+    semantic workers never receive a cross-repository writable cache: durable
+    writes are scoped by canonical repository identity so one client project
+    cannot poison another project's future tool state.
+    """
+    explicit = os.environ.get("OFLOOP_TOOL_CACHE_ROOT", "").strip()
+    if explicit:
+        return Path(explicit).expanduser().resolve(strict=False)
+    return default_runtime_cache_root().parent / "tool-cache"
+
+
+def repo_tool_cache_path(canonical_repo: Path) -> Path:
+    return default_repo_tool_cache_root() / _repo_key(canonical_repo)
+
+
+def repo_tool_cache_dir(canonical_repo: Path) -> Path:
+    root = default_repo_tool_cache_root()
+    _ensure_private_dir(root)
+    return _ensure_private_dir(repo_tool_cache_path(canonical_repo))
 
 
 def _slug(s: str) -> str:
@@ -80,6 +112,8 @@ def hermetic_subprocess_env(
     role: str,
     *,
     base_env: dict[str, str] | None = None,
+    capability_environment: dict[str, str] | None = None,
+    path_prepend: list[str] | None = None,
 ) -> dict[str, str]:
     """Return env for a subprocess that must not pollute the worktree.
 
@@ -107,6 +141,20 @@ def hermetic_subprocess_env(
         _ensure_private_dir(d)
 
     env = dict(base_env) if base_env is not None else dict(os.environ)
+
+    # Capability resolution is core-owned.  Only a tiny non-secret environment
+    # surface may be injected here; host manifests cannot smuggle arbitrary
+    # credentials or loader/runtime overrides into semantic Bash.
+    for key, value in (capability_environment or {}).items():
+        if key not in CAPABILITY_ENV_ALLOWED_KEYS:
+            raise ValueError(f"unsupported capability environment key: {key}")
+        if not isinstance(value, str) or not value:
+            raise ValueError(f"invalid capability environment value for {key}")
+        env[key] = value
+    prepend = [str(Path(p).expanduser().resolve(strict=False)) for p in (path_prepend or [])]
+    if prepend:
+        existing_path = env.get("PATH", "")
+        env["PATH"] = os.pathsep.join(prepend + ([existing_path] if existing_path else []))
     # Ensure the OwnFramework Loop library dir is on PYTHONPATH so our
     # pytest plugin (of_disable_cache) can be imported when the env is
     # passed to a subprocess whose parent did not already include it
@@ -175,6 +223,10 @@ def hermetic_subprocess_env(
 
 __all__ = [
     "SCHEMA",
+    "CAPABILITY_ENV_ALLOWED_KEYS",
+    "default_repo_tool_cache_root",
+    "repo_tool_cache_dir",
+    "repo_tool_cache_path",
     "default_runtime_cache_root",
     "hermetic_subprocess_env",
     "runtime_cache_dir",

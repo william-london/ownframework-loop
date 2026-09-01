@@ -9,6 +9,13 @@ development and is not a published release until its promotion gates close.
 OwnFramework Loop is a vendor-neutral, execution-sealed engineering runtime for
 autonomous coding agents.
 
+Semantic work packets may also declare portable host capabilities (toolchains,
+package managers, browser runtimes, local-service authority, or privileged
+container authority). The trusted core resolves and receipts the exact host
+implementation before launching the model; packets never gain authority by
+naming arbitrary HOME paths or daemon sockets. See
+`docs/architecture/HOST_CAPABILITIES.md`.
+
 A human defines the SPEC and owns final promotion. Between those boundaries, a
 durable supervisor can drive bounded BUILD, REVIEW, repair, and PROGRAM
 checkpoint advancement without routine permission prompts or terminal

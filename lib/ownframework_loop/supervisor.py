@@ -29,7 +29,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import approval as approval_mod, branch_resolver as branch_resolver_mod, dispatch as dispatch_mod, dispatch_hold as dispatch_hold_mod, git_checks, packet as packet_mod, runtime_env, state as state_mod, util, runtime_identity
+from . import approval as approval_mod, branch_resolver as branch_resolver_mod, capabilities as capabilities_mod, dispatch as dispatch_mod, dispatch_hold as dispatch_hold_mod, git_checks, packet as packet_mod, runtime_env, state as state_mod, util, runtime_identity
 
 SCHEMA = "ownframework-loop-supervisor/v1"
 DISPATCH_HOLD_KIND = "PROGRAM_CHECKPOINT_BOUNDARY"
@@ -337,6 +337,7 @@ def _semantic_worker_settings(
     worktree: Path,
     semantic_path: Path,
     network_read_allowlist: list[str] | None = None,
+    capability_resolution: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Fail-closed Claude settings for one unattended semantic worker.
 
@@ -359,6 +360,16 @@ def _semantic_worker_settings(
     # runtime surfaces. More-specific allowRead wins over the broad denyRead.
     home = Path.home().expanduser().resolve(strict=False)
     run_evidence_dir = (canonical_repo / ".ownframework-loop" / run_id).resolve(strict=False)
+    capability_resolution = capability_resolution or {}
+    capability_fs = capability_resolution.get("filesystem") or {}
+    capability_allow_read = {
+        str(Path(p).expanduser().resolve(strict=False))
+        for p in (capability_fs.get("allowRead") or [])
+    }
+    capability_allow_write = {
+        str(Path(p).expanduser().resolve(strict=False))
+        for p in (capability_fs.get("allowWrite") or [])
+    }
     allow_read = sorted({
         str(worktree.resolve(strict=False)),
         str(semantic_path.parent.resolve(strict=False)),
@@ -367,10 +378,12 @@ def _semantic_worker_settings(
         str((git_checks.git_common_dir(canonical_repo) or (canonical_repo / ".git")).resolve(strict=False)),
         str(_source_root().resolve(strict=False)),
         *_parse_adapter_auth_read_paths(),
+        *capability_allow_read,
     })
     allow_write = sorted({
         str(cache_root.resolve(strict=False)),
         str(semantic_path.parent.resolve(strict=False)),
+        *capability_allow_write,
     })
     state_root = default_db_path().parent.expanduser().resolve(strict=False)
     deny_read = sorted({str(home), str(state_root)})
@@ -392,6 +405,18 @@ def _semantic_worker_settings(
         "GITHUB_TOKEN", "GH_TOKEN", "NPM_TOKEN", "NODE_AUTH_TOKEN",
         "PYPI_TOKEN", "TWINE_PASSWORD", "DOCKER_AUTH_CONFIG",
     ]
+    effective_network_domains = sorted(
+        set(network_read_allowlist or [])
+        | set(capability_resolution.get("network_domains") or [])
+    )
+    capability_sandbox_network = capability_resolution.get("sandbox_network") or {}
+    sandbox_network: dict[str, Any] = {
+        "allowedDomains": effective_network_domains,
+        "strictAllowlist": True,
+    }
+    if capability_sandbox_network.get("allowLocalBinding") is True:
+        sandbox_network["allowLocalBinding"] = True
+
     return {
         "autoMemoryEnabled": False,
         "sandbox": {
@@ -401,10 +426,7 @@ def _semantic_worker_settings(
             "allowUnsandboxedCommands": False,
             "excludedCommands": [],
             "filesystem": filesystem,
-            "network": {
-                "allowedDomains": sorted(set(network_read_allowlist or [])),
-                "strictAllowlist": True,
-            },
+            "network": sandbox_network,
             "credentials": {
                 "envVars": [
                     {"name": name, "mode": "deny"} for name in credential_vars
@@ -3005,7 +3027,39 @@ class ClaudeCodeRunner:
             raise RuntimeError(f"prepared worktree missing: {worktree}")
 
         role_contract = _load_role_prompt(role)
-        payload = json.dumps(work_order, indent=2, sort_keys=True)
+        canonical_repo = Path(
+            str(work_order.get("canonical_repo") or "")
+        ).resolve(strict=False)
+        semantic_path = Path(
+            str(work_order.get("semantic_path") or "")
+        ).resolve(strict=False)
+        attempt_id = str(work_order.get("attempt_id") or "")
+        if not attempt_id:
+            raise capabilities_mod.CapabilityResolutionError(
+                "semantic work order missing durable attempt identity"
+            )
+        capability_resolution = capabilities_mod.resolve_capabilities(
+            [str(item) for item in (work_order.get("capabilities") or [])],
+            canonical_repo=canonical_repo,
+            role=role,
+            repo_cache_root=runtime_env.repo_tool_cache_dir(canonical_repo),
+            packet_network_allowlist=[
+                str(item) for item in (work_order.get("network_read_allowlist") or [])
+            ],
+        )
+        capability_receipt = capabilities_mod.write_resolution_receipt(
+            canonical_repo,
+            str(work_order.get("run_id") or ""),
+            role,
+            attempt_id,
+            capability_resolution,
+        )
+        effective_work_order = dict(work_order)
+        effective_work_order["capability_resolution"] = capabilities_mod.public_summary(
+            capability_resolution
+        )
+        effective_work_order["capability_receipt"] = str(capability_receipt)
+        payload = json.dumps(effective_work_order, indent=2, sort_keys=True)
         prompt = (
             role_contract
             + "\n\n# SUPERVISOR WORK ORDER\n"
@@ -3027,12 +3081,6 @@ class ClaudeCodeRunner:
         allowed_tools = (
             CLAUDE_BUILDER_TOOLS if role == "builder" else CLAUDE_REVIEWER_TOOLS
         )
-        canonical_repo = Path(
-            str(work_order.get("canonical_repo") or "")
-        ).resolve(strict=False)
-        semantic_path = Path(
-            str(work_order.get("semantic_path") or "")
-        ).resolve(strict=False)
         secure_settings = _semantic_worker_settings(
             canonical_repo=canonical_repo,
             run_id=str(work_order.get("run_id") or ""),
@@ -3042,6 +3090,7 @@ class ClaudeCodeRunner:
             network_read_allowlist=[
                 str(item) for item in (work_order.get("network_read_allowlist") or [])
             ],
+            capability_resolution=capability_resolution,
         )
         # --restricted is the native shared-machine isolation boundary.
         # dontAsk + explicit --allowedTools means there are no human permission
@@ -3090,9 +3139,11 @@ class ClaudeCodeRunner:
             stderr_fh = subprocess.PIPE
 
         worker_env = runtime_env.hermetic_subprocess_env(
-            Path(str(work_order.get("canonical_repo") or "")).resolve(strict=False),
+            canonical_repo,
             str(work_order.get("run_id") or ""),
             role,
+            capability_environment=dict(capability_resolution.get("environment") or {}),
+            path_prepend=list(capability_resolution.get("path_prepend") or []),
         )
         # Claude-native subprocess scrub: keep model authentication available to
         # the Claude process itself while stripping Anthropic/cloud credentials
@@ -3446,6 +3497,8 @@ def _classify_runner_failure(result: RunnerResult) -> tuple[str, str]:
 def _classify_exception(exc: BaseException) -> tuple[str, str]:
     if isinstance(exc, WorkerLaunchError):
         return "configuration", "worker_launch_failed"
+    if isinstance(exc, capabilities_mod.CapabilityResolutionError):
+        return "configuration", "capability_resolution_failed"
     if isinstance(exc, dispatch_mod.SemanticResultIncomplete):
         if exc.retryable:
             return "runner", "semantic_result_incomplete"
@@ -4241,8 +4294,10 @@ def run_one(*, db_path: Path | None = None, timeout_seconds: int = 0) -> dict[st
                     semantic_timeout_seconds, remaining_wall
                 )
 
+            runner_work_order = dict(work_order)
+            runner_work_order["attempt_id"] = attempt_id
             result = _runner(str(job["runner"])).run(
-                work_order,
+                runner_work_order,
                 timeout_seconds=semantic_timeout_seconds,
                 on_start=lambda pid, started_role: _set_worker_pid(
                     conn,

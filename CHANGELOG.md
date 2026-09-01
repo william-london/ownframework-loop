@@ -9,6 +9,23 @@ commissioning gates below close.
 The complete historical changelog through 0.5.2 is preserved at
 [`docs/history/CHANGELOG-through-0.5.2.md`](docs/history/CHANGELOG-through-0.5.2.md).
 
+## Unreleased - Host Capability Plane (2026-09-01)
+
+- packets may declare portable semantic `capabilities`; the trusted runtime
+  resolves exact host executables, versions, read/write paths and derived
+  network authority before the model starts;
+- every semantic attempt receives a durable capability-resolution receipt;
+- HOME remains broadly denied and tools discovered under HOME now require
+  explicit operator commissioning instead of relying on contradictory PATH
+  discovery;
+- per-pass scratch is separated from durable repository-scoped package/browser
+  caches, preventing repeated downloads without introducing cross-client
+  writable-cache poisoning;
+- privileged `container.docker` is broker-only: direct daemon sockets and
+  unsandboxed Docker exceptions are never granted;
+- `local.http-service` is explicit and unavailable until a safe local-binding
+  provider is commissioned/proven for the exact host runtime.
+
 ## 0.9.0 - Bounded Multi-Repository Autonomy (2026-08-31)
 
 Development line for bounded single-host multi-repository execution. Release

@@ -80,3 +80,16 @@ macOS Claude credentials are Keychain-backed, so no `~/.claude` filesystem
 exception is commissioned. Linux may expose only the exact private
 `.credentials.json` file (including the `CLAUDE_CONFIG_DIR` location when
 used), never the full Claude configuration/session directory.
+
+## Host capability resolution
+
+Packet `capabilities` are resolved by the trusted core before Claude starts.
+The resulting exact executable/version, cache paths, derived network hosts and
+sandbox authority are written to a pass-scoped capability receipt. HOME stays
+denied; tools installed under HOME require explicit host commissioning.
+
+Writable durable caches are repository-scoped. Trusted global assets may be
+reused read-only. Direct Docker daemon sockets and unsandboxed Docker command
+exceptions are forbidden; `container.docker` requires a commissioned broker.
+Local binding is likewise explicit and requires commissioned proof rather than
+being enabled implicitly. See `docs/architecture/HOST_CAPABILITIES.md`.

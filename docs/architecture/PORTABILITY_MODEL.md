@@ -53,3 +53,12 @@ Historical artifact fields required for deterministic audit remain readable.
 Retired executable commands, old plugin-install assumptions, and misleading
 scheduler paths are removed from active surfaces instead of preserved as
 runtime choices.
+
+## Capability portability
+
+Packets declare host-neutral capability names. The core resolves those names
+through built-ins and an operator-owned host manifest, records exact executable
+and version evidence, and refuses execution when the host cannot satisfy the
+packet safely. Host paths therefore no longer belong in portable mission
+contracts. Writable durable caches are repository-scoped; trusted shared assets
+are read-only.

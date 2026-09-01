@@ -145,3 +145,6 @@ tests/integration/test_v086_dispatch_hold.sh
 # v0.8.5 PROGRAM routing semantics — build-validation retry versus
 # reviewer-funded repair through the actual deterministic finalizers.
 tests/integration/test_v085_program_routing_semantics.sh
+
+# v0.9.1 host capability resolution + cache/broker boundary
+tests/integration/test_v091_capability_runtime.sh

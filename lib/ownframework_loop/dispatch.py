@@ -621,6 +621,7 @@ def claim_next(*, canonical_repo: Path, run_id: str) -> dict[str, Any]:
                     "acceptance_criterion_ids": prep.get("acceptance_criterion_ids"),
                     "repair_context": repair_context,
                     "network_read_allowlist": list(pmeta.get("network_read_allowlist") or []),
+                    "capabilities": list(pmeta.get("capabilities") or []),
                     "claim": claim,
                     "prepare": prep,
                 }
@@ -660,6 +661,7 @@ def claim_next(*, canonical_repo: Path, run_id: str) -> dict[str, Any]:
                         if isinstance(item, dict) and item.get("id")
                     ],
                     "network_read_allowlist": list(pmeta.get("network_read_allowlist") or []),
+                    "capabilities": list(pmeta.get("capabilities") or []),
                     "claim": claim,
                     "prepare": prep,
                 }

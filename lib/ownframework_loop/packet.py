@@ -18,7 +18,7 @@ from typing import Any
 
 from .util import sha256_text
 from .integrity import canonical_json_dumps
-from . import git_checks, schema_validate
+from . import capabilities as capabilities_mod, git_checks, schema_validate
 
 
 SCHEMA_VERSION = "ownframework-work-packet/v2"
@@ -170,6 +170,7 @@ def validate_packet_metadata(meta: dict[str, Any]) -> list[str]:
     if schema == PROGRAM_SCHEMA_VERSION and "execution_mode" in meta and meta["execution_mode"] not in ("single", "program"):
         errors.append(f"execution_mode must be single|program, got {meta['execution_mode']!r}")
     errors.extend(_validate_risk_budget_envelope(meta))
+    errors.extend(capabilities_mod.validate_capability_names(meta.get("capabilities")))
 
     if schema == PROGRAM_SCHEMA_VERSION:
         em = meta.get("execution_mode")
