@@ -3174,6 +3174,7 @@ class ClaudeCodeRunner:
     """One fresh non-interactive Claude Code process per semantic pass."""
 
     runner_id = "claude-code"
+    requires_capability_receipt = True
     # Only runners that actually implement the persist-before-exec release
     # handshake may claim gate-v1 recovery semantics.
     launch_gate_version = 1
