@@ -92,6 +92,8 @@ result = supervisor.ClaudeCodeRunner().run(
         "worktree": str(worktree),
         "semantic_path": str(worktree / "result.json"),
         "network_read_allowlist": [],
+        "attempt_id": "attempt-oversize-durable-output",
+        "attempt_id": "attempt-large-durable-output",
     },
     timeout_seconds=30,
     durable_files=(out, err),
