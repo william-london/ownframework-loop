@@ -232,12 +232,16 @@ with tempfile.TemporaryDirectory() as td:
     (repo / ".ownframework-loop" / "r1").mkdir(parents=True)
 
     # The shared immutable asset tree the canary would prove.
-    asset_root = capabilities.default_browser_asset_dir()
-    chromium_dir = asset_root / "chromium-9999"
+    asset_root_raw = capabilities.default_browser_asset_dir()
+    chromium_dir = asset_root_raw / "chromium-9999"
     chromium_dir.mkdir(parents=True)
     (chromium_dir / "chrome").write_bytes(b"fake-browser-binary")
     (chromium_dir / "manifest.json").write_text("{}")
-    os.chmod(asset_root, 0o700)
+    os.chmod(asset_root_raw, 0o700)
+    # macOS exposes /var through the /private/var alias. Runtime authority is
+    # bound to the canonical physical root workers receive, not the lexical
+    # tempfile spelling used to create the fixture.
+    asset_root = capabilities._browser_asset_root(asset_root_raw, require_exists=True)
     merkle = capabilities.browser_asset_merkle_sha256(asset_root)
 
     proof = capabilities.write_browser_runtime_proof(
