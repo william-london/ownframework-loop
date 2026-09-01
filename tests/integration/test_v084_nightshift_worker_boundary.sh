@@ -57,7 +57,11 @@ class FakePopen:
                 and cmd[1] == "-C"
                 and cmd[-2:] == ["rev-parse", "--git-common-dir"]
             )
-            or cmd == ["/bin/sh", "--version"]
+            or (
+                len(cmd) == 2
+                and cmd[1] == "--version"
+                and pathlib.Path(cmd[0]).resolve() == pathlib.Path("/bin/sh").resolve()
+            )
         ):
             # v0.9.1 capability binding fingerprints the exact semantic
             # runtime before launch. Delegate that read-only version probe;
