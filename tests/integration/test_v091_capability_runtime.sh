@@ -66,7 +66,14 @@ with tempfile.TemporaryDirectory() as td:
     assert len(inventory["runtime_fingerprint"]) == 64
     by_name = {item["name"]: item for item in inventory["capabilities"]}
     assert by_name["toolchain.python"]["available"]
-    assert by_name["browser.playwright.chromium"]["available"]
+    # Truthful browser inventory: `available` reflects ONLY empirical runtime
+    # proof (a canary actually launched the browser), never mere resolvability.
+    browser_item = by_name["browser.playwright.chromium"]
+    assert browser_item["available"] == browser_item["runtime_proven"]
+    assert isinstance(browser_item["resolvable"], bool)
+    if not browser_item["runtime_proven"]:
+        assert not browser_item["available"]
+        assert "canary" in browser_item["reason"]
     assert not by_name["container.docker"]["available"]
     assert "example.com" in resolved["network_domains"]
 
