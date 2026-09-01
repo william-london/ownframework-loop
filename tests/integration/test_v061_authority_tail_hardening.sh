@@ -11,7 +11,7 @@ python3 - "$TMP" <<'PY'
 import json
 import sys
 from pathlib import Path
-from ownframework_loop import integrity, receipts, state, worktrees, git_checks, limits, util
+from ownframework_loop import guards, integrity, receipts, state, worktrees, git_checks, limits, util
 
 root = Path(sys.argv[1])
 
@@ -100,6 +100,22 @@ try:
     assert git_checks.dirty_classification(root)["status"] == "unknown"
 finally:
     git_checks.run_subprocess = orig_run
+
+assert guards.classify_bash_command(
+    "env git commit -m hidden", role="reviewer"
+)["severity"] == "forbidden"
+assert guards.classify_bash_command(
+    "echo $(git branch hidden)", role="reviewer"
+)["severity"] == "forbidden"
+assert guards.classify_bash_command(
+    "env FOO=bar pytest -q", role="reviewer"
+)["severity"] == "allowed"
+assert guards.classify_bash_command(
+    "sudo true", role="builder"
+)["severity"] == "forbidden"
+assert guards.classify_bash_command(
+    "echo $(sudo true)", role="builder"
+)["severity"] == "forbidden"
 PY
 
 # Static guards pin exact-branch and per-validation semantics.

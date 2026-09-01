@@ -36,6 +36,7 @@ with tempfile.TemporaryDirectory() as td:
       "docker --config /tmp/evil ps",
       "sh -c 'docker --host=tcp://127.0.0.1:2375 ps'",
       "bash -c 'env DOCKER_CONTEXT=x docker ps'",
+      "echo $(docker --context=x ps)",
       "docker-compose up",
       "podman ps",
       "nerdctl ps",

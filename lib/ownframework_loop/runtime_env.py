@@ -96,8 +96,16 @@ def _slug(s: str) -> str:
 
 
 def _repo_key(canonical_repo: Path) -> str:
-    resolved = str(Path(canonical_repo).expanduser().resolve(strict=False))
-    return hashlib.sha256(resolved.encode("utf-8")).hexdigest()[:24]
+    resolved_path = Path(canonical_repo).expanduser().resolve(strict=False)
+    identity = resolved_path
+    try:
+        from . import git_checks
+        common = git_checks.git_common_dir(resolved_path)
+    except Exception:
+        common = None
+    if common is not None:
+        identity = common.resolve(strict=False)
+    return hashlib.sha256(str(identity).encode("utf-8")).hexdigest()[:24]
 
 
 def runtime_cache_path(

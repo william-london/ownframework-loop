@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import stat
+import subprocess
 import sys
 import tempfile
 
@@ -49,6 +50,22 @@ with tempfile.TemporaryDirectory() as td:
     runtime_dir = runtime_env.runtime_cache_dir(repo, "r1", "builder")
     assert runtime_path == runtime_dir
     assert str(runtime_path) == str(runtime_path.resolve(strict=False))
+
+    git_repo = root / "git-cache-repo"; git_repo.mkdir()
+    subprocess.run(["git","-C",str(git_repo),"init","-q"],check=True)
+    subprocess.run(["git","-C",str(git_repo),"config","user.email","test@example.com"],check=True)
+    subprocess.run(["git","-C",str(git_repo),"config","user.name","test"],check=True)
+    (git_repo/"x").write_text("x")
+    subprocess.run(["git","-C",str(git_repo),"add","x"],check=True)
+    subprocess.run(["git","-C",str(git_repo),"commit","-qm","init"],check=True)
+    linked = root / "linked-cache-wt"
+    subprocess.run(["git","-C",str(git_repo),"worktree","add","--detach",str(linked),"HEAD"],check=True)
+    assert runtime_env.repo_tool_cache_path(git_repo) == runtime_env.repo_tool_cache_path(linked)
+    alias = root / "git-cache-alias"; alias.symlink_to(git_repo, target_is_directory=True)
+    assert runtime_env.repo_tool_cache_path(alias) == runtime_env.repo_tool_cache_path(git_repo)
+    other = root / "other-cache-repo"; other.mkdir()
+    subprocess.run(["git","-C",str(other),"init","-q"],check=True)
+    assert runtime_env.repo_tool_cache_path(other) != runtime_env.repo_tool_cache_path(git_repo)
 
     resolved = capabilities.resolve_capabilities(
         ["toolchain.synthetic"],

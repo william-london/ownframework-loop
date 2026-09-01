@@ -441,9 +441,17 @@ def classify_bash_command(
         # Multiline/unparseable: fall back to the original.
         segments = _split_command_chain(command)
     forbidden: list[str] = []
+    host_privilege_clients = {"sudo", "doas", "pkexec", "nsenter", "su"}
     for seg in segments:
         first_word = _first_executable_word(seg)
         candidates = [seg, _norm(seg)]
+        for payload in _wrapped_git_command_payloads(seg):
+            elevated = _first_executable_word(payload)
+            if elevated and elevated.rsplit("/", 1)[-1] in host_privilege_clients:
+                forbidden.append(
+                    "host privilege/session escalation is prohibited: "
+                    + payload.strip()
+                )
         for pattern, desc, kind in FORBIDDEN_PATTERNS:
             if kind == "executable_identity":
                 # Match ONLY against the first executable word. The compiled
@@ -697,8 +705,19 @@ def _container_invocations(command: str) -> list[dict[str, Any]]:
             return
 
     for segment in _split_command_chain(command):
-        scan_segment(segment)
-    return found
+        for payload in _wrapped_git_command_payloads(segment):
+            scan_segment(payload)
+    unique: list[dict[str, Any]] = []
+    seen: set[tuple[Any, ...]] = set()
+    for item in found:
+        key = (
+            item["client"], item["token"],
+            tuple(item["args"]), tuple(item["assignments"]),
+        )
+        if key not in seen:
+            seen.add(key)
+            unique.append(item)
+    return unique
 
 
 def _segment_invokes_docker(segment: str) -> bool:
@@ -817,27 +836,63 @@ def _reviewer_git_branch_listing(seg: str) -> bool:
     return any(tok.split("=", 1)[0] in _GIT_BRANCH_LISTING_MARKERS for tok in rest)
 
 
-def _reviewer_segment_allowed(seg: str) -> bool:
-    """Classify one reviewer segment: allowlist match PLUS mutation-form
-    refusals.
+def _reviewer_effective_segment(seg: str) -> str | None:
+    """Normalize benign execution prefixes before reviewer allowlist matching.
 
-    The allowlist is executable-shaped; these checks close the mutating
-    forms that live INSIDE an allowlisted executable's syntax: shell write
-    redirects, find(1) delete/exec actions, and git-branch creation.
-    Arbitrary-execution toolchains (python, node, make, docker, package
-    managers) remain reviewer-available because the reviewer must be able
-    to run the project's own validation; their external effects are
-    covered by FORBIDDEN_PATTERNS plus the external-action guard, and any
-    candidate-source mutation is refused by the exact-SHA clean-worktree
-    proof in the review finalizer.
+    env git commit must be judged as git commit, not as the allowlisted env
+    command. Only a narrow env-assignment form is supported; opaque wrapper
+    options fail closed.
     """
-    if _reviewer_redirects_mutating(seg):
+    try:
+        tokens = shlex.split(seg)
+    except ValueError:
+        return None
+    if not tokens:
+        return None
+    i = 0
+    while i < len(tokens) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", tokens[i]):
+        i += 1
+    wrappers = {"command", "builtin", "exec"}
+    while i < len(tokens) and tokens[i].rsplit("/", 1)[-1] in wrappers:
+        i += 1
+    if i < len(tokens) and tokens[i].rsplit("/", 1)[-1] == "env":
+        i += 1
+        if i >= len(tokens):
+            return "env"
+        while i < len(tokens):
+            if tokens[i].startswith("-"):
+                return None
+            if re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", tokens[i]):
+                i += 1
+                continue
+            break
+    while i < len(tokens) and tokens[i].rsplit("/", 1)[-1] in {"nice", "time", "stdbuf"}:
+        i += 1
+        while i < len(tokens) and tokens[i].startswith("-"):
+            i += 1
+    if i >= len(tokens):
+        return None
+    return shlex.join(tokens[i:])
+
+def _reviewer_segment_allowed(seg: str) -> bool:
+    """Classify reviewer Bash after wrapper and nested-command normalization."""
+    payloads = list(_wrapped_git_command_payloads(seg))
+    for nested in payloads[1:]:
+        if not _reviewer_segment_allowed(nested):
+            return False
+
+    effective = _reviewer_effective_segment(seg)
+    if effective is None:
         return False
-    if re.match(r"^\s*git\s+branch\b", seg):
-        return _reviewer_git_branch_listing(seg)
-    if _REVIEWER_FIND_MUTATION.search(seg):
+    if _reviewer_redirects_mutating(seg) or _reviewer_redirects_mutating(effective):
         return False
-    return any(p.search(seg) for p in REVIEWER_ALLOWLIST_PATTERNS)
+    if _builder_git_topology_mutation(effective):
+        return False
+    if re.match(r"^\s*git\s+branch\b", effective):
+        return _reviewer_git_branch_listing(effective)
+    if _REVIEWER_FIND_MUTATION.search(effective):
+        return False
+    return any(p.search(effective) for p in REVIEWER_ALLOWLIST_PATTERNS)
 
 
 def is_reviewer_allowed(command: str) -> bool:
