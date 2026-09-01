@@ -250,6 +250,11 @@ try:
         "canonical_repo": "$T2_REPO",
         "worktree": "$T2_WORKTREE",
         "semantic_path": "$T2_WORKTREE/x",
+        # Current semantic runner contract requires a durable supervisor-owned
+        # attempt identity before any provider launch. This fixture is testing
+        # provider binary precedence, so model a legitimate current attempt
+        # rather than weakening the production invariant.
+        "attempt_id": "attempt-T2",
     }
     supervisor.ClaudeCodeRunner().run(wo, timeout_seconds=1)
 except SystemExit:
