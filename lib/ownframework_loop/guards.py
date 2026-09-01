@@ -251,14 +251,56 @@ _BUILDER_SHARED_GIT_TOPOLOGY_SUBCOMMANDS = frozenset({
 })
 
 
+_WRAPPER_SHELLS = {"sh", "bash", "zsh", "dash", "ksh"}
+
+
+def _wrapped_git_command_payloads(seg: str):
+    """Yield `seg` plus any nested shell `-c` payloads and command substitutions.
+
+    Closes wrapper escapes: `sh -c 'git ...'`, `env`/interpreter wrappers,
+    `$(git ...)` and backtick command substitution must be classified exactly
+    like a bare `git ...` instead of hiding a shared-topology mutation inside
+    a wrapped string the top-level token scan cannot see.
+    """
+    yield seg
+    # Command substitutions: $(...) and backticks. The paren form matches the
+    # common non-nested case; nested substitutions are still caught when the
+    # inner payload is itself a bare `git ...` token sequence after splitting.
+    for m in re.finditer(r"\$\(([^()]*)\)", seg):
+        yield from _wrapped_git_command_payloads(m.group(1))
+    for m in re.finditer(r"`([^`]*)`", seg):
+        yield from _wrapped_git_command_payloads(m.group(1))
+    # Nested shell `-c` payloads.
+    try:
+        tokens = shlex.split(seg)
+    except ValueError:
+        return
+    for i, tok in enumerate(tokens):
+        base = tok.rsplit("/", 1)[-1]
+        if base in _WRAPPER_SHELLS:
+            for j in range(i + 1, len(tokens) - 1):
+                if tokens[j] in ("-c", "--command"):
+                    yield from _wrapped_git_command_payloads(tokens[j + 1])
+                    break
+
+
 def _builder_git_topology_mutation(seg: str) -> str | None:
     """Return a reason when builder Bash would mutate shared Git topology.
 
     Builder source commits are legitimate inside the assigned candidate
     worktree. Shared refs/worktree administration are core-owned because
     concurrent runs in one Git common-dir must not be able to redirect one
-    another through semantic Bash.
+    another through semantic Bash. Wrapped forms (shell -c, command
+    substitution) are unwrapped and classified identically.
     """
+    for payload in _wrapped_git_command_payloads(seg):
+        reason = _git_topology_mutation_core(payload)
+        if reason is not None:
+            return reason
+    return None
+
+
+def _git_topology_mutation_core(seg: str) -> str | None:
     try:
         tokens = shlex.split(seg)
     except ValueError:
@@ -599,9 +641,10 @@ def _container_invocations(command: str) -> list[dict[str, Any]]:
     # VM-provisioning wrappers (colima/limactl) and Finch are included: they
     # can stand up or drive a container daemon that bypasses the commissioned
     # broker, so they are refused as parallel container-control clients.
+    # OrbStack's `orb`/`orbctl` are likewise parallel container/VM authority.
     clients = {
         "docker", "docker-compose", "podman", "nerdctl", "ctr", "crictl",
-        "colima", "finch", "limactl",
+        "colima", "finch", "limactl", "orb", "orbctl",
     }
     wrappers = {"command", "builtin", "exec"}
     shells = {"sh", "bash", "zsh", "dash", "ksh"}
@@ -706,7 +749,7 @@ _REVIEWER_MUTATING_REDIRECT = re.compile(
     r"&>>?"                        # bash &> / &>> — both-stream file write
     r"|>&\s*(?![0-9])"             # cmd >& file (both-stream write), not fd dup
     r"|(?<![0-9&])>>?(?!\s*&)"     # > f / >> f; not N>..., not >&M dup
-    r"|(?:1|[3-9]|\d{2,})>>?(?!\s*&|\s*>)"  # 1> f / 3> f / 10> f file writes
+    r"|(?:[01]|[3-9]|\d{2,})>>?(?!\s*&|\s*>)"  # 0>/1>/3>/10> f file writes (every fd except 2)
     r"|<>"                         # read-write open
 )
 
