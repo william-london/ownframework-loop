@@ -100,3 +100,25 @@ Example custom tool:
 
 The manifest is operator authority. Repository content cannot edit it from a
 semantic worker because the supervisor state root remains denied.
+
+## Privileged proof binding
+
+For `container.docker` and `local.http-service`, `proof` is not a free-form
+attestation. It must equal the current semantic runtime fingerprint, which binds
+platform/architecture and the commissioned Claude executable/version. Changing
+Claude Code or the host invalidates the privileged grant until it is re-tested
+and re-commissioned. Resolved executable bytes are SHA-256 digested into the
+attempt receipt.
+
+## Reviewer cache isolation
+
+Builder package/browser caches are durable but repository-scoped. Reviewers use
+pass-ephemeral writable caches so exact-SHA validation cannot persist poisoned
+tool state into a later attempt. Trusted global assets remain read-only.
+
+## Host IPC environment
+
+Semantic workers unconditionally scrub daemon/agent selectors including
+`DOCKER_HOST`, `DOCKER_CONTEXT`, `CONTAINER_HOST`, `PODMAN_HOST`,
+`KUBECONFIG`, `SSH_AUTH_SOCK`, and `GPG_AGENT_INFO`. Docker commands are
+also refused by the Bash guard unless `container.docker` was actually resolved.

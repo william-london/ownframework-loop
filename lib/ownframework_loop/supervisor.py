@@ -3043,6 +3043,13 @@ class ClaudeCodeRunner:
             canonical_repo=canonical_repo,
             role=role,
             repo_cache_root=runtime_env.repo_tool_cache_dir(canonical_repo),
+            ephemeral_cache_root=(
+                runtime_env.runtime_cache_dir(
+                    canonical_repo,
+                    str(work_order.get("run_id") or ""),
+                    role,
+                ) / "capability-cache"
+            ),
             packet_network_allowlist=[
                 str(item) for item in (work_order.get("network_read_allowlist") or [])
             ],
@@ -3149,6 +3156,12 @@ class ClaudeCodeRunner:
         # the Claude process itself while stripping Anthropic/cloud credentials
         # from Bash children. This also forces filesystem isolation to remain on.
         worker_env["CLAUDE_CODE_SUBPROCESS_ENV_SCRUB"] = "1"
+        privileged_names = sorted(
+            str(item.get("name"))
+            for item in (capability_resolution.get("resolved") or [])
+            if isinstance(item, dict) and item.get("privileged") is True
+        )
+        worker_env["OFLOOP_PRIVILEGED_CAPABILITIES"] = ",".join(privileged_names)
 
         # Do not expose ~/.gitconfig merely so an unattended builder can commit.
         # Give semantic Git a deterministic bot identity and disable terminal

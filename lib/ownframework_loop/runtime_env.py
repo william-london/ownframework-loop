@@ -30,6 +30,19 @@ CAPABILITY_ENV_ALLOWED_KEYS = frozenset({
     "npm_config_cache",
     "npm_config_store_dir",
     "PLAYWRIGHT_BROWSERS_PATH",
+    "PLAYWRIGHT_SKIP_BROWSER_GC",
+})
+
+HOST_IPC_ENV_KEYS = frozenset({
+    "DOCKER_HOST",
+    "DOCKER_CONTEXT",
+    "DOCKER_CONFIG",
+    "CONTAINER_HOST",
+    "PODMAN_HOST",
+    "KUBECONFIG",
+    "KUBERNETES_MASTER",
+    "SSH_AUTH_SOCK",
+    "GPG_AGENT_INFO",
 })
 
 
@@ -142,6 +155,11 @@ def hermetic_subprocess_env(
 
     env = dict(base_env) if base_env is not None else dict(os.environ)
 
+    # Host IPC/daemon selectors are authority, not harmless developer
+    # convenience. Privileged services must enter through a typed broker.
+    for key in HOST_IPC_ENV_KEYS:
+        env.pop(key, None)
+
     # Capability resolution is core-owned.  Only a tiny non-secret environment
     # surface may be injected here; host manifests cannot smuggle arbitrary
     # credentials or loader/runtime overrides into semantic Bash.
@@ -224,6 +242,7 @@ def hermetic_subprocess_env(
 __all__ = [
     "SCHEMA",
     "CAPABILITY_ENV_ALLOWED_KEYS",
+    "HOST_IPC_ENV_KEYS",
     "default_repo_tool_cache_root",
     "repo_tool_cache_dir",
     "repo_tool_cache_path",

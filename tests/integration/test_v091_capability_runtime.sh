@@ -11,7 +11,7 @@ import stat
 import sys
 import tempfile
 
-from ownframework_loop import capabilities, packet, runtime_env, supervisor
+from ownframework_loop import capabilities, guards, packet, runtime_env, supervisor
 
 with tempfile.TemporaryDirectory() as td:
     root = Path(td)
@@ -55,20 +55,27 @@ with tempfile.TemporaryDirectory() as td:
     )
     assert resolved["requested"] == ["toolchain.synthetic"]
     assert resolved["resolved"][0]["executable"] == str(Path(sys.executable).resolve())
+    assert len(resolved["resolved"][0]["executable_sha256"]) == 64
     assert "example.com" in resolved["network_domains"]
 
     builder = capabilities.resolve_capabilities(
         ["package.pip"], canonical_repo=repo, role="builder",
         repo_cache_root=cache, packet_network_allowlist=[],
     )
+    reviewer_ephemeral = runtime_env.runtime_cache_dir(repo, "r1", "reviewer") / "capability-cache"
     reviewer = capabilities.resolve_capabilities(
         ["package.pip"], canonical_repo=repo, role="reviewer",
-        repo_cache_root=cache, packet_network_allowlist=[],
+        repo_cache_root=cache, ephemeral_cache_root=reviewer_ephemeral,
+        packet_network_allowlist=[],
     )
     pip_cache = builder["environment"]["PIP_CACHE_DIR"]
+    reviewer_pip_cache = reviewer["environment"]["PIP_CACHE_DIR"]
     assert pip_cache in builder["filesystem"]["allowWrite"]
-    assert pip_cache in reviewer["filesystem"]["allowRead"]
-    assert pip_cache not in reviewer["filesystem"]["allowWrite"]
+    assert reviewer_pip_cache != pip_cache
+    assert reviewer_pip_cache in reviewer["filesystem"]["allowRead"]
+    assert reviewer_pip_cache in reviewer["filesystem"]["allowWrite"]
+    assert builder["resolved"][0]["cache_scope"] == "repository_durable"
+    assert reviewer["resolved"][0]["cache_scope"] == "pass_ephemeral"
     assert {"pypi.org", "files.pythonhosted.org"} <= set(builder["network_domains"])
 
     env = runtime_env.hermetic_subprocess_env(
@@ -77,6 +84,19 @@ with tempfile.TemporaryDirectory() as td:
         path_prepend=[str(Path(sys.executable).resolve().parent)],
     )
     assert env["PIP_CACHE_DIR"] == pip_cache
+    poisoned_base = {
+        "PATH": os.environ.get("PATH", ""),
+        "HOME": os.environ.get("HOME", str(root)),
+        "DOCKER_HOST": "unix:///tmp/docker.sock",
+        "DOCKER_CONTEXT": "desktop-linux",
+        "KUBECONFIG": "/tmp/kubeconfig",
+        "SSH_AUTH_SOCK": "/tmp/agent.sock",
+    }
+    scrubbed = runtime_env.hermetic_subprocess_env(
+        repo, "r1", "builder", base_env=poisoned_base
+    )
+    for key in ("DOCKER_HOST", "DOCKER_CONTEXT", "KUBECONFIG", "SSH_AUTH_SOCK"):
+        assert key not in scrubbed
     try:
         runtime_env.hermetic_subprocess_env(
             repo, "r1", "builder",
@@ -86,6 +106,29 @@ with tempfile.TemporaryDirectory() as td:
         pass
     else:
         raise AssertionError("unsafe capability environment key accepted")
+
+    no_docker = guards.classify_bash_command_with_env(
+        "docker compose up -d",
+        {
+            "OFLOOP_SEMANTIC_CONTEXT": "1",
+            "OFLOOP_RUN_ID": "r1",
+            "OFLOOP_ROLE": "builder",
+            "OFLOOP_CANONICAL_REPO": str(repo.resolve()),
+            "OFLOOP_PRIVILEGED_CAPABILITIES": "",
+        },
+    )
+    assert no_docker["severity"] == "forbidden"
+    broker_docker = guards.classify_bash_command_with_env(
+        "docker compose up -d",
+        {
+            "OFLOOP_SEMANTIC_CONTEXT": "1",
+            "OFLOOP_RUN_ID": "r1",
+            "OFLOOP_ROLE": "builder",
+            "OFLOOP_CANONICAL_REPO": str(repo.resolve()),
+            "OFLOOP_PRIVILEGED_CAPABILITIES": "container.docker",
+        },
+    )
+    assert broker_docker["severity"] == "allowed"
 
     try:
         capabilities.resolve_capabilities(
@@ -97,6 +140,16 @@ with tempfile.TemporaryDirectory() as td:
     else:
         raise AssertionError("direct Docker capability unexpectedly resolved")
 
+    manifest.write_text(json.dumps({
+        "schema": capabilities.HOST_MANIFEST_SCHEMA,
+        "capabilities": {
+            "local.http-service": {
+                "provider": "claude_native_safe_local_binding",
+                "proof": "stale-proof",
+            }
+        },
+    }), encoding="utf-8")
+    manifest.chmod(0o600)
     try:
         capabilities.resolve_capabilities(
             ["local.http-service"], canonical_repo=repo, role="builder",
@@ -106,6 +159,24 @@ with tempfile.TemporaryDirectory() as td:
         assert "safe-local-binding" in str(exc)
     else:
         raise AssertionError("local binding enabled without commissioning proof")
+
+    manifest.write_text(json.dumps({
+        "schema": capabilities.HOST_MANIFEST_SCHEMA,
+        "capabilities": {
+            "toolchain.synthetic": {
+                "kind": "tool",
+                "executable": sys.executable,
+                "version_args": ["--version"],
+                "read_paths": [str(Path(sys.executable).resolve().parent)],
+            },
+            "package.pip": {
+                "executable": sys.executable,
+                "version_args": ["--version"],
+                "read_paths": [str(Path(sys.executable).resolve().parent)],
+            },
+        },
+    }), encoding="utf-8")
+    manifest.chmod(0o600)
 
     try:
         capabilities.resolve_capabilities(

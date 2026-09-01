@@ -22,6 +22,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import platform
 import re
 import shutil
 import stat
@@ -77,7 +78,13 @@ BUILTIN_CAPABILITIES: dict[str, CapabilityDefinition] = {
     ),
     "browser.playwright.chromium": CapabilityDefinition(
         "browser.playwright.chromium", "browser",
-        network_domains=("cdn.playwright.dev",),
+        # Current Playwright Chromium downloads can use the Playwright CDN,
+        # Microsoft's fallback CDN, and Chrome-for-Testing redirects.
+        network_domains=(
+            "cdn.playwright.dev",
+            "playwright.download.prss.microsoft.com",
+            "storage.googleapis.com",
+        ),
         cache_key="playwright-browsers", cache_env="PLAYWRIGHT_BROWSERS_PATH",
     ),
     "local.http-service": CapabilityDefinition(
@@ -93,6 +100,47 @@ def default_host_manifest_path() -> Path:
     root = os.environ.get("XDG_STATE_HOME", "").strip()
     base = Path(root).expanduser() if root else Path.home() / ".local" / "state"
     return base / "ownframework-loop" / "host-capabilities.json"
+
+
+def semantic_runtime_fingerprint() -> str:
+    """Fingerprint host + Claude sandbox generation for privileged proof."""
+    claude_raw = os.environ.get("OFLOOP_CLAUDE_BIN", "claude")
+    discovered = shutil.which(claude_raw) if not Path(claude_raw).is_absolute() else claude_raw
+    claude_path = ""
+    claude_version = "unavailable"
+    if discovered:
+        p = Path(discovered).expanduser().resolve(strict=False)
+        if p.is_file() and os.access(p, os.X_OK):
+            claude_path = str(p)
+            try:
+                proc = subprocess.run(
+                    [claude_path, "--version"], capture_output=True, text=True,
+                    check=False, timeout=5,
+                )
+                lines = (proc.stdout or proc.stderr or "").strip().splitlines()
+                if lines:
+                    claude_version = lines[0][:512]
+            except (OSError, subprocess.SubprocessError):
+                pass
+    payload = {
+        "platform": platform.system(),
+        "platform_release": platform.release(),
+        "machine": platform.machine(),
+        "claude_path": claude_path,
+        "claude_version": claude_version,
+    }
+    encoded = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _file_sha256(path: str | None) -> str | None:
+    if not path:
+        return None
+    h = hashlib.sha256()
+    with Path(path).open("rb") as fh:
+        for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
 
 
 def validate_capability_names(values: Any) -> list[str]:
@@ -135,6 +183,11 @@ def _load_host_manifest(path: Path | None = None) -> tuple[dict[str, Any], str |
     if not isinstance(data, dict) or data.get("schema") != HOST_MANIFEST_SCHEMA:
         raise CapabilityResolutionError(
             f"host capability manifest schema must be {HOST_MANIFEST_SCHEMA!r}"
+        )
+    unknown_top = sorted(set(data) - {"schema", "capabilities"})
+    if unknown_top:
+        raise CapabilityResolutionError(
+            f"host capability manifest has unsupported top-level keys: {unknown_top}"
         )
     entries = data.get("capabilities")
     if not isinstance(entries, dict):
@@ -213,7 +266,7 @@ def _resolve_executable(
     entry: dict[str, Any],
     *,
     broker: bool = False,
-) -> tuple[str | None, str | None, list[str]]:
+) -> tuple[str | None, str | None, str | None, list[str]]:
     field = "broker_executable" if broker else "executable"
     explicit = entry.get(field)
     executable: str | None = None
@@ -238,9 +291,9 @@ def _resolve_executable(
                     executable = str(rp)
                     break
 
-    if definition.executable_names and executable is None:
+    if executable is None and (definition.executable_names or not broker):
         raise CapabilityResolutionError(
-            f"capability {definition.name!r} executable is not discoverable"
+            f"capability {definition.name!r} executable is not discoverable/commissioned"
         )
 
     read_paths = _absolute_existing_paths(
@@ -279,7 +332,7 @@ def _resolve_executable(
             )
         version = text[0][:512]
 
-    return executable, version, sorted(set(read_paths))
+    return executable, version, _file_sha256(executable), sorted(set(read_paths))
 
 
 def resolve_capabilities(
@@ -288,6 +341,7 @@ def resolve_capabilities(
     canonical_repo: Path,
     role: str,
     repo_cache_root: Path,
+    ephemeral_cache_root: Path | None = None,
     packet_network_allowlist: list[str] | None = None,
     manifest_path: Path | None = None,
 ) -> dict[str, Any]:
@@ -303,6 +357,14 @@ def resolve_capabilities(
     repo_cache_root.mkdir(parents=True, exist_ok=True, mode=0o700)
     try:
         os.chmod(repo_cache_root, 0o700)
+    except OSError:
+        pass
+    if ephemeral_cache_root is None:
+        ephemeral_cache_root = repo_cache_root / ".reviewer-ephemeral"
+    ephemeral_cache_root = ephemeral_cache_root.expanduser().resolve(strict=False)
+    ephemeral_cache_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    try:
+        os.chmod(ephemeral_cache_root, 0o700)
     except OSError:
         pass
 
@@ -330,12 +392,14 @@ def resolve_capabilities(
             definition = CapabilityDefinition(name, "tool", ())
 
         if definition.name == "container.docker":
-            if entry.get("provider") != "broker" or not entry.get("proof"):
+            expected_proof = semantic_runtime_fingerprint()
+            if entry.get("provider") != "broker" or entry.get("proof") != expected_proof:
                 raise CapabilityResolutionError(
-                    "container.docker requires an operator-commissioned broker with proof; "
-                    "raw Docker daemon/socket authority is never granted"
+                    "container.docker requires an operator-commissioned broker whose proof "
+                    "matches the current semantic runtime fingerprint; raw Docker "
+                    "daemon/socket authority is never granted"
                 )
-            executable, version, extra_reads = _resolve_executable(
+            executable, version, executable_sha256, extra_reads = _resolve_executable(
                 definition, entry, broker=True
             )
             if executable is None or Path(executable).name != "docker":
@@ -349,16 +413,22 @@ def resolve_capabilities(
             resolved.append({
                 "name": name, "kind": "privileged", "privileged": True,
                 "provider": "broker", "executable": executable, "version": version,
+                "executable_sha256": executable_sha256,
                 "network_domains": manifest_domains,
                 "proof": str(entry.get("proof"))[:512],
             })
             continue
 
         if definition.name == "local.http-service":
-            if entry.get("provider") != "claude_native_safe_local_binding" or not entry.get("proof"):
+            expected_proof = semantic_runtime_fingerprint()
+            if (
+                entry.get("provider") != "claude_native_safe_local_binding"
+                or entry.get("proof") != expected_proof
+            ):
                 raise CapabilityResolutionError(
-                    "local.http-service requires a commissioned safe-local-binding provider/proof; "
-                    "native local binding is not enabled implicitly"
+                    "local.http-service requires a commissioned safe-local-binding provider "
+                    "whose proof matches the current semantic runtime fingerprint; native "
+                    "local binding is not enabled implicitly"
                 )
             sandbox_network["allowLocalBinding"] = True
             resolved.append({
@@ -368,13 +438,14 @@ def resolve_capabilities(
             })
             continue
 
-        executable, version, extra_reads = _resolve_executable(definition, entry)
+        executable, version, executable_sha256, extra_reads = _resolve_executable(definition, entry)
         allow_read.update(extra_reads)
         manifest_domains = _network_domains(entry.get("network_domains"), name=name)
         effective_domains = sorted(set(definition.network_domains) | set(manifest_domains))
         network_domains.update(effective_domains)
 
         cache_path: str | None = None
+        cache_scope: str | None = None
         trusted_asset = entry.get("trusted_asset_path")
         if trusted_asset is not None:
             if not isinstance(trusted_asset, str):
@@ -386,29 +457,34 @@ def resolve_capabilities(
             if not asset.exists():
                 raise CapabilityResolutionError(f"{name}.trusted_asset_path does not exist: {asset}")
             cache_path = str(asset)
+            cache_scope = "trusted_read_only"
             allow_read.add(cache_path)
         elif definition.cache_key:
-            cache = (repo_cache_root / definition.cache_key).resolve(strict=False)
+            cache_base = repo_cache_root if role == "builder" else ephemeral_cache_root
+            cache = (cache_base / definition.cache_key).resolve(strict=False)
             cache.mkdir(parents=True, exist_ok=True, mode=0o700)
             try:
                 os.chmod(cache, 0o700)
             except OSError:
                 pass
             cache_path = str(cache)
+            cache_scope = "repository_durable" if role == "builder" else "pass_ephemeral"
             allow_read.add(cache_path)
-            if role == "builder":
-                allow_write.add(cache_path)
+            allow_write.add(cache_path)
 
         if definition.cache_env and cache_path:
             environment[definition.cache_env] = cache_path
         if definition.name == "package.pnpm" and cache_path:
-            # pnpm also uses npm's cache for metadata/tarballs.
-            npm_cache = (repo_cache_root / "npm").resolve(strict=False)
+            # Reviewer metadata stays pass-ephemeral, never persistent.
+            npm_base = repo_cache_root if role == "builder" else ephemeral_cache_root
+            npm_cache = (npm_base / "npm").resolve(strict=False)
             npm_cache.mkdir(parents=True, exist_ok=True, mode=0o700)
             allow_read.add(str(npm_cache))
-            if role == "builder":
-                allow_write.add(str(npm_cache))
+            allow_write.add(str(npm_cache))
             environment.setdefault("npm_config_cache", str(npm_cache))
+
+        if definition.name == "browser.playwright.chromium" and role == "reviewer":
+            environment["PLAYWRIGHT_SKIP_BROWSER_GC"] = "1"
 
         resolved.append({
             "name": name,
@@ -417,7 +493,9 @@ def resolve_capabilities(
             "provider": "builtin" if not entry else "commissioned",
             "executable": executable,
             "version": version,
+            "executable_sha256": executable_sha256,
             "cache_path": cache_path,
+            "cache_scope": cache_scope,
             "network_domains": effective_domains,
         })
 
@@ -452,7 +530,10 @@ def public_summary(resolution: dict[str, Any]) -> dict[str, Any]:
         "resolved": [
             {
                 k: item.get(k)
-                for k in ("name", "kind", "privileged", "provider", "executable", "version", "cache_path")
+                for k in (
+                    "name", "kind", "privileged", "provider", "executable",
+                    "version", "executable_sha256", "cache_path", "cache_scope",
+                )
                 if item.get(k) is not None
             }
             for item in (resolution.get("resolved") or [])
@@ -505,6 +586,7 @@ __all__ = [
     "default_host_manifest_path",
     "public_summary",
     "resolve_capabilities",
+    "semantic_runtime_fingerprint",
     "validate_capability_names",
     "write_resolution_receipt",
 ]

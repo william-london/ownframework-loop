@@ -21,10 +21,15 @@ The complete historical changelog through 0.5.2 is preserved at
 - per-pass scratch is separated from durable repository-scoped package/browser
   caches, preventing repeated downloads without introducing cross-client
   writable-cache poisoning;
-- privileged `container.docker` is broker-only: direct daemon sockets and
-  unsandboxed Docker exceptions are never granted;
+- privileged `container.docker` is broker-only: direct daemon sockets,
+  inherited Docker/Kubernetes/agent IPC selectors, and unsandboxed Docker
+  exceptions are never granted; the Bash guard also requires the resolved
+  privileged capability marker before any Docker invocation;
 - `local.http-service` is explicit and unavailable until a safe local-binding
-  provider is commissioned/proven for the exact host runtime.
+  provider is commissioned/proven for the exact host runtime;
+- privileged/local proofs are bound to the current platform/architecture/Claude
+  runtime fingerprint, executable bytes are SHA-256 receipted, and reviewer
+  tool caches are pass-ephemeral.
 
 ## 0.9.0 - Bounded Multi-Repository Autonomy (2026-08-31)
 
