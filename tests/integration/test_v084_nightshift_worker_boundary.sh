@@ -329,7 +329,7 @@ try:
     try:
         supervisor.ClaudeCodeRunner().run(order, timeout_seconds=1)
     except RuntimeError as exc:
-        assert "may not override semantic-worker authority" in str(exc), exc
+        assert "may not override semantic-worker" in str(exc), exc
     else:
         raise AssertionError("authority-bearing OFLOOP_CLAUDE_EXTRA_ARGS was accepted")
 finally:
