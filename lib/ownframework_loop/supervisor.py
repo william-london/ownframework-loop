@@ -386,7 +386,17 @@ def _semantic_worker_settings(
         *capability_allow_write,
     })
     state_root = default_db_path().parent.expanduser().resolve(strict=False)
-    deny_read = sorted({str(home), str(state_root)})
+    # Raw container-daemon sockets are root-equivalent host authority. Even
+    # when a Docker broker capability is commissioned, the semantic worker
+    # must not bypass that broker by addressing a conventional daemon socket.
+    raw_container_sockets = {
+        "/var/run/docker.sock",
+        "/run/docker.sock",
+        "/var/run/podman/podman.sock",
+        "/run/podman/podman.sock",
+        "/run/containerd/containerd.sock",
+    }
+    deny_read = sorted({str(home), str(state_root), *raw_container_sockets})
     filesystem: dict[str, Any] = {
         "denyRead": deny_read,
         "allowRead": allow_read,

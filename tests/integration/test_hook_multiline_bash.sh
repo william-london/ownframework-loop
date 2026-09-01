@@ -122,6 +122,8 @@ FORBIDDEN = [
      ["EC","SP","HI","SP","AND","SP","GT","SP","PS"]),
     ("variant 10: push after ||",
      ["EC","SP","HI","SP","OR","SP","GT","SP","PS"]),
+    ("variant 11: uncommissioned docker compose is forbidden",
+     ["DC","SP","CP","SP","UP"]),
 ]
 ALLOWED = [
     ("control 0: ssh on second line (classifier allows ssh alone)",
@@ -136,8 +138,6 @@ ALLOWED = [
      ["EC","SP","HI","SP","AND","SP","EC","SP","DONE"]),
     ("control 6: harmless command substitution",
      ["EC","SP","DOLLAR","LPAREN","ECHIHI","RPAREN"]),
-    ("control 7: docker compose up is local engineering",
-     ["DC","SP","CP","SP","UP"]),
 ]
 
 for label, parts in FORBIDDEN + ALLOWED:
@@ -211,6 +211,80 @@ while IFS= read -r line; do
   fi
   pass "$label"
 done < "$CASES_FILE"
+
+# Docker becomes valid local engineering only when the supervisor has resolved
+# the privileged broker capability for this exact semantic pass.
+docker_payload="$(make_payload "docker compose up")"
+set +e
+docker_out="$(
+  printf '%s' "$docker_payload" |
+  OFLOOP_PRIVILEGED_CAPABILITIES="container.docker"   CLAUDE_PLUGIN_ROOT="$ROOT" PATH="$SANDBOX:$PATH" bash "$HOOK" 2>&1
+)"
+docker_rc=$?
+set -e
+if [[ "$docker_rc" -ne 0 || "$docker_out" == *'"decision": "block"'* ]]; then
+  fail "commissioned docker compose capability should be admitted. output=$docker_out"
+else
+  pass "commissioned docker compose capability admitted"
+fi
+
+# Common wrapper forms must not bypass the capability requirement.
+for wrapped in   'command docker compose up'   'env FOO=bar docker compose up'   "sh -c 'docker compose up'"
+do
+  wrapped_payload="$(make_payload "$wrapped")"
+  IFS=# ----------------------------------------------------------------------
+STAGING_ROOT="$SANDBOX/staged_plugin"
+mkdir -p "$STAGING_ROOT/lib/ownframework_loop" "$STAGING_ROOT/hooks"
+cp "$ROOT/lib/ownframework_loop/"*.py "$STAGING_ROOT/lib/ownframework_loop/"
+cp "$ROOT/hooks/"*.sh "$STAGING_ROOT/hooks/"
+chmod +x "$STAGING_ROOT/hooks/"*.sh
+mkdir -p "$STAGING_ROOT/.ownframework-loop/run-TEST"
+echo '{"state":"BUILDING"}' > "$STAGING_ROOT/.ownframework-loop/run-TEST/STATE.json"
+
+for i in 1 2 3 4 5 6 7 8 9 10; do
+  payload="$(make_payload "ls -la")"
+  printf '%s' "$payload" | CLAUDE_PLUGIN_ROOT="$STAGING_ROOT" PATH="$SANDBOX:$PATH" bash "$STAGING_ROOT/hooks/block_dangerous_bash.sh" >/dev/null 2>&1 || true
+done
+bc_count=$(find "$STAGING_ROOT" \
+  \( -type d -name "__pycache__" -o \
+     -type f -name "*.pyc" -o \
+     -type f -name "*.pyo" -o \
+     -type f -name "*.pyd" \) -print 2>/dev/null | wc -l | tr -d " ")
+if [[ "$bc_count" -ne 0 ]]; then
+  fail "bytecode regression: $bc_count bytecode paths created after 10 hook runs"
+else
+  pass "bytecode regression: 0 bytecode paths after 10 hook runs"
+fi
+
+if [[ "$FAIL" -gt 0 ]]; then
+  echo "OF_LOOP_MULTILINE_GUARD=FAIL count=$FAIL"
+  exit 1
+fi
+echo "OF_LOOP_MULTILINE_GUARD=PASS"
+echo "MULTILINE_BASH_TESTS=PASS"
+\t' read -r wrapped_rc wrapped_out < <(invoke_hook "$wrapped_payload")
+  if [[ "$wrapped_rc" -ne 0 || "$wrapped_out" != *'"decision": "block"'* ]]; then
+    fail "uncommissioned Docker wrapper escaped capability gate: $wrapped output=$wrapped_out"
+  else
+    pass "uncommissioned Docker wrapper blocked: $wrapped"
+  fi
+done
+
+# Registry mutation remains forbidden even when the local broker capability is
+# present.
+push_payload="$(make_payload "docker push example.invalid/image:latest")"
+set +e
+push_out="$(
+  printf '%s' "$push_payload" |
+  OFLOOP_PRIVILEGED_CAPABILITIES="container.docker"   CLAUDE_PLUGIN_ROOT="$ROOT" PATH="$SANDBOX:$PATH" bash "$HOOK" 2>&1
+)"
+push_rc=$?
+set -e
+if [[ "$push_rc" -ne 0 || "$push_out" != *'"decision": "block"'* ]]; then
+  fail "docker push must remain forbidden with container capability. output=$push_out"
+else
+  pass "docker push remains forbidden with container capability"
+fi
 
 # ----------------------------------------------------------------------
 # Repeated hook execution produces zero bytecode paths

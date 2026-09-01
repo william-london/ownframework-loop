@@ -25,8 +25,10 @@ The complete historical changelog through 0.5.2 is preserved at
   writable-cache poisoning;
 - privileged `container.docker` is broker-only: direct daemon sockets,
   inherited Docker/Kubernetes/agent IPC selectors, and unsandboxed Docker
-  exceptions are never granted; the Bash guard also requires the resolved
-  privileged capability marker before any Docker invocation;
+  exceptions are never granted; conventional Docker/Podman/containerd daemon
+  sockets are explicitly denied and the Bash guard requires the resolved
+  privileged capability marker before Docker invocation, including common
+  shell-wrapper forms;
 - `local.http-service` is explicit and unavailable until a safe local-binding
   provider is commissioned/proven for the exact host runtime;
 - privileged/local proofs are bound to the current platform/architecture/Claude

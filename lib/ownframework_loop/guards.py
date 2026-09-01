@@ -476,11 +476,7 @@ def classify_bash_command_with_env(
             if item.strip()
         }
         docker_invocation = any(
-            re.match(
-                r"^\s*(?:env\s+)?(?:[A-Za-z_][A-Za-z0-9_]*=[^\s]+\s+)*"
-                r"(?:\S*/)?docker(?:-compose)?(?:\s|$)",
-                seg,
-            )
+            _segment_invokes_docker(seg)
             for seg in _split_command_chain(command)
         )
         if docker_invocation and "container.docker" not in privileged:
@@ -501,6 +497,48 @@ from .external_action import (
     _split_command_chain,
     _split_single_line,
 )
+
+
+def _segment_invokes_docker(segment: str) -> bool:
+    """Recognize Docker execution through common shell wrappers.
+
+    This is deliberately execution-shaped rather than a raw substring match,
+    so docs/grep/echo mentioning Docker remain harmless. Nested shell -c
+    invocations recurse into their payload, closing the easy
+    `command docker`, `env X=1 docker`, and `sh -c 'docker ...'`
+    capability-bypass forms.
+    """
+    if not segment:
+        return False
+    try:
+        tokens = shlex.split(segment)
+    except ValueError:
+        tokens = segment.split()
+    if not tokens:
+        return False
+
+    prefixes = {"command", "builtin", "env", "nice", "time", "stdbuf", "exec"}
+    i = 0
+    while i < len(tokens):
+        tok = tokens[i]
+        if re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", tok):
+            i += 1
+            continue
+        base = tok.rsplit("/", 1)[-1]
+        if base in prefixes:
+            i += 1
+            continue
+        if base in {"docker", "docker-compose"}:
+            return True
+        if base in {"sh", "bash", "zsh", "dash", "ksh"}:
+            for idx in range(i + 1, len(tokens) - 1):
+                if tokens[idx] in {"-c", "--command"}:
+                    return any(
+                        _segment_invokes_docker(inner)
+                        for inner in _split_command_chain(tokens[idx + 1])
+                    )
+        return False
+    return False
 
 
 def _first_executable_word(segment: str) -> str | None:

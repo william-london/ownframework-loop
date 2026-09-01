@@ -22,7 +22,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
-import platform
+import sys
 import re
 import shutil
 import stat
@@ -123,9 +123,13 @@ def semantic_runtime_fingerprint() -> str:
             except (OSError, subprocess.SubprocessError):
                 pass
     payload = {
-        "platform": platform.system(),
-        "platform_release": platform.release(),
-        "machine": platform.machine(),
+        "platform": sys.platform,
+        "platform_release": (
+            os.uname().release if hasattr(os, "uname") else ""
+        ),
+        "machine": (
+            os.uname().machine if hasattr(os, "uname") else ""
+        ),
         "claude_path": claude_path,
         "claude_version": claude_version,
     }

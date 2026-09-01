@@ -214,8 +214,9 @@ with tempfile.TemporaryDirectory() as td:
     sandbox = settings["sandbox"]
     assert "pypi.org" in sandbox["network"]["allowedDomains"]
     assert sandbox["excludedCommands"] == []
-    flat = json.dumps(settings)
-    assert "docker.sock" not in flat
+    assert "/var/run/docker.sock" in sandbox["filesystem"]["denyRead"]
+    assert "/run/containerd/containerd.sock" in sandbox["filesystem"]["denyRead"]
+    assert "docker.sock" not in json.dumps(sandbox["filesystem"]["allowRead"])
 
     good = {
         "schema": packet.PROGRAM_SCHEMA_VERSION,
