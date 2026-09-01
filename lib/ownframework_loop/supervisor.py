@@ -860,7 +860,8 @@ def _connect(path: Path) -> sqlite3.Connection:
           cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
           tokens_known INTEGER NOT NULL DEFAULT 0,
           failure_class TEXT,
-          failure_reason TEXT
+          failure_reason TEXT,
+          effective_model TEXT NOT NULL DEFAULT ''
         );
         CREATE INDEX IF NOT EXISTS semantic_attempts_job_idx
           ON semantic_attempts(job_id, started_at);
@@ -961,6 +962,7 @@ def _connect(path: Path) -> sqlite3.Connection:
         "tokens_known": "ALTER TABLE semantic_attempts ADD COLUMN tokens_known INTEGER NOT NULL DEFAULT 0",
         "failure_class": "ALTER TABLE semantic_attempts ADD COLUMN failure_class TEXT",
         "failure_reason": "ALTER TABLE semantic_attempts ADD COLUMN failure_reason TEXT",
+        "effective_model": "ALTER TABLE semantic_attempts ADD COLUMN effective_model TEXT NOT NULL DEFAULT ''",
     }
     cost_known_added = "cost_known" not in attempt_columns
     for name, statement in attempt_migrations.items():
@@ -1334,6 +1336,49 @@ def _parse_token_usage_from_durable_stdout(path: str | None) -> dict[str, int] |
     return recovered if observed else None
 
 
+def _extract_effective_model_from_durable_stdout(path: str | None) -> str:
+    """Recover the provider-reported effective model from one durable envelope."""
+    if not path:
+        return ""
+    p = Path(path)
+    if not p.is_file():
+        return ""
+    try:
+        payload = json.loads(_read_durable_provider_envelope(p))
+    except (OSError, ValueError, json.JSONDecodeError):
+        return ""
+    return _extract_effective_model(payload if isinstance(payload, dict) else None)
+
+
+def _extract_effective_model(payload: dict[str, Any] | None) -> str:
+    """Return the model the provider actually reported/billed, or "".
+
+    The EFFECTIVE model is read from the provider envelope (modelUsage keys or
+    an explicit model field). It is distinguished from the runner profile's
+    REQUESTED model so a substitution/downgrade is never silently certified as
+    the requested profile. Empty string means the envelope did not reveal it.
+    """
+    if not isinstance(payload, dict):
+        return ""
+    usage = payload.get("modelUsage")
+    if isinstance(usage, dict) and usage:
+        # Pick the model that accounts for the most output tokens; fall back to
+        # a stable sort of the keys when usage is absent/zero.
+        def _weight(name: str) -> int:
+            entry = usage.get(name)
+            if isinstance(entry, dict):
+                try:
+                    return int(entry.get("outputTokens") or entry.get("output_tokens") or 0)
+                except (TypeError, ValueError):
+                    return 0
+            return 0
+        return str(sorted(usage.keys(), key=lambda n: (-_weight(n), n))[0])[:256]
+    model = payload.get("model")
+    if isinstance(model, str) and model:
+        return model[:256]
+    return ""
+
+
 def _account_attempt_cost(
     conn: sqlite3.Connection,
     *,
@@ -1349,11 +1394,13 @@ def _account_attempt_cost(
     cache_creation_tokens: int = 0,
     tokens_known: bool = False,
     manage_transaction: bool = True,
+    effective_model: str | None = None,
 ) -> float:
     """Account one durable semantic attempt exactly once by attempt identity.
 
     Cost and token telemetry share the same attempt-identity fence so retries
-    can never double-count either resource.
+    can never double-count either resource. `effective_model` records the model
+    the provider actually reported, kept distinct from the requested profile.
     """
     if not math.isfinite(float(cost_usd)) or float(cost_usd) < 0:
         raise RuntimeError("semantic attempt cost is not a finite non-negative value")
@@ -1380,7 +1427,7 @@ def _account_attempt_cost(
             """UPDATE semantic_attempts SET status=?, completed_at=?,
                returncode=?, cost_usd=?, cost_accounted=1, cost_known=?,
                input_tokens=?, output_tokens=?, cache_read_tokens=?,
-               cache_creation_tokens=?, tokens_known=?
+               cache_creation_tokens=?, tokens_known=?, effective_model=?
                WHERE attempt_id=?""",
             (
                 status_value,
@@ -1390,6 +1437,7 @@ def _account_attempt_cost(
                 1 if cost_known else 0,
                 *usage_values,
                 1 if tokens_known else 0,
+                str(effective_model or ""),
                 attempt_id,
             ),
         )
@@ -1442,6 +1490,25 @@ def _unknown_cost_attempt_count(conn: sqlite3.Connection, job_id: int) -> int:
     return int((row[0] if row is not None else 0) or 0)
 
 
+# Failure reasons that PROVE a semantic attempt never reached provider exec.
+# Each is set only on a provably pre-provider terminalization:
+#   worker_launch_failed            — WorkerLaunchError before/after the gate, provider never exec'd
+#   capability_resolution_failed    — capability plane refused before any model call
+#   capability_binding_failed       — run-binding drift/refusal before any model call
+#   runner_profile_resolution_failed — profile plane refused before any model call
+#   worker_ownership_not_published  — crash recovery of a gated RESERVED attempt whose
+#                                     release byte was never written (provider never released)
+# A first capability binding may be created after any number of such attempts,
+# because none of them could have observed or bound a prior capability set.
+PRE_PROVIDER_FAILURE_REASONS = frozenset({
+    "worker_launch_failed",
+    "capability_resolution_failed",
+    "capability_binding_failed",
+    "runner_profile_resolution_failed",
+    "worker_ownership_not_published",
+})
+
+
 def _capability_binding_creation_allowed(
     conn: sqlite3.Connection,
     job_id: int,
@@ -1454,15 +1521,9 @@ def _capability_binding_creation_allowed(
     ).fetchall()
     if not rows:
         return True
-    pre_provider = {
-        "worker_launch_failed",
-        "capability_resolution_failed",
-        "capability_binding_failed",
-        "runner_profile_resolution_failed",
-    }
     return all(
         str(row["status"] or "") == "FAILED"
-        and str(row["failure_reason"] or "") in pre_provider
+        and str(row["failure_reason"] or "") in PRE_PROVIDER_FAILURE_REASONS
         and int(row["cost_accounted"] or 0) == 1
         and float(row["cost_usd"] or 0.0) == 0.0
         for row in rows
@@ -1599,6 +1660,7 @@ def _recover_stale_running(conn: sqlite3.Connection) -> int:
         recovered_cost = None
         recovered_usage = None
         recovered_cost_known = False
+        recovered_effective_model = ""
         if attempt_id:
             observed_attempt = conn.execute(
                 "SELECT * FROM semantic_attempts WHERE attempt_id=? AND job_id=?",
@@ -1612,6 +1674,9 @@ def _recover_stale_running(conn: sqlite3.Connection) -> int:
                 )
                 recovered_cost_known = recovered_cost is not None
                 recovered_usage = _parse_token_usage_from_durable_stdout(
+                    observed_attempt["stdout_path"]
+                )
+                recovered_effective_model = _extract_effective_model_from_durable_stdout(
                     observed_attempt["stdout_path"]
                 )
 
@@ -1743,6 +1808,7 @@ def _recover_stale_running(conn: sqlite3.Connection) -> int:
                     cache_creation_tokens=int(usage.get("cache_creation_tokens", 0)),
                     tokens_known=recovered_usage is not None,
                     manage_transaction=False,
+                    effective_model=recovered_effective_model,
                 )
 
         cur = conn.execute(
@@ -2981,6 +3047,11 @@ class RunnerResult:
     cache_read_tokens: int = 0
     cache_creation_tokens: int = 0
     tokens_known: bool = False
+    # The model the provider ACTUALLY billed/reported, when the envelope
+    # reveals it. This is the EFFECTIVE model and may differ from the profile's
+    # REQUESTED model (e.g. a substitution/downgrade); it is recorded so the
+    # two are never conflated.
+    effective_model: str = ""
 
 
 class ClaudeCodeRunner:
@@ -3451,6 +3522,7 @@ class ClaudeCodeRunner:
         cache_read_tokens = 0
         cache_creation_tokens = 0
         tokens_known = False
+        effective_model = ""
         parsed: dict[str, Any] | None = None
         try:
             data = json.loads(stdout_data or "")
@@ -3458,6 +3530,9 @@ class ClaudeCodeRunner:
             data = None
         if isinstance(data, dict):
             parsed = data
+            # The EFFECTIVE model the provider reported (distinct from the
+            # requested profile model); empty when the envelope hides it.
+            effective_model = _extract_effective_model(data)
             # Telemetry extraction degrades independently: a malformed cost
             # or usage value must demote that TELEMETRY to unknown, never
             # discard the semantic result envelope itself (which would turn
@@ -3533,6 +3608,7 @@ class ClaudeCodeRunner:
             cache_read_tokens=cache_read_tokens,
             cache_creation_tokens=cache_creation_tokens,
             tokens_known=tokens_known,
+            effective_model=effective_model,
         )
 
 
@@ -4568,6 +4644,7 @@ def run_one(*, db_path: Path | None = None, timeout_seconds: int = 0) -> dict[st
                 cache_read_tokens=result.cache_read_tokens,
                 cache_creation_tokens=result.cache_creation_tokens,
                 tokens_known=result.tokens_known,
+                effective_model=result.effective_model,
             )
             if not result.ok:
                 failure_class, failure_reason = _classify_runner_failure(result)
