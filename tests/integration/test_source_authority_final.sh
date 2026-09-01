@@ -96,7 +96,7 @@ with tempfile.TemporaryDirectory() as td:
     assert att_identity and att_identity["attestation_sha256"]
     stricty_bound = dict(stricty)
     stricty_bound["effort_attestation"] = att_identity
-    assert runner_profiles.public_summary(stricty_bound)["effort_attestation_sha256"]
+    assert runner_profiles.public_summary(stricty_bound)["effort_assertion_sha256"]
     p = runner_profiles.effort_attestation_path("stricty")
     # Attestation is runtime-fresh: changing Claude/runtime identity stales it.
     from ownframework_loop import capabilities
