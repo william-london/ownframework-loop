@@ -22,7 +22,7 @@ done
 # Ask only for CLI help while presenting the exact authority-bearing option
 # surface. This validates parser compatibility without model execution.
 set +e
-PARSE_OUT="$("$CLAUDE_BIN"   -p   --output-format json   --restricted   --permission-mode dontAsk   --no-chrome   --no-session-persistence   --strict-mcp-config   --mcp-config '{"mcpServers":{}}'   --plugin-dir "$ROOT"   --settings '{"sandbox":{"enabled":true,"failIfUnavailable":true,"allowUnsandboxedCommands":false,"network":{"strictAllowlist":true,"allowedDomains":[]}}}'   --tools 'Read,Bash,Glob,Grep'   --allowedTools 'Read,Bash,Glob,Grep'   --help 2>&1)"
+PARSE_OUT="$("$CLAUDE_BIN"   -p   --output-format json   --restricted   --permission-mode dontAsk   --no-chrome   --no-session-persistence   --strict-mcp-config   --mcp-config '{"mcpServers":{}}'   --plugin-dir "$ROOT"   --model sonnet   --effort high   --max-budget-usd 0.01   --settings '{"sandbox":{"enabled":true,"failIfUnavailable":true,"allowUnsandboxedCommands":false,"network":{"strictAllowlist":true,"allowedDomains":[]}}}'   --tools 'Read,Bash,Glob,Grep'   --allowedTools 'Read,Bash,Glob,Grep'   --help 2>&1)"
 RC=$?
 set -e
 if [[ "$RC" -ne 0 ]]; then
@@ -32,6 +32,7 @@ if [[ "$RC" -ne 0 ]]; then
 fi
 
 echo "CURRENT_CLAUDE_CLI_SURFACE=PASS"
+echo "CURRENT_CLAUDE_PROFILE_BUDGET_ABI=PASS"
 echo "CURRENT_CLAUDE_INVOCATION_MODEL_CALL=no"
 echo "PLUGIN_HOOK_REGISTRATION_PROOF=strict_plugin_validation"
 echo "PLUGIN_HOOK_RUNTIME_FIRING=CANARY_ONLY"

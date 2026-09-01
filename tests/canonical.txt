@@ -161,3 +161,6 @@ tests/integration/test_v091_runner_profiles.sh
 
 # v0.9.1 structural broker-only Docker authority negatives
 tests/integration/test_v091_docker_broker_authority.sh
+
+# v0.9.1 trusted model/effort profile + funded native Claude pass budget
+tests/integration/test_v091_pass_budget_profile.sh
