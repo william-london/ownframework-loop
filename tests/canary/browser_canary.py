@@ -55,23 +55,30 @@ def main() -> int:
     sys.path.insert(0, _lib_dir())
     from ownframework_loop import capabilities as cap_mod
 
-    asset_root = cap_mod.default_browser_asset_dir()
+    asset_root_raw = cap_mod.default_browser_asset_dir()
     result = {
         "schema": CANARY_SCHEMA,
         "capability": CAPABILITY,
         "ok": False,
         "browser": "chromium",
         "headless": True,
-        "browser_asset_root": str(asset_root),
+        "browser_asset_root": str(asset_root_raw),
     }
 
-    if asset_root.is_symlink() or not asset_root.is_dir() or not any(asset_root.iterdir()):
+    if asset_root_raw.is_symlink() or not asset_root_raw.is_dir() or not any(asset_root_raw.iterdir()):
         result["error"] = (
             "browser asset root missing or empty; provision it exactly once with: "
-            f"PLAYWRIGHT_BROWSERS_PATH={asset_root} python3 -m playwright install chromium"
+            f"PLAYWRIGHT_BROWSERS_PATH={asset_root_raw} python3 -m playwright install chromium"
         )
         print(json.dumps(result, sort_keys=True))
         return 1
+
+    # Normalize parent aliases (notably macOS /var -> /private/var) only AFTER
+    # refusing a symlink at the commissioned leaf itself. Workers resolve the
+    # same physical root before launch, so the canary must attest that exact
+    # canonical path string as well as the same bytes.
+    asset_root = cap_mod._browser_asset_root(asset_root_raw, require_exists=True)
+    result["browser_asset_root"] = str(asset_root)
 
     # Prove the EXACT runtime workers receive: force the Playwright registry
     # at the shared immutable asset root BEFORE importing/launching
