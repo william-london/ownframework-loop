@@ -57,7 +57,10 @@ def stable_projection(resolution: dict[str, Any], runner_profile: dict[str, Any]
         # substitution is never certified as the requested profile.
         "requested_runner_profile": {
             k: runner_profile.get(k)
-            for k in ("name", "provider", "model", "effort", "identity_sha256")
+            for k in (
+                "name", "provider", "model", "effort", "identity_sha256",
+                "effort_attestation",
+            )
         },
     }
 

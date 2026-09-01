@@ -524,13 +524,17 @@ def resolve_capabilities(
         if trusted_asset is not None:
             if not isinstance(trusted_asset, str):
                 raise CapabilityResolutionError(f"{name}.trusted_asset_path must be a string")
-            asset = Path(trusted_asset).expanduser()
-            if not asset.is_absolute():
+            asset_raw = Path(trusted_asset).expanduser()
+            if not asset_raw.is_absolute():
                 raise CapabilityResolutionError(f"{name}.trusted_asset_path must be absolute")
-            asset = asset.resolve(strict=False)
+            if asset_raw.is_symlink():
+                raise CapabilityResolutionError(
+                    f"{name}.trusted_asset_path must not be a symlink"
+                )
+            asset = asset_raw.resolve(strict=False)
             if not asset.exists():
                 raise CapabilityResolutionError(f"{name}.trusted_asset_path does not exist: {asset}")
-            identity = _trusted_asset_identity(asset)
+            identity = _trusted_asset_identity(asset_raw)
             cache_path = str(asset)
             cache_scope = "trusted_read_only"
             allow_read.add(cache_path)
@@ -1146,6 +1150,66 @@ def _publish_immutable_text(path: Path, encoded: str) -> bool:
             pass
 
 
+def resolution_receipt_path(
+    canonical_repo: Path,
+    run_id: str,
+    role: str,
+    attempt_id: str,
+) -> Path:
+    from . import state as _state_mod
+    _state_mod.validate_run_id(run_id)
+    if role not in {"builder", "reviewer"}:
+        raise CapabilityResolutionError(f"invalid capability receipt role: {role!r}")
+    if not str(attempt_id):
+        raise CapabilityResolutionError("capability receipt requires attempt identity")
+    safe_prefix = re.sub(r"[^A-Za-z0-9_.-]", "_", str(attempt_id))[:64]
+    safe_attempt = safe_prefix + "-" + hashlib.sha256(str(attempt_id).encode()).hexdigest()[:16]
+    root = canonical_repo.resolve(strict=False) / ".ownframework-loop" / run_id / "capabilities"
+    return root / f"{safe_attempt}-{role}.json"
+
+
+def read_resolution_receipt(
+    canonical_repo: Path,
+    run_id: str,
+    role: str,
+    attempt_id: str,
+) -> dict[str, Any]:
+    """Read one immutable launch receipt and prove it matches the run binding."""
+    path = resolution_receipt_path(canonical_repo, run_id, role, attempt_id)
+    if path.is_symlink() or not path.is_file():
+        raise CapabilityResolutionError("capability receipt missing or symlinked")
+    st = path.stat()
+    if not stat.S_ISREG(st.st_mode):
+        raise CapabilityResolutionError("capability receipt must be a regular file")
+    if hasattr(os, "getuid") and st.st_uid != os.getuid():
+        raise CapabilityResolutionError("capability receipt must be owned by supervisor user")
+    if st.st_mode & 0o077:
+        raise CapabilityResolutionError("capability receipt must be private")
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise CapabilityResolutionError("capability receipt unreadable") from exc
+    if not isinstance(payload, dict):
+        raise CapabilityResolutionError("capability receipt must be an object")
+    if payload.get("run_id") != run_id or payload.get("role") != role:
+        raise CapabilityResolutionError("capability receipt run/role mismatch")
+    if payload.get("attempt_id") != attempt_id:
+        raise CapabilityResolutionError("capability receipt attempt mismatch")
+    requested_profile = payload.get("requested_runner_profile")
+    if not isinstance(requested_profile, dict):
+        raise CapabilityResolutionError("capability receipt missing requested runner profile")
+    from . import capability_binding as _binding_mod
+    binding = _binding_mod._read(_binding_mod.binding_path(canonical_repo, run_id))
+    if payload.get("run_binding_sha256") != binding.get("binding_sha256"):
+        raise CapabilityResolutionError("capability receipt run-binding digest mismatch")
+    projection = _binding_mod.stable_projection(payload, requested_profile)
+    if projection != binding.get("projection"):
+        raise CapabilityResolutionError(
+            "capability receipt resolution/profile does not match immutable run binding"
+        )
+    return payload
+
+
 def write_resolution_receipt(
     canonical_repo: Path,
     run_id: str,
@@ -1156,22 +1220,13 @@ def write_resolution_receipt(
     run_binding: dict[str, Any] | None = None,
     runner_profile: dict[str, Any] | None = None,
 ) -> Path:
-    # Defense in depth: callers already validate run_id, but this path
-    # builds filesystem locations from it and must never be reachable with
-    # an unvalidated identifier.
-    from . import state as _state_mod
-    _state_mod.validate_run_id(run_id)
-    safe_prefix = re.sub(r"[^A-Za-z0-9_.-]", "_", str(attempt_id))[:64]
-    safe_attempt = safe_prefix + "-" + hashlib.sha256(str(attempt_id).encode()).hexdigest()[:16]
-    if not safe_attempt:
-        raise CapabilityResolutionError("capability receipt requires attempt identity")
-    root = canonical_repo.resolve(strict=False) / ".ownframework-loop" / run_id / "capabilities"
+    path = resolution_receipt_path(canonical_repo, run_id, role, attempt_id)
+    root = path.parent
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
     try:
         os.chmod(root, 0o700)
     except OSError:
         pass
-    path = root / f"{safe_attempt}-{role}.json"
     payload = dict(resolution)
     payload["run_id"] = run_id
     payload["role"] = role
@@ -1183,7 +1238,10 @@ def write_resolution_receipt(
         # provider reveals it) is recorded on the semantic attempt ledger.
         payload["requested_runner_profile"] = {
             k: runner_profile.get(k)
-            for k in ("name", "provider", "model", "effort", "identity_sha256")
+            for k in (
+                "name", "provider", "model", "effort", "identity_sha256",
+                "effort_attestation",
+            )
         }
     encoded = json.dumps(payload, indent=2, sort_keys=True) + "\n"
     if path.exists():
@@ -1209,6 +1267,8 @@ __all__ = [
     "default_host_manifest_path",
     "platform_identity",
     "probe_host_capabilities",
+    "read_resolution_receipt",
+    "resolution_receipt_path",
     "public_summary",
     "resolve_capabilities",
     "semantic_runtime_fingerprint",

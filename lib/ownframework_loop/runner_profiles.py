@@ -215,11 +215,15 @@ def write_effort_attestation(
     return {**body, "attestation_path": str(path)}
 
 
-def verify_effort_attestation(profile: dict[str, Any]) -> None:
-    """Fail closed unless current runtime/profile identity matches attestation."""
+def verify_effort_attestation(profile: dict[str, Any]) -> dict[str, Any] | None:
+    """Fail closed unless current runtime/profile identity matches attestation.
+
+    Returns the stable attestation identity to freeze into the run binding and
+    attempt receipt. Profiles without explicit effort return None.
+    """
     effort = profile.get("effort")
     if effort is None:
-        return
+        return None
     from . import capabilities as _cap_mod
     name = str(profile.get("name") or "")
     path = effort_attestation_path(name)
@@ -256,6 +260,14 @@ def verify_effort_attestation(profile: dict[str, Any]) -> None:
     for key, expected in checks.items():
         if doc.get(key) != expected:
             raise RunnerProfileError(f"effort attestation stale or mismatched: {key}")
+    return {
+        "schema": EFFORT_ATTESTATION_SCHEMA,
+        "attestation_sha256": str(claimed),
+        "profile_identity_sha256": str(profile.get("identity_sha256") or ""),
+        "semantic_runtime_fingerprint": str(
+            doc.get("semantic_runtime_fingerprint") or ""
+        ),
+    }
 
 def public_summary(profile: dict[str, Any]) -> dict[str, Any]:
     out = {k: profile.get(k) for k in (
@@ -267,6 +279,9 @@ def public_summary(profile: dict[str, Any]) -> dict[str, Any]:
     out["strict_quality"] = bool(
         profile.get("model") is not None or profile.get("effort") is not None
     )
+    attestation = profile.get("effort_attestation")
+    if isinstance(attestation, dict):
+        out["effort_attestation_sha256"] = attestation.get("attestation_sha256")
     return out
 
 

@@ -1408,6 +1408,51 @@ def _strict_profile_model_violation(
     return ""
 
 
+def _attempt_provenance_gate(
+    conn: sqlite3.Connection,
+    *,
+    job: sqlite3.Row,
+    work_order: dict[str, Any],
+    attempt_id: str,
+) -> tuple[bool, str, dict[str, Any] | None]:
+    """Prove a complete semantic artifact belongs to an accepted launch attempt."""
+    role = str(work_order.get("role") or "")
+    if role not in {"builder", "reviewer"}:
+        return False, "semantic_replay_role_invalid", None
+    if not attempt_id:
+        return False, "semantic_replay_attempt_missing", None
+    attempt = conn.execute(
+        "SELECT * FROM semantic_attempts WHERE attempt_id=? AND job_id=?",
+        (attempt_id, int(job["id"])),
+    ).fetchone()
+    if attempt is None:
+        return False, "semantic_replay_attempt_missing", None
+    if str(attempt["role"] or "") != role:
+        return False, "semantic_replay_attempt_role_mismatch", None
+    if not bool(int(attempt["cost_accounted"] or 0)):
+        return False, "semantic_replay_attempt_unaccounted", None
+    if attempt["failure_class"] or attempt["failure_reason"]:
+        return False, "semantic_replay_attempt_previously_failed", None
+    try:
+        receipt = capabilities_mod.read_resolution_receipt(
+            Path(str(job["repo"])),
+            str(job["run_id"]),
+            role,
+            attempt_id,
+        )
+    except capabilities_mod.CapabilityResolutionError:
+        return False, "semantic_replay_capability_receipt_invalid", None
+    requested_profile = receipt.get("requested_runner_profile") or {}
+    strict_reason = _strict_profile_model_violation(
+        str(requested_profile.get("model") or ""),
+        result_ok=True,
+        effective_model=str(attempt["effective_model"] or ""),
+    )
+    if strict_reason:
+        return False, strict_reason, receipt
+    return True, "", receipt
+
+
 _MODEL_USAGE_JSON_MAX = 8192
 
 
@@ -3248,6 +3293,13 @@ class ClaudeCodeRunner:
             str(work_order.get("runner_profile") or "default"),
             provider=self.runner_id,
         )
+        runner_profiles_mod.verify_profile_integrity(runner_profile)
+        effort_attestation = runner_profiles_mod.verify_effort_attestation(
+            runner_profile
+        )
+        if effort_attestation is not None:
+            runner_profile = dict(runner_profile)
+            runner_profile["effort_attestation"] = effort_attestation
         run_binding = capability_binding_mod.ensure_run_binding(
             canonical_repo,
             str(work_order.get("run_id") or ""),
@@ -3419,11 +3471,13 @@ class ClaudeCodeRunner:
         # gate, so any drift here produces zero model calls.
         capabilities_mod.verify_resolution_integrity(capability_resolution)
         runner_profiles_mod.verify_profile_integrity(runner_profile)
-        # Strict-effort profiles fail closed BEFORE any model call unless an
-        # operator commissioned an effort attestation: the provider envelope
-        # can never prove effort, so an unattested strict request must not be
-        # run (and thus never silently certified at a substituted quality).
-        runner_profiles_mod.verify_effort_attestation(runner_profile)
+        current_effort_attestation = runner_profiles_mod.verify_effort_attestation(
+            runner_profile
+        )
+        if current_effort_attestation != runner_profile.get("effort_attestation"):
+            raise runner_profiles_mod.RunnerProfileError(
+                "runner effort attestation changed after run binding"
+            )
         capability_binding_mod.verify_run_binding(
             canonical_repo,
             str(work_order.get("run_id") or ""),
@@ -4418,6 +4472,34 @@ def run_one(*, db_path: Path | None = None, timeout_seconds: int = 0) -> dict[st
                 work_order
             )
             if semantic_ready:
+                replay_attempt_id = str(job["latest_attempt_id"] or "")
+                replay_ok, replay_reason, _receipt = _attempt_provenance_gate(
+                    conn,
+                    job=job,
+                    work_order=work_order,
+                    attempt_id=replay_attempt_id,
+                )
+                if not replay_ok:
+                    _update_job(
+                        conn,
+                        job["id"],
+                        status_value="QUARANTINED",
+                        last_error=(
+                            "semantic artifact exists but its durable launch "
+                            f"provenance cannot be certified: {replay_reason}"
+                        ),
+                        last_failure_class="replay_provenance",
+                        last_failure_reason=replay_reason,
+                        next_attempt_at=0,
+                    )
+                    return {
+                        "schema": SCHEMA,
+                        "ok": False,
+                        "action": "QUARANTINED",
+                        "job_id": job["id"],
+                        "reason": replay_reason,
+                        "semantic_replay": True,
+                    }
                 finalized = dispatch_mod.finalize_work_order(work_order)
                 _update_job(
                     conn,
@@ -4730,14 +4812,14 @@ def run_one(*, db_path: Path | None = None, timeout_seconds: int = 0) -> dict[st
             # already accounted above; the envelope truth (full modelUsage) is
             # preserved in the ledger either way.
             strict_failure_reason = ""
-            try:
-                requested_profile = runner_profiles_mod.resolve_profile(
-                    str(work_order.get("runner_profile") or "default"),
-                    provider=str(job["runner"]),
-                )
-            except runner_profiles_mod.RunnerProfileError:
-                requested_profile = None
-            strict_model = str((requested_profile or {}).get("model") or "")
+            receipt = capabilities_mod.read_resolution_receipt(
+                Path(str(job["repo"])),
+                str(job["run_id"]),
+                role,
+                attempt_id,
+            )
+            requested_profile = receipt.get("requested_runner_profile") or {}
+            strict_model = str(requested_profile.get("model") or "")
             strict_failure_reason = _strict_profile_model_violation(
                 strict_model,
                 result_ok=bool(result.ok),

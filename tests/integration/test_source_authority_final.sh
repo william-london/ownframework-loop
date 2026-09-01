@@ -89,7 +89,11 @@ with tempfile.TemporaryDirectory() as td:
     runner_profiles.write_effort_attestation(
         name="stricty", provider="claude-code", model="claude-sonnet-4-6", effort="high"
     )
-    runner_profiles.verify_effort_attestation(stricty)
+    att_identity = runner_profiles.verify_effort_attestation(stricty)
+    assert att_identity and att_identity["attestation_sha256"]
+    stricty_bound = dict(stricty)
+    stricty_bound["effort_attestation"] = att_identity
+    assert runner_profiles.public_summary(stricty_bound)["effort_attestation_sha256"]
     p = runner_profiles.effort_attestation_path("stricty")
     # Attestation is runtime-fresh: changing Claude/runtime identity stales it.
     from ownframework_loop import capabilities
@@ -346,6 +350,36 @@ with tempfile.TemporaryDirectory() as td:
         res, runner_profiles.resolve_profile("default", provider="claude-code")
     )
     assert projection["capabilities"][0]["browser"]["browser_asset_merkle_sha256"] == merkle
+    # Host-manifest trusted asset roots refuse unresolved symlinks.
+    manifest = capabilities.default_host_manifest_path()
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    real_asset = root / "trusted-real"
+    real_asset.mkdir()
+    (real_asset / "x").write_text("x")
+    linked_asset = root / "trusted-link"
+    os.symlink(real_asset, linked_asset)
+    manifest.write_text(json.dumps({
+        "schema": capabilities.HOST_MANIFEST_SCHEMA,
+        "capabilities": {
+            "toolchain.synthetic": {
+                "kind": "tool",
+                "executable": sys.executable,
+                "trusted_asset_path": str(linked_asset),
+            }
+        },
+    }))
+    manifest.chmod(0o600)
+    try:
+        capabilities.resolve_capabilities(
+            ["toolchain.synthetic"],
+            canonical_repo=repo,
+            role="builder",
+            repo_cache_root=root / "trusted-cache",
+            packet_network_allowlist=[],
+        )
+        raise SystemExit("symlinked trusted asset root accepted")
+    except capabilities.CapabilityResolutionError:
+        pass
 print("3 browser proof freshness + shared read-only wiring ok")
 PY
 pass "browser proof is private, freshness-bound, auto-stale on drift; assets shared read-only"
