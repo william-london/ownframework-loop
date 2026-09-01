@@ -39,8 +39,8 @@ from . import (
     locking, packet as packet_mod, program as program_mod, receipts,
     scheduling, state as state_mod, transitions, util, verdicts, worktrees,
     integrity, limits as limits_mod, approval, build_finalize, review_finalize,
-    branch_resolver, execution_start,
-    dispatch as dispatch_mod, supervisor as supervisor_mod,
+    branch_resolver, capabilities as capabilities_mod, execution_start,
+    dispatch as dispatch_mod, runtime_env, supervisor as supervisor_mod,
 )
 
 
@@ -1664,6 +1664,74 @@ def _build_parser() -> argparse.ArgumentParser:
     d_fin.add_argument("decision", choices=["BUILD", "REVIEW"])
     d_fin.add_argument("semantic_path")
     d_fin.set_defaults(func=cmd_dispatch_finalize)
+
+    # host capabilities — read-only inventory/preflight. Privileged commissioning
+    # remains operator-owned through the private host manifest.
+    def cmd_capabilities_fingerprint(args: argparse.Namespace) -> None:
+        _emit({
+            "ok": True,
+            "schema": capabilities_mod.SCHEMA,
+            "runtime_fingerprint": capabilities_mod.semantic_runtime_fingerprint(),
+        })
+
+    def cmd_capabilities_probe(args: argparse.Namespace) -> None:
+        manifest = Path(args.manifest).expanduser() if args.manifest else None
+        out = capabilities_mod.probe_host_capabilities(manifest_path=manifest)
+        out["ok"] = out.get("manifest_error") is None
+        _emit(out, exit_code=0 if out["ok"] else 2)
+
+    def cmd_capabilities_preflight(args: argparse.Namespace) -> None:
+        repo = _repo_path(args.repo)
+        manifest = Path(args.manifest).expanduser() if args.manifest else None
+        try:
+            out = capabilities_mod.resolve_capabilities(
+                list(args.capability),
+                canonical_repo=repo,
+                role=args.role,
+                repo_cache_root=runtime_env.repo_tool_cache_dir(repo),
+                ephemeral_cache_root=(
+                    runtime_env.runtime_cache_dir(repo, "capability-preflight", args.role)
+                    / "capability-cache"
+                ),
+                packet_network_allowlist=list(args.network_host or []),
+                manifest_path=manifest,
+            )
+        except capabilities_mod.CapabilityResolutionError as exc:
+            _emit({
+                "ok": False,
+                "schema": capabilities_mod.SCHEMA,
+                "error": str(exc),
+            }, exit_code=2)
+            return
+        out["ok"] = True
+        _emit(out)
+
+    cap = sub.add_parser(
+        "capabilities",
+        help="inspect and preflight trusted host capabilities without launching a model",
+    )
+    cap_sub = cap.add_subparsers(dest="capabilities_cmd", required=True)
+    cap_fp = cap_sub.add_parser(
+        "fingerprint",
+        help="print the platform/Claude runtime fingerprint used by privileged proofs",
+    )
+    cap_fp.set_defaults(func=cmd_capabilities_fingerprint)
+    cap_probe = cap_sub.add_parser(
+        "probe",
+        help="read-only inventory of built-in and commissioned host capabilities",
+    )
+    cap_probe.add_argument("--manifest", default=None)
+    cap_probe.set_defaults(func=cmd_capabilities_probe)
+    cap_pre = cap_sub.add_parser(
+        "preflight",
+        help="resolve an exact capability set for a repository without a model call",
+    )
+    cap_pre.add_argument("repo")
+    cap_pre.add_argument("capability", nargs="+")
+    cap_pre.add_argument("--role", choices=["builder", "reviewer"], default="builder")
+    cap_pre.add_argument("--network-host", action="append", default=[])
+    cap_pre.add_argument("--manifest", default=None)
+    cap_pre.set_defaults(func=cmd_capabilities_preflight)
 
     # supervisor — durable machine execution clock. Protocol truth remains in core artifacts.
     def cmd_supervisor_enqueue(args: argparse.Namespace) -> None:

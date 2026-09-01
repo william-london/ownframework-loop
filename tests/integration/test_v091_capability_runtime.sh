@@ -56,6 +56,14 @@ with tempfile.TemporaryDirectory() as td:
     assert resolved["requested"] == ["toolchain.synthetic"]
     assert resolved["resolved"][0]["executable"] == str(Path(sys.executable).resolve())
     assert len(resolved["resolved"][0]["executable_sha256"]) == 64
+
+    inventory = capabilities.probe_host_capabilities()
+    assert inventory["schema"] == "ownframework-loop-host-capability-inventory/v1"
+    assert len(inventory["runtime_fingerprint"]) == 64
+    by_name = {item["name"]: item for item in inventory["capabilities"]}
+    assert by_name["toolchain.python"]["available"]
+    assert by_name["browser.playwright.chromium"]["available"]
+    assert not by_name["container.docker"]["available"]
     assert "example.com" in resolved["network_domains"]
 
     builder = capabilities.resolve_capabilities(
@@ -233,6 +241,16 @@ with tempfile.TemporaryDirectory() as td:
     bad = dict(good)
     bad["capabilities"] = ["../home"]
     assert any("capabilities" in e for e in packet.validate_packet_metadata(bad))
+
+    browser = capabilities.resolve_capabilities(
+        ["browser.playwright.chromium"],
+        canonical_repo=repo,
+        role="builder",
+        repo_cache_root=cache,
+        packet_network_allowlist=[],
+    )
+    assert browser["resolved"][0]["executable"] is None
+    assert "storage.googleapis.com" in browser["network_domains"]
 
     manifest.chmod(0o666)
     try:

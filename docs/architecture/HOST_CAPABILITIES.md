@@ -122,3 +122,18 @@ Semantic workers unconditionally scrub daemon/agent selectors including
 `DOCKER_HOST`, `DOCKER_CONTEXT`, `CONTAINER_HOST`, `PODMAN_HOST`,
 `KUBECONFIG`, `SSH_AUTH_SOCK`, and `GPG_AGENT_INFO`. Docker commands are
 also refused by the Bash guard unless `container.docker` was actually resolved.
+
+## Operator preflight
+
+No model call is required to inspect this layer:
+
+```bash
+ofloop capabilities fingerprint
+ofloop capabilities probe
+ofloop capabilities preflight /path/to/repo toolchain.python package.uv
+```
+
+`probe` is read-only. `preflight` resolves the exact requested set using the
+same resolver as a semantic pass, including executable/version/digest,
+filesystem/cache, network, privileged-proof, and HOME-access checks. A missing
+capability therefore fails before provider execution.

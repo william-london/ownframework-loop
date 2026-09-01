@@ -148,3 +148,6 @@ tests/integration/test_v085_program_routing_semantics.sh
 
 # v0.9.1 host capability resolution + cache/broker boundary
 tests/integration/test_v091_capability_runtime.sh
+
+# v0.9.1 read-only capability inventory/preflight CLI
+tests/integration/test_v091_capability_cli.sh

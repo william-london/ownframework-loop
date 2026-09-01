@@ -1423,6 +1423,7 @@ def _mark_attempt_launch_failed(
     job_id: int,
     attempt_id: str,
     detail: str,
+    failure_reason: str = "worker_launch_failed",
 ) -> None:
     """Terminalize only a semantic attempt proven not to have reached provider exec."""
     conn.execute("BEGIN IMMEDIATE")
@@ -1434,13 +1435,13 @@ def _mark_attempt_launch_failed(
              cost_usd=0, cost_accounted=1, cost_known=1,
              input_tokens=0, output_tokens=0, cache_read_tokens=0,
              cache_creation_tokens=0, tokens_known=1,
-             failure_class='configuration', failure_reason='worker_launch_failed'
+             failure_class='configuration', failure_reason=?
            WHERE attempt_id=? AND job_id=?
              AND (
                status='RESERVED'
                OR (status='RUNNING' AND launch_gate_version>=1)
              )""",
-        (time.time(), attempt_id, int(job_id)),
+        (time.time(), failure_reason, attempt_id, int(job_id)),
     )
     if cur.rowcount != 1:
         conn.rollback()
@@ -4515,12 +4516,19 @@ def run_one(*, db_path: Path | None = None, timeout_seconds: int = 0) -> dict[st
                 "finalized": finalized,
             }
         except Exception as exc:
-            if attempt_id and isinstance(exc, WorkerLaunchError):
+            if attempt_id and isinstance(
+                exc, (WorkerLaunchError, capabilities_mod.CapabilityResolutionError)
+            ):
                 _mark_attempt_launch_failed(
                     conn,
                     job_id=int(job["id"]),
                     attempt_id=attempt_id,
                     detail=str(exc),
+                    failure_reason=(
+                        "capability_resolution_failed"
+                        if isinstance(exc, capabilities_mod.CapabilityResolutionError)
+                        else "worker_launch_failed"
+                    ),
                 )
             elif attempt_id and isinstance(exc, dispatch_mod.SemanticResultIncomplete):
                 conn.execute(

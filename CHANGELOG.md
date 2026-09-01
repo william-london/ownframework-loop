@@ -15,6 +15,8 @@ The complete historical changelog through 0.5.2 is preserved at
   resolves exact host executables, versions, read/write paths and derived
   network authority before the model starts;
 - every semantic attempt receives a durable capability-resolution receipt;
+  `ofloop capabilities probe|preflight|fingerprint` exposes the same host
+  inventory and resolution contract without launching a model;
 - HOME remains broadly denied and tools discovered under HOME now require
   explicit operator commissioning instead of relying on contradictory PATH
   discovery;
@@ -29,7 +31,9 @@ The complete historical changelog through 0.5.2 is preserved at
   provider is commissioned/proven for the exact host runtime;
 - privileged/local proofs are bound to the current platform/architecture/Claude
   runtime fingerprint, executable bytes are SHA-256 receipted, and reviewer
-  tool caches are pass-ephemeral.
+  tool caches are pass-ephemeral;
+- capability-resolution failures are terminalized as proven pre-provider
+  semantic attempts instead of leaving a reserved attempt for stale recovery.
 
 ## 0.9.0 - Bounded Multi-Repository Autonomy (2026-08-31)
 

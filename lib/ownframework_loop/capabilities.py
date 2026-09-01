@@ -291,7 +291,10 @@ def _resolve_executable(
                     executable = str(rp)
                     break
 
-    if executable is None and (definition.executable_names or not broker):
+    if executable is None and (
+        definition.executable_names
+        or (definition.name not in BUILTIN_CAPABILITIES and not broker)
+    ):
         raise CapabilityResolutionError(
             f"capability {definition.name!r} executable is not discoverable/commissioned"
         )
@@ -523,6 +526,98 @@ def resolve_capabilities(
     }
 
 
+def probe_host_capabilities(
+    *, manifest_path: Path | None = None,
+) -> dict[str, Any]:
+    """Read-only capability inventory for operator/commissioning preflight."""
+    try:
+        entries, manifest_name, manifest_sha = _load_host_manifest(manifest_path)
+        manifest_error = None
+    except CapabilityResolutionError as exc:
+        entries = {}
+        manifest_name = str(
+            (manifest_path or default_host_manifest_path()).expanduser().resolve(strict=False)
+        )
+        manifest_sha = None
+        manifest_error = str(exc)
+
+    fingerprint = semantic_runtime_fingerprint()
+    items: list[dict[str, Any]] = []
+    for name, definition in sorted(BUILTIN_CAPABILITIES.items()):
+        item: dict[str, Any] = {
+            "name": name,
+            "kind": definition.kind,
+            "privileged": definition.privileged,
+            "available": False,
+        }
+        if manifest_error is not None:
+            item["reason"] = f"host_manifest_invalid: {manifest_error}"
+            items.append(item)
+            continue
+        try:
+            entry = _entry_for(name, entries)
+            if name == "container.docker":
+                if entry.get("provider") != "broker":
+                    raise CapabilityResolutionError("commissioned broker missing")
+                if entry.get("proof") != fingerprint:
+                    raise CapabilityResolutionError("commissioning proof does not match runtime")
+                executable, version, digest, _ = _resolve_executable(
+                    definition, entry, broker=True
+                )
+                if executable is None or Path(executable).name != "docker":
+                    raise CapabilityResolutionError("broker must be a drop-in docker executable")
+                item.update({
+                    "available": True,
+                    "provider": "broker",
+                    "executable": executable,
+                    "version": version,
+                    "executable_sha256": digest,
+                })
+            elif name == "local.http-service":
+                if entry.get("provider") != "claude_native_safe_local_binding":
+                    raise CapabilityResolutionError("commissioned safe-local-binding provider missing")
+                if entry.get("proof") != fingerprint:
+                    raise CapabilityResolutionError("commissioning proof does not match runtime")
+                item.update({
+                    "available": True,
+                    "provider": entry.get("provider"),
+                })
+            elif definition.executable_names:
+                executable, version, digest, _ = _resolve_executable(definition, entry)
+                item.update({
+                    "available": True,
+                    "provider": "builtin" if not entry else "commissioned",
+                    "executable": executable,
+                    "version": version,
+                    "executable_sha256": digest,
+                })
+            else:
+                # Framework-backed capabilities such as Playwright do not
+                # require a host executable. The project package invokes the
+                # runtime and Loop supplies cache/network authority.
+                item.update({
+                    "available": True,
+                    "provider": "project_runtime",
+                })
+                if entry.get("trusted_asset_path"):
+                    asset = Path(str(entry["trusted_asset_path"])).expanduser().resolve(strict=False)
+                    if not asset.exists():
+                        raise CapabilityResolutionError(f"trusted asset missing: {asset}")
+                    item["trusted_asset_path"] = str(asset)
+        except CapabilityResolutionError as exc:
+            item["reason"] = str(exc)
+        items.append(item)
+
+    return {
+        "schema": "ownframework-loop-host-capability-inventory/v1",
+        "runtime_fingerprint": fingerprint,
+        "host_manifest_path": manifest_name,
+        "host_manifest_sha256": manifest_sha,
+        "manifest_error": manifest_error,
+        "capabilities": items,
+    }
+
+
 def public_summary(resolution: dict[str, Any]) -> dict[str, Any]:
     return {
         "schema": resolution.get("schema"),
@@ -584,6 +679,7 @@ __all__ = [
     "MAX_CAPABILITIES",
     "SCHEMA",
     "default_host_manifest_path",
+    "probe_host_capabilities",
     "public_summary",
     "resolve_capabilities",
     "semantic_runtime_fingerprint",
