@@ -92,7 +92,7 @@ _EVENT_CALLER_RESERVED_FIELDS = _EVENT_AUTHORITATIVE_FIELDS | {"state_txn_id"}
 # would desync the event-chain SHA binding on the next verified read.
 _STATE_RESERVED_EXTRA_KEYS = frozenset({
     "state", "run_id", "transitions_count", "state_history",
-    "updated_at", "last_actor",
+    "updated_at", "last_actor", "started_at",
 })
 
 
@@ -428,10 +428,17 @@ def _verify_mutation_integrity_locked(canonical_repo: Path, run_id: str) -> None
 def save(canonical_repo: Path, run_id: str, payload: dict[str, Any]) -> None:
     """Persist state under flock and record an integrity event.
 
-    `save()` is reserved for cases where the caller has computed a full new
-    state object (e.g. updating counters, patching a field). It writes
+    `save()` is reserved for non-transition field updates. It writes
     STATE.json atomically and appends a `state_saved` event so the SHA
     chain stays consistent for subsequent `transition()` / `save()` calls.
+
+    A non-transition save can NEVER change transition/run identity: if durable
+    state already exists, `state` and `run_id` must be carried through
+    unchanged. State changes go through transition()/program_transition()/
+    transition_funded_repair(). This also fails closed on a stale
+    read-modify-write: if another writer moved the run between the caller's
+    load and this save, the mismatched `state` is refused rather than
+    clobbered.
     """
     actor = str(payload.get("last_actor", "spec"))
     sp = state_path(canonical_repo, run_id)
@@ -441,6 +448,19 @@ def save(canonical_repo: Path, run_id: str, payload: dict[str, Any]) -> None:
         # A brand-new run legitimately has neither STATE nor EVENTS yet.
         _verify_mutation_integrity_locked(canonical_repo, run_id)
         old = read_json(sp, default={}) if sp.exists() else {}
+        prior_state = (old or {}).get("state")
+        if prior_state is not None and payload.get("state") != prior_state:
+            raise ValueError(
+                "non-transition save() may not change `state` "
+                f"({prior_state!r} -> {payload.get('state')!r}); use the "
+                "transition owners"
+            )
+        prior_run_id = (old or {}).get("run_id")
+        if prior_run_id is not None and payload.get("run_id") != prior_run_id:
+            raise ValueError(
+                f"non-transition save() may not change run_id ({prior_run_id!r} "
+                f"-> {payload.get('run_id')!r})"
+            )
         _commit_state_event_locked(
             canonical_repo,
             run_id,
@@ -456,6 +476,53 @@ def save(canonical_repo: Path, run_id: str, payload: dict[str, Any]) -> None:
         fsync_dir(sp.parent)
     except OSError:
         pass
+
+
+def atomic_patch(
+    canonical_repo: Path,
+    run_id: str,
+    fields: dict[str, Any],
+    *,
+    actor: str,
+    reason: str,
+    event_type: str = "state_saved",
+) -> dict[str, Any]:
+    """Crash-atomic read-modify-write of non-identity fields under the run lock.
+
+    `fields` may not contain protocol-authoritative identity/FSM keys
+    (state/run_id/transitions_count/state_history/updated_at/last_actor) and
+    can therefore never change transition identity; the current state is
+    carried through unchanged. Because the read, mutation, and commit all
+    happen under one flock + one STATE_TXN, there is no stale read->save
+    lost-update window. Returns the committed payload.
+    """
+    _validate_state_extras(fields)
+    sp = state_path(canonical_repo, run_id)
+    with flock_exclusive(lock_path(canonical_repo, run_id)):
+        _verify_mutation_integrity_locked(canonical_repo, run_id)
+        current = read_json(sp)
+        if not isinstance(current, dict) or not current:
+            raise FileNotFoundError(f"STATE.json missing for run {run_id}")
+        new = dict(current)
+        new.update(fields)
+        new["updated_at"] = utc_now_iso()
+        new["last_actor"] = actor
+        _commit_state_event_locked(
+            canonical_repo,
+            run_id,
+            new,
+            event_type=event_type,
+            old_state=current.get("state"),
+            new_state=new.get("state"),
+            actor=actor,
+            commit_sha=new.get("last_candidate_sha"),
+            reason=reason,
+        )
+    try:
+        fsync_dir(sp.parent)
+    except OSError:
+        pass
+    return new
 
 
 def _locked_state(canonical_repo: Path, run_id: str):
@@ -667,7 +734,7 @@ def transition(
     return new
 
 
-def transition_review_rejection_with_repair(
+def transition_funded_repair(
     canonical_repo: Path,
     run_id: str,
     *,
@@ -675,13 +742,17 @@ def transition_review_rejection_with_repair(
     actor: str,
     commit_sha: str,
     extras: dict[str, Any] | None = None,
+    allowed_sources: frozenset[str] = frozenset({"REVIEWING"}),
+    claimed_reason: str = "repair entitlement claimed atomically",
 ) -> dict[str, Any]:
-    """Atomically fund a rejected review before exposing repair execution.
+    """Atomically fund a repair entitlement while moving to CHANGES_REQUESTED.
 
-    REVIEWING -> CHANGES_REQUESTED and the exact repair entitlement are one
-    STATE_TXN-backed mutation.  When the repair envelope is exhausted the same
-    mutation seals BLOCKED instead, so no crash boundary can expose an unfunded
-    builder state.
+    `<allowed_sources>` -> CHANGES_REQUESTED and the exact repair entitlement
+    are one STATE_TXN-backed mutation.  When the repair envelope is exhausted
+    the same mutation seals BLOCKED instead, so no crash boundary can ever
+    expose an unfunded / claimable CHANGES_REQUESTED state.  This is the single
+    crash-atomic funding owner shared by the live review finalizer, crash
+    reconciliation, and the foreground repair transition (SINGLE + PROGRAM).
     """
     _validate_state_extras(extras)
     sp = state_path(canonical_repo, run_id)
@@ -690,10 +761,11 @@ def transition_review_rejection_with_repair(
         current = read_json(sp)
         if not isinstance(current, dict) or not current:
             raise FileNotFoundError(f"STATE.json missing for run {run_id}")
-        if current.get("state") != "REVIEWING":
+        from_state = current.get("state")
+        if from_state not in allowed_sources:
             raise RuntimeError(
-                "atomic review rejection requires REVIEWING state, got "
-                f"{current.get('state')!r}"
+                "atomic funded repair requires state in "
+                f"{sorted(allowed_sources)}, got {from_state!r}"
             )
 
         new = dict(current)
@@ -754,21 +826,20 @@ def transition_review_rejection_with_repair(
                 target = "CHANGES_REQUESTED"
                 repair_claimed = True
 
-        transitions.assert_valid("REVIEWING", target)
+        transitions.assert_valid(from_state, target)
         now = utc_now_iso()
         new["state"] = target
         new["transitions_count"] = int(current.get("transitions_count", 0)) + 1
         new["updated_at"] = now
         new["last_actor"] = actor
-        new["last_candidate_sha"] = commit_sha
+        # Only rebind the candidate when the caller proved one; an empty
+        # commit_sha must not clobber the run's bound candidate.
+        if commit_sha:
+            new["last_candidate_sha"] = commit_sha
         history = list(current.get("state_history", []))
-        reason = (
-            "review rejected; repair entitlement claimed atomically"
-            if repair_claimed
-            else repair_block_reason
-        )
+        reason = claimed_reason if repair_claimed else repair_block_reason
         history.append({
-            "from": "REVIEWING",
+            "from": from_state,
             "to": target,
             "at": now,
             "actor": actor,
@@ -785,7 +856,7 @@ def transition_review_rejection_with_repair(
             run_id,
             new,
             event_type="state_transition",
-            old_state="REVIEWING",
+            old_state=from_state,
             new_state=target,
             actor=actor,
             commit_sha=commit_sha,
@@ -801,6 +872,34 @@ def transition_review_rejection_with_repair(
         "repair_round": int(new.get("repair_round", 0) or 0),
         "reason": reason,
     }
+
+
+def transition_review_rejection_with_repair(
+    canonical_repo: Path,
+    run_id: str,
+    *,
+    packet: dict[str, Any],
+    actor: str,
+    commit_sha: str,
+    extras: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Atomically fund a rejected review before exposing repair execution.
+
+    REVIEWING -> CHANGES_REQUESTED and the exact repair entitlement are one
+    STATE_TXN-backed mutation.  When the repair envelope is exhausted the same
+    mutation seals BLOCKED instead, so no crash boundary can expose an unfunded
+    builder state.  Thin REVIEWING-pinned wrapper over transition_funded_repair.
+    """
+    return transition_funded_repair(
+        canonical_repo,
+        run_id,
+        packet=packet,
+        actor=actor,
+        commit_sha=commit_sha,
+        extras=extras,
+        allowed_sources=frozenset({"REVIEWING"}),
+        claimed_reason="review rejected; repair entitlement claimed atomically",
+    )
 
 
 def increment_counter(
