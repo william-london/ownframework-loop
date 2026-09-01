@@ -4702,7 +4702,8 @@ def run_one(*, db_path: Path | None = None, timeout_seconds: int = 0) -> dict[st
             runner_work_order["allow_capability_binding_create"] = binding_create_allowed
             if remaining_cost_budget is not None:
                 runner_work_order["max_budget_usd"] = remaining_cost_budget
-            result = _runner(str(job["runner"])).run(
+            runner_impl = _runner(str(job["runner"]))
+            result = runner_impl.run(
                 runner_work_order,
                 timeout_seconds=semantic_timeout_seconds,
                 on_start=lambda pid, started_role: _set_worker_pid(
