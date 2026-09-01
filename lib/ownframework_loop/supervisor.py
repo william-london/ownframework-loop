@@ -398,6 +398,9 @@ def _semantic_worker_settings(
         "/var/run/podman/podman.sock",
         "/run/podman/podman.sock",
         "/run/containerd/containerd.sock",
+        str(home / ".orbstack" / "run" / "docker.sock"),
+        str(home / ".docker" / "run" / "docker.sock"),
+        str(home / ".local" / "share" / "containers" / "podman" / "podman.sock"),
     }
     deny_read = sorted({str(home), str(state_root), *raw_container_sockets})
     filesystem: dict[str, Any] = {

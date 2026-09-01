@@ -158,3 +158,6 @@ tests/integration/test_v091_capability_binding.sh
 tests/integration/test_v091_privileged_commissioning.sh
 # v0.9.1 trusted named runner-profile plane
 tests/integration/test_v091_runner_profiles.sh
+
+# v0.9.1 structural broker-only Docker authority negatives
+tests/integration/test_v091_docker_broker_authority.sh

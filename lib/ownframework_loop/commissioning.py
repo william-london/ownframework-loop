@@ -59,14 +59,27 @@ def _trusted_executable(value: Any, *, field: str) -> tuple[str, str]:
 def _provider_identity(name: str, entry: dict[str, Any]) -> dict[str, Any]:
     from . import capabilities as cap
     if name == "container.docker":
-        executable, version, digest, _ = cap._resolve_executable(
-            cap.BUILTIN_CAPABILITIES[name], entry, broker=True
+        executable, digest = _trusted_executable(
+            entry.get("broker_executable"), field="container.docker.broker_executable"
         )
-        if executable is None or Path(executable).name != "docker":
+        if Path(executable).name != "docker":
             raise CommissioningError("Docker broker must be a drop-in executable named docker")
+        args = entry.get("version_args", ["--version"])
+        if not isinstance(args, list) or not all(isinstance(x, str) for x in args):
+            raise CommissioningError("container.docker.version_args must be an array of strings")
+        try:
+            proc = subprocess.run(
+                [executable, *args], capture_output=True, text=True,
+                check=False, timeout=5,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise CommissioningError(f"Docker broker version proof failed: {exc}") from exc
+        lines = (proc.stdout or proc.stderr or "").strip().splitlines()
+        if not lines:
+            raise CommissioningError("Docker broker version could not be proven")
         return {
             "provider": "broker", "executable": executable,
-            "version": version, "executable_sha256": digest,
+            "version": lines[0][:512], "executable_sha256": digest,
         }
     if name == "local.http-service":
         if entry.get("provider") != "claude_native_safe_local_binding":

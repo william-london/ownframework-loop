@@ -126,7 +126,9 @@ with tempfile.TemporaryDirectory() as td:
         },
     )
     assert no_docker["severity"] == "forbidden"
-    broker_docker = guards.classify_bash_command_with_env(
+    # A capability marker alone is not authority: the exact broker identity is
+    # required as well. Dedicated broker tests below prove the admitted path.
+    marker_only = guards.classify_bash_command_with_env(
         "docker compose up -d",
         {
             "OFLOOP_SEMANTIC_CONTEXT": "1",
@@ -136,7 +138,7 @@ with tempfile.TemporaryDirectory() as td:
             "OFLOOP_PRIVILEGED_CAPABILITIES": "container.docker",
         },
     )
-    assert broker_docker["severity"] == "allowed"
+    assert marker_only["severity"] == "forbidden"
 
     try:
         capabilities.resolve_capabilities(
@@ -144,7 +146,7 @@ with tempfile.TemporaryDirectory() as td:
             repo_cache_root=cache, packet_network_allowlist=[],
         )
     except capabilities.CapabilityResolutionError as exc:
-        assert "broker" in str(exc)
+        assert "provider='broker'" in str(exc) or "canary-proven" in str(exc)
     else:
         raise AssertionError("direct Docker capability unexpectedly resolved")
 
@@ -164,7 +166,7 @@ with tempfile.TemporaryDirectory() as td:
             repo_cache_root=cache, packet_network_allowlist=[],
         )
     except capabilities.CapabilityResolutionError as exc:
-        assert "safe-local-binding" in str(exc)
+        assert "canary-proven" in str(exc) or "safe-local-binding" in str(exc)
     else:
         raise AssertionError("local binding enabled without commissioning proof")
 

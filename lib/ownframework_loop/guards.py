@@ -17,6 +17,7 @@ from __future__ import annotations
 import os
 import re
 import shlex
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -467,23 +468,90 @@ def classify_bash_command_with_env(
             partial_env = True
     result = classify_bash_command(command, role=role)
 
-    # Docker is host authority. It is unavailable unless the supervisor
-    # actually resolved the privileged broker capability for this pass.
+    # Local container control is privileged and broker-only. The capability
+    # marker is necessary but not sufficient: every executable path and every
+    # daemon/context selector is checked against the exact commissioned broker.
     if role in ("builder", "reviewer"):
         privileged = {
             item.strip()
             for item in str(e.get("OFLOOP_PRIVILEGED_CAPABILITIES") or "").split(",")
             if item.strip()
         }
-        docker_invocation = any(
-            _segment_invokes_docker(seg)
-            for seg in _split_command_chain(command)
+        broker_raw = str(e.get("OFLOOP_CONTAINER_BROKER_EXECUTABLE") or "")
+        broker = (
+            str(Path(broker_raw).expanduser().resolve(strict=False))
+            if broker_raw else ""
         )
-        if docker_invocation and "container.docker" not in privileged:
-            result["forbidden"].append(
-                "container.docker capability was not resolved for this semantic pass"
+        for invocation in _container_invocations(command):
+            client = str(invocation["client"])
+            token = str(invocation["token"])
+            args = list(invocation["args"])
+            assignments = set(invocation["assignments"])
+            if client != "docker":
+                result["forbidden"].append(
+                    f"uncommissioned parallel container-control client refused: {client}"
+                )
+                result["severity"] = "forbidden"
+                continue
+            if "container.docker" not in privileged or not broker:
+                result["forbidden"].append(
+                    "container.docker capability/broker was not resolved for this semantic pass"
+                )
+                result["severity"] = "forbidden"
+                continue
+
+            # The worker may not select a different client by path or inline
+            # PATH mutation. Bare docker must resolve to the exact broker.
+            if "PATH" in assignments:
+                result["forbidden"].append("inline PATH override refused for container broker")
+                result["severity"] = "forbidden"
+            if "/" in token:
+                selected = str(Path(token).expanduser().resolve(strict=False))
+            else:
+                discovered = shutil.which("docker", path=str(e.get("PATH") or ""))
+                selected = str(Path(discovered).resolve(strict=False)) if discovered else ""
+            if selected != broker:
+                result["forbidden"].append(
+                    "container client does not resolve to the commissioned broker"
+                )
+                result["severity"] = "forbidden"
+
+            daemon_env = {
+                "DOCKER_HOST", "DOCKER_CONTEXT", "DOCKER_CONFIG",
+                "CONTAINER_HOST", "PODMAN_HOST",
+            }
+            if assignments & daemon_env:
+                result["forbidden"].append(
+                    "inline container daemon/context environment selector refused"
+                )
+                result["severity"] = "forbidden"
+
+            selector_flags = {"-H", "--host", "--context", "--config"}
+            if any(
+                arg in selector_flags
+                or arg.startswith("--host=")
+                or arg.startswith("--context=")
+                or arg.startswith("--config=")
+                or (arg.startswith("-H") and arg != "-H")
+                for arg in args
+            ):
+                result["forbidden"].append(
+                    "container daemon/context CLI selector refused; broker endpoint is immutable"
+                )
+                result["severity"] = "forbidden"
+
+            lowered = [str(arg).lower() for arg in args]
+            publishes = (
+                "push" in lowered
+                or "--push" in lowered
+                or (len(lowered) >= 2 and lowered[0:2] == ["manifest", "push"])
+                or (len(lowered) >= 3 and lowered[0:3] == ["buildx", "imagetools", "create"])
             )
-            result["severity"] = "forbidden"
+            if publishes:
+                result["forbidden"].append(
+                    "container registry publication is outside local engineering authority"
+                )
+                result["severity"] = "forbidden"
 
     result["partial_env"] = partial_env
     return result
@@ -499,46 +567,71 @@ from .external_action import (
 )
 
 
-def _segment_invokes_docker(segment: str) -> bool:
-    """Recognize Docker execution through common shell wrappers.
+def _container_invocations(command: str) -> list[dict[str, Any]]:
+    """Return execution-shaped local container-control invocations.
 
-    This is deliberately execution-shaped rather than a raw substring match,
-    so docs/grep/echo mentioning Docker remain harmless. Nested shell -c
-    invocations recurse into their payload, closing the easy
-    `command docker`, `env X=1 docker`, and `sh -c 'docker ...'`
-    capability-bypass forms.
+    This remains a guardrail rather than a full shell parser, but handles the
+    common wrapper/path/env/nested-shell forms that could otherwise route around
+    the broker. Mentions in echo/grep/docs are not classified as execution.
     """
-    if not segment:
-        return False
-    try:
-        tokens = shlex.split(segment)
-    except ValueError:
-        tokens = segment.split()
-    if not tokens:
-        return False
+    clients = {"docker", "docker-compose", "podman", "nerdctl", "ctr", "crictl"}
+    wrappers = {"command", "builtin", "exec"}
+    shells = {"sh", "bash", "zsh", "dash", "ksh"}
+    found: list[dict[str, Any]] = []
 
-    prefixes = {"command", "builtin", "env", "nice", "time", "stdbuf", "exec"}
-    i = 0
-    while i < len(tokens):
-        tok = tokens[i]
-        if re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", tok):
-            i += 1
-            continue
-        base = tok.rsplit("/", 1)[-1]
-        if base in prefixes:
-            i += 1
-            continue
-        if base in {"docker", "docker-compose"}:
-            return True
-        if base in {"sh", "bash", "zsh", "dash", "ksh"}:
-            for idx in range(i + 1, len(tokens) - 1):
-                if tokens[idx] in {"-c", "--command"}:
-                    return any(
-                        _segment_invokes_docker(inner)
-                        for inner in _split_command_chain(tokens[idx + 1])
-                    )
-        return False
-    return False
+    def scan_segment(segment: str) -> None:
+        try:
+            tokens = shlex.split(segment)
+        except ValueError:
+            tokens = segment.split()
+        if not tokens:
+            return
+        assignments: set[str] = set()
+        i = 0
+        while i < len(tokens):
+            tok = tokens[i]
+            match = re.match(r"^([A-Za-z_][A-Za-z0-9_]*)=", tok)
+            if match:
+                assignments.add(match.group(1))
+                i += 1
+                continue
+            base = tok.rsplit("/", 1)[-1]
+            if base in wrappers:
+                i += 1
+                continue
+            if base == "env":
+                i += 1
+                while i < len(tokens) and tokens[i].startswith("-"):
+                    i += 1
+                continue
+            if base in {"nice", "time", "stdbuf"}:
+                i += 1
+                while i < len(tokens) and tokens[i].startswith("-"):
+                    i += 1
+                continue
+            if base in shells:
+                for idx in range(i + 1, len(tokens) - 1):
+                    if tokens[idx] in {"-c", "--command"}:
+                        for nested in _split_command_chain(tokens[idx + 1]):
+                            scan_segment(nested)
+                        return
+                return
+            if base in clients:
+                found.append({
+                    "client": base,
+                    "token": tok,
+                    "args": tokens[i + 1:],
+                    "assignments": sorted(assignments),
+                })
+            return
+
+    for segment in _split_command_chain(command):
+        scan_segment(segment)
+    return found
+
+
+def _segment_invokes_docker(segment: str) -> bool:
+    return any(item["client"] in {"docker", "docker-compose"} for item in _container_invocations(segment))
 
 
 def _first_executable_word(segment: str) -> str | None:
