@@ -15,8 +15,8 @@
 #   6. First capability binding is allowed after proven pre-provider attempts
 #      (including worker_ownership_not_published) and refused after a
 #      provider-reachable attempt.
-#   7. Effective model telemetry is captured distinctly from the requested
-#      profile.
+#   7. Effective model truth: singular model only when provable; the full
+#      provider-reported usage is preserved and never inferred away.
 #
 # No model is called; synthetic fixtures are schema-correct.
 
@@ -335,21 +335,28 @@ print("6 capability binding allowance ok")
 PY
 pass "first binding allowed after pre-provider attempts, refused after provider-reachable one"
 
-# ---------- 7. effective model captured distinctly from requested profile ----------
+# ---------- 7. effective model truth: provable only, full usage preserved ----------
 python3 - <<'PY'
-import os, sys
+import json, os, sys
 sys.path.insert(0, os.environ.get("OFLOOP_LIB"))
 from ownframework_loop import supervisor
-# modelUsage reveals the effective model.
-env = {"modelUsage": {"claude-x-20260101": {"outputTokens": 10}, "claude-y": {"outputTokens": 3}}}
-assert supervisor._extract_effective_model(env) == "claude-x-20260101"
-# Explicit model field.
+# A SINGLE reported model is provable.
+assert supervisor._extract_effective_model(
+    {"modelUsage": {"claude-x-20260101": {"outputTokens": 10}}}
+) == "claude-x-20260101"
+# Explicit model field is provable.
 assert supervisor._extract_effective_model({"model": "claude-z"}) == "claude-z"
+# A MULTI-model mix is NOT inferred to a singular effective model...
+mix = {"modelUsage": {"claude-x-20260101": {"outputTokens": 10}, "claude-y": {"outputTokens": 3}}}
+assert supervisor._extract_effective_model(mix) == ""
+# ...but the FULL provider-reported usage is preserved exactly.
+assert json.loads(supervisor._extract_model_usage_json(mix)) == mix["modelUsage"]
 # No signal -> empty (unknown), never fabricated.
 assert supervisor._extract_effective_model({}) == ""
 assert supervisor._extract_effective_model(None) == ""
-print("7 effective model extraction ok")
+assert supervisor._extract_model_usage_json({}) == ""
+print("7 effective model truth ok")
 PY
-pass "effective model telemetry is captured distinctly (never fabricated)"
+pass "effective model is provable-only; full provider usage preserved (never inferred)"
 
 echo "OF_LOOP_FINAL_SOURCE_CLOSURE=PASS"

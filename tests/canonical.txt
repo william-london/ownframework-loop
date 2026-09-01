@@ -174,3 +174,9 @@ tests/integration/test_single_mode_repair_continuity.sh
 # non-transition save identity guard, symlinked-manifest rejection, pre-provider
 # runtime-drift re-proof, capability-binding allowance, effective-model capture.
 tests/integration/test_final_source_closure.sh
+
+# Final source-authority regressions: strict runner-profile truth gate,
+# commissioned effort attestation negatives, commissioning failure
+# normalization (timeout/launch), and browser runtime proof privacy/
+# freshness/asset-drift + shared read-only asset wiring.
+tests/integration/test_source_authority_final.sh

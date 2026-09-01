@@ -33,6 +33,13 @@ print(json.dumps({"is_error":False,"subtype":"success","result":"ok","total_cost
   "schema":runner_profiles.MANIFEST_SCHEMA,
   "profiles":{"deep":{"provider":"claude-code","model":"sonnet","effort":"high"}}
  })); profiles.chmod(0o600)
+ # 'deep' is quality-strict (explicit effort). The runner fails closed before
+ # any provider call unless the effort is commissioned; the fixture plays the
+ # operator and commissions the attestation.
+ resolved_deep=runner_profiles.resolve_profile("deep",provider="claude-code")
+ runner_profiles.write_effort_attestation(
+  name="deep",provider="claude-code",model="sonnet",effort="high")
+ runner_profiles.verify_effort_attestation(resolved_deep)
  os.environ["OFLOOP_CLAUDE_BIN"]=str(fake); os.environ["OFLOOP_CAPTURE"]=str(capture)
  result=supervisor.ClaudeCodeRunner().run({
   "schema":supervisor.SCHEMA,"decision":"BUILD","role":"builder","run_id":"r1",
