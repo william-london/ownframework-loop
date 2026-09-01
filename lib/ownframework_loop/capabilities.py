@@ -31,6 +31,7 @@ from typing import Any
 
 SCHEMA = "ownframework-loop-capability-resolution/v1"
 HOST_MANIFEST_SCHEMA = "ownframework-loop-host-capabilities/v1"
+CAPABILITY_CONTRACT_REVISION = "host-capability-contract/v2"
 CAPABILITY_NAME_RE = re.compile(r"^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$")
 MAX_CAPABILITIES = 32
 
@@ -102,6 +103,14 @@ def default_host_manifest_path() -> Path:
     return base / "ownframework-loop" / "host-capabilities.json"
 
 
+def platform_identity() -> dict[str, str]:
+    return {
+        "platform": sys.platform,
+        "platform_release": os.uname().release if hasattr(os, "uname") else "",
+        "machine": os.uname().machine if hasattr(os, "uname") else "",
+    }
+
+
 def semantic_runtime_fingerprint() -> str:
     """Fingerprint host + Claude sandbox generation for privileged proof."""
     claude_raw = os.environ.get("OFLOOP_CLAUDE_BIN", "claude")
@@ -123,13 +132,7 @@ def semantic_runtime_fingerprint() -> str:
             except (OSError, subprocess.SubprocessError):
                 pass
     payload = {
-        "platform": sys.platform,
-        "platform_release": (
-            os.uname().release if hasattr(os, "uname") else ""
-        ),
-        "machine": (
-            os.uname().machine if hasattr(os, "uname") else ""
-        ),
+        **platform_identity(),
         "claude_path": claude_path,
         "claude_version": claude_version,
     }
@@ -145,6 +148,36 @@ def _file_sha256(path: str | None) -> str | None:
         for chunk in iter(lambda: fh.read(1024 * 1024), b""):
             h.update(chunk)
     return h.hexdigest()
+
+
+def _trusted_asset_identity(path: Path) -> dict[str, Any]:
+    raw = path.expanduser()
+    if raw.is_symlink():
+        raise CapabilityResolutionError("trusted asset root must not be a symlink")
+    root = raw.resolve(strict=True)
+    if root.is_file():
+        return {"path": str(root), "kind": "file", "sha256": _file_sha256(str(root))}
+    if not root.is_dir():
+        raise CapabilityResolutionError(f"trusted asset is not file/directory: {root}")
+    h = hashlib.sha256()
+    for current, dirs, files in os.walk(root, followlinks=False):
+        base = Path(current)
+        dirs.sort()
+        files.sort()
+        for name in list(dirs) + list(files):
+            p = base / name
+            if p.is_symlink():
+                raise CapabilityResolutionError(
+                    f"trusted asset tree contains symlink: {p.relative_to(root)}"
+                )
+            rel = p.relative_to(root).as_posix()
+            st = p.stat()
+            kind = "d" if p.is_dir() else "f"
+            h.update(f"{kind}\0{rel}\0{stat.S_IMODE(st.st_mode):o}\0".encode())
+            if p.is_file():
+                h.update((_file_sha256(str(p)) or "").encode())
+            h.update(b"\n")
+    return {"path": str(root), "kind": "directory", "tree_sha256": h.hexdigest()}
 
 
 def validate_capability_names(values: Any) -> list[str]:
@@ -208,6 +241,7 @@ def _entry_for(name: str, entries: dict[str, Any]) -> dict[str, Any]:
     allowed = {
         "kind", "enabled", "executable", "broker_executable", "version_args",
         "read_paths", "network_domains", "trusted_asset_path", "provider", "proof",
+        "canary_executable",
     }
     unknown = sorted(set(raw) - allowed)
     if unknown:
@@ -378,6 +412,7 @@ def resolve_capabilities(
     resolved: list[dict[str, Any]] = []
     allow_read: set[str] = set()
     allow_write: set[str] = set()
+    stable_allow_read: set[str] = set()
     environment: dict[str, str] = {}
     path_prepend: list[str] = []
     network_domains: set[str] = set(packet_network_allowlist or [])
@@ -398,55 +433,62 @@ def resolve_capabilities(
                 )
             definition = CapabilityDefinition(name, "tool", ())
 
-        if definition.name == "container.docker":
-            expected_proof = semantic_runtime_fingerprint()
-            if entry.get("provider") != "broker" or entry.get("proof") != expected_proof:
-                raise CapabilityResolutionError(
-                    "container.docker requires an operator-commissioned broker whose proof "
-                    "matches the current semantic runtime fingerprint; raw Docker "
-                    "daemon/socket authority is never granted"
-                )
-            executable, version, executable_sha256, extra_reads = _resolve_executable(
-                definition, entry, broker=True
-            )
-            if executable is None or Path(executable).name != "docker":
-                raise CapabilityResolutionError(
-                    "container.docker broker executable must be a drop-in CLI named 'docker'"
-                )
-            allow_read.update(extra_reads)
-            path_prepend.append(str(Path(executable).parent))
-            manifest_domains = _network_domains(entry.get("network_domains"), name=name)
-            network_domains.update(manifest_domains)
-            resolved.append({
-                "name": name, "kind": "privileged", "privileged": True,
-                "provider": "broker", "executable": executable, "version": version,
-                "executable_sha256": executable_sha256,
-                "network_domains": manifest_domains,
-                "proof": str(entry.get("proof"))[:512],
-            })
-            continue
-
-        if definition.name == "local.http-service":
-            expected_proof = semantic_runtime_fingerprint()
+        if definition.name in {"container.docker", "local.http-service"}:
+            from . import commissioning as commissioning_mod
+            if definition.name == "container.docker" and entry.get("provider") != "broker":
+                raise CapabilityResolutionError("container.docker requires provider='broker'")
             if (
-                entry.get("provider") != "claude_native_safe_local_binding"
-                or entry.get("proof") != expected_proof
+                definition.name == "local.http-service"
+                and entry.get("provider") != "claude_native_safe_local_binding"
             ):
                 raise CapabilityResolutionError(
-                    "local.http-service requires a commissioned safe-local-binding provider "
-                    "whose proof matches the current semantic runtime fingerprint; native "
-                    "local binding is not enabled implicitly"
+                    "local.http-service requires the safe-local-binding provider"
                 )
-            sandbox_network["allowLocalBinding"] = True
-            resolved.append({
-                "name": name, "kind": "local-service", "privileged": False,
-                "provider": str(entry.get("provider")),
-                "proof": str(entry.get("proof"))[:512],
-            })
+            try:
+                commissioned = commissioning_mod.verify_commissioning(
+                    name, entry, manifest_sha256=manifest_sha
+                )
+            except commissioning_mod.CommissioningError as exc:
+                raise CapabilityResolutionError(str(exc)) from exc
+            provider_identity = commissioned["provider_identity"]
+            if definition.name == "container.docker":
+                executable = str(provider_identity.get("executable") or "")
+                version = provider_identity.get("version")
+                executable_sha256 = provider_identity.get("executable_sha256")
+                if not executable or Path(executable).name != "docker":
+                    raise CapabilityResolutionError("commissioned Docker broker identity invalid")
+                extra_reads = _absolute_existing_paths(
+                    entry.get("read_paths"), field="read_paths", name=name
+                )
+                extra_reads.append(executable)
+                allow_read.update(extra_reads)
+                stable_allow_read.update(extra_reads)
+                path_prepend.append(str(Path(executable).parent))
+                manifest_domains = _network_domains(entry.get("network_domains"), name=name)
+                network_domains.update(manifest_domains)
+                resolved.append({
+                    "name": name, "kind": "privileged", "privileged": True,
+                    "provider": "broker", "executable": executable, "version": version,
+                    "executable_sha256": executable_sha256,
+                    "network_domains": manifest_domains,
+                    "commissioning_evidence_path": commissioned["evidence_path"],
+                    "commissioning_evidence_sha256": commissioned["evidence_sha256"],
+                    "commissioning_canary_kind": commissioned["canary_kind"],
+                })
+            else:
+                sandbox_network["allowLocalBinding"] = True
+                resolved.append({
+                    "name": name, "kind": "local-service", "privileged": True,
+                    "provider": str(entry.get("provider")),
+                    "commissioning_evidence_path": commissioned["evidence_path"],
+                    "commissioning_evidence_sha256": commissioned["evidence_sha256"],
+                    "commissioning_canary_kind": commissioned["canary_kind"],
+                })
             continue
 
         executable, version, executable_sha256, extra_reads = _resolve_executable(definition, entry)
         allow_read.update(extra_reads)
+        stable_allow_read.update(extra_reads)
         manifest_domains = _network_domains(entry.get("network_domains"), name=name)
         effective_domains = sorted(set(definition.network_domains) | set(manifest_domains))
         network_domains.update(effective_domains)
@@ -463,9 +505,11 @@ def resolve_capabilities(
             asset = asset.resolve(strict=False)
             if not asset.exists():
                 raise CapabilityResolutionError(f"{name}.trusted_asset_path does not exist: {asset}")
+            identity = _trusted_asset_identity(asset)
             cache_path = str(asset)
             cache_scope = "trusted_read_only"
             allow_read.add(cache_path)
+            stable_allow_read.add(cache_path)
         elif definition.cache_key:
             cache_base = repo_cache_root if role == "builder" else ephemeral_cache_root
             cache = (cache_base / definition.cache_key).resolve(strict=False)
@@ -503,6 +547,7 @@ def resolve_capabilities(
             "executable_sha256": executable_sha256,
             "cache_path": cache_path,
             "cache_scope": cache_scope,
+            "trusted_asset_identity": identity if trusted_asset is not None else None,
             "network_domains": effective_domains,
         })
 
@@ -515,6 +560,7 @@ def resolve_capabilities(
 
     return {
         "schema": SCHEMA,
+        "capability_contract_revision": CAPABILITY_CONTRACT_REVISION,
         "requested": requested,
         "resolved": resolved,
         "network_domains": sorted(network_domains),
@@ -525,15 +571,21 @@ def resolve_capabilities(
         "environment": dict(sorted(environment.items())),
         "path_prepend": sorted(set(path_prepend)),
         "sandbox_network": sandbox_network,
+        "stable_filesystem": {
+            "allowRead": sorted(stable_allow_read),
+            "allowWrite": [],
+        },
         "host_manifest_path": manifest_name,
         "host_manifest_sha256": manifest_sha,
+        "semantic_runtime_fingerprint": semantic_runtime_fingerprint(),
+        "platform_identity": platform_identity(),
     }
 
 
 def probe_host_capabilities(
     *, manifest_path: Path | None = None,
 ) -> dict[str, Any]:
-    """Read-only capability inventory for operator/commissioning preflight."""
+    """Read-only capability inventory including canary commissioning state."""
     try:
         entries, manifest_name, manifest_sha = _load_host_manifest(manifest_path)
         manifest_error = None
@@ -544,77 +596,54 @@ def probe_host_capabilities(
         )
         manifest_sha = None
         manifest_error = str(exc)
-
-    fingerprint = semantic_runtime_fingerprint()
     items: list[dict[str, Any]] = []
     for name, definition in sorted(BUILTIN_CAPABILITIES.items()):
         item: dict[str, Any] = {
-            "name": name,
-            "kind": definition.kind,
-            "privileged": definition.privileged,
+            "name": name, "kind": definition.kind,
+            "privileged": bool(definition.requires_commissioned_provider or definition.privileged),
             "available": False,
         }
-        if manifest_error is not None:
+        if manifest_error:
             item["reason"] = f"host_manifest_invalid: {manifest_error}"
             items.append(item)
             continue
         try:
             entry = _entry_for(name, entries)
-            if name == "container.docker":
-                if entry.get("provider") != "broker":
-                    raise CapabilityResolutionError("commissioned broker missing")
-                if entry.get("proof") != fingerprint:
-                    raise CapabilityResolutionError("commissioning proof does not match runtime")
-                executable, version, digest, _ = _resolve_executable(
-                    definition, entry, broker=True
+            if definition.requires_commissioned_provider:
+                from . import commissioning as commissioning_mod
+                commissioned = commissioning_mod.verify_commissioning(
+                    name, entry, manifest_sha256=manifest_sha
                 )
-                if executable is None or Path(executable).name != "docker":
-                    raise CapabilityResolutionError("broker must be a drop-in docker executable")
-                item.update({
-                    "available": True,
-                    "provider": "broker",
-                    "executable": executable,
-                    "version": version,
-                    "executable_sha256": digest,
-                })
-            elif name == "local.http-service":
-                if entry.get("provider") != "claude_native_safe_local_binding":
-                    raise CapabilityResolutionError("commissioned safe-local-binding provider missing")
-                if entry.get("proof") != fingerprint:
-                    raise CapabilityResolutionError("commissioning proof does not match runtime")
                 item.update({
                     "available": True,
                     "provider": entry.get("provider"),
+                    "commissioning_evidence_sha256": commissioned["evidence_sha256"],
+                    "canary_kind": commissioned["canary_kind"],
                 })
+                if name == "container.docker":
+                    item.update(commissioned["provider_identity"])
             elif definition.executable_names:
                 executable, version, digest, _ = _resolve_executable(definition, entry)
                 item.update({
                     "available": True,
                     "provider": "builtin" if not entry else "commissioned",
-                    "executable": executable,
-                    "version": version,
+                    "executable": executable, "version": version,
                     "executable_sha256": digest,
                 })
             else:
-                # Framework-backed capabilities such as Playwright do not
-                # require a host executable. The project package invokes the
-                # runtime and Loop supplies cache/network authority.
-                item.update({
-                    "available": True,
-                    "provider": "project_runtime",
-                })
+                item.update({"available": True, "provider": "project_runtime"})
                 if entry.get("trusted_asset_path"):
-                    asset = Path(str(entry["trusted_asset_path"])).expanduser().resolve(strict=False)
-                    if not asset.exists():
-                        raise CapabilityResolutionError(f"trusted asset missing: {asset}")
-                    item["trusted_asset_path"] = str(asset)
-        except CapabilityResolutionError as exc:
+                    item["trusted_asset_identity"] = _trusted_asset_identity(
+                        Path(str(entry["trusted_asset_path"]))
+                    )
+        except Exception as exc:
             item["reason"] = str(exc)
         items.append(item)
-
     return {
         "schema": "ownframework-loop-host-capability-inventory/v1",
-        "runtime_fingerprint": fingerprint,
+        "capability_contract_revision": CAPABILITY_CONTRACT_REVISION,
+        "runtime_fingerprint": semantic_runtime_fingerprint(),
+        "platform_identity": platform_identity(),
         "host_manifest_path": manifest_name,
         "host_manifest_sha256": manifest_sha,
         "manifest_error": manifest_error,
@@ -642,14 +671,54 @@ def public_summary(resolution: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def verify_resolution_integrity(resolution: dict[str, Any]) -> None:
+    path_value = resolution.get("host_manifest_path")
+    _, _, current_manifest = _load_host_manifest(
+        Path(str(path_value)) if path_value else None
+    )
+    if current_manifest != resolution.get("host_manifest_sha256"):
+        raise CapabilityResolutionError("host capability manifest changed after resolution")
+    for item in resolution.get("resolved") or []:
+        if not isinstance(item, dict):
+            continue
+        executable = item.get("executable")
+        digest = item.get("executable_sha256")
+        if executable and digest and _file_sha256(str(executable)) != digest:
+            raise CapabilityResolutionError(
+                f"capability executable changed after resolution: {item.get('name')}"
+            )
+        trusted = item.get("trusted_asset_identity")
+        if isinstance(trusted, dict):
+            if _trusted_asset_identity(Path(str(trusted.get("path") or ""))) != trusted:
+                raise CapabilityResolutionError(
+                    f"trusted capability asset changed after resolution: {item.get('name')}"
+                )
+        evidence_path_value = item.get("commissioning_evidence_path")
+        evidence_sha = item.get("commissioning_evidence_sha256")
+        if evidence_path_value and evidence_sha:
+            p = Path(str(evidence_path_value))
+            if not p.is_file() or p.is_symlink():
+                raise CapabilityResolutionError("commissioning evidence disappeared after resolution")
+            try:
+                doc = json.loads(p.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as exc:
+                raise CapabilityResolutionError("commissioning evidence became unreadable") from exc
+            if doc.get("evidence_sha256") != evidence_sha:
+                raise CapabilityResolutionError("commissioning evidence changed after resolution")
+
+
 def write_resolution_receipt(
     canonical_repo: Path,
     run_id: str,
     role: str,
     attempt_id: str,
     resolution: dict[str, Any],
+    *,
+    run_binding: dict[str, Any] | None = None,
+    runner_profile: dict[str, Any] | None = None,
 ) -> Path:
-    safe_attempt = re.sub(r"[^A-Za-z0-9_.-]", "_", str(attempt_id))[:96]
+    safe_prefix = re.sub(r"[^A-Za-z0-9_.-]", "_", str(attempt_id))[:64]
+    safe_attempt = safe_prefix + "-" + hashlib.sha256(str(attempt_id).encode()).hexdigest()[:16]
     if not safe_attempt:
         raise CapabilityResolutionError("capability receipt requires attempt identity")
     root = canonical_repo.resolve(strict=False) / ".ownframework-loop" / run_id / "capabilities"
@@ -663,19 +732,34 @@ def write_resolution_receipt(
     payload["run_id"] = run_id
     payload["role"] = role
     payload["attempt_id"] = attempt_id
+    if run_binding is not None:
+        payload["run_binding_sha256"] = run_binding.get("binding_sha256")
+    if runner_profile is not None:
+        payload["runner_profile"] = {
+            k: runner_profile.get(k)
+            for k in ("name", "provider", "model", "effort", "identity_sha256")
+        }
     encoded = json.dumps(payload, indent=2, sort_keys=True) + "\n"
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(encoded, encoding="utf-8")
-    os.replace(tmp, path)
+    if path.exists():
+        if path.is_symlink() or path.read_text(encoding="utf-8") != encoded:
+            raise CapabilityResolutionError("capability receipt collision/overwrite refused")
+        return path
     try:
-        os.chmod(path, 0o600)
-    except OSError:
-        pass
+        fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        if path.is_symlink() or path.read_text(encoding="utf-8") != encoded:
+            raise CapabilityResolutionError("capability receipt race/collision refused")
+        return path
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(encoded)
+        fh.flush()
+        os.fsync(fh.fileno())
     return path
 
 
 __all__ = [
     "BUILTIN_CAPABILITIES",
+    "CAPABILITY_CONTRACT_REVISION",
     "CAPABILITY_NAME_RE",
     "CapabilityDefinition",
     "CapabilityResolutionError",
@@ -683,10 +767,12 @@ __all__ = [
     "MAX_CAPABILITIES",
     "SCHEMA",
     "default_host_manifest_path",
+    "platform_identity",
     "probe_host_capabilities",
     "public_summary",
     "resolve_capabilities",
     "semantic_runtime_fingerprint",
     "validate_capability_names",
+    "verify_resolution_integrity",
     "write_resolution_receipt",
 ]
