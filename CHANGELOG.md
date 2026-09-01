@@ -4,7 +4,7 @@ All notable source/master release-line changes to OwnFramework Loop are document
 
 **Publication status:** 0.9.1 is the current development source/master line and
 is not yet a published GitHub Release/tag. 0.8.4 remains the immutable released
-serial baseline. The latest published GitHub Release is **v0.8.4** after the
+serial baseline. The latest published GitHub Release remains **v0.8.4** until the
 commissioning gates below close.
 The complete historical changelog through 0.5.2 is preserved at
 [`docs/history/CHANGELOG-through-0.5.2.md`](docs/history/CHANGELOG-through-0.5.2.md).
