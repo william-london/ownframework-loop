@@ -165,6 +165,12 @@ tests/integration/test_v091_docker_broker_authority.sh
 # v0.9.1 trusted model/effort profile + funded native Claude pass budget
 tests/integration/test_v091_pass_budget_profile.sh
 
-# v0.9.2 single-mode repair continuity (build-validation retry must stay
-# claimable), extras FSM-bypass defense, and guard classifier hardening
-tests/integration/test_v092_single_mode_repair_continuity.sh
+# Single-mode repair continuity (build-validation retry must stay claimable),
+# crash-atomic repair funding, extras FSM-bypass defense, and guard classifier
+# hardening (version-neutral).
+tests/integration/test_single_mode_repair_continuity.sh
+
+# Final source-closure crash/negative regressions: crash-atomic funded repair,
+# non-transition save identity guard, symlinked-manifest rejection, pre-provider
+# runtime-drift re-proof, capability-binding allowance, effective-model capture.
+tests/integration/test_final_source_closure.sh

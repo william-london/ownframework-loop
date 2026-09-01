@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# v0.9.2 — single-mode repair continuity + guard classifier regressions.
+# Single-mode repair continuity + guard classifier regressions (version-neutral).
 #
 # 1. BUILD_VALIDATION_RETRY continuity: the generic FSM has no
 #    CHANGES_REQUESTED -> BUILDING edge, so a single-mode run whose required
@@ -226,4 +226,4 @@ print("guard classifier hardening ok")
 PY
 pass "guard classifier hardening (redirects, git topology, container clients, rsync)"
 
-echo "OF_LOOP_V092_SINGLE_MODE_REPAIR_CONTINUITY=PASS"
+echo "OF_LOOP_SINGLE_MODE_REPAIR_CONTINUITY=PASS"
