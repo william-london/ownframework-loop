@@ -6,9 +6,13 @@ export PYTHONPATH="$LIB_DIR${PYTHONPATH:+:$PYTHONPATH}"
 export OFLOOP_ROOT="$ROOT_DIR"
 
 python3 -B <<'PY'
-import hashlib, json, subprocess, tempfile
+import hashlib, json, os, subprocess, sys, tempfile
 from pathlib import Path
 from ownframework_loop import approval, program, reconcile, state as state_mod
+# Crash-state seeding is a TEST-ONLY seam: production save() can never change
+# transition identity; fixtures simulate the durable state a crash leaves.
+sys.path.insert(0, str(Path(os.environ["OFLOOP_ROOT"]) / "tests" / "helpers"))
+from state_seed import seed_state
 
 def mkrepo():
     p=Path(tempfile.mkdtemp(prefix="ofloop-v046-"))
@@ -49,7 +53,7 @@ try: program.claim_build_pass(canonical_repo=repo,run_id=rid,packet=packet)
 except program.ClaimRefused: pass
 else: raise AssertionError("wrong-lane build claim accepted")
 a=state_mod.load(repo,rid); assert a["state"]=="READY_FOR_REVIEW" and a["program"]["cumulative_counters"]["build_pass_count"]==0
-a["state"]="READY_TO_BUILD"; state_mod.save(repo,rid,a)
+a["state"]="READY_TO_BUILD"; seed_state(repo,rid,a)
 try: program.claim_review_pass(canonical_repo=repo,run_id=rid,packet=packet)
 except program.ClaimRefused: pass
 else: raise AssertionError("wrong-lane review claim accepted")
@@ -64,7 +68,7 @@ print("PASS atomic PROGRAM claim phase/mirror gate")
 repo=mkrepo(); run,app=simple_run(repo,"run-v046-stale","READY_TO_BUILD"); rid=app["run_id"]
 (run/"BUILD_RECEIPT.json").write_text(json.dumps({"packet_sha256":app["packet_sha256"],"builder_pass_number":1,"next_state":"READY_FOR_REVIEW","candidate_sha":app["baseline_sha"]}))
 r=reconcile.reconcile_run(canonical_repo=repo,run_id=rid); assert r["ok"] and not r["artifact_adopted"]; assert state_mod.load(repo,rid)["state"]=="READY_TO_BUILD"
-s=state_mod.load(repo,rid); s["state"]="READY_FOR_REVIEW"; state_mod.save(repo,rid,s)
+s=state_mod.load(repo,rid); s["state"]="READY_FOR_REVIEW"; seed_state(repo,rid,s)
 (run/"REVIEW_VERDICT.json").write_text(json.dumps({"packet_sha256":app["packet_sha256"],"review_pass_number":1,"verdict":"APPROVED","recommended_next_state":"APPROVED","candidate_sha_reviewed":app["baseline_sha"]}))
 r=reconcile.reconcile_run(canonical_repo=repo,run_id=rid); assert r["ok"] and not r["artifact_adopted"]; assert state_mod.load(repo,rid)["state"]=="READY_FOR_REVIEW"
 print("PASS idle states ignore stale run-root artifacts")
@@ -73,7 +77,7 @@ repo=mkrepo(); run,app=simple_run(repo,"run-v046-pass","BUILDING"); rid=app["run
 s=state_mod.load(repo,rid); s["build_pass_count"]=2; state_mod.save(repo,rid,s)
 (run/"BUILD_RECEIPT.json").write_text(json.dumps({"packet_sha256":app["packet_sha256"],"builder_pass_number":1,"next_state":"READY_FOR_REVIEW","candidate_sha":app["baseline_sha"]}))
 r=reconcile.reconcile_run(canonical_repo=repo,run_id=rid); assert r["ok"] and state_mod.load(repo,rid)["state"]=="BUILDING"; assert any("skip_stale_build_receipt_pass" in x for x in r["actions"])
-s=state_mod.load(repo,rid); s["state"]="REVIEWING"; s["review_pass_count"]=2; state_mod.save(repo,rid,s)
+s=state_mod.load(repo,rid); s["state"]="REVIEWING"; s["review_pass_count"]=2; seed_state(repo,rid,s)
 (run/"REVIEW_VERDICT.json").write_text(json.dumps({"packet_sha256":app["packet_sha256"],"review_pass_number":1,"verdict":"APPROVED","recommended_next_state":"APPROVED","candidate_sha_reviewed":app["baseline_sha"]}))
 r=reconcile.reconcile_run(canonical_repo=repo,run_id=rid); assert r["ok"] and state_mod.load(repo,rid)["state"]=="REVIEWING"; assert any("skip_stale_review_verdict_pass" in x for x in r["actions"])
 print("PASS in-flight recovery requires exact pass identity")
@@ -83,7 +87,7 @@ repo=mkrepo(); run,app=simple_run(repo,"run-v046-current","BUILDING"); rid=app["
 s=state_mod.load(repo,rid); s["build_pass_count"]=1; state_mod.save(repo,rid,s)
 (run/"BUILD_RECEIPT.json").write_text(json.dumps({"packet_sha256":app["packet_sha256"],"builder_pass_number":1,"next_state":"READY_FOR_REVIEW","candidate_sha":app["baseline_sha"]}))
 r=reconcile.reconcile_run(canonical_repo=repo,run_id=rid); assert r["ok"] and r["artifact_adopted"]; assert state_mod.load(repo,rid)["state"]=="READY_FOR_REVIEW"
-s=state_mod.load(repo,rid); s["state"]="REVIEWING"; s["review_pass_count"]=1; state_mod.save(repo,rid,s)
+s=state_mod.load(repo,rid); s["state"]="REVIEWING"; s["review_pass_count"]=1; seed_state(repo,rid,s)
 (run/"REVIEW_VERDICT.json").write_text(json.dumps({"packet_sha256":app["packet_sha256"],"review_pass_number":1,"verdict":"APPROVED","recommended_next_state":"APPROVED","candidate_sha_reviewed":app["baseline_sha"]}))
 r=reconcile.reconcile_run(canonical_repo=repo,run_id=rid); assert r["ok"] and r["artifact_adopted"]; assert state_mod.load(repo,rid)["state"]=="APPROVED"
 print("PASS exact-current single-mode crash recovery")

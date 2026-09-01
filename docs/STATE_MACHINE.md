@@ -52,6 +52,7 @@ There is intentionally no generic `CHANGES_REQUESTED -> BUILDING` edge. In
 single-run mode the deterministic finalizers apply a post-hook that returns
 the run to `READY_TO_BUILD` inside the same finalize sequence (with the
 reviewer-funded repair entitlement claimed atomically by
+`transition_funded_repair`, exposed for the review lane as
 `transition_review_rejection_with_repair`), so the next build claim always
 starts from a generic-FSM state. In PROGRAM mode the unified claim owner
 performs the claim edge (including `CHANGES_REQUESTED -> BUILDING`) atomically
@@ -75,6 +76,19 @@ Every transition acquires an exclusive `fcntl.flock` on
 `.ownframework-loop/<run-id>/LOCK` before reading or writing `STATE.json`.
 Concurrent state mutations are serialized; the loser of the race retries on
 the next supervisor dispatch tick or a deliberate foreground supervisor/dispatch invocation.
+
+Transition identity is owned exclusively by the transition owners
+(`state.transition()`, `state.program_transition()`,
+`state.transition_funded_repair()`). `state.save()` is reserved for
+non-transition field updates and refuses — fail-closed — any payload that
+would change `state` or `run_id` against existing durable state, which also
+closes stale read→save lost-update windows. Crash-atomic read-modify-write of
+non-identity fields is `state.atomic_patch()`: one flock hold, one
+write-ahead `STATE_TXN`, no window between read and commit. Funded repair is
+likewise ONE atomic mutation: the rejection state and the repair entitlement
+commit in a single `STATE_TXN`, and repair-cap exhaustion seals `BLOCKED` in
+that same transaction, so an unfunded claimable `CHANGES_REQUESTED` can never
+exist — not even across a crash.
 
 ## Event log
 

@@ -8,7 +8,7 @@ trap 'rm -rf "$TMP"' EXIT
 
 TMP_ROOT="$TMP" ROOT_DIR="$ROOT_DIR" OFLOOP_BIN="$OFLOOP_BIN" \
 PYTHONDONTWRITEBYTECODE=1 python3 -B - <<'PY'
-import json, os, subprocess, time
+import json, os, subprocess, sys, time
 from pathlib import Path
 from ownframework_loop import state as state_mod, supervisor
 
@@ -16,6 +16,11 @@ tmp = Path(os.environ["TMP_ROOT"])
 root = Path(os.environ["ROOT_DIR"])
 setup = root / "tests/helpers/setup_program_run.py"
 ofloop = Path(os.environ["OFLOOP_BIN"])
+# Crash-state seeding is a TEST-ONLY seam: production save() can never change
+# transition identity; the CP-1 -> CP-2 boundary is seeded as the durable
+# state a real advancement crash would leave behind.
+sys.path.insert(0, str(root / "tests" / "helpers"))
+from state_seed import seed_state
 
 def git(repo, *args):
     subprocess.run(["git", "-C", str(repo), *args], check=True,
@@ -43,7 +48,7 @@ def make_boundary(repo, rid):
     previous_cp["terminal"] = "APPROVED"
     next_cp = {x["id"]: x for x in prog["checkpoints"]}["CP-2"]
     next_cp.update(build_pass_count=0, review_pass_count=0, repair_round_count=0)
-    state_mod.save(repo, rid, doc)
+    seed_state(repo, rid, doc)
 
 def held_fixture(name, rid):
     repo = make_repo(name); make_program(repo, rid); make_boundary(repo, rid)

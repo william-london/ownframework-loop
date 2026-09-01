@@ -142,6 +142,10 @@ repo = Path(sys.argv[1]); rid = sys.argv[2]
 run_d = state_mod.run_dir(repo, rid)
 X = "x" * 40
 Y = "y" * 40
+# Crash-state seeding is a TEST-ONLY seam: production save() can never
+# change transition identity.
+sys.path.insert(0, str(Path(os.environ["OFLOOP_ROOT"]) / "tests" / "helpers"))
+from state_seed import seed_state
 
 # --- case A: stale CHANGES_REQUESTED verdict + fresh failed build receipt.
 # v0.6.3 raised a dispatch invariant error here (hard quarantine). v0.7.0
@@ -150,7 +154,7 @@ state = state_mod.load(repo, rid)
 state["state"] = "CHANGES_REQUESTED"
 state["repair_round"] = 1
 state["last_candidate_sha"] = Y
-state_mod.save(repo, rid, state)
+seed_state(repo, rid, state)
 (run_d / "REVIEW_VERDICT.json").write_text(json.dumps({
     "schema": "ownframework-loop-review-verdict/v2",
     "run_id": rid,
