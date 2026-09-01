@@ -1439,6 +1439,9 @@ def _attempt_provenance_gate(
         return False, "semantic_replay_attempt_unaccounted", None
     if attempt["failure_class"] or attempt["failure_reason"]:
         return False, "semantic_replay_attempt_previously_failed", None
+    runner_impl = _runner(str(job["runner"]))
+    if not bool(getattr(runner_impl, "requires_capability_receipt", False)):
+        return True, "", None
     try:
         receipt = capabilities_mod.read_resolution_receipt(
             Path(str(job["repo"])),
