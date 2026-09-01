@@ -149,17 +149,15 @@ def verify_profile_integrity(profile: dict[str, Any]) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Strict-quality commissioning.
+# Strict-effort operator assertion.
 #
-# A profile that requests an explicit `effort` demands a quality the provider
-# envelope cannot prove empirically (unlike `model`, which the envelope can
-# reveal). Such a profile is therefore only runnable when an operator has
-# COMMISSIONED an effort attestation binding exactly that profile/provider/
-# model/effort. Without it the profile fails closed BEFORE any model call —
-# a silent quality substitution is never certified as the requested profile.
+# Claude's result envelope does NOT expose effective effort. This artifact is
+# therefore an operator assertion authorizing the requested effort for one
+# exact profile + semantic-runtime generation. It is not provider-observed
+# evidence that Claude internally honored that effort value.
 # ---------------------------------------------------------------------------
 
-EFFORT_ATTESTATION_SCHEMA = "ownframework-loop-runner-effort-attestation/v2"
+EFFORT_ATTESTATION_SCHEMA = "ownframework-loop-runner-effort-operator-assertion/v3"
 
 
 def effort_attestation_path(name: str) -> Path:
@@ -192,6 +190,7 @@ def write_effort_attestation(
         raise RunnerProfileError("effort attestation effort does not match resolved profile")
     body = {
         "schema": EFFORT_ATTESTATION_SCHEMA,
+        "evidence_kind": "operator_assertion",
         "profile": name,
         "provider": provider,
         "model": str(profile.get("model") or ""),
@@ -244,7 +243,9 @@ def verify_effort_attestation(profile: dict[str, Any]) -> dict[str, Any] | None:
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise RunnerProfileError(f"effort attestation unreadable: {exc}") from exc
     if not isinstance(doc, dict) or doc.get("schema") != EFFORT_ATTESTATION_SCHEMA:
-        raise RunnerProfileError("effort attestation schema mismatch")
+        raise RunnerProfileError("effort assertion schema mismatch")
+    if doc.get("evidence_kind") != "operator_assertion":
+        raise RunnerProfileError("effort evidence is not an operator assertion")
     claimed = doc.get("attestation_sha256")
     body = {k: v for k, v in doc.items() if k != "attestation_sha256"}
     if not claimed or hashlib.sha256(_canonical(body)).hexdigest() != claimed:
@@ -262,6 +263,7 @@ def verify_effort_attestation(profile: dict[str, Any]) -> dict[str, Any] | None:
             raise RunnerProfileError(f"effort attestation stale or mismatched: {key}")
     return {
         "schema": EFFORT_ATTESTATION_SCHEMA,
+        "evidence_kind": "operator_assertion",
         "attestation_sha256": str(claimed),
         "profile_identity_sha256": str(profile.get("identity_sha256") or ""),
         "semantic_runtime_fingerprint": str(
@@ -273,15 +275,20 @@ def public_summary(profile: dict[str, Any]) -> dict[str, Any]:
     out = {k: profile.get(k) for k in (
         "schema", "name", "provider", "model", "effort", "identity_sha256"
     )}
-    # Truthful strictness marker: a profile requesting an explicit model or
-    # effort is quality-strict and is fail-closed enforced (model proven from
-    # the provider envelope; effort requires a commissioned attestation).
-    out["strict_quality"] = bool(
-        profile.get("model") is not None or profile.get("effort") is not None
+    # Moving aliases are refused during validation, so an explicit model is a
+    # strict provider identity that can be proven post-provider.
+    out["strict_model"] = profile.get("model") is not None
+    # Effort remains operator-authorized configuration, not provider-observed
+    # effective quality.
+    out["operator_asserted_effort"] = profile.get("effort") is not None
+    out["effort_evidence_kind"] = (
+        "operator_assertion" if profile.get("effort") is not None else "none"
     )
+    out["effective_effort_proven"] = False
+    out["strict_quality"] = bool(out["strict_model"])
     attestation = profile.get("effort_attestation")
     if isinstance(attestation, dict):
-        out["effort_attestation_sha256"] = attestation.get("attestation_sha256")
+        out["effort_assertion_sha256"] = attestation.get("attestation_sha256")
     return out
 
 

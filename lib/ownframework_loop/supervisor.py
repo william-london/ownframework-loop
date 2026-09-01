@@ -1459,9 +1459,6 @@ def _attempt_provenance_gate(
     return True, "", receipt
 
 
-_MODEL_USAGE_JSON_MAX = 8192
-
-
 def _extract_model_usage_json(payload: dict[str, Any] | None) -> str:
     """Canonical JSON of the FULL provider-reported modelUsage, or "".
 
@@ -1480,7 +1477,9 @@ def _extract_model_usage_json(payload: dict[str, Any] | None) -> str:
         )
     except (TypeError, ValueError):
         return ""
-    return encoded[:_MODEL_USAGE_JSON_MAX]
+    # The durable provider envelope is already bounded. Preserve complete,
+    # valid canonical JSON instead of slicing evidence into an invalid fragment.
+    return encoded
 
 
 def _account_attempt_cost(

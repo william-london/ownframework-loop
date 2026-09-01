@@ -74,7 +74,10 @@ with tempfile.TemporaryDirectory() as td:
     # restore the manifest used by the already-resolved profile integrity checks
     del bad_manifest["profiles"]["alias"]
     manifest.write_text(json.dumps(bad_manifest)); manifest.chmod(0o600)
-    assert runner_profiles.public_summary(stricty)["strict_quality"] is True
+    stricty_summary = runner_profiles.public_summary(stricty)
+    assert stricty_summary["strict_quality"] is True
+    assert stricty_summary["operator_asserted_effort"] is True
+    assert stricty_summary["effective_effort_proven"] is False
     assert runner_profiles.public_summary(plain)["strict_quality"] is False
 
     # Non-strict profiles need no attestation.
@@ -85,7 +88,7 @@ with tempfile.TemporaryDirectory() as td:
         raise SystemExit("unattested strict effort accepted")
     except runner_profiles.RunnerProfileError as exc:
         assert "attestation" in str(exc)
-    # Operator commissions the attestation; then it verifies.
+    # Operator records the runtime-bound effort assertion; then it verifies.
     runner_profiles.write_effort_attestation(
         name="stricty", provider="claude-code", model="claude-sonnet-4-6", effort="high"
     )
@@ -119,17 +122,19 @@ with tempfile.TemporaryDirectory() as td:
         raise SystemExit("tampered effort attestation accepted")
     except runner_profiles.RunnerProfileError:
         pass
-    # Rewrite valid but for the WRONG effort: binding mismatch refused.
-    runner_profiles.write_effort_attestation(
-        name="stricty", provider="claude-code", model="claude-sonnet-4-6", effort="max"
-    )
+    # The writer itself cannot mint an assertion that disagrees with the
+    # commissioned profile.
     try:
-        runner_profiles.verify_effort_attestation(stricty)
-        raise SystemExit("wrong-effort attestation accepted")
+        runner_profiles.write_effort_attestation(
+            name="stricty", provider="claude-code",
+            model="claude-sonnet-4-6", effort="max"
+        )
+        raise SystemExit("wrong-effort assertion minted")
     except runner_profiles.RunnerProfileError:
         pass
     runner_profiles.write_effort_attestation(
-        name="stricty", provider="claude-code", model="sonnet", effort="high"
+        name="stricty", provider="claude-code",
+        model="claude-sonnet-4-6", effort="high"
     )
     # A symlinked attestation is refused.
     real = p.read_text()
@@ -145,7 +150,7 @@ with tempfile.TemporaryDirectory() as td:
         pass
 print("1 strict runner-profile truth ok")
 PY
-pass "strict profiles fail closed: substitution, unproven quality, unattested effort"
+pass "runner quality truth: exact-model proof + runtime-bound operator effort assertion"
 
 # ---------- 2. commissioning failure normalization ----------
 python3 - <<'PY'

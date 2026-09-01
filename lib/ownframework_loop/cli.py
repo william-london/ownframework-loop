@@ -1694,6 +1694,7 @@ def _build_parser() -> argparse.ArgumentParser:
             _emit({"ok": False, "error": str(exc)}, exit_code=2)
             return
         out["ok"] = True
+        out["effective_effort_proven"] = False
         _emit(out)
 
     def cmd_capabilities_preflight(args: argparse.Namespace) -> None:
@@ -1772,7 +1773,7 @@ def _build_parser() -> argparse.ArgumentParser:
     cap_commission.set_defaults(func=cmd_capabilities_commission)
     cap_attest = cap_sub.add_parser(
         "attest-effort",
-        help="commission one strict-effort runner profile for the current Claude runtime",
+        help="record a runtime-bound operator assertion for a profile's requested effort",
     )
     cap_attest.add_argument("profile")
     cap_attest.add_argument("--provider", default="claude-code")
