@@ -14,15 +14,15 @@ with tempfile.TemporaryDirectory() as td:
     path=runner_profiles.default_manifest_path(); path.parent.mkdir(parents=True)
     path.write_text(json.dumps({
       "schema":runner_profiles.MANIFEST_SCHEMA,
-      "profiles":{"deep":{"provider":"claude-code","model":"sonnet","effort":"high"}}
+      "profiles":{"deep":{"provider":"claude-code","model":"claude-sonnet-4-6","effort":"high"}}
     })); path.chmod(0o600)
     deep=runner_profiles.resolve_profile("deep",provider="claude-code")
-    assert deep["model"]=="sonnet" and deep["effort"]=="high"
+    assert deep["model"]=="claude-sonnet-4-6" and deep["effort"]=="high"
     assert len(deep["identity_sha256"])==64
     # Authority flags are not representable in the strict profile schema.
     path.write_text(json.dumps({
       "schema":runner_profiles.MANIFEST_SCHEMA,
-      "profiles":{"bad":{"provider":"claude-code","model":"sonnet","permission_mode":"bypassPermissions"}}
+      "profiles":{"bad":{"provider":"claude-code","model":"claude-sonnet-4-6","permission_mode":"bypassPermissions"}}
     })); path.chmod(0o600)
     try: runner_profiles.resolve_profile("bad",provider="claude-code")
     except runner_profiles.RunnerProfileError: pass
