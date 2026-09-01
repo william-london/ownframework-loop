@@ -28,6 +28,9 @@ open(os.environ["OFLOOP_CAPTURE"],"w").write(json.dumps(sys.argv[1:]))
 print(json.dumps({"is_error":False,"subtype":"success","result":"ok","total_cost_usd":0.01,"usage":{"input_tokens":1,"output_tokens":1}}))
 """)
  fake.chmod(0o700)
+ # Commission strict effort against the EXACT pinned runtime the runner will
+ # later execute. Changing OFLOOP_CLAUDE_BIN after attestation must stale it.
+ os.environ["OFLOOP_CLAUDE_BIN"]=str(fake)
  profiles=runner_profiles.default_manifest_path(); profiles.parent.mkdir(parents=True)
  profiles.write_text(json.dumps({
   "schema":runner_profiles.MANIFEST_SCHEMA,
@@ -40,7 +43,7 @@ print(json.dumps({"is_error":False,"subtype":"success","result":"ok","total_cost
  runner_profiles.write_effort_attestation(
   name="deep",provider="claude-code",model="claude-sonnet-4-6",effort="high")
  runner_profiles.verify_effort_attestation(resolved_deep)
- os.environ["OFLOOP_CLAUDE_BIN"]=str(fake); os.environ["OFLOOP_CAPTURE"]=str(capture)
+ os.environ["OFLOOP_CAPTURE"]=str(capture)
  result=supervisor.ClaudeCodeRunner().run({
   "schema":supervisor.SCHEMA,"decision":"BUILD","role":"builder","run_id":"r1",
   "state":"BUILDING","canonical_repo":str(repo),"worktree":str(wt),
