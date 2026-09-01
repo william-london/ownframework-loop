@@ -31,14 +31,14 @@ print(json.dumps({"is_error":False,"subtype":"success","result":"ok","total_cost
  profiles=runner_profiles.default_manifest_path(); profiles.parent.mkdir(parents=True)
  profiles.write_text(json.dumps({
   "schema":runner_profiles.MANIFEST_SCHEMA,
-  "profiles":{"deep":{"provider":"claude-code","model":"sonnet","effort":"high"}}
+  "profiles":{"deep":{"provider":"claude-code","model":"claude-sonnet-4-6","effort":"high"}}
  })); profiles.chmod(0o600)
  # 'deep' is quality-strict (explicit effort). The runner fails closed before
  # any provider call unless the effort is commissioned; the fixture plays the
  # operator and commissions the attestation.
  resolved_deep=runner_profiles.resolve_profile("deep",provider="claude-code")
  runner_profiles.write_effort_attestation(
-  name="deep",provider="claude-code",model="sonnet",effort="high")
+  name="deep",provider="claude-code",model="claude-sonnet-4-6",effort="high")
  runner_profiles.verify_effort_attestation(resolved_deep)
  os.environ["OFLOOP_CLAUDE_BIN"]=str(fake); os.environ["OFLOOP_CAPTURE"]=str(capture)
  result=supervisor.ClaudeCodeRunner().run({
@@ -50,7 +50,7 @@ print(json.dumps({"is_error":False,"subtype":"success","result":"ok","total_cost
  assert result.ok
  args=json.loads(capture.read_text())
  def val(flag): return args[args.index(flag)+1]
- assert val("--model")=="sonnet"
+ assert val("--model")=="claude-sonnet-4-6"
  assert val("--effort")=="high"
  assert val("--max-budget-usd")=="2.75"
  assert "--restricted" in args and val("--permission-mode")=="dontAsk"
