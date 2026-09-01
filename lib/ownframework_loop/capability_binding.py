@@ -21,6 +21,11 @@ def _canonical(obj: Any) -> bytes:
 
 
 def binding_path(canonical_repo: Path, run_id: str) -> Path:
+    # Defense in depth: callers already validate run_id, but this path
+    # builds filesystem locations from it and must never be reachable with
+    # an unvalidated identifier.
+    from . import state as _state_mod
+    _state_mod.validate_run_id(run_id)
     return canonical_repo.resolve(strict=False) / ".ownframework-loop" / run_id / "CAPABILITY_BINDING.json"
 
 

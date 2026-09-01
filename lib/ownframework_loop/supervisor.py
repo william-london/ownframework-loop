@@ -3454,40 +3454,57 @@ class ClaudeCodeRunner:
         parsed: dict[str, Any] | None = None
         try:
             data = json.loads(stdout_data or "")
-            if isinstance(data, dict):
-                parsed = data
-                if "total_cost_usd" in data:
+        except json.JSONDecodeError:
+            data = None
+        if isinstance(data, dict):
+            parsed = data
+            # Telemetry extraction degrades independently: a malformed cost
+            # or usage value must demote that TELEMETRY to unknown, never
+            # discard the semantic result envelope itself (which would turn
+            # a completed pass into a duplicate model call).
+            if "total_cost_usd" in data:
+                try:
                     candidate_cost = float(data.get("total_cost_usd"))
-                    if math.isfinite(candidate_cost) and candidate_cost >= 0:
-                        cost = candidate_cost
-                        cost_known = True
-                usage = data.get("usage")
-                if isinstance(usage, dict):
-                    token_keys = (
-                        ("input_tokens", "input_tokens"),
-                        ("output_tokens", "output_tokens"),
-                        ("cache_read_tokens", "cache_read_input_tokens"),
-                        ("cache_creation_tokens", "cache_creation_input_tokens"),
-                    )
-                    values: dict[str, int] = {}
-                    usage_valid = False
-                    for target, source in token_keys:
-                        if source not in usage:
-                            values[target] = 0
-                            continue
+                except (TypeError, ValueError):
+                    candidate_cost = None
+                if (
+                    candidate_cost is not None
+                    and math.isfinite(candidate_cost)
+                    and candidate_cost >= 0
+                ):
+                    cost = candidate_cost
+                    cost_known = True
+            usage = data.get("usage")
+            if isinstance(usage, dict):
+                token_keys = (
+                    ("input_tokens", "input_tokens"),
+                    ("output_tokens", "output_tokens"),
+                    ("cache_read_tokens", "cache_read_input_tokens"),
+                    ("cache_creation_tokens", "cache_creation_input_tokens"),
+                )
+                values: dict[str, int] = {}
+                usage_valid = False
+                usage_malformed = False
+                for target, source in token_keys:
+                    if source not in usage:
+                        values[target] = 0
+                        continue
+                    try:
                         candidate = int(usage.get(source) or 0)
-                        if candidate < 0:
-                            raise ValueError("negative token usage")
-                        values[target] = candidate
-                        usage_valid = True
-                    if usage_valid:
-                        input_tokens = values["input_tokens"]
-                        output_tokens = values["output_tokens"]
-                        cache_read_tokens = values["cache_read_tokens"]
-                        cache_creation_tokens = values["cache_creation_tokens"]
-                        tokens_known = True
-        except (json.JSONDecodeError, TypeError, ValueError):
-            parsed = None
+                    except (TypeError, ValueError):
+                        usage_malformed = True
+                        break
+                    if candidate < 0:
+                        usage_malformed = True
+                        break
+                    values[target] = candidate
+                    usage_valid = True
+                if usage_valid and not usage_malformed:
+                    input_tokens = values["input_tokens"]
+                    output_tokens = values["output_tokens"]
+                    cache_read_tokens = values["cache_read_tokens"]
+                    cache_creation_tokens = values["cache_creation_tokens"]
+                    tokens_known = True
 
         # Treat Claude as success when its structured JSON output says
         # is_error is false AND there is a substantive result. Claude CLI

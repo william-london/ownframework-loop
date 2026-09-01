@@ -747,6 +747,11 @@ def write_resolution_receipt(
     run_binding: dict[str, Any] | None = None,
     runner_profile: dict[str, Any] | None = None,
 ) -> Path:
+    # Defense in depth: callers already validate run_id, but this path
+    # builds filesystem locations from it and must never be reachable with
+    # an unvalidated identifier.
+    from . import state as _state_mod
+    _state_mod.validate_run_id(run_id)
     safe_prefix = re.sub(r"[^A-Za-z0-9_.-]", "_", str(attempt_id))[:64]
     safe_attempt = safe_prefix + "-" + hashlib.sha256(str(attempt_id).encode()).hexdigest()[:16]
     if not safe_attempt:
