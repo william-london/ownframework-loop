@@ -37,6 +37,7 @@ def simple_run(repo,rid,state_name):
          "candidate_branch":f"factory/candidate/{rid}","packet_schema":"ownframework-work-packet/v2",
          "approval_method":"tty_confirmation","confirmation_token":approval.derive_confirmation_token(sha)}
     (run/"APPROVAL.json").write_text(json.dumps(app))
+    (run/"APPROVAL.json").chmod(0o600)
     s=state_mod.initial_state(rid); s["state"]=state_name; seed_state(repo,rid,s)
     return run,app
 
@@ -110,6 +111,7 @@ def program_fixture(two=True, verdict="APPROVED"):
       "canonical_repo":str(repo.resolve()),"baseline_branch":"master","baseline_sha":base,"candidate_branch":branch,"packet_schema":"ownframework-work-packet/v3",
       "approval_method":"tty_confirmation","confirmation_token":approval.derive_confirmation_token(sha)}
     (run/"APPROVAL.json").write_text(json.dumps(app))
+    (run/"APPROVAL.json").chmod(0o600)
     ps=program.materialise_initial_program_state(packet,baseline_sha=base,candidate_branch=branch)
     cp=ps["checkpoints"][0]; cp["build_pass_count"]=1; cp["review_pass_count"]=1; ps["cumulative_counters"]["build_pass_count"]=1; ps["cumulative_counters"]["review_pass_count"]=1
     state=state_mod.initial_state(rid); state.update({"schema":state_mod.PROGRAM_STATE_SCHEMA_VERSION,"state":"REVIEWING","program":ps,"build_pass_count":1,"review_pass_count":1,"last_candidate_sha":base}); seed_state(repo,rid,state)
