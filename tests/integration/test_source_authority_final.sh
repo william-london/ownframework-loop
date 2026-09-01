@@ -214,6 +214,17 @@ from pathlib import Path
 sys.path.insert(0, os.environ.get("OFLOOP_LIB"))
 from ownframework_loop import capabilities
 
+# No physical Playwright install is required in this model-free source test.
+# Pin a deterministic client identity so the proof/binding contract can be
+# exercised independently of host provisioning.
+fake_client = {
+    "package_root": "/commissioned/playwright",
+    "package_tree_sha256": "a" * 64,
+    "distribution_version": "9.9.9",
+}
+_original_client_identity = capabilities.playwright_client_identity
+capabilities.playwright_client_identity = lambda: dict(fake_client)
+
 with tempfile.TemporaryDirectory() as td:
     root = Path(td)
     os.environ["XDG_STATE_HOME"] = str(root / "state")
@@ -233,6 +244,7 @@ with tempfile.TemporaryDirectory() as td:
         "browser.playwright.chromium",
         asset_root=str(asset_root),
         asset_merkle_sha256=merkle,
+        playwright_client=fake_client,
         playwright_version="9.9.9",
         browser_version="9999",
     )
@@ -271,6 +283,7 @@ with tempfile.TemporaryDirectory() as td:
         "browser.playwright.chromium",
         asset_root=str(asset_root),
         asset_merkle_sha256=merkle,
+        playwright_client=fake_client,
         playwright_version="9.9.9",
         browser_version="9999",
     )
@@ -343,6 +356,7 @@ with tempfile.TemporaryDirectory() as td:
         assert browser_meta["browser_asset_root"] == str(asset_root), browser_meta
         assert browser_meta["browser_asset_merkle_sha256"] == merkle, browser_meta
         assert browser_meta["browser_proof_sha256"], browser_meta
+        assert browser_meta["playwright_client_identity"] == fake_client, browser_meta
         assert "provisionable" in browser_meta, browser_meta
         assert res["environment"]["PLAYWRIGHT_BROWSERS_PATH"] == str(asset_root)
         assert res["environment"]["PLAYWRIGHT_SKIP_BROWSER_GC"] == "1"
@@ -355,6 +369,7 @@ with tempfile.TemporaryDirectory() as td:
         res, runner_profiles.resolve_profile("default", provider="claude-code")
     )
     assert projection["capabilities"][0]["browser"]["browser_asset_merkle_sha256"] == merkle
+    assert projection["capabilities"][0]["browser"]["playwright_client_identity"] == fake_client
     # Host-manifest trusted asset roots refuse unresolved symlinks.
     manifest = capabilities.default_host_manifest_path()
     manifest.parent.mkdir(parents=True, exist_ok=True)
@@ -385,6 +400,7 @@ with tempfile.TemporaryDirectory() as td:
         raise SystemExit("symlinked trusted asset root accepted")
     except capabilities.CapabilityResolutionError:
         pass
+capabilities.playwright_client_identity = _original_client_identity
 print("3 browser proof freshness + shared read-only wiring ok")
 PY
 pass "browser proof is private, freshness-bound, auto-stale on drift; assets shared read-only"
