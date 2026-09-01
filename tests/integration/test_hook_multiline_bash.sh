@@ -218,7 +218,9 @@ docker_payload="$(make_payload "docker compose up")"
 set +e
 docker_out="$(
   printf '%s' "$docker_payload" |
-  OFLOOP_PRIVILEGED_CAPABILITIES="container.docker"   CLAUDE_PLUGIN_ROOT="$ROOT" PATH="$SANDBOX:$PATH" bash "$HOOK" 2>&1
+  OFLOOP_PRIVILEGED_CAPABILITIES="container.docker" \
+  OFLOOP_CONTAINER_BROKER_EXECUTABLE="$SANDBOX/docker" \
+  CLAUDE_PLUGIN_ROOT="$ROOT" PATH="$SANDBOX:$PATH" bash "$HOOK" 2>&1
 )"
 docker_rc=$?
 set -e
@@ -250,6 +252,7 @@ set +e
 push_out="$(
   printf '%s' "$push_payload" |
   OFLOOP_PRIVILEGED_CAPABILITIES="container.docker" \
+  OFLOOP_CONTAINER_BROKER_EXECUTABLE="$SANDBOX/docker" \
   CLAUDE_PLUGIN_ROOT="$ROOT" PATH="$SANDBOX:$PATH" bash "$HOOK" 2>&1
 )"
 push_rc=$?
