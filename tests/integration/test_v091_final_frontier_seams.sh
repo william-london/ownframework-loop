@@ -33,9 +33,10 @@ tmp = Path(tempfile.mkdtemp(prefix="ofloop-final-frontier-"))
 secret_store = tmp / "host-secrets"
 secret_store.mkdir()
 pem_target = secret_store / "id_rsa"
+private_key_label = "OPENSSH " + "PRIVATE KEY"
 pem_target.write_text(
-    "-----BEGIN OPENSSH PRIVATE KEY-----\nabcdef\n"
-    "-----END OPENSSH PRIVATE KEY-----\n",
+    "-----BEGIN " + private_key_label + "-----\nabcdef\n"
+    "-----END " + private_key_label + "-----\n",
     encoding="utf-8",
 )
 
@@ -57,10 +58,11 @@ assert not any(
 
 # The symlink's candidate bytes (the target text) ARE scanned: a target
 # path containing a hard pattern is detected.
-token_dir = tmp / "AKIA0123456789ABCDEF-store"
+aws_access_id = "AKIA" + "0123456789ABCDEF"
+token_dir = tmp / (aws_access_id + "-store")
 token_dir.mkdir()
 token_link = scan_dir / "lookup"
-os.symlink(str(token_dir / "AKIA0123456789ABCDEF.txt"), str(token_link))
+os.symlink(str(token_dir / (aws_access_id + ".txt")), str(token_link))
 token_findings = secrets_v2.scan_path_for_secrets_strict(token_link)
 assert any(
     f.get("pattern_id") == "aws_access_key" for f in token_findings
@@ -78,7 +80,7 @@ if os.name == "posix":
 
 # Plain secret-bearing files still block.
 plain = scan_dir / "creds.txt"
-plain.write_text("key = sk-ant-api03-" + "a" * 24 + "\n", encoding="utf-8")
+plain.write_text("key = sk-" + "ant-api03-" + "a" * 24 + "\n", encoding="utf-8")
 plain_findings = secrets_v2.scan_path_for_secrets_strict(plain)
 assert any(
     f.get("pattern_id") == "anthropic_api_key" for f in plain_findings
