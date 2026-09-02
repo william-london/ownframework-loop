@@ -416,4 +416,83 @@ print("8 Playwright client drift stales browser proof")
 PY
 pass "browser proof binds exact Playwright client implementation, not version strings alone"
 
+# ---------- 9. SINGLE claim owner: tampered STATE and cap-zero both fail closed ----------
+python3 - "$T" "$RID" <<'PY'
+import json, os, sys, tempfile
+from pathlib import Path
+sys.path.insert(0, os.environ.get("OFLOOP_LIB"))
+from ownframework_loop import state as state_mod, limits as limits_mod
+
+# 9a. Tampered STATE during in-flight replay must be refused by integrity
+# verification, never laundered into a fresh pass number. The mutation
+# integrity gate runs before every transition / claim write, so a tampered
+# build_pass_count or state value fails closed with TamperingDetected.
+with tempfile.TemporaryDirectory() as td:
+    os.environ["XDG_STATE_HOME"] = str(Path(td) / "state")
+    repo = Path(td) / "repo"; repo.mkdir()
+    (repo / ".ownframework-loop" / "rid").mkdir(parents=True)
+    state_mod.save(repo, "rid", state_mod.initial_state("rid"))
+    state_mod.transition(repo, "rid", to_state="READY_TO_BUILD",
+                         actor="t", reason="ready")
+    packet = {"risk_budget": {"max_build_passes": 5, "max_review_passes": 5}}
+    first = state_mod.claim_single_pass(repo, "rid", pass_kind="build",
+                                        actor="b", packet=packet)
+    assert first["claimed_pass_number"] == 1 and first["replayed"] is False, first
+    sp = state_mod.state_path(repo, "rid")
+    raw = json.loads(sp.read_text())
+    raw["build_pass_count"] = 0
+    sp.write_text(json.dumps(raw, indent=2, sort_keys=True))
+    try:
+        state_mod.claim_single_pass(repo, "rid", pass_kind="build",
+                                    actor="b", packet=packet)
+        raise SystemExit("tampered replay accepted")
+    except state_mod.integrity.TamperingDetected as exc:
+        assert "integrity" in str(exc).lower() or "sha" in str(exc).lower(), str(exc)
+
+# 9b. A cap-zero risk_budget seals BLOCKED atomically: the first claim
+# raises RepairLimitExceeded and the same STATE_TXN commits the BLOCKED
+# transition. This is the degenerate boundary of the cap-exhaustion
+# invariant proved in section 1c.
+with tempfile.TemporaryDirectory() as td:
+    os.environ["XDG_STATE_HOME"] = str(Path(td) / "state")
+    repo = Path(td) / "repo"; repo.mkdir()
+    (repo / ".ownframework-loop" / "rid").mkdir(parents=True)
+    state_mod.save(repo, "rid", state_mod.initial_state("rid"))
+    state_mod.transition(repo, "rid", to_state="READY_TO_BUILD",
+                         actor="t", reason="ready")
+    zero = {"risk_budget": {"max_build_passes": 0, "max_review_passes": 0}}
+    try:
+        state_mod.claim_single_pass(repo, "rid", pass_kind="build",
+                                    actor="b", packet=zero)
+        raise SystemExit("cap-zero claim accepted")
+    except limits_mod.RepairLimitExceeded as exc:
+        assert "cap" in str(exc).lower(), str(exc)
+    cur = state_mod.load_verified(repo, "rid")
+    assert cur["state"] == "BLOCKED", cur["state"]
+    assert int(cur.get("build_pass_count", 0)) == 0, cur["build_pass_count"]
+print("9 single-claim fail-closed invariants ok")
+PY
+pass "tampered STATE during SINGLE in-flight replay refused; cap-zero risk_budget seals BLOCKED atomically"
+
+# ---------- 10. complete modelUsage round-trips past the legacy 8 KiB boundary ----------
+python3 - <<'PY'
+import json, os, sys
+sys.path.insert(0, os.environ.get("OFLOOP_LIB"))
+from ownframework_loop import supervisor
+
+# 600 model entries produces ~30 KiB canonical JSON: well past the legacy
+# 8192-byte fence. The current extract path MUST preserve the full
+# provider-reported usage so the ledger never loses multi-model truth.
+usage = {f"model-{i:04d}": {"inputTokens": i, "outputTokens": i + 1}
+         for i in range(600)}
+encoded = supervisor._extract_model_usage_json({"modelUsage": usage})
+assert len(encoded) > 8192, len(encoded)
+assert json.loads(encoded) == usage, "round-trip mismatch"
+# And the boundary reads the empty payload safely.
+assert supervisor._extract_model_usage_json({}) == ""
+assert supervisor._extract_model_usage_json(None) == ""
+print("10 modelUsage boundary preserved ok")
+PY
+pass "complete modelUsage round-trips past 8 KiB; empty payloads return \"\""
+
 echo "OF_LOOP_FINAL_SOURCE_CLOSURE=PASS"
