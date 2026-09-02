@@ -1,6 +1,6 @@
 # Commissioned Claude Semantic-Worker Permission Contract
 
-OwnFramework Loop 0.8.4 is designed for SPEC -> unattended BUILD/REVIEW/repair -> human merge.
+OwnFramework Loop 0.9.1 is designed for SPEC -> unattended BUILD/REVIEW/repair -> human merge.
 
 ## No human permission loop
 

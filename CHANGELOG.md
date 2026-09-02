@@ -2,10 +2,10 @@
 
 All notable source/master release-line changes to OwnFramework Loop are documented here.
 
-**Publication status:** 0.9.1 is the current development source/master line and
-is not yet a published GitHub Release/tag. 0.8.4 remains the immutable released
-serial baseline. The latest published GitHub Release remains **v0.8.4** until the
-commissioning gates below close.
+**Publication status:** 0.9.1 is the current closed source/master line and its
+source-hardening gates are complete. It is not yet a published GitHub
+Release/tag. **v0.8.4** remains the immutable published baseline until a
+separate 0.9.1 release is created.
 The complete historical changelog through 0.5.2 is preserved at
 [`docs/history/CHANGELOG-through-0.5.2.md`](docs/history/CHANGELOG-through-0.5.2.md).
 
@@ -45,6 +45,35 @@ The complete historical changelog through 0.5.2 is preserved at
   remains canonical; reviewer tool caches remain pass-ephemeral;
 - capability-resolution failures are terminalized as proven pre-provider
   semantic attempts instead of leaving a reserved attempt for stale recovery.
+
+### Terminal source hardening
+
+- semantic replay is authorized only after durable resource accounting and an
+  explicit acceptance publication bound to the exact semantic artifact digest
+  and role-specific candidate identity; drifted bytes or candidate identity
+  fail closed without a second semantic charge;
+- preflight output carries the same proved effort-attestation identity used at
+  launch and marks explicit manifest/profile overrides as diagnostic rather
+  than launch-parity evidence;
+- redacted secret scanning refuses unreadable or oversized inputs instead of
+  collapsing unknown scan state into a clean result;
+- browser runtime proof binds the top-level Playwright version to the verified
+  installed distribution identity and rejects contradictory proof;
+- source authority, recovery, claim ownership, cost accounting, capability
+  binding, browser identity, runner-profile truth, secret scanning, worktree
+  ownership, and state/event integrity remain covered by the canonical
+  multi-platform release gate.
+
+### Repository hygiene
+
+- operator-facing adapter and supervisor lifecycle commands live under `bin/`;
+  platform-specific service implementations live under `scripts/supervisor/`;
+  repository root retains only the deliberate core install, uninstall,
+  validation, and release-gate entrypoints;
+- maintained docs, templates, scripts, and tests now have explicit indexes;
+  one-off implementation reports and retired policy examples are absent from
+  the active repository surface while provenance-bearing regression names are
+  retained.
 
 ## 0.9.0 - Bounded Multi-Repository Autonomy (2026-08-31)
 

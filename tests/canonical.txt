@@ -1,7 +1,7 @@
-# OwnFramework Loop — canonical test gate allow-list.
-# Each line is a path relative to repo root. Lines starting with # are ignored.
+# OwnFramework Loop — canonical release-gate allow-list.
+# Paths are repository-relative. Versioned filenames are retained as regression provenance.
 
-# Unit tests
+# Core unit contracts
 tests/unit/test_trust_approval.sh
 tests/unit/test_trust_build_review.sh
 tests/unit/test_approval_pty_e2e.sh
@@ -12,7 +12,7 @@ tests/unit/test_v050_hardening.sh
 tests/unit/test_lifecycle.sh
 tests/unit/test_no_silent_tests.sh
 
-# Integration tests
+# Core integration and portability
 tests/integration/test_v032_bytecode_boundary.sh
 tests/integration/test_release_gate_preflight.sh
 tests/integration/test_version_truth.sh
@@ -43,145 +43,57 @@ tests/integration/test_repair_loop.sh
 tests/integration/test_execution_context_contract.sh
 tests/integration/test_mac_runtime_provenance.sh
 
-# v0.4+ adapter contract tests
+# Adapter contracts
 tests/test_run_adapter_conformance.sh
 tests/integration/test_adapter_portability.sh
 tests/integration/test_adapter_cli.sh
 tests/integration/test_codex_adapter_install.sh
 
+# Runtime authority, recovery, and lifecycle
 tests/integration/test_v061_authority_tail_hardening.sh
-
 tests/integration/test_v061_packet_identity_hardening.sh
-
 tests/integration/test_v061_runner_cost_proof.sh
-
-# v0.6.2 scope-suffix compatibility regression
 tests/integration/test_v062_scope_suffix_compat.sh
-
-# v0.6.3 PROGRAM pre-execution contract regression
 tests/integration/test_v063_program_preflight.sh
-
-# v0.7.0 final autonomy architecture regression
 tests/integration/test_v070_autonomy_envelope.sh
-
-# v0.8.0 final architecture closure — negative authority-boundary regression
 tests/integration/test_v072_authority_negative.sh
-# v0.8.0 final architecture closure — execution-semantics regression
 tests/integration/test_v072_execution_closure.sh
-
-# v0.8.1 closure — runtime-generation contract, install/refresh safety, ledger defaults
 tests/integration/test_v080_runtime_generation.sh
-# v0.8.1 closure — mutating-HTTP fail-closed authority + run-id diagnostics
 tests/integration/test_v080_http_mutation_diagnostics.sh
-
-# v0.8.2 production hardening — byte identity, read-only status, lifecycle safety
 tests/integration/test_v082_production_hardening.sh
-
-# v0.8.3 supervisor enrollment retirement — non-destructive QUARANTINED -> RETIRED,
-# retired rows excluded from install generation probe, retirement refuses
-# QUEUED/BACKOFF/RUNNING, resume refuses RETIRED, artifacts preserved.
 tests/integration/test_v083_supervisor_retire.sh
-
-# v0.8.4 night-shift worker boundary + RETIRED managed lifecycle consistency
 tests/integration/test_v084_nightshift_worker_boundary.sh
-
-# v0.8.4 write-ahead STATE/EVENTS crash recovery + verified dispatch reads
 tests/integration/test_v084_state_transaction_recovery.sh
-
-# v0.8.4 authority-bearing semantic/execution state reads are integrity verified
 tests/integration/test_v084_authoritative_state_reads.sh
-
-# v0.8.4 frozen SPEC network-read authority -> dispatch -> native Claude sandbox.
 tests/integration/test_v084_packet_network_read_authority.sh
-
-# v0.8.4 vendor-neutral core install/discovery/uninstall portability
 tests/integration/test_v084_core_install_portability.sh
-
-# v0.8.4 Linux systemd-user supervisor + Claude sandbox commissioning parity
 tests/integration/test_v084_linux_supervisor_service.sh
-
-# v0.8.4 adversarial runtime/concurrency/crash-consistency repair lane
 tests/integration/test_runtime_recovery_lane.sh
-
-# v0.8.5 final integration — actual PROGRAM review-finalizer repair crash atomicity
 tests/integration/test_v085_program_repair_crash_atomicity.sh
-# v0.8.5 final integration — actual build-finalizer same-pass crash/replay atomicity
 tests/integration/test_v085_build_finalize_replay_atomicity.sh
-
-# v0.8.4 static-call-graph correction — install.sh is not a release orchestrator;
-# validate.sh --installed --skip-tests is non-recursive structural validation.
 tests/integration/test_v084_static_call_graph_correction.sh
-
-# v0.8.5 platform lifecycle repair — fail-closed ledger truth + destructive uninstall safety
 tests/integration/test_v085_ledger_lifecycle_contract.sh
-
-# v0.8.5 platform lifecycle repair — exact Python, rollback, service publication recovery
 tests/integration/test_v085_platform_commissioning_repair.sh
-
-# v0.8.5 source/install distribution parity
 tests/integration/test_v085_distribution_parity.sh
-
-# v0.8.5 artifact schema contract truth
 tests/integration/test_v084_schema_contract_truth.sh
-
-# v0.8.5 exact immutable hosted-CI SHA contract
 tests/integration/test_v085_ci_exact_sha.sh
-
-# v0.8.5 allowlisted-host direct mutation defense matrix
 tests/integration/test_v085_network_mutation_defense.sh
-
-# v0.8.5 commissioned PROGRAM canary model-free contract
 tests/integration/test_v085_commissioned_canary_contract.sh
-
-# v0.9 bounded single-host multi-repository scheduler proof (model-free)
 tests/integration/test_v090_bounded_concurrency.sh
-
-# v0.8.5 commissioned PROGRAM canary durable restart-watcher lifecycle
 tests/integration/test_v085_commissioned_canary_restart_watcher.sh
-
-# v0.8.6 typed one-shot per-run dispatch hold and atomic scheduler hand-off
 tests/integration/test_v086_dispatch_hold.sh
-
-# v0.8.5 PROGRAM routing semantics — build-validation retry versus
-# reviewer-funded repair through the actual deterministic finalizers.
 tests/integration/test_v085_program_routing_semantics.sh
 
-# v0.9.1 host capability resolution + cache/broker boundary
+# Capability and terminal authority
 tests/integration/test_v091_capability_runtime.sh
-
-# v0.9.1 read-only capability inventory/preflight CLI
 tests/integration/test_v091_capability_cli.sh
-
-# v0.9.1 immutable run-level capability identity and drift/race proof
 tests/integration/test_v091_capability_binding.sh
-# v0.9.1 actual trusted-canary privileged commissioning evidence
 tests/integration/test_v091_privileged_commissioning.sh
-# v0.9.1 trusted named runner-profile plane
 tests/integration/test_v091_runner_profiles.sh
-
-# v0.9.1 structural broker-only Docker authority negatives
 tests/integration/test_v091_docker_broker_authority.sh
-
-# v0.9.1 trusted model/effort profile + funded native Claude pass budget
 tests/integration/test_v091_pass_budget_profile.sh
-
-# Single-mode repair continuity (build-validation retry must stay claimable),
-# crash-atomic repair funding, extras FSM-bypass defense, and guard classifier
-# hardening (version-neutral).
 tests/integration/test_single_mode_repair_continuity.sh
-
-# Final source-closure crash/negative regressions: crash-atomic funded repair,
-# non-transition save identity guard, symlinked-manifest rejection, pre-provider
-# runtime-drift re-proof, capability-binding allowance, effective-model capture.
 tests/integration/test_final_source_closure.sh
-
-# Final source-authority regressions: strict runner-profile truth gate,
-# commissioned effort attestation negatives, commissioning failure
-# normalization (timeout/launch), and browser runtime proof privacy/
-# freshness/asset-drift + shared read-only asset wiring.
 tests/integration/test_source_authority_final.sh
 tests/integration/test_single_claim_atomicity.sh
-
-# v0.9.1 terminal source closure — semantic acceptance crash entitlement,
-# preflight/launch provenance parity, fail-closed redacted secrets, browser version identity.
 tests/integration/test_v091_terminal_source_closure.sh

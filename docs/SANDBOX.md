@@ -1,6 +1,6 @@
 # Commissioned Claude Semantic-Worker Sandbox
 
-OwnFramework Loop 0.8.4 uses Claude Code's native shared-machine controls instead of recreating them.
+OwnFramework Loop 0.9.1 uses Claude Code's native shared-machine controls instead of recreating them.
 
 ## Native boundary
 
