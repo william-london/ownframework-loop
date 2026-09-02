@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Remove the per-user OwnFramework Loop macOS supervisor service.
 set -euo pipefail
-ROOT="$(cd "$(dirname "$0")" && pwd)"
+ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 
 LABEL="com.ownframework.loop-supervisor"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"

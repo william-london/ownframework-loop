@@ -182,7 +182,7 @@ exit 0
 SH
   chmod +x "$TX_FAKE/launchctl"
   PATH_TX="$TX_BIN:$TX_FAKE:/usr/local/bin:/usr/bin:/bin"
-  HOME="$TX_HOME" XDG_STATE_HOME="$TX_STATE" PATH="$PATH_TX" PYTHON_BIN="$A" OFLOOP_BIN="$CORE_ROOT/bin/ofloop" bash "$CORE_ROOT/install-supervisor.sh" > "$TMP/tx-first.out"
+  HOME="$TX_HOME" XDG_STATE_HOME="$TX_STATE" PATH="$PATH_TX" PYTHON_BIN="$A" OFLOOP_BIN="$CORE_ROOT/bin/ofloop" bash "$CORE_ROOT/bin/install-supervisor" > "$TMP/tx-first.out"
   test -f "$TX_ROOT/supervisor.sqlite3" && test -f "$TX_ROOT/ledger-incarnation.json" || fail "first mac commissioning did not initialize canonical ledger"
   ART1="$TX_HOME/Library/LaunchAgents/com.ownframework.loop-supervisor.plist"
   ART2="$TX_ROOT/runtime-provenance.json"; ART3="$TX_ROOT/service-env.json"
@@ -197,7 +197,7 @@ SH
     if [[ "$stage" -ge 2 ]]; then printf '{"broken":true}\n' > "$ART2"; fi
     if [[ "$stage" -ge 3 ]]; then printf '{"broken":true}\n' > "$ART3"; fi
     printf 'prepared\n' > "$TXN/state"
-    PATH="$PATH_TX" PYTHON_BIN="$A" OFLOOP_BIN="$CORE_ROOT/bin/ofloop" bash "$CORE_ROOT/install-supervisor.sh" > "$TMP/tx-recover-$stage.out"
+    PATH="$PATH_TX" PYTHON_BIN="$A" OFLOOP_BIN="$CORE_ROOT/bin/ofloop" bash "$CORE_ROOT/bin/install-supervisor" > "$TMP/tx-recover-$stage.out"
     grep -F 'SUPERVISOR_INSTALL_RECOVERY=recovered_incomplete_transaction' "$TMP/tx-recover-$stage.out" >/dev/null || fail "mac transaction stage $stage not recovered"
   done
 else
@@ -211,7 +211,7 @@ esac
 SH
   chmod +x "$TX_FAKE/systemctl"
   PATH_TX="$TX_BIN:$TX_FAKE:/usr/local/bin:/usr/bin:/bin"
-  HOME="$TX_HOME" XDG_STATE_HOME="$TX_STATE" XDG_CONFIG_HOME="$TX_CFG" OFLOOP_SYSTEMD_USER_DIR="$TX_CFG/systemd/user" SYSTEMCTL_BIN="$TX_FAKE/systemctl" PATH="$PATH_TX" PYTHON_BIN="$A" OFLOOP_BIN="$CORE_ROOT/bin/ofloop" bash "$CORE_ROOT/install-supervisor.sh" > "$TMP/tx-first.out"
+  HOME="$TX_HOME" XDG_STATE_HOME="$TX_STATE" XDG_CONFIG_HOME="$TX_CFG" OFLOOP_SYSTEMD_USER_DIR="$TX_CFG/systemd/user" SYSTEMCTL_BIN="$TX_FAKE/systemctl" PATH="$PATH_TX" PYTHON_BIN="$A" OFLOOP_BIN="$CORE_ROOT/bin/ofloop" bash "$CORE_ROOT/bin/install-supervisor" > "$TMP/tx-first.out"
   test -f "$TX_ROOT/supervisor.sqlite3" && test -f "$TX_ROOT/ledger-incarnation.json" || fail "first Linux commissioning did not initialize canonical ledger"
   ART1="$TX_CFG/systemd/user/ownframework-loop-supervisor.service"
   ART2="$TX_ROOT/runtime-provenance.json"; ART3="$TX_ROOT/service-env.json"
@@ -226,7 +226,7 @@ SH
     if [[ "$stage" -ge 2 ]]; then printf '{"broken":true}\n' > "$ART2"; fi
     if [[ "$stage" -ge 3 ]]; then printf '{"broken":true}\n' > "$ART3"; fi
     printf 'prepared\n' > "$TXN/state"
-    HOME="$TX_HOME" XDG_STATE_HOME="$TX_STATE" XDG_CONFIG_HOME="$TX_CFG" OFLOOP_SYSTEMD_USER_DIR="$TX_CFG/systemd/user" SYSTEMCTL_BIN="$TX_FAKE/systemctl" PATH="$PATH_TX" PYTHON_BIN="$A" OFLOOP_BIN="$CORE_ROOT/bin/ofloop" bash "$CORE_ROOT/install-supervisor.sh" > "$TMP/tx-recover-$stage.out"
+    HOME="$TX_HOME" XDG_STATE_HOME="$TX_STATE" XDG_CONFIG_HOME="$TX_CFG" OFLOOP_SYSTEMD_USER_DIR="$TX_CFG/systemd/user" SYSTEMCTL_BIN="$TX_FAKE/systemctl" PATH="$PATH_TX" PYTHON_BIN="$A" OFLOOP_BIN="$CORE_ROOT/bin/ofloop" bash "$CORE_ROOT/bin/install-supervisor" > "$TMP/tx-recover-$stage.out"
     grep -F 'SUPERVISOR_INSTALL_RECOVERY=recovered_incomplete_transaction' "$TMP/tx-recover-$stage.out" >/dev/null || fail "Linux transaction stage $stage not recovered"
   done
 fi

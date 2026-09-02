@@ -3,8 +3,9 @@
 Source/master release line: **0.9.1**
 
 Latest published GitHub Release: **v0.8.4** at
-`134a7ce543e2d5858b3a4613c49d49959fe0b029`. The 0.9.1 source line is current
-development and is not a published release until its promotion gates close.
+`134a7ce543e2d5858b3a4613c49d49959fe0b029`. The 0.9.1 source line is closed
+and validated on `master`; GitHub Release publication is a separate
+distribution step.
 
 OwnFramework Loop is a vendor-neutral, execution-sealed engineering runtime for
 autonomous coding agents.
@@ -78,7 +79,7 @@ optional foreground/debug adapters; they are not the scheduler.
 From a Git checkout or source release:
 
 ```bash
-bash install.sh
+./install.sh
 ```
 
 The core installs to a versioned user data directory and creates a managed
@@ -91,13 +92,13 @@ The core install is independent of Claude Code, Codex, or any other agent host.
 Claude Code:
 
 ```bash
-bash install-adapter.sh claude-code
+./bin/install-adapter claude-code
 ```
 
 Codex:
 
 ```bash
-bash install-adapter.sh codex
+./bin/install-adapter codex
 ```
 
 Adapters provide host-specific UX only. Installing or removing an adapter does
@@ -106,7 +107,7 @@ not own or remove the core runtime.
 ### 3. Commission the durable supervisor
 
 ```bash
-bash install-supervisor.sh
+./bin/install-supervisor
 ```
 
 Platform selection is automatic:
@@ -270,20 +271,18 @@ implemented separately by each service manager.
 ## Repository layout
 
 ```text
-bin/                         deterministic CLI entrypoint
+bin/                         CLI + operator-facing setup commands
 lib/ownframework_loop/       core protocol + supervisor + runner registry
 schemas/                     packet/state/receipt/verdict contracts
-templates/                   packet and semantic-result templates
+templates/                   current packet and semantic-result templates
 docs/architecture/           vendor-neutral architecture
 adapters/                    host adapter contracts/docs
 .agents/skills/              portable Agent Skills
 .claude-plugin/              optional Claude Code adapter manifest
 skills/ agents/ hooks/       Claude adapter surfaces
-install.sh                   vendor-neutral core installer
-install-adapter.sh           optional host-adapter installer
-install-supervisor.sh        platform-neutral service commissioning
-install-supervisor-macos.sh  launchd implementation
-install-supervisor-linux.sh  systemd-user implementation
+scripts/supervisor/          platform service implementation details
+install.sh / uninstall.sh    vendor-neutral core lifecycle
+validate.sh / release_gate.sh canonical validation entrypoints
 tests/                       canonical + adapter/platform regressions
 ```
 
@@ -292,14 +291,14 @@ tests/                       canonical + adapter/platform regressions
 Source tree:
 
 ```bash
-bash validate.sh
-bash release_gate.sh
+./validate.sh
+./release_gate.sh
 ```
 
 Installed core:
 
 ```bash
-bash validate.sh --installed
+./validate.sh --installed
 ```
 
 Adapter inspection:

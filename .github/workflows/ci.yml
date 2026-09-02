@@ -141,14 +141,14 @@ jobs:
         run: |
           export HOME="$RUNNER_TEMP/claude-home"
           mkdir -p "$HOME"
-          bash install-adapter.sh claude-code
+          ./bin/install-adapter claude-code
           claude plugin list | tee "$RUNNER_TEMP/claude-plugin-list.txt"
           grep -F 'of-loop@ownframework' "$RUNNER_TEMP/claude-plugin-list.txt"
           # v0.4.4: derive expected version from the canonical machine
           # source-of-truth, do NOT hardcode the release number into CI.
           EXPECTED_VERSION="$(PYTHONPATH="$PWD/lib" python3 -c 'from ownframework_loop import __version__; print(__version__)')"
           grep -F "$EXPECTED_VERSION" "$RUNNER_TEMP/claude-plugin-list.txt"
-          REMOVE_MARKETPLACE=1 bash uninstall-adapter.sh claude-code
+          REMOVE_MARKETPLACE=1 ./bin/uninstall-adapter claude-code
           bash uninstall.sh
 
   codex-adapter-static:
@@ -175,7 +175,7 @@ jobs:
         run: |
           export HOME="$RUNNER_TEMP/codex-home"
           mkdir -p "$HOME"
-          bash install-adapter.sh codex | tee "$RUNNER_TEMP/codex-install.txt"
+          ./bin/install-adapter codex | tee "$RUNNER_TEMP/codex-install.txt"
           grep -F 'ADAPTER_INSTALL=PASS' "$RUNNER_TEMP/codex-install.txt"
           "$HOME/.local/bin/ofloop" adapter show codex | tee "$RUNNER_TEMP/codex-adapter.json"
           grep -F '"maturity": "experimental"' "$RUNNER_TEMP/codex-adapter.json"
@@ -183,7 +183,7 @@ jobs:
           for skill in of-loop-spec of-loop-build of-loop-review of-loop-status; do
             test -f "$HOME/.agents/skills/$skill/SKILL.md"
           done
-          bash uninstall-adapter.sh codex
+          ./bin/uninstall-adapter codex
       - name: Portable contract remains unverified until authenticated runtime proof
         run: bash tests/integration/test_adapter_portability.sh
 

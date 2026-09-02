@@ -5,7 +5,7 @@ Canonical operation for the vendor-neutral OwnFramework Loop runtime.
 ## 1. Install core
 
 ```bash
-bash install.sh
+./install.sh
 ```
 
 This installs the versioned core and managed `ofloop` launcher. It does not
@@ -14,15 +14,15 @@ require an agent host.
 Optional adapter:
 
 ```bash
-bash install-adapter.sh claude-code
+./bin/install-adapter claude-code
 # or
-bash install-adapter.sh codex
+./bin/install-adapter codex
 ```
 
 ## 2. Commission durable service
 
 ```bash
-bash install-supervisor.sh
+./bin/install-supervisor
 ```
 
 The wrapper selects launchd on macOS and systemd-user on Linux.
@@ -134,7 +134,7 @@ capability set is denied rather than escalated to a human.
 A later:
 
 ```bash
-bash install.sh
+./install.sh
 ```
 
 refreshes an already-commissioned service only after the shared runtime
@@ -181,20 +181,20 @@ unrelated remote systems.
 Adapter only:
 
 ```bash
-bash uninstall-adapter.sh claude-code
-bash uninstall-adapter.sh codex
+./bin/uninstall-adapter claude-code
+./bin/uninstall-adapter codex
 ```
 
 Supervisor only:
 
 ```bash
-bash uninstall-supervisor.sh
+./bin/uninstall-supervisor
 ```
 
 Core:
 
 ```bash
-bash uninstall.sh
+./uninstall.sh
 ```
 
 Core uninstall preserves durable supervisor state/evidence and independently

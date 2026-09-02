@@ -2,13 +2,13 @@
 # Remove one optional OwnFramework Loop host adapter. Core runtime is preserved.
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ADAPTER="${1:-}"
 case "$ADAPTER" in
   claude-code|codex) ;;
   *)
     echo "ADAPTER_UNINSTALL=REFUSED reason=unknown_adapter adapter=$ADAPTER" >&2
-    echo "Usage: bash uninstall-adapter.sh {claude-code|codex}" >&2
+    echo "Usage: ./bin/uninstall-adapter {claude-code|codex}" >&2
     exit 2
     ;;
 esac

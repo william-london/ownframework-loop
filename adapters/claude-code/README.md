@@ -9,8 +9,8 @@ scheduler.
 ## Install
 
 ```bash
-bash install.sh
-bash install-adapter.sh claude-code
+./install.sh
+./bin/install-adapter claude-code
 ```
 
 The adapter installs the `of-loop@ownframework` Claude plugin. The core remains

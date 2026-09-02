@@ -26,7 +26,7 @@ if [[ ! -f "$PLIST" && ! -f "$PROVENANCE" ]]; then
   exit 0
 fi
 
-INSTALLER="$CORE_ROOT/install-supervisor-macos.sh"
+INSTALLER="$CORE_ROOT/scripts/supervisor/install-macos.sh"
 OFLOOP="$CORE_ROOT/bin/ofloop"
 if [[ ! -x "$INSTALLER" || ! -x "$OFLOOP" ]]; then
   echo "SUPERVISOR_REFRESH=REFUSED reason=installed_payload_incomplete" >&2

@@ -7,7 +7,7 @@ or optional host adapter.
 
 ```bash
 command -v ofloop
-bash install.sh
+./install.sh
 bash validate.sh --installed
 ```
 
@@ -19,7 +19,7 @@ the active `ofloop` launcher. It does not query an agent/plugin registry.
 The Claude adapter is optional:
 
 ```bash
-bash install-adapter.sh claude-code
+./bin/install-adapter claude-code
 claude plugin list
 ```
 
@@ -30,7 +30,7 @@ Do not use a Claude plugin cache path as the OwnFramework Loop core runtime.
 ## Codex skills are missing
 
 ```bash
-bash install-adapter.sh codex
+./bin/install-adapter codex
 ```
 
 Codex remains experimental until live lifecycle evidence upgrades that adapter.
@@ -40,7 +40,7 @@ Codex remains experimental until live lifecycle evidence upgrades that adapter.
 Commission:
 
 ```bash
-bash install-supervisor.sh
+./bin/install-supervisor
 ```
 
 Inspect:

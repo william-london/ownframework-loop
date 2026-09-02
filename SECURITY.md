@@ -11,8 +11,8 @@ or OS-level containment of arbitrary same-user code.
 - The source/master supported line in this repository is **0.9.1**.
 - The latest published GitHub Release is **v0.8.4** at
   `134a7ce543e2d5858b3a4613c49d49959fe0b029`.
-- **0.9.1** is the current development line and is not a published release until
-  its promotion gates close.
+- **0.9.1** is the current closed and validated source line on `master`.
+  GitHub Release publication is tracked separately from source validation.
 - Earlier 0.2.x/0.3.x/0.4.x/0.5.0-0.5.4 behavior remains in Git history for
   compatibility/audit context but is not the current product contract.
 

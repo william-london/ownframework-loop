@@ -41,9 +41,9 @@ that an unspecified host is automatically safe for unattended production.
 
 `install.sh` installs core only.
 
-`install-adapter.sh <adapter>` installs host integration only.
+`bin/install-adapter <adapter>` installs host integration only.
 
-`install-supervisor.sh` selects the platform service manager.
+`bin/install-supervisor` selects the platform service manager.
 
 No adapter cache is an OwnFramework Loop runtime root.
 

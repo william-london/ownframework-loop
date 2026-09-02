@@ -128,8 +128,17 @@ for f in \
   adapters/README.md \
   adapters/generic-cli/README.md \
   docs/architecture/ADAPTER_CONTRACT.md \
-  install-supervisor.sh \
-  uninstall-supervisor.sh
+  bin/install-adapter \
+  bin/uninstall-adapter \
+  bin/install-supervisor \
+  bin/uninstall-supervisor \
+  scripts/supervisor/install-linux.sh \
+  scripts/supervisor/install-macos.sh \
+  scripts/supervisor/uninstall-linux.sh \
+  scripts/supervisor/uninstall-macos.sh \
+  scripts/supervisor/refresh.sh \
+  scripts/supervisor/refresh-linux.sh \
+  scripts/supervisor/refresh-macos.sh
 do
   [[ -e "$ROOT/$f" ]] || bad "missing $ROOT/$f"
 done

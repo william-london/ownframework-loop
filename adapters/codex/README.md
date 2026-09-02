@@ -5,13 +5,13 @@ The Codex adapter demonstrates vendor portability through portable Agent Skills.
 ## Install
 
 ```bash
-bash install.sh
-bash install-adapter.sh codex
+./install.sh
+./bin/install-adapter codex
 ```
 
 This installs the shared core plus Codex-specific managed Agent Skills. Adapter
 uninstall removes only those skills; the core runtime remains until
-`uninstall.sh` is explicitly run.
+`./uninstall.sh` is explicitly run.
 
 ## Status
 

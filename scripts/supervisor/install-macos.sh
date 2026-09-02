@@ -21,7 +21,7 @@
 
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "$0")" && pwd)"
+ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 
 # 1. Resolve runtime executables to canonical absolute paths.
 #    Python and ofloop are mandatory. Claude is optional; when absent,
@@ -49,7 +49,7 @@ PY
 
 if [[ -z "$OFLOOP_BIN_RAW" ]]; then
   echo "SUPERVISOR_INSTALL=REFUSED reason=core_not_installed" >&2
-  echo "hint: run 'bash install.sh' first or set OFLOOP_BIN explicitly for development/testing" >&2
+  echo "hint: run './install.sh' first or set OFLOOP_BIN explicitly for development/testing" >&2
   exit 2
 fi
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Remove the per-user OwnFramework Loop systemd supervisor service.
 set -euo pipefail
-ROOT="$(cd "$(dirname "$0")" && pwd)"
+ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 [[ "$(uname -s)" == "Linux" ]] || { echo "SUPERVISOR_UNINSTALL=REFUSED reason=linux_required" >&2; exit 2; }
 
 SYSTEMCTL_BIN="${SYSTEMCTL_BIN:-$(command -v systemctl || true)}"

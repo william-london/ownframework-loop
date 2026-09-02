@@ -62,7 +62,7 @@ fi
 exit 0
 SH
 chmod +x "$FAKE/claude"
-ADAPTER_OUT="$(HOME="$DIRTY_HOME" XDG_DATA_HOME="$DIRTY_DATA" XDG_STATE_HOME="$DIRTY_STATE" OFLOOP_BIN_DIR="$DIRTY_BIN" PATH="$FAKE:$PATH" bash "$SRC/install-adapter.sh" claude-code)"
+ADAPTER_OUT="$(HOME="$DIRTY_HOME" XDG_DATA_HOME="$DIRTY_DATA" XDG_STATE_HOME="$DIRTY_STATE" OFLOOP_BIN_DIR="$DIRTY_BIN" PATH="$FAKE:$PATH" bash "$SRC/bin/install-adapter" claude-code)"
 grep -F 'ADAPTER_INSTALL=PASS' <<<"$ADAPTER_OUT" >/dev/null || fail "dirty-source Claude adapter did not install: $ADAPTER_OUT"
 CORE_ROOT="$(sed -n 's/^CORE_ROOT=//p' <<<"$ADAPTER_OUT" | tail -n1)"
 grep -F "ADAPTER_SOURCE_ROOT=$CORE_ROOT" <<<"$ADAPTER_OUT" >/dev/null || fail "adapter source root not reported as managed core"

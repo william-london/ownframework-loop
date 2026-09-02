@@ -17,10 +17,10 @@ promotion.
 Install core first (or let the adapter installer idempotently ensure it):
 
 ```bash
-bash install.sh
-bash install-adapter.sh claude-code
+./install.sh
+./bin/install-adapter claude-code
 # or
-bash install-adapter.sh codex
+./bin/install-adapter codex
 ```
 
 Removing an adapter preserves the core runtime.

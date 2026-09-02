@@ -1,26 +1,16 @@
-# Historical engineering snapshots
+# Historical changelog archive
 
-The files in this directory are preserved **engineering snapshots**
-from earlier OwnFramework Loop releases. They are kept for context
-only.
+This directory contains release-history material retained for audit context only.
 
-**They are not authoritative for current behaviour.** The current
-authoritative sources for what OwnFramework Loop does are:
+**Historical files are not authoritative for current behavior.** Current product
+truth lives in the source under `lib/ownframework_loop/`, the schemas under
+`schemas/`, the canonical tests under `tests/`, and the current public
+documentation.
 
-- [`README.md`](../../README.md) — public project landing page
-- [`CHANGELOG.md`](../../CHANGELOG.md) — release-by-release record
-- The test suite under `tests/` — executable specification
-- The schemas under `schemas/` — JSON Schema definitions for packet,
-  state, receipt, and verdict
-- The source under `lib/ownframework_loop/` — Python runtime
+## Retained archive
 
-If a file in this directory disagrees with the sources above, the
-sources above win.
+- `CHANGELOG-through-0.5.2.md` — changelog entries moved out of the active
+  changelog as the project matured.
 
-## Files
-
-- `IMPLEMENTATION_REPORT_2026-07-23.md` — implementation report from
-  the v0.2.x line (renamed from the previous root `REPORT.md`).
-- `LOOP_REPAIR_MISSION_REPORT_2026-07-30.md` — loop-repair and
-  autonomy mission report from the v0.3.0 line (renamed from the
-  previous root `LOOP_REPAIR_MISSION_REPORT.md`).
+Dated implementation and repair mission reports are intentionally not retained
+in the product tree; Git history already preserves that engineering record.

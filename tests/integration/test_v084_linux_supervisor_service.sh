@@ -63,7 +63,7 @@ export ANTHROPIC_BASE_URL="https://api.example.invalid/anthropic"
 export ANTHROPIC_MODEL="linux-test-model"
 
 # Old Claude fails at commissioning, before a service is written.
-if "$CORE_ROOT/install-supervisor.sh" >"$TMP/old.out" 2>&1; then
+if "$CORE_ROOT/bin/install-supervisor" >"$TMP/old.out" 2>&1; then
   echo "FAIL: Claude below minimum commissioned on Linux" >&2
   exit 1
 fi
@@ -77,7 +77,7 @@ exit 0
 EOF
 chmod +x "$FAKE/claude"
 
-"$CORE_ROOT/install-supervisor.sh" | tee "$TMP/install.out"
+"$CORE_ROOT/bin/install-supervisor" | tee "$TMP/install.out"
 grep -F 'SUPERVISOR_INSTALL=PASS' "$TMP/install.out" >/dev/null
 grep -F 'SERVICE_MANAGER=systemd-user' "$TMP/install.out" >/dev/null
 grep -F 'USER_MANAGER_PERSISTENCE=linger-enabled' "$TMP/install.out" >/dev/null
@@ -157,10 +157,10 @@ with supervisor._connect(Path(sys.argv[1])):
     pass
 PY
 
-"$CORE_ROOT/scripts/refresh-existing-supervisor.sh" "$CORE_ROOT" "$ROOT_DIR" | tee "$TMP/refresh.out"
+"$CORE_ROOT/scripts/supervisor/refresh.sh" "$CORE_ROOT" "$ROOT_DIR" | tee "$TMP/refresh.out"
 grep -F 'SUPERVISOR_REFRESH=PASS' "$TMP/refresh.out" >/dev/null
 
-"$CORE_ROOT/uninstall-supervisor.sh" | tee "$TMP/uninstall.out"
+"$CORE_ROOT/bin/uninstall-supervisor" | tee "$TMP/uninstall.out"
 grep -F 'SUPERVISOR_UNINSTALL=PASS' "$TMP/uninstall.out" >/dev/null
 test ! -e "$UNIT"
 test ! -e "$PROV"

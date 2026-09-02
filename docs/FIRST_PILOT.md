@@ -13,9 +13,9 @@ Do not use a production repository for the first live proof.
 From the OwnFramework Loop source checkout:
 
 ```bash
-bash install.sh
-bash install-adapter.sh claude-code
-bash install-supervisor.sh
+./install.sh
+./bin/install-adapter claude-code
+./bin/install-supervisor
 ```
 
 Use another adapter only when that adapter is explicitly live-verified for the

@@ -2,7 +2,7 @@
 # Install OwnFramework Loop supervisor as a per-user systemd service on Linux.
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "$0")" && pwd)"
+ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 [[ "$(uname -s)" == "Linux" ]] || { echo "SUPERVISOR_INSTALL=REFUSED reason=linux_required" >&2; exit 2; }
 
 PYTHON_BIN_RAW="${PYTHON_BIN:-$(command -v python3 || true)}"
@@ -11,7 +11,7 @@ CLAUDE_BIN_RAW="${CLAUDE_BIN:-$(command -v claude || true)}"
 SYSTEMCTL_BIN="${SYSTEMCTL_BIN:-$(command -v systemctl || true)}"
 
 [[ -n "$PYTHON_BIN_RAW" && -x "$PYTHON_BIN_RAW" ]] || { echo "SUPERVISOR_INSTALL=REFUSED reason=python3_missing" >&2; exit 2; }
-[[ -n "$OFLOOP_BIN_RAW" ]] || { echo "SUPERVISOR_INSTALL=REFUSED reason=core_not_installed" >&2; echo "hint: run 'bash install.sh' first or set OFLOOP_BIN explicitly for development/testing" >&2; exit 2; }
+[[ -n "$OFLOOP_BIN_RAW" ]] || { echo "SUPERVISOR_INSTALL=REFUSED reason=core_not_installed" >&2; echo "hint: run './install.sh' first or set OFLOOP_BIN explicitly for development/testing" >&2; exit 2; }
 [[ -n "$SYSTEMCTL_BIN" && -x "$SYSTEMCTL_BIN" ]] || { echo "SUPERVISOR_INSTALL=REFUSED reason=systemctl_missing" >&2; exit 2; }
 
 canon_path() {

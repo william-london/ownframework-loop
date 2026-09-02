@@ -16,12 +16,12 @@ contributions are tightly scoped and evidence-backed.
    suite for any boundary your change touches. Include the output in
    the PR description or attach it as a comment.
 4. **Use canonical scripts and commands.** `install.sh` /
-   `uninstall.sh` own the vendor-neutral core, `install-adapter.sh` /
-   `uninstall-adapter.sh` own optional host adapters, and
-   `install-supervisor.sh` / `uninstall-supervisor.sh` own the durable
-   platform service. `validate.sh`, `release_gate.sh`, and supported helpers
-   under `bin/`, `lib/`, `scripts/`, and `hooks/` are canonical local
-   surfaces. Prefer them over ad-hoc shell.
+   `uninstall.sh` own the vendor-neutral core. Operator-facing adapter and
+   supervisor lifecycle commands live under `bin/`; platform-specific service
+   plumbing lives under `scripts/supervisor/`. `validate.sh`,
+   `release_gate.sh`, and supported helpers under `bin/`, `lib/`,
+   `scripts/`, and `hooks/` are canonical local surfaces. Prefer them over
+   ad-hoc shell.
 5. **Keep the public surface coherent.** Public-surface files include
    `README.md`, `AGENTS.md`, `CONTRIBUTING.md`, `SECURITY.md`,
    `CHANGELOG.md`, `LICENSE`, `THIRD_PARTY_NOTICES.md`, adapter and

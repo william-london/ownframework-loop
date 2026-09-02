@@ -3,13 +3,13 @@
 # Core runtime ownership remains with install.sh.
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ADAPTER="${1:-}"
 case "$ADAPTER" in
   claude-code|codex) ;;
   *)
     echo "ADAPTER_INSTALL=REFUSED reason=unknown_adapter adapter=$ADAPTER" >&2
-    echo "Usage: bash install-adapter.sh {claude-code|codex}" >&2
+    echo "Usage: ./bin/install-adapter {claude-code|codex}" >&2
     exit 2
     ;;
 esac

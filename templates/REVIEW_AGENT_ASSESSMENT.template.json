@@ -57,5 +57,5 @@
   "_recommended_verdict_enum": "Must be exactly one of: APPROVED | CHANGES_REQUESTED | BLOCKED | HUMAN_REVIEW_REQUIRED | STALE_CANDIDATE — UPPERCASE, no quotes mismatch.",
 
   "reviewer_identity": "of-reviewer",
-  "timestamp":         "<fill: UTC ISO 8601, e.g. 2026-08-28T02:39:00Z>"
+  "timestamp":         "<fill: UTC ISO 8601>"
 }

@@ -3,8 +3,8 @@
 #
 # This is intentionally NOT an agent/plugin installer. Host integrations are
 # installed separately with:
-#   bash install-adapter.sh claude-code
-#   bash install-adapter.sh codex
+#   ./bin/install-adapter claude-code
+#   ./bin/install-adapter codex
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -247,7 +247,7 @@ fi
 
 # Refresh only an already-commissioned durable service. Core installation never
 # creates a service implicitly.
-REFRESH="$INSTALL_ROOT/scripts/refresh-existing-supervisor.sh"
+REFRESH="$INSTALL_ROOT/scripts/supervisor/refresh.sh"
 if [[ -x "$REFRESH" && "${OFLOOP_SKIP_SUPERVISOR_REFRESH:-0}" != "1" ]]; then
   if ! "$REFRESH" "$INSTALL_ROOT" "$ROOT"; then
     rollback_core_install

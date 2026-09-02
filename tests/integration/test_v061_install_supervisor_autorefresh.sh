@@ -70,7 +70,7 @@ PY
 OUT="$TMP/refresh.out"
 set +e
 env HOME="$HOME_EXISTING" PATH="$FAKEBIN:/usr/local/bin:/usr/bin:/bin" \
-  "$CORE/scripts/refresh-existing-supervisor.sh" "$CORE" "$SRC" >"$OUT" 2>&1
+  "$CORE/scripts/supervisor/refresh.sh" "$CORE" "$SRC" >"$OUT" 2>&1
 REFRESH_RC=$?
 set -e
 if [[ "$REFRESH_RC" -ne 0 ]]; then
@@ -110,14 +110,14 @@ PY
 # Fresh host has no commissioning signal: helper must be a true no-op.
 OUT2="$TMP/fresh.out"
 env HOME="$HOME_FRESH" PATH="$FAKEBIN:/usr/local/bin:/usr/bin:/bin" \
-  "$CORE/scripts/refresh-existing-supervisor.sh" "$CORE" "$SRC" >"$OUT2" 2>&1
+  "$CORE/scripts/supervisor/refresh.sh" "$CORE" "$SRC" >"$OUT2" 2>&1
 grep -Fq "SUPERVISOR_REFRESH=NOOP reason=not_commissioned" "$OUT2" || fail "fresh host was not a no-op"
 [[ ! -e "$HOME_FRESH/Library/LaunchAgents/com.ownframework.loop-supervisor.plist" ]] || fail "fresh host got implicit service"
 
 # Opt-out remains explicit and non-mutating.
 OUT3="$TMP/skip.out"
 env HOME="$HOME_EXISTING" PATH="$FAKEBIN:/usr/local/bin:/usr/bin:/bin" OFLOOP_SKIP_SUPERVISOR_REFRESH=1 \
-  "$CORE/scripts/refresh-existing-supervisor.sh" "$CORE" "$SRC" >"$OUT3" 2>&1
+  "$CORE/scripts/supervisor/refresh.sh" "$CORE" "$SRC" >"$OUT3" 2>&1
 grep -Fq "SUPERVISOR_REFRESH=SKIPPED reason=operator_opt_out" "$OUT3" || fail "opt-out not honored"
 
 echo "V061_INSTALL_SUPERVISOR_AUTOREFRESH=PASS"

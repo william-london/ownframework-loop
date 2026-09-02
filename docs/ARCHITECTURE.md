@@ -163,10 +163,10 @@ install.sh
   -> versioned OwnFramework Loop core
   -> managed ofloop launcher
 
-install-adapter.sh <host>
+bin/install-adapter <host>
   -> optional host integration only
 
-install-supervisor.sh
+bin/install-supervisor
   -> platform service manager
   -> exact installed core
 ```
@@ -175,11 +175,11 @@ The core runtime never lives inside an adapter/plugin cache.
 
 ### macOS
 
-`install-supervisor-macos.sh` creates a per-user launchd service.
+`scripts/supervisor/install-macos.sh` creates a per-user launchd service.
 
 ### Linux
 
-`install-supervisor-linux.sh` creates a per-user systemd service.
+`scripts/supervisor/install-linux.sh` creates a per-user systemd service.
 
 Both use the same read-only runtime dependency probe before replacement or
 uninstall. Service-manager code therefore cannot define different generation

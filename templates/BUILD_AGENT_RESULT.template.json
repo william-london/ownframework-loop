@@ -32,5 +32,5 @@
   "notes": "<fill: anything the reviewer/finalizer should know that is not visible from the diff>",
 
   "builder_identity": "of-builder",
-  "timestamp": "<fill: UTC ISO 8601, e.g. 2026-08-28T12:10:00Z>"
+  "timestamp": "<fill: UTC ISO 8601>"
 }

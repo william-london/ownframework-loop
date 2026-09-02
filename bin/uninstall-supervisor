@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Platform-neutral durable supervisor uninstaller.
 set -euo pipefail
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 IF_COMMISSIONED=0
 if [[ "${1:-}" == "--if-commissioned" ]]; then IF_COMMISSIONED=1; shift; fi
 case "$(uname -s)" in
@@ -15,7 +15,7 @@ case "$(uname -s)" in
       echo "SUPERVISOR_UNINSTALL=NOOP reason=not_commissioned"
       exit 0
     fi
-    exec bash "$ROOT/uninstall-supervisor-macos.sh" "$@"
+    exec bash "$ROOT/scripts/supervisor/uninstall-macos.sh" "$@"
     ;;
   Linux)
     UNIT_DIR="${OFLOOP_SYSTEMD_USER_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user}"
@@ -28,7 +28,7 @@ case "$(uname -s)" in
       echo "SUPERVISOR_UNINSTALL=NOOP reason=not_commissioned"
       exit 0
     fi
-    exec bash "$ROOT/uninstall-supervisor-linux.sh" "$@"
+    exec bash "$ROOT/scripts/supervisor/uninstall-linux.sh" "$@"
     ;;
   *) echo "SUPERVISOR_UNINSTALL=REFUSED reason=unsupported_platform platform=$(uname -s)" >&2; exit 2 ;;
 esac

@@ -43,9 +43,9 @@ fi
 
 # Remove only an already-commissioned service; durable state/ledger/evidence are
 # intentionally preserved.
-if [[ -x "$ROOT/uninstall-supervisor.sh" ]]; then
+if [[ -x "$ROOT/bin/uninstall-supervisor" ]]; then
   TMP_OUT="${TMPDIR:-/tmp}/ofloop-supervisor-uninstall.$$"
-  if "$ROOT/uninstall-supervisor.sh" --if-commissioned >"$TMP_OUT" 2>&1; then
+  if "$ROOT/bin/uninstall-supervisor" --if-commissioned >"$TMP_OUT" 2>&1; then
     cat "$TMP_OUT"
   else
     rc=$?

@@ -1,11 +1,15 @@
 <!--
-WORK_PACKET.md template for OwnFramework Loop.
+WORK_PACKET.md default single-run template for OwnFramework Loop.
 
 The metadata block is JSON inside a triple-backtick fence. Do NOT depend on
 YAML parsing. The body sections are Markdown for human review.
 
+This template intentionally uses the current v2 single-run compatibility
+schema. PROGRAM missions use v3 and the checkpoint graph described in
+docs/WORK_PACKET_FORMAT.md.
+
 Replace every <placeholder> with concrete content. Validate the metadata
-against schemas/work-packet.schema.json before approval.
+against schemas/work-packet.schema.json before execution.
 -->
 ```json
 {

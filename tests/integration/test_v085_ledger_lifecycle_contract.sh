@@ -170,7 +170,7 @@ exit 5
 SH
 chmod +x "$MFAKE/"*
 set +e
-OUT="$(HOME="$MHOME" XDG_STATE_HOME="$MXDG" PATH="$MFAKE:$PATH" bash "$ROOT_DIR/uninstall-supervisor-macos.sh" 2>&1)"
+OUT="$(HOME="$MHOME" XDG_STATE_HOME="$MXDG" PATH="$MFAKE:$PATH" bash "$ROOT_DIR/scripts/supervisor/uninstall-macos.sh" 2>&1)"
 RC=$?
 set -e
 [[ "$RC" -eq 14 ]] || fail "mac manager failure rc=$RC out=$OUT"
@@ -186,7 +186,7 @@ fi
 exit 0
 SH
 chmod +x "$MFAKE/launchctl"
-HOME="$MHOME" XDG_STATE_HOME="$MXDG" PATH="$MFAKE:$PATH" bash "$ROOT_DIR/uninstall-supervisor-macos.sh" >/dev/null
+HOME="$MHOME" XDG_STATE_HOME="$MXDG" PATH="$MFAKE:$PATH" bash "$ROOT_DIR/scripts/supervisor/uninstall-macos.sh" >/dev/null
 test ! -e "$MPLIST" && test ! -e "$MPROV" || fail "mac already-absent uninstall did not converge"
 
 # Linux: unknown manager state refuses; known inactive unit can be removed.
@@ -209,7 +209,7 @@ esac
 SH
 chmod +x "$LFAKE/"*
 set +e
-OUT="$(HOME="$LHOME" XDG_STATE_HOME="$LXDG" XDG_CONFIG_HOME="$LCFG" PATH="$LFAKE:$PATH" SYSTEMCTL_BIN="$LFAKE/systemctl" bash "$ROOT_DIR/uninstall-supervisor-linux.sh" 2>&1)"
+OUT="$(HOME="$LHOME" XDG_STATE_HOME="$LXDG" XDG_CONFIG_HOME="$LCFG" PATH="$LFAKE:$PATH" SYSTEMCTL_BIN="$LFAKE/systemctl" bash "$ROOT_DIR/scripts/supervisor/uninstall-linux.sh" 2>&1)"
 RC=$?
 set -e
 [[ "$RC" -eq 14 ]] || fail "linux manager unknown rc=$RC out=$OUT"
@@ -222,7 +222,7 @@ case " $* " in
 esac
 SH
 chmod +x "$LFAKE/systemctl"
-HOME="$LHOME" XDG_STATE_HOME="$LXDG" XDG_CONFIG_HOME="$LCFG" PATH="$LFAKE:$PATH" SYSTEMCTL_BIN="$LFAKE/systemctl" bash "$ROOT_DIR/uninstall-supervisor-linux.sh" >/dev/null
+HOME="$LHOME" XDG_STATE_HOME="$LXDG" XDG_CONFIG_HOME="$LCFG" PATH="$LFAKE:$PATH" SYSTEMCTL_BIN="$LFAKE/systemctl" bash "$ROOT_DIR/scripts/supervisor/uninstall-linux.sh" >/dev/null
 test ! -e "$LUNIT" && test ! -e "$LPROV" || fail "linux inactive uninstall did not converge"
 
 echo "V085_LEDGER_LIFECYCLE_CONTRACT=PASS"

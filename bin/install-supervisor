@@ -1,18 +1,18 @@
 #!/usr/bin/env bash
 # Platform-neutral durable supervisor installer.
 set -euo pipefail
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 if [[ -z "${OFLOOP_BIN:-}" ]]; then
   OFLOOP_BIN="$(command -v ofloop || true)"
   [[ -n "$OFLOOP_BIN" ]] || {
     echo "SUPERVISOR_INSTALL=REFUSED reason=core_not_installed" >&2
-    echo "hint: run 'bash install.sh' first" >&2
+    echo "hint: run './install.sh' first" >&2
     exit 2
   }
   export OFLOOP_BIN
 fi
 case "$(uname -s)" in
-  Darwin) exec bash "$ROOT/install-supervisor-macos.sh" "$@" ;;
-  Linux) exec bash "$ROOT/install-supervisor-linux.sh" "$@" ;;
+  Darwin) exec bash "$ROOT/scripts/supervisor/install-macos.sh" "$@" ;;
+  Linux) exec bash "$ROOT/scripts/supervisor/install-linux.sh" "$@" ;;
   *) echo "SUPERVISOR_INSTALL=REFUSED reason=unsupported_platform platform=$(uname -s)" >&2; exit 2 ;;
 esac

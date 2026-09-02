@@ -20,7 +20,7 @@ if [[ ! -f "$UNIT" && ! -f "$PROVENANCE" ]]; then
   echo "SUPERVISOR_REFRESH=NOOP reason=not_commissioned"
   exit 0
 fi
-INSTALLER="$CORE_ROOT/install-supervisor-linux.sh"
+INSTALLER="$CORE_ROOT/scripts/supervisor/install-linux.sh"
 OFLOOP="$CORE_ROOT/bin/ofloop"
 [[ -x "$INSTALLER" && -x "$OFLOOP" ]] || {
   echo "SUPERVISOR_REFRESH=REFUSED reason=installed_payload_incomplete" >&2
