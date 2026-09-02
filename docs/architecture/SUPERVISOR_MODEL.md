@@ -151,10 +151,10 @@ SIGKILL only when needed.
 
 ## Platform service
 
-The canonical `install-supervisor.sh` wrapper commissions the durable service
+The canonical `bin/install-supervisor` command commissions the durable service
 from the installed vendor-neutral core.
 
-On macOS, `install-supervisor-macos.sh` installs a per-user `launchd` agent
+On macOS, `scripts/supervisor/install-macos.sh` installs a per-user `launchd` agent
 named `com.ownframework.loop-supervisor`. The generated
 service uses the exact `ofloop` executable path selected at installation and
 runs `ofloop supervisor serve` independently of any terminal working
@@ -186,12 +186,12 @@ fresh/missing schema fields. Existing rows are never silently reinterpreted:
 the historical exact $25 / unlimited-token / 8-hour tuple is ambiguous and is
 preserved with an operator-visible warning until explicitly re-registered.
 
-On Linux, `install-supervisor-linux.sh` installs a per-user systemd unit named
+On Linux, `scripts/supervisor/install-linux.sh` installs a per-user systemd unit named
 `ownframework-loop-supervisor.service`. Both platform implementations persist
 the same runtime-generation/provenance contract and call the same shared
 runtime-dependency probe.
 
-Use `uninstall-supervisor.sh` to remove the commissioned platform service.
+Use `bin/uninstall-supervisor` to remove the commissioned platform service.
 Durable supervisor state/evidence is preserved.
 
 ## Semantic-pass context, delegation, and timing
