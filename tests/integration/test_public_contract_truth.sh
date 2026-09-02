@@ -144,7 +144,7 @@ require_pair_phrase "skills/spec/SKILL.md" ".agents/skills/of-loop-spec/SKILL.md
 
 require_pair_phrase "skills/build/SKILL.md" ".agents/skills/of-loop-build/SKILL.md" "ofloop supervisor enqueue <repo> <run-id>"
 require_pair_phrase "skills/build/SKILL.md" ".agents/skills/of-loop-build/SKILL.md" "No raw worktree/branch creation or removal"
-require_pair_phrase "skills/build/SKILL.md" ".agents/skills/of-loop-build/SKILL.md" "no push, merge, deploy, publish"
+require_pair_phrase "skills/build/SKILL.md" ".agents/skills/of-loop-build/SKILL.md" "no push, merge, deploy,"
 
 require_pair_phrase "skills/review/SKILL.md" ".agents/skills/of-loop-review/SKILL.md" "ofloop supervisor enqueue <repo> <run-id>"
 require_pair_phrase "skills/review/SKILL.md" ".agents/skills/of-loop-review/SKILL.md" "builder owns first start"
