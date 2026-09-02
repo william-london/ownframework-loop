@@ -189,7 +189,7 @@ def _read_candidate_bytes(path: Path) -> bytes:
     clean scan for bytes the candidate does not contain.
     """
     if os.path.islink(str(path)):
-        return os.readlink(str(path)).encode("utf-8")
+        return os.fsencode(os.readlink(path))
     with open(path, "rb") as f:
         return f.read(MAX_INPUT_BYTES + 1)
 

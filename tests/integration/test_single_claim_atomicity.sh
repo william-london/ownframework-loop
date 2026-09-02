@@ -4,15 +4,19 @@ TESTS_DIR="$(cd "$(dirname "$0")" && pwd)"
 . "$TESTS_DIR/../_helpers.sh"
 export PYTHONPATH="$LIB_DIR${PYTHONPATH:+:$PYTHONPATH}"
 
+# This test intentionally creates several fixed-name sibling repositories.
+# Keep every one of them beneath a unique test-private parent: interrupted
+# runs may leave that unique parent behind, but a later run can neither
+# collide with it nor delete generic names from the shared system temp root.
+SCRATCH_ROOT="$(mktemp -d -t ofloop_single_claim.XXXXXX)"
+cleanup_single_claim_scratch() { rm -rf "$SCRATCH_ROOT"; }
+trap cleanup_single_claim_scratch EXIT
+export TMPDIR="$SCRATCH_ROOT"
 T="$(make_tmp_repo)"
-# This test creates fixed-name sibling scratch repos next to "$T". An
-# interrupted prior gate run can leave them behind, and a bare mkdir would
-# then wedge the canonical gate with FileExistsError. Clear the exact names
-# before use so the test is idempotent under leftover state.
 SCRATCH_PARENT="$(dirname "$T")"
-rm -rf "$SCRATCH_PARENT/bad-initial" "$SCRATCH_PARENT/legacy" \
-       "$SCRATCH_PARENT/legacy-cli" "$SCRATCH_PARENT/review" \
-       "$SCRATCH_PARENT/cap"
+if [[ "$SCRATCH_PARENT" != "$SCRATCH_ROOT" ]]; then
+  fail "single-claim scratch repo escaped private temp root: $SCRATCH_PARENT"
+fi
 mkdir -p "$T/src"; echo x > "$T/src/a.py"
 git -C "$T" add . && git -C "$T" commit -m src >/dev/null
 RID="$(make_approved_run "$T" BUG low "single-claim-atomicity")"

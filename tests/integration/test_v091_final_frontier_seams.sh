@@ -66,6 +66,16 @@ assert any(
     f.get("pattern_id") == "aws_access_key" for f in token_findings
 ), token_findings
 
+# POSIX symlink targets are arbitrary filesystem bytes, not necessarily
+# UTF-8. The candidate-byte reader must round-trip those bytes exactly
+# instead of leaking UnicodeEncodeError on surrogate-escaped target text.
+if os.name == "posix":
+    raw_link = os.fsencode(scan_dir / "raw-link")
+    raw_target = b"raw-\xff-target"
+    os.symlink(raw_target, raw_link)
+    raw_path = Path(os.fsdecode(raw_link))
+    assert secrets_v2._read_candidate_bytes(raw_path) == raw_target
+
 # Plain secret-bearing files still block.
 plain = scan_dir / "creds.txt"
 plain.write_text("key = sk-ant-api03-" + "a" * 24 + "\n", encoding="utf-8")
