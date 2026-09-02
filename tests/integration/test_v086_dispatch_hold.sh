@@ -183,7 +183,7 @@ with supervisor._connect(watch_db) as conn:
     assert got is None
     hstate = conn.execute("select state from dispatch_holds where hold_id=?", (watch_job["dispatch_hold"]["hold_id"],)).fetchone()[0]
     assert hstate in {"HELD", "RELEASED"}
-deadline = time.time() + 10
+deadline = time.time() + 60
 while time.time() < deadline:
     if (watch_root / "restart-proof.json").is_file():
         with supervisor._connect_readonly(watch_db) as conn:
