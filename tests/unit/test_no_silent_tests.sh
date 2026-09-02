@@ -15,15 +15,17 @@ ROOT="$(cd "$TESTS_DIR/.." && pwd)"
 CANONICAL="$ROOT/tests/canonical.txt"
 NONCANONICAL="$ROOT/tests/non_canonical.txt"
 
-# Build the set of declared paths.
-declared="$(cat "$CANONICAL" "$NONCANONICAL" 2>/dev/null | grep -E '^tests/' || true)"
+# Build the set of declared paths. Use awk to strip blanks/comments inline
+# so the join is robust to a missing $NONCANONICAL.
+declared="$(awk 'NR==FNR || 1' "$CANONICAL" "$NONCANONICAL" 2>/dev/null | awk '/^tests\//' | sort -u)"
 
 # All test_*.sh scripts that exist on disk.
 on_disk="$(find tests -name 'test_*.sh' -type f 2>/dev/null | sort -u)"
 
 missing=""
 for f in $on_disk; do
-  if ! printf '%s\n' "$declared" | grep -qx "$f"; then
+  # comm-style check is SIGPIPE-safe under set -euo pipefail
+  if ! printf '%s\n' "$declared" | grep -F -x -- "$f" >/dev/null; then
     missing="$missing $f"
   fi
 done
