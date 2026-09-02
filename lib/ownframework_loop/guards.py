@@ -919,11 +919,8 @@ def scan_text_for_secrets(text: str) -> list[dict[str, str]]:
 
 
 def scan_path_for_secrets(path: Path) -> list[dict[str, str]]:
-    """Scan a file for secrets. Returns [] on read errors."""
-    try:
-        text = path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return []
+    """Scan a file for secrets; propagate read failure as unknown evidence."""
+    text = path.read_text(encoding="utf-8", errors="replace")
     return scan_text_for_secrets(text)
 
 

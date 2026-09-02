@@ -276,6 +276,20 @@ assert literal not in repr(findings), findings
 print("REDACTED_SECRET_SCAN_FAIL_CLOSED=PASS")
 PY
 
+python3 -B - <<'PY'
+import tempfile
+from pathlib import Path
+from ownframework_loop import guards
+
+missing = Path(tempfile.mkdtemp(prefix="ofloop-legacy-guard-scan-")) / "missing.txt"
+try:
+    guards.scan_path_for_secrets(missing)
+    raise AssertionError("legacy guard secret helper encoded read failure as clean")
+except OSError:
+    pass
+print("LEGACY_GUARD_SECRET_SCAN_FAIL_CLOSED=PASS")
+PY
+
 TMP="$(mktemp -d -t ofloop-terminal-preflight-XXXXXX)"
 trap 'rm -rf "$TMP"' EXIT INT TERM HUP
 mkdir -p "$TMP/repo"
