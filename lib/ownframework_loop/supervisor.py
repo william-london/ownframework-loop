@@ -1769,10 +1769,12 @@ def _remaining_funded_cost_budget(max_total_cost_usd: float, spent_cost_usd: flo
 
 
 def _unknown_cost_attempt_count(conn: sqlite3.Connection, job_id: int) -> int:
+    # TOKENS_UNKNOWN attempts can also carry unknown provider cost; a funded
+    # cost ceiling must fail closed on them exactly like COST_UNKNOWN rows.
     row = conn.execute(
         """SELECT COUNT(*) FROM semantic_attempts
            WHERE job_id=? AND cost_known=0
-             AND status IN ('COMPLETED','COST_UNKNOWN','RECOVERED')""",
+             AND status IN ('COMPLETED','COST_UNKNOWN','TOKENS_UNKNOWN','RECOVERED')""",
         (int(job_id),),
     ).fetchone()
     return int((row[0] if row is not None else 0) or 0)
@@ -2058,10 +2060,22 @@ def _recover_stale_running(conn: sqlite3.Connection) -> int:
                     int(current["max_total_tokens"] or 0) > 0
                     and recovered_usage is None
                 ):
-                    conn.execute(
-                        """UPDATE semantic_attempts SET status='TOKENS_UNKNOWN',
-                           completed_at=? WHERE attempt_id=? AND job_id=?""",
-                        (time.time(), attempt_id, job_id),
+                    # Mirror the live TOKENS_UNKNOWN path: account the recovered
+                    # attempt exactly once inside this transaction BEFORE the
+                    # quarantine. A known recovered cost must reach the durable
+                    # ledger; an unknown one must record honest cost_known=0.
+                    _account_attempt_cost(
+                        conn,
+                        job_id=job_id,
+                        attempt_id=attempt_id,
+                        cost_usd=effective_cost,
+                        returncode=None,
+                        status_value="TOKENS_UNKNOWN",
+                        cost_known=recovered_cost_known,
+                        tokens_known=False,
+                        manage_transaction=False,
+                        effective_model=recovered_effective_model,
+                        model_usage_json=recovered_model_usage_json,
                     )
                     conn.execute(
                         """UPDATE jobs SET status='QUARANTINED',
@@ -4958,24 +4972,38 @@ def run_one(*, db_path: Path | None = None, timeout_seconds: int = 0) -> dict[st
                     }
 
             if int(job["max_total_tokens"] or 0) > 0 and not result.tokens_known:
+                # Account the completed attempt exactly once BEFORE the
+                # TOKENS_UNKNOWN quarantine. Terminalizing the attempt without
+                # accounting would leave cost_accounted=0 forever: a provable
+                # provider cost would never reach jobs.total_cost_usd (a funded
+                # cost ceiling would then under-count spend across the
+                # quarantine/resume cycle), and an unprovable cost would keep
+                # the INSERT-default cost_known=1 instead of the honest 0.
+                tokens_unknown_total = _account_attempt_cost(
+                    conn,
+                    job_id=int(job["id"]),
+                    attempt_id=attempt_id,
+                    cost_usd=float(result.cost_usd),
+                    returncode=int(result.returncode),
+                    status_value="TOKENS_UNKNOWN",
+                    cost_known=result.cost_known,
+                    tokens_known=False,
+                    effective_model=result.effective_model,
+                    model_usage_json=result.model_usage_json,
+                )
                 conn.execute(
-                    """UPDATE semantic_attempts SET status='TOKENS_UNKNOWN',
-                       completed_at=?, returncode=?,
+                    """UPDATE semantic_attempts SET
                        failure_class='usage_unknown',
                        failure_reason='token_usage_unknown'
                        WHERE attempt_id=? AND job_id=?""",
-                    (
-                        time.time(),
-                        int(result.returncode),
-                        attempt_id,
-                        int(job["id"]),
-                    ),
+                    (attempt_id, int(job["id"])),
                 )
                 conn.commit()
                 _update_job(
                     conn,
                     job["id"],
                     status_value="QUARANTINED",
+                    total_cost_usd=tokens_unknown_total,
                     last_error=(
                         "semantic worker completed without trustworthy token usage "
                         "while a token ceiling is enabled"
