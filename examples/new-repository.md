@@ -28,6 +28,7 @@ the candidate branch.
   ],
   "allowed_paths": ["src/", "tests/", "docs/", "README.md", ".gitignore"],
   "protected_paths": ["AGENTS.md", "CLAUDE.md", ".claude/", ".ownframework-loop/", "state/"],
+  "runner_profile": "default",
   "required_validation": [
     { "name": "git_identity", "command": "git -C <repo> branch --show-current", "kind": "fast", "expected_exit_code": 0 }
   ],

@@ -5,10 +5,16 @@ vendor-neutral. Adapters add optional host-specific UX.
 
 Current adapters:
 
-- [claude-code](claude-code/) — stable/live/hardened Claude integration and the
-  first production semantic runner.
-- [generic-cli](generic-cli/) — vendor-neutral portability contract.
-- [codex](codex/) — experimental Agent Skills integration.
+| Adapter | Adapter maturity | Durable supervisor runner |
+| --- | --- | --- |
+| [claude-code](claude-code/) | stable / live / hardened | yes |
+| [generic-cli](generic-cli/) | portable contract | no |
+| [codex](codex/) | experimental Agent Skills | no |
+
+Adapter support means the host can consume OwnFramework Loop contracts through
+that integration surface. Durable supervisor support is a separate, stricter
+claim. The current live runner registry contains only `claude-code`; installing
+the Codex adapter does not make `--runner codex` executable.
 
 Adapters do not own execution sealing, lifecycle state, repair/checkpoint
 counters, exact candidate SHA, verdict finalization, runtime generation, or

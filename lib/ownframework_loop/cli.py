@@ -1738,6 +1738,8 @@ def _build_parser() -> argparse.ArgumentParser:
             _emit({"ok": False, "error": str(exc)}, exit_code=2)
             return
         out["runner_profile"] = runner_profiles_mod.public_summary(profile)
+        out["runner_settings_policy"] = "loop_isolated"
+        out["interactive_settings_inherited"] = False
         diagnostic_override = bool(args.manifest or args.profile_manifest)
         out["launch_parity"] = not diagnostic_override
         out["diagnostic_override"] = diagnostic_override
@@ -1953,7 +1955,12 @@ def _build_parser() -> argparse.ArgumentParser:
     s_enq = sup_sub.add_parser("enqueue", help="enqueue one existing human-originated run")
     s_enq.add_argument("repo")
     s_enq.add_argument("run_id")
-    s_enq.add_argument("--runner", default="claude-code")
+    s_enq.add_argument(
+        "--runner",
+        default="claude-code",
+        choices=supervisor_mod.registered_runner_ids(),
+        help="live supervisor semantic runner (installed adapter support is separate)",
+    )
     s_enq.add_argument("--db", default=None)
     s_enq.add_argument(
         "--max-infra-failures", type=int, default=None,

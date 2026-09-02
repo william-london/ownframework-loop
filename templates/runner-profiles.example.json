@@ -1,0 +1,14 @@
+{
+  "schema": "ownframework-loop-runner-profiles/v1",
+  "profiles": {
+    "primary": {
+      "provider": "claude-code",
+      "model": "replace-with-provider-stable-model-id"
+    },
+    "frontier": {
+      "provider": "claude-code",
+      "model": "replace-with-provider-stable-model-id",
+      "effort": "high"
+    }
+  }
+}

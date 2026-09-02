@@ -64,6 +64,21 @@ The complete historical changelog through 0.5.2 is preserved at
   ownership, and state/event integrity remain covered by the canonical
   multi-platform release gate.
 
+### Public contract and runner normalization
+
+- durable supervisor runner availability is now explicit and distinct from
+  adapter installation; unsupported `--runner` values are refused before a
+  job row can be created, while Codex remains an experimental foreground
+  Agent-Skills adapter rather than an implied unattended runner;
+- commissioned Claude model selection is documented as packet/profile truth:
+  restricted workers do not inherit interactive `settings.json`; named
+  operator profiles bind explicit model/effort policy before provider launch;
+- Claude and Codex coordinator skills are parity-gated on critical authority
+  doctrine so duplicated host UX cannot silently drift;
+- packet examples are executable documentation validated by the current packet
+  admission path, including a modern v3 PROGRAM example with checkpoint-scoped
+  acceptance and runner/capability declarations.
+
 ### Repository hygiene
 
 - operator-facing adapter and supervisor lifecycle commands live under `bin/`;

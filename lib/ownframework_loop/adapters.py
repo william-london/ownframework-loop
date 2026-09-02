@@ -19,6 +19,7 @@ class AdapterCapabilities:
     interactive_spec: bool
     builder_supported: bool
     reviewer_supported: bool
+    supervisor_runner_supported: bool
     native_hooks: bool
     native_subagents: bool
     session_looping: bool
@@ -42,6 +43,7 @@ _ADAPTERS = (
         interactive_spec=True,
         builder_supported=True,
         reviewer_supported=True,
+        supervisor_runner_supported=True,
         native_hooks=True,
         native_subagents=True,
         session_looping=True,
@@ -60,6 +62,7 @@ _ADAPTERS = (
         interactive_spec=True,
         builder_supported=True,
         reviewer_supported=True,
+        supervisor_runner_supported=False,
         native_hooks=False,
         native_subagents=False,
         session_looping=False,
@@ -78,6 +81,7 @@ _ADAPTERS = (
         interactive_spec=True,
         builder_supported=True,
         reviewer_supported=True,
+        supervisor_runner_supported=False,
         native_hooks=False,
         native_subagents=False,
         session_looping=False,

@@ -26,6 +26,7 @@ ACTIVE_FILES=(
   docs/architecture/SUPERVISOR_MODEL.md
   adapters/README.md
   adapters/generic-cli/README.md
+  examples/README.md
   skills/spec/SKILL.md
   skills/build/SKILL.md
   skills/review/SKILL.md
@@ -129,6 +130,57 @@ pass "active spec skill exposes supervisor-first no-ceremony UX"
 grep -Fq 'AWAITING_APPROVAL / READY_TO_START | WAIT' "$REVIEW_SKILL" || fail "review skill does not WAIT at pre-start"
 grep -Fq 'builder owns first start' "$REVIEW_SKILL" || fail "review skill does not assign first-start ownership to builder"
 pass "active review skill waits before first start"
+
+# Cross-adapter coordinator parity: host-specific prose may differ, but the
+# execution-authority doctrine must remain aligned.
+require_pair_phrase() {
+  local left="$1" right="$2" phrase="$3"
+  grep -Fiq "$phrase" "$ROOT_DIR/$left" || fail "$left missing shared adapter doctrine: $phrase"
+  grep -Fiq "$phrase" "$ROOT_DIR/$right" || fail "$right missing shared adapter doctrine: $phrase"
+}
+
+require_pair_phrase "skills/spec/SKILL.md" ".agents/skills/of-loop-spec/SKILL.md" "ofloop supervisor enqueue <repo> <run-id>"
+require_pair_phrase "skills/spec/SKILL.md" ".agents/skills/of-loop-spec/SKILL.md" "Never add push, merge, deploy, publish"
+
+require_pair_phrase "skills/build/SKILL.md" ".agents/skills/of-loop-build/SKILL.md" "ofloop supervisor enqueue <repo> <run-id>"
+require_pair_phrase "skills/build/SKILL.md" ".agents/skills/of-loop-build/SKILL.md" "No raw worktree/branch creation or removal"
+require_pair_phrase "skills/build/SKILL.md" ".agents/skills/of-loop-build/SKILL.md" "no push, merge, deploy, publish"
+
+require_pair_phrase "skills/review/SKILL.md" ".agents/skills/of-loop-review/SKILL.md" "ofloop supervisor enqueue <repo> <run-id>"
+require_pair_phrase "skills/review/SKILL.md" ".agents/skills/of-loop-review/SKILL.md" "builder owns first start"
+require_pair_phrase "skills/review/SKILL.md" ".agents/skills/of-loop-review/SKILL.md" "no push, merge, deploy, publish"
+
+for f in "$ROOT_DIR/skills/spec/SKILL.md" "$ROOT_DIR/.agents/skills/of-loop-spec/SKILL.md"; do
+  grep -Fq 'Always write `runner_profile`' "$f" || fail "spec adapter does not require explicit runner_profile: $f"
+  grep -Fq 'does not inherit interactive user/project/local' "$f" || fail "spec adapter misstates interactive settings inheritance: $f"
+done
+for f in "$ROOT_DIR/skills/build/SKILL.md" "$ROOT_DIR/.agents/skills/of-loop-build/SKILL.md"; do
+  grep -Fq 'first claim may auto-seal' "$f" || fail "build adapter drifted first-start semantics: $f"
+done
+for f in "$ROOT_DIR/skills/review/SKILL.md" "$ROOT_DIR/.agents/skills/of-loop-review/SKILL.md"; do
+  grep -Fq 'builder owns first start' "$f" || fail "review adapter drifted first-start ownership: $f"
+done
+pass "Claude and Codex coordinator surfaces share critical execution doctrine"
+
+# Examples are executable documentation: every packet example must parse and
+# pass the same current structural/business admission validator as a real packet.
+PYTHONPATH="$ROOT_DIR/lib" python3 - "$ROOT_DIR" <<'PY'
+import sys
+from pathlib import Path
+from ownframework_loop import packet
+
+root = Path(sys.argv[1])
+files = sorted(p for p in (root / "examples").glob("*.md") if p.name != "README.md")
+if not files:
+    raise SystemExit("no packet examples found")
+for path in files:
+    meta, _ = packet.parse_packet_file(path)
+    errors = packet.validate_packet_for_approval(meta)
+    if errors:
+        raise SystemExit(f"{path.relative_to(root)} invalid: " + "; ".join(errors))
+print(f"EXAMPLE_PACKET_CONTRACTS=PASS count={len(files)}")
+PY
+pass "packet examples validate against current executable contracts"
 
 # Product identity: active generic contracts may name Claude only as an
 # adapter/runner, never as the owner of the core runtime or scheduler.

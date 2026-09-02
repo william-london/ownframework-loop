@@ -21,6 +21,19 @@ db=root/"supervisor.sqlite3"
 first=supervisor.enqueue(canonical_repo=repo,run_id="run-safe",db_path=db,
                          max_total_cost_usd=25,max_wall_seconds=100)
 assert first["status"]=="QUEUED"
+
+# Adapter availability is not durable-runner availability. Refuse an
+# unregistered runner before creating or mutating a durable enrollment.
+unsupported=supervisor.enqueue(
+    canonical_repo=repo,run_id="run-unsupported",runner="codex",db_path=db)
+assert unsupported["ok"] is False and unsupported["enqueue_refused"] is True, unsupported
+assert unsupported["reason"]=="runner_not_registered", unsupported
+assert unsupported["runner"]=="codex", unsupported
+assert unsupported["live_runners"]==["claude-code"], unsupported
+with supervisor._connect(db) as conn:
+    assert conn.execute(
+        "SELECT COUNT(*) FROM jobs WHERE run_id='run-unsupported'"
+    ).fetchone()[0] == 0
 with supervisor._connect(db) as conn:
     conn.execute("""UPDATE jobs SET status='RUNNING', worker_pid=424242,
                     worker_started_at=123, worker_role='builder',

@@ -17,12 +17,14 @@ assert adapters["claude-code"].maturity == "stable"
 assert adapters["claude-code"].protocol_compatible is True
 assert adapters["claude-code"].hardened is True
 assert adapters["claude-code"].live_verified is True
+assert adapters["claude-code"].supervisor_runner_supported is True
 
 assert adapters["generic-cli"].maturity == "portable"
 assert adapters["generic-cli"].agent_family == "vendor-neutral"
 assert adapters["generic-cli"].protocol_compatible is True
 assert adapters["generic-cli"].hardened is False
 assert adapters["generic-cli"].live_verified is False
+assert adapters["generic-cli"].supervisor_runner_supported is False
 assert adapters["generic-cli"].native_hooks is False
 assert adapters["generic-cli"].native_subagents is False
 assert adapters["generic-cli"].session_looping is False
@@ -31,6 +33,7 @@ assert adapters["codex"].maturity == "experimental"
 assert adapters["codex"].protocol_compatible is True
 assert adapters["codex"].hardened is False
 assert adapters["codex"].live_verified is False
+assert adapters["codex"].supervisor_runner_supported is False
 
 for adapter_id in ("claude-code", "generic-cli", "codex"):
     failures = doctor_adapter(root, adapter_id)

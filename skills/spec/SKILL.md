@@ -32,7 +32,13 @@ This skill is a host adapter over the deterministic ofloop core.
    (for example `toolchain.python`, `package.uv`,
    `browser.playwright.chromium`). Use `runner_profile` only as a trusted
    profile NAME when the mission needs an operator-commissioned model/effort
-   policy; packets never carry raw Claude flags. Use
+   policy; packets never carry raw Claude flags. Always write `runner_profile`
+   explicitly in newly authored current packets. Use `default` only when the
+   operator intentionally accepts the live runner's provider default. The
+   commissioned Claude runner does not inherit interactive user/project/local
+   Claude settings (including `~/.claude/settings.json`); a specific model
+   belongs in a trusted named runner profile, while provider endpoint/auth
+   belongs in the private commissioned service environment. Use
    `network_read_allowlist` only for packet-specific extra read hosts not
    already supplied by a capability contract. Never add a broad wildcard,
    scheme, port, path, publish endpoint, daemon socket, or unrelated host.
@@ -57,6 +63,7 @@ This skill is a host adapter over the deterministic ofloop core.
    * packet_sha256
    * spec_baseline_branch / spec_baseline_sha
    * execution_mode / checkpoint_count
+   * runner_profile
    * canonical unattended enqueue: ofloop supervisor enqueue <repo> <run-id>
    * canonical status: ofloop supervisor status <repo> <run-id>
    * execution clock when not already running as a service: ofloop supervisor serve

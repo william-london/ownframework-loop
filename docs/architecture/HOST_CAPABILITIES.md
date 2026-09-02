@@ -191,6 +191,22 @@ provider model identity; moving Claude aliases such as `sonnet`, `opus`,
 `haiku`, `best`, `default`, `opusplan`, and `[1m]` selectors are not
 immutable model identity and are refused in strict profiles.
 
+Commissioned Claude workers run in restricted mode and intentionally exclude
+interactive user/project/local settings, including `~/.claude/settings.json`.
+Those files are not model authority for unattended execution. A current packet
+should name `runner_profile` explicitly; `default` means provider default,
+not "inherit my interactive Claude model." A specific MiniMax, Qwen, Claude, or
+other model exposed through the commissioned Claude CLI belongs in an
+operator-owned named profile.
+
+Provider routing/authentication is separate from packet authority. A
+launchd/systemd supervisor that needs `ANTHROPIC_BASE_URL`, authentication,
+`ANTHROPIC_MODEL`/default-model aliases, or `CLAUDE_CONFIG_DIR` may receive
+only the supervisor's explicit allowlisted keys through a private JSON file
+referenced by `OFLOOP_SERVICE_ENV_FILE`. The file is required to be an
+operator-owned regular file under a private directory with mode 0600-or-stricter
+and unknown keys fail closed. Packets never carry these secrets or endpoints.
+
 A profile that also requests explicit effort requires a current-runtime
 attestation before execution:
 

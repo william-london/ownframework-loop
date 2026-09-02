@@ -25,6 +25,7 @@ must be honored. `work_class: TRACKED_CONTRACT`.
   ],
   "allowed_paths": ["src/admin/", "tests/admin/"],
   "protected_paths": ["AGENTS.md", "CLAUDE.md", ".claude/", ".ownframework-loop/", "state/"],
+  "runner_profile": "default",
   "required_validation": [
     { "name": "fast_tests", "command": "make test-fast", "kind": "fast", "expected_exit_code": 0 }
   ],

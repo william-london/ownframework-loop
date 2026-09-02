@@ -25,6 +25,7 @@ Use this shape for `work_class: HARDENING`.
   ],
   "allowed_paths": ["src/api/sync/", "src/middleware/", "tests/api/"],
   "protected_paths": ["AGENTS.md", "CLAUDE.md", ".claude/", ".ownframework-loop/", "state/"],
+  "runner_profile": "default",
   "required_validation": [
     { "name": "fast_tests", "command": "make test-fast", "kind": "fast", "expected_exit_code": 0 }
   ],

@@ -2215,6 +2215,20 @@ def enqueue(
     -> wall clock) before calling this; explicit operator flags win.
     """
     state_mod.validate_run_id(run_id)
+    db = db_path or default_db_path()
+    live_runners = registered_runner_ids()
+    if runner not in live_runners:
+        return {
+            "schema": SCHEMA,
+            "ok": False,
+            "db_path": str(db),
+            "repo": str(Path(canonical_repo).resolve(strict=False)),
+            "run_id": run_id,
+            "enqueue_refused": True,
+            "reason": "runner_not_registered",
+            "runner": runner,
+            "live_runners": list(live_runners),
+        }
     _validate_dispatch_hold_request(
         dispatch_hold_kind,
         dispatch_hold_previous_checkpoint_id,
@@ -2227,7 +2241,6 @@ def enqueue(
         repository_proven=identity_proven,
     )
     execution_mode = _packet_execution_mode(Path(repo), run_id)
-    db = db_path or default_db_path()
     if not identity_proven or not workspace_proven:
         return {
             "schema": SCHEMA,
@@ -3956,11 +3969,16 @@ class _RegisteredClaudeCodeRunner(ClaudeCodeRunner):
     runner_id = "claude-code"
 
 
+def registered_runner_ids() -> tuple[str, ...]:
+    """Return the exact live supervisor runner IDs registered in this runtime."""
+    return tuple(sorted(_RUNNER_REGISTRY))
+
+
 def _runner(name: str):
     if name not in _RUNNER_REGISTRY:
         raise RuntimeError(
             f"runner {name!r} is not registered; live implementations: "
-            + ", ".join(sorted(_RUNNER_REGISTRY))
+            + ", ".join(registered_runner_ids())
         )
     return _RUNNER_REGISTRY[name]
 

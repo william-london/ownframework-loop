@@ -151,14 +151,16 @@ mutate unrelated external systems.
 
 The core is canonical. Current adapters are:
 
-| Adapter | Status | Role |
-| --- | --- | --- |
-| Claude Code | stable, live-verified, hardened | first production semantic runner; optional interactive plugin UX |
-| Generic CLI | portable contract | vendor-neutral host floor |
-| Codex | experimental | portable Agent Skills; live lifecycle hardening not yet claimed |
+| Adapter | Status | Durable supervisor runner | Role |
+| --- | --- | --- | --- |
+| Claude Code | stable, live-verified, hardened | yes | first production semantic runner; optional interactive plugin UX |
+| Generic CLI | portable contract | no | vendor-neutral host floor |
+| Codex | experimental | no | portable Agent Skills; live lifecycle hardening not yet claimed |
 
 Claude Code is the first production-hardened runner, not the identity of
-OwnFramework Loop.
+OwnFramework Loop. Adapter installation and durable-runner availability are
+different contracts: installing the Codex adapter does not register a Codex
+supervisor runner.
 
 The supervisor already selects semantic runners through a runner registry.
 Adding another live runner must not fork the deterministic dispatch/state
@@ -214,6 +216,31 @@ sandbox implementation.
 Claude plugin commands such as `/of-loop:build` and `/of-loop:review` remain
 available for foreground/debug work after installing the Claude adapter. They
 are not the canonical unattended scheduling mechanism.
+
+### Model selection is packet/profile truth
+
+Commissioned semantic workers intentionally do **not** inherit interactive
+user/project/local Claude settings, including `~/.claude/settings.json`.
+Restricted execution receives only Loop-owned worker settings. This prevents an
+unreviewed local setting from silently changing model, tools, MCP, sandbox, or
+other authority after a packet was prepared.
+
+Every newly authored current packet should therefore carry `runner_profile`
+explicitly. `"default"` means the operator intentionally accepts the live
+runner's provider default; it does **not** mean "reuse whatever model my
+interactive Claude session currently uses." To pin MiniMax, Qwen, Claude, or
+another model reachable through the commissioned Claude CLI, put the exact
+provider model selector in an operator-owned named runner profile and put only
+that profile name in the packet. Provider endpoint/authentication and model
+alias environment belong in the private commissioned service environment, not
+in the packet.
+
+A named profile is resolved and bound before provider execution. When it names
+an explicit model, the provider-reported effective model must match or the pass
+is refused as unproven/substituted quality.
+
+See `templates/runner-profiles.example.json` and
+`docs/architecture/HOST_CAPABILITIES.md`.
 
 ## Network and host capability authority
 

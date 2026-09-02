@@ -37,6 +37,12 @@ execution/sandbox is integrated and proven.
 Codex remains experimental. Generic CLI describes the contract, not a claim
 that an unspecified host is automatically safe for unattended production.
 
+Adapter maturity and durable-supervisor runner maturity are intentionally
+separate. An adapter may provide SPEC/BUILD/REVIEW foreground UX without a
+registered unattended runner implementation. The current live supervisor
+registry contains only `claude-code`; enqueue refuses any other runner before
+creating a durable job row.
+
 ## Installation portability
 
 `install.sh` installs core only.
