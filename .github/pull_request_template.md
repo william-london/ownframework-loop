@@ -12,7 +12,7 @@ What changed, and what is explicitly out of scope?
 - [ ] `./validate.sh` passes when required by scope.
 - [ ] `./release_gate.sh` passes at a release/promotion boundary.
 - [ ] `git diff --check` passes.
-- [ ] No real secrets/customer/private data are introduced.
+- [ ] No real secrets, customer data, or private infrastructure references were introduced.
 
 List the decisive markers or commands:
 
@@ -35,20 +35,21 @@ If this PR changes or adds an agent adapter:
 - Known enforcement differences:
 
 - [ ] The adapter reuses the deterministic `ofloop` core.
-- [ ] It does not create its own approval/state/repair/candidate/verdict path.
+- [ ] It does not create its own execution-seal/state/repair/candidate/verdict path.
 - [ ] Public support claims match the evidence above.
 
 ## Authority / compatibility
 
-- [ ] Human approval remains outside agent authority.
-- [ ] Exact candidate SHA remains the review handoff.
-- [ ] Human promotion remains outside the loop.
-- [ ] Existing Claude Code `/of-loop:spec`, `/of-loop:build`, and `/of-loop:review` compatibility is preserved, or a breaking change is explicitly justified.
+- [ ] First-start execution sealing remains deterministic and packet-bound.
+- [ ] Exact candidate SHA remains the BUILD/REVIEW handoff.
+- [ ] Promotion and unrelated external effects remain human/operator-owned.
+- [ ] Existing supported adapter UX is preserved, or a breaking change is explicitly justified.
 
 ## Public-surface check
 
-If public docs, adapter metadata, skills, CI, or contributor files changed:
+If public docs, templates, adapter metadata, skills, CI, or contributor files changed:
 
 - [ ] Checkout-portability scan passes.
-- [ ] Secret scan passes.
-- [ ] No unsupported agent compatibility claim was added.
+- [ ] Secret/public-surface scan passes.
+- [ ] No unsupported adapter/runtime maturity claim was added.
+- [ ] No stale execution path, private host path, or historical wording was reintroduced.

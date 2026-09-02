@@ -10,7 +10,8 @@ Describe the observed behavior and what you expected instead.
 
 ## Reproduction
 
-Provide the smallest safe reproduction you can. Use synthetic data only; do not paste tokens, customer data, private repository contents, or other secrets.
+Provide the smallest safe reproduction you can. Use synthetic data only; do not paste
+tokens, customer data, private repository contents, or other secrets.
 
 ## Environment
 
@@ -22,18 +23,21 @@ Provide the smallest safe reproduction you can. Use synthetic data only; do not 
 
 ## Evidence
 
-Include the focused validation result, relevant error marker, or exact failing command. Avoid giant raw logs when a small excerpt is enough.
+Include the focused validation result, relevant refusal/error marker, or exact failing
+command. Prefer the smallest decisive excerpt over large raw logs.
 
 ## Boundary affected
 
 Check any that apply:
 
-- [ ] Work-packet / approval binding
-- [ ] State / locking / lifecycle
+- [ ] Work packet / execution seal
+- [ ] State / events / locking / lifecycle
 - [ ] Builder / candidate SHA
 - [ ] Exact-SHA review / verdict
-- [ ] Repair / terminal limits
+- [ ] Repair / retry / runtime / cost limits
+- [ ] Supervisor / restart recovery
+- [ ] Capability / runner-profile binding
 - [ ] Adapter discovery / install
-- [ ] Hooks / command guard
+- [ ] Sandbox / secret / external-effect guard
 - [ ] Release gate / CI
-- [ ] Documentation only
+- [ ] Documentation or template only
