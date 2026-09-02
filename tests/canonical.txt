@@ -181,3 +181,7 @@ tests/integration/test_final_source_closure.sh
 # freshness/asset-drift + shared read-only asset wiring.
 tests/integration/test_source_authority_final.sh
 tests/integration/test_single_claim_atomicity.sh
+
+# v0.9.1 terminal source closure — semantic acceptance crash entitlement,
+# preflight/launch provenance parity, fail-closed redacted secrets, browser version identity.
+tests/integration/test_v091_terminal_source_closure.sh
