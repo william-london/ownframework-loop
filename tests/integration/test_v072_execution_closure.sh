@@ -436,8 +436,14 @@ order = {
     "semantic_path": str(semantic),
 }
 supervisor.dispatch_mod.claim_next = lambda **kwargs: dict(order)
-# Not replay-ready: force the real runner launch path under test.
-supervisor.dispatch_mod.semantic_result_ready = lambda work_order: (False, "builder_summary_empty")
+# Test-only lifecycle seam: not replay-ready before the provider call, then
+# ready once the successful fake provider has returned so acceptance may be
+# durably published before the mocked deterministic finalizer.
+supervisor.dispatch_mod.semantic_result_ready = lambda work_order: (
+    (False, "builder_summary_empty")
+    if RecordingRunner.recorded_timeout is None
+    else (True, "ready")
+)
 finalizer_timeouts = []
 def fake_finalize(work_order, **kwargs):
     finalizer_timeouts.append(kwargs.get("timeout_seconds"))
