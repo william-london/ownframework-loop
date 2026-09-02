@@ -11,6 +11,7 @@ from __future__ import annotations
 import sys
 
 from concurrent.futures import Future, ThreadPoolExecutor
+import hashlib
 import json
 import math
 import re
@@ -976,6 +977,16 @@ def _connect(path: Path) -> sqlite3.Connection:
         "failure_reason": "ALTER TABLE semantic_attempts ADD COLUMN failure_reason TEXT",
         "effective_model": "ALTER TABLE semantic_attempts ADD COLUMN effective_model TEXT NOT NULL DEFAULT ''",
         "model_usage_json": "ALTER TABLE semantic_attempts ADD COLUMN model_usage_json TEXT NOT NULL DEFAULT ''",
+        # v0.9.1 terminal closure: acceptance must bind the exact semantic
+        # artifact digest and the exact role-specific finalization identity
+        # captured at acceptance publication. Historical rows with
+        # semantic_accepted=1 but no captured identity are ambiguous across a
+        # crash and therefore remain replay-ineligible; the new gate refuses
+        # them. Going forward the supervisor captures these fields at the
+        # moment of acceptance and refuses replay if either identity drifts.
+        "accepted_semantic_sha256": "ALTER TABLE semantic_attempts ADD COLUMN accepted_semantic_sha256 TEXT NOT NULL DEFAULT ''",
+        "accepted_candidate_sha": "ALTER TABLE semantic_attempts ADD COLUMN accepted_candidate_sha TEXT NOT NULL DEFAULT ''",
+        "accepted_at": "ALTER TABLE semantic_attempts ADD COLUMN accepted_at REAL NOT NULL DEFAULT 0",
     }
     cost_known_added = "cost_known" not in attempt_columns
     for name, statement in attempt_migrations.items():
@@ -1419,6 +1430,43 @@ def _strict_profile_model_violation(
     return ""
 
 
+def _replay_candidate_sha(
+    *,
+    role: str,
+    work_order: dict[str, Any],
+    repo: str,
+    run_id: str,
+) -> str:
+    """Resolve the candidate SHA a replay would operate on for this role.
+
+    For a builder role the candidate is the builder worktree's current HEAD
+    (which review_prepare/build_prepare have anchored at the build pass's
+    exact candidate). For a reviewer role the candidate is whatever the
+    protocol state currently records as last_candidate_sha — the review
+    finalizer is read-only against the reviewer worktree and never advances
+    it. Either way, the answer is empty string if unresolvable; the gate
+    then refuses replay rather than inferring.
+    """
+    if role == "builder":
+        wt = work_order.get("worktree") or ""
+        if not wt:
+            return ""
+        try:
+            head = git_checks.current_head(Path(str(wt)))
+        except OSError:
+            return ""
+        return str(head or "")
+    if role == "reviewer":
+        if not repo or not run_id:
+            return ""
+        try:
+            state = state_mod.load_verified(Path(str(repo)), str(run_id))
+        except Exception:
+            return ""
+        return str((state or {}).get("last_candidate_sha") or "")
+    return ""
+
+
 def _attempt_provenance_gate(
     conn: sqlite3.Connection,
     *,
@@ -1446,6 +1494,37 @@ def _attempt_provenance_gate(
         return False, "semantic_replay_attempt_not_accepted", None
     if attempt["failure_class"] or attempt["failure_reason"]:
         return False, "semantic_replay_attempt_previously_failed", None
+    # v0.9.1 terminal closure: the acceptance publication captured the exact
+    # semantic artifact digest and the exact role-specific finalization
+    # identity. Both must still hold before a zero-cost replay is permitted.
+    # Old rows with semantic_accepted=1 but no captured identity are ambiguous
+    # across a crash and therefore remain replay-ineligible.
+    accepted_semantic_sha = str(attempt["accepted_semantic_sha256"] or "")
+    accepted_candidate_sha = str(attempt["accepted_candidate_sha"] or "")
+    if not accepted_semantic_sha:
+        return False, "semantic_replay_legacy_artifact_unproven", None
+    if not accepted_candidate_sha:
+        return False, "semantic_replay_legacy_candidate_unproven", None
+    semantic_path = str(work_order.get("semantic_path") or "")
+    if not semantic_path:
+        return False, "semantic_replay_artifact_path_missing", None
+    try:
+        current_semantic_bytes = Path(str(semantic_path)).read_bytes()
+    except OSError as exc:
+        return False, f"semantic_replay_artifact_unreadable:{type(exc).__name__}", None
+    current_semantic_sha = hashlib.sha256(current_semantic_bytes).hexdigest()
+    if current_semantic_sha != accepted_semantic_sha:
+        return False, "semantic_replay_artifact_changed", None
+    current_candidate_sha = _replay_candidate_sha(
+        role=role,
+        work_order=work_order,
+        repo=str(job["repo"] or ""),
+        run_id=str(job["run_id"] or ""),
+    )
+    if not current_candidate_sha:
+        return False, "semantic_replay_candidate_unresolvable", None
+    if current_candidate_sha != accepted_candidate_sha:
+        return False, "semantic_replay_candidate_changed", None
     runner_impl = _runner(str(job["runner"]))
     if not bool(getattr(runner_impl, "requires_capability_receipt", False)):
         return True, "", None
@@ -1594,6 +1673,8 @@ def _publish_semantic_acceptance(
     *,
     job_id: int,
     attempt_id: str,
+    semantic_path: str,
+    candidate_sha: str,
 ) -> None:
     """Durably authorize deterministic finalization for one exact attempt.
 
@@ -1602,7 +1683,26 @@ def _publish_semantic_acceptance(
     capability receipt/model checks passed, and the semantic artifact was
     proven ready for deterministic finalization. Historical/ambiguous rows
     default to semantic_accepted=0 and are never inferred accepted.
+
+    v0.9.1 terminal closure: this publication captures the exact semantic
+    artifact digest (accepted_semantic_sha256) and the exact role-specific
+    finalization identity (accepted_candidate_sha). Zero-cost replay
+    re-proves both identities; changed semantic bytes or changed candidate
+    HEAD refuse replay. Old rows with semantic_accepted=1 but no captured
+    identity remain fail-closed; the supervisor never silently rewrites a
+    historical acceptance.
     """
+    if not semantic_path:
+        raise RuntimeError("semantic acceptance requires the semantic artifact path")
+    if not candidate_sha:
+        raise RuntimeError("semantic acceptance requires the candidate SHA")
+    try:
+        semantic_bytes = Path(str(semantic_path)).read_bytes()
+    except OSError as exc:
+        raise RuntimeError(
+            f"semantic artifact unreadable at acceptance: {type(exc).__name__}: {exc}"
+        )
+    semantic_sha256 = hashlib.sha256(semantic_bytes).hexdigest()
     conn.execute("BEGIN IMMEDIATE")
     attempt = conn.execute(
         "SELECT * FROM semantic_attempts WHERE attempt_id=? AND job_id=?",
@@ -1618,17 +1718,41 @@ def _publish_semantic_acceptance(
         conn.rollback()
         raise RuntimeError("failed semantic attempt cannot be accepted")
     if bool(int(attempt["semantic_accepted"] or 0)):
-        conn.commit()
-        return
+        conn.rollback()
+        existing_artifact = str(attempt["accepted_semantic_sha256"] or "")
+        existing_candidate = str(attempt["accepted_candidate_sha"] or "")
+        if (
+            existing_artifact == semantic_sha256
+            and existing_candidate == candidate_sha
+        ):
+            conn.commit()
+            return
+        # Never silently rewrite a historical acceptance with a different
+        # identity. The original acceptance already bound whatever it bound;
+        # a subsequent attempt to re-publish with different bytes/candidate
+        # is a fail-closed ambiguity.
+        raise RuntimeError(
+            "semantic acceptance already published with different identity; "
+            "refusing to silently update"
+        )
     cur = conn.execute(
         """UPDATE semantic_attempts
-              SET semantic_accepted=1
+              SET semantic_accepted=1,
+                  accepted_semantic_sha256=?,
+                  accepted_candidate_sha=?,
+                  accepted_at=?
             WHERE attempt_id=? AND job_id=?
               AND cost_accounted=1
               AND semantic_accepted=0
               AND failure_class IS NULL
               AND failure_reason IS NULL""",
-        (attempt_id, int(job_id)),
+        (
+            semantic_sha256,
+            candidate_sha,
+            time.time(),
+            attempt_id,
+            int(job_id),
+        ),
     )
     if cur.rowcount != 1:
         conn.rollback()
@@ -4945,15 +5069,33 @@ def run_one(*, db_path: Path | None = None, timeout_seconds: int = 0) -> dict[st
             # publish an explicit durable entitlement BEFORE deterministic
             # finalization. A crash before this point fails closed; a crash
             # after it may legitimately replay at zero semantic cost.
+            #
+            # The acceptance publication captures the exact semantic artifact
+            # digest and the exact role-specific finalization identity so a
+            # subsequent zero-cost replay can re-prove them. Zero-cost replay
+            # without identity binding would let a crashed-pending replay
+            # operate on different bytes/HEAD than what was accepted.
             acceptance_ready, acceptance_reason = dispatch_mod.semantic_result_ready(
                 work_order
             )
             if not acceptance_ready:
                 raise dispatch_mod.SemanticResultIncomplete(acceptance_reason)
+            acceptance_candidate_sha = _replay_candidate_sha(
+                role=role,
+                work_order=work_order,
+                repo=str(job["repo"] or ""),
+                run_id=str(job["run_id"] or ""),
+            )
+            if not acceptance_candidate_sha:
+                raise RuntimeError(
+                    f"semantic acceptance cannot resolve candidate SHA for role={role!r}"
+                )
             _publish_semantic_acceptance(
                 conn,
                 job_id=int(job["id"]),
                 attempt_id=attempt_id,
+                semantic_path=str(work_order.get("semantic_path") or ""),
+                candidate_sha=acceptance_candidate_sha,
             )
 
             finalizer_timeout: int | None = None

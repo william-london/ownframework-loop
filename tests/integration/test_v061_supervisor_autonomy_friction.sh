@@ -10,6 +10,7 @@ trap 'rm -rf "$TMP"' EXIT
 python3 - "$TMP" <<'PY'
 import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -18,6 +19,14 @@ from ownframework_loop import supervisor
 root = Path(sys.argv[1])
 repo = root / "repo"
 repo.mkdir()
+# v0.9.1 terminal closure: the supervisor binds the candidate SHA from the
+# builder worktree's HEAD at acceptance time. The fixture must be a real git
+# repo with at least one commit so current_head() returns an authoritative
+# identity instead of None.
+subprocess.check_call(["git", "-C", str(repo), "init", "--quiet", "--initial-branch=main"])
+subprocess.check_call(["git", "-C", str(repo), "config", "user.email", "test@ofloop"])
+subprocess.check_call(["git", "-C", str(repo), "config", "user.name", "ofloop-test"])
+subprocess.check_call(["git", "-C", str(repo), "commit", "--quiet", "--allow-empty", "-m", "initial"])
 rd = repo / ".ownframework-loop" / "run-auto"
 rd.mkdir(parents=True)
 (rd / "STATE.json").write_text(json.dumps({"state": "BUILDING"}), encoding="utf-8")

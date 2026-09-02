@@ -6,6 +6,7 @@ export PYTHONPATH="$ROOT/lib${PYTHONPATH:+:$PYTHONPATH}"
 
 python3 -B - <<'PY'
 import json
+import subprocess
 import tempfile
 from pathlib import Path
 
@@ -16,13 +17,21 @@ tmp = Path(tempfile.mkdtemp(prefix="ofloop-acceptance-"))
 def repo(name):
     p = tmp / name
     p.mkdir()
+    # Initialize a real git repo with one empty commit so the supervisor's
+    # candidate-SHA resolution can read a real builder worktree HEAD.
+    # Without this, the v0.9.1 terminal closure cannot bind an
+    # accepted_candidate_sha at acceptance time.
+    subprocess.check_call(["git", "-C", str(p), "init", "--quiet", "--initial-branch=main"])
+    subprocess.check_call(["git", "-C", str(p), "config", "user.email", "test@ofloop"])
+    subprocess.check_call(["git", "-C", str(p), "config", "user.name", "ofloop-test"])
+    subprocess.check_call(["git", "-C", str(p), "commit", "--quiet", "--allow-empty", "-m", "initial"])
     return p
 
-def wo_for(p, rid):
+def wo_for(p, rid, *, decision="BUILD", role="builder"):
     sem = p / "semantic.json"
     sem.write_text("{}\n", encoding="utf-8")
     return {
-        "decision": "BUILD", "role": "builder",
+        "decision": decision, "role": role,
         "canonical_repo": str(p), "run_id": rid,
         "worktree": str(p), "semantic_path": str(sem),
     }
@@ -235,6 +244,281 @@ try:
         job = conn.execute("SELECT * FROM jobs WHERE run_id=?", (rid4,)).fetchone()
         a4 = conn.execute("SELECT * FROM semantic_attempts WHERE job_id=?", (int(job["id"]),)).fetchone()
         assert int(a4["cost_accounted"]) == 1 and int(a4["semantic_accepted"]) == 0, dict(a4)
+
+    # E. Acceptance identity must reject replay when the exact semantic
+    # artifact bytes mutate between acceptance and replay. A successful
+    # provider envelope + valid strict profile publishes acceptance with the
+    # exact bytes captured at that moment; a later rewrite of the semantic
+    # JSON behind the supervisor's back is no longer the artifact that was
+    # accepted, so replay is refused and the run is quarantined.
+    p5 = repo("identity-artifact")
+    db5 = tmp / "identity-artifact.sqlite3"
+    rid5 = "run-identity-artifact"
+    calls5 = {"runner": 0, "finalizer": 0}
+    @supervisor.register_runner
+    class IdentityArtifactRunner:
+        runner_id = "terminal-identity-artifact"
+        requires_capability_receipt = True
+        def preflight(self):
+            return supervisor.RunnerReadiness(True)
+        def run(self, *args, **kwargs):
+            calls5["runner"] += 1
+            return supervisor.RunnerResult(
+                ok=True, returncode=0, cost_usd=1.5,
+                stdout="ok", stderr="", cost_known=True,
+                tokens_known=True, effective_model="model-a",
+            )
+    supervisor.enqueue(canonical_repo=p5, run_id=rid5, db_path=db5, runner=IdentityArtifactRunner.runner_id)
+    work5 = wo_for(p5, rid5)
+    ready5 = {"n": 0}
+    def first_not_ready_then_ready(_wo):
+        ready5["n"] += 1
+        return (False, "not-yet") if ready5["n"] == 1 else (True, "ready")
+    supervisor.packet_mod.parse_packet_file = lambda path: ({}, "")
+    supervisor.dispatch_mod.claim_next = lambda **kwargs: dict(work5)
+    supervisor.dispatch_mod.semantic_result_ready = first_not_ready_then_ready
+    capabilities.read_resolution_receipt = lambda *a, **k: {
+        "requested_runner_profile": {"model": "model-a"}
+    }
+    supervisor.dispatch_mod.finalize_work_order = lambda *a, **k: (
+        calls5.__setitem__("finalizer", calls5["finalizer"] + 1)
+        or {"finalized": True}
+    )
+    out5 = supervisor.run_one(db_path=db5)
+    assert out5["ok"] is True, out5
+    assert calls5 == {"runner": 1, "finalizer": 1}, calls5
+    # Mutate the semantic JSON behind the supervisor's back, between
+    # acceptance and the next replay attempt.
+    sem5 = Path(work5["semantic_path"])
+    sem5.write_text('{"different": true}\n', encoding="utf-8")
+    # Model the deterministic core's post-finalization state advancement.
+    supervisor.dispatch_mod.claim_next = lambda **kwargs: {
+        "decision": "BUILD", "role": "builder",
+        "canonical_repo": str(p5), "run_id": rid5,
+        "worktree": str(p5), "semantic_path": str(sem5),
+    }
+    # Make sure replay reaches the gate again by queueing a fresh job.
+    from ownframework_loop import supervisor as _sup
+    with _sup._connect(db5) as conn:
+        row = conn.execute("SELECT * FROM jobs WHERE run_id=?", (rid5,)).fetchone()
+        # Re-queue the job for a replay attempt. Cost is preserved so we can
+        # later prove the second run did not charge cost twice.
+        conn.execute(
+            """UPDATE jobs SET status='QUEUED',
+               last_failure_class=NULL, last_failure_reason=NULL,
+               last_error=NULL, next_attempt_at=0
+               WHERE id=?""",
+            (int(row["id"]),),
+        )
+        conn.commit()
+    replay5 = supervisor.run_one(db_path=db5)
+    assert replay5["action"] == "QUARANTINED", replay5
+    assert replay5["reason"] == "semantic_replay_artifact_changed", replay5
+    assert calls5["runner"] == 1, calls5
+    assert calls5["finalizer"] == 1, calls5
+
+    # F. Acceptance identity must reject replay when the BUILD candidate HEAD
+    # changes between acceptance and replay. The acceptance publication
+    # captured the builder worktree HEAD at the moment of acceptance; a
+    # different HEAD at replay time means the candidate the finalizer would
+    # operate on is not the candidate that was accepted.
+    p6 = repo("identity-candidate")
+    db6 = tmp / "identity-candidate.sqlite3"
+    rid6 = "run-identity-candidate"
+    calls6 = {"runner": 0, "finalizer": 0}
+    @supervisor.register_runner
+    class IdentityCandidateRunner:
+        runner_id = "terminal-identity-candidate"
+        requires_capability_receipt = True
+        def preflight(self):
+            return supervisor.RunnerReadiness(True)
+        def run(self, *args, **kwargs):
+            calls6["runner"] += 1
+            return supervisor.RunnerResult(
+                ok=True, returncode=0, cost_usd=2.0,
+                stdout="ok", stderr="", cost_known=True,
+                tokens_known=True, effective_model="model-a",
+            )
+    supervisor.enqueue(canonical_repo=p6, run_id=rid6, db_path=db6, runner=IdentityCandidateRunner.runner_id)
+    work6 = wo_for(p6, rid6)
+    ready6 = {"n": 0}
+    def first_not_ready_then_ready6(_wo):
+        ready6["n"] += 1
+        return (False, "not-yet") if ready6["n"] == 1 else (True, "ready")
+    supervisor.packet_mod.parse_packet_file = lambda path: ({}, "")
+    supervisor.dispatch_mod.claim_next = lambda **kwargs: dict(work6)
+    supervisor.dispatch_mod.semantic_result_ready = first_not_ready_then_ready6
+    capabilities.read_resolution_receipt = lambda *a, **k: {
+        "requested_runner_profile": {"model": "model-a"}
+    }
+    supervisor.dispatch_mod.finalize_work_order = lambda *a, **k: (
+        calls6.__setitem__("finalizer", calls6["finalizer"] + 1)
+        or {"finalized": True}
+    )
+    out6 = supervisor.run_one(db_path=db6)
+    assert out6["ok"] is True, out6
+    # Mutate the builder worktree HEAD behind the supervisor's back.
+    subprocess.check_call(["git", "-C", str(p6), "commit", "--quiet", "--allow-empty", "-m", "mutation"])
+    # Re-queue the job for replay. Cost is preserved.
+    with _sup._connect(db6) as conn:
+        row = conn.execute("SELECT * FROM jobs WHERE run_id=?", (rid6,)).fetchone()
+        conn.execute(
+            """UPDATE jobs SET status='QUEUED',
+               last_failure_class=NULL, last_failure_reason=NULL,
+               last_error=NULL, next_attempt_at=0
+               WHERE id=?""",
+            (int(row["id"]),),
+        )
+        conn.commit()
+    replay6 = supervisor.run_one(db_path=db6)
+    assert replay6["action"] == "QUARANTINED", replay6
+    assert replay6["reason"] == "semantic_replay_candidate_changed", replay6
+    assert calls6["runner"] == 1, calls6
+    assert calls6["finalizer"] == 1, calls6
+
+    # G. REVIEW acceptance identity must reject replay when the protocol
+    # state's last_candidate_sha mutates between acceptance and replay.
+    # The review acceptance captures the exact candidate the review would
+    # finalize against; a different last_candidate_sha at replay time means
+    # the verdict would describe a different candidate than was accepted.
+    p7 = repo("identity-review")
+    db7 = tmp / "identity-review.sqlite3"
+    rid7 = "run-identity-review"
+    calls7 = {"runner": 0, "finalizer": 0}
+    @supervisor.register_runner
+    class IdentityReviewRunner:
+        runner_id = "terminal-identity-review"
+        requires_capability_receipt = True
+        def preflight(self):
+            return supervisor.RunnerReadiness(True)
+        def run(self, *args, **kwargs):
+            calls7["runner"] += 1
+            return supervisor.RunnerResult(
+                ok=True, returncode=0, cost_usd=1.0,
+                stdout="ok", stderr="", cost_known=True,
+                tokens_known=True, effective_model="model-a",
+            )
+    supervisor.enqueue(canonical_repo=p7, run_id=rid7, db_path=db7, runner=IdentityReviewRunner.runner_id)
+    work7 = wo_for(p7, rid7, decision="REVIEW", role="reviewer")
+    ready7 = {"n": 0}
+    def first_not_ready_then_ready7(_wo):
+        ready7["n"] += 1
+        return (False, "not-yet") if ready7["n"] == 1 else (True, "ready")
+    supervisor.packet_mod.parse_packet_file = lambda path: ({}, "")
+    supervisor.dispatch_mod.claim_next = lambda **kwargs: dict(work7)
+    supervisor.dispatch_mod.semantic_result_ready = first_not_ready_then_ready7
+    capabilities.read_resolution_receipt = lambda *a, **k: {
+        "requested_runner_profile": {"model": "model-a"}
+    }
+    supervisor.dispatch_mod.finalize_work_order = lambda *a, **k: (
+        calls7.__setitem__("finalizer", calls7["finalizer"] + 1)
+        or {"finalized": True}
+    )
+    # Seed the protocol state with a REVIEWING entry carrying a known
+    # last_candidate_sha so the review acceptance can bind against it.
+    initial_candidate = subprocess.check_output(
+        ["git", "-C", str(p7), "rev-parse", "HEAD"], text=True
+    ).strip()
+    run_d = _sup.state_mod.run_dir(p7, rid7)
+    run_d.mkdir(parents=True, exist_ok=True)
+    state_path = run_d / "STATE.json"
+    initial_state = {
+        "schema": _sup.state_mod.SCHEMA_VERSION,
+        "run_id": rid7,
+        "state": "REVIEWING",
+        "last_candidate_sha": initial_candidate,
+    }
+    # Test-only seed seam: write STATE.json directly so the review finalizer
+    # has a valid protocol state to read last_candidate_sha from. This is a
+    # single-purpose test fixture, not a production mutation path.
+    import os as _os_seed
+    tmp_state = state_path.with_suffix(".json.tmp")
+    tmp_state.write_text(json.dumps(initial_state, sort_keys=True, indent=2), encoding="utf-8")
+    _os_seed.replace(tmp_state, state_path)
+    out7 = supervisor.run_one(db_path=db7)
+    assert out7["ok"] is True, out7
+    # Mutate the protocol state's last_candidate_sha behind the supervisor's
+    # back. The replay must refuse.
+    mutated_candidate = "f" * 40
+    mutated_state = dict(initial_state)
+    mutated_state["last_candidate_sha"] = mutated_candidate
+    tmp_state2 = state_path.with_suffix(".json.tmp")
+    tmp_state2.write_text(json.dumps(mutated_state, sort_keys=True, indent=2), encoding="utf-8")
+    _os_seed.replace(tmp_state2, state_path)
+    # Re-queue the job. Cost is preserved.
+    with _sup._connect(db7) as conn:
+        row = conn.execute("SELECT * FROM jobs WHERE run_id=?", (rid7,)).fetchone()
+        conn.execute(
+            """UPDATE jobs SET status='QUEUED',
+               last_failure_class=NULL, last_failure_reason=NULL,
+               last_error=NULL, next_attempt_at=0
+               WHERE id=?""",
+            (int(row["id"]),),
+        )
+        conn.commit()
+    replay7 = supervisor.run_one(db_path=db7)
+    assert replay7["action"] == "QUARANTINED", replay7
+    assert replay7["reason"] == "semantic_replay_candidate_changed", replay7
+    assert calls7["runner"] == 1, calls7
+    assert calls7["finalizer"] == 1, calls7
+
+    # H. Exact accepted artifact + exact identity unchanged: zero-cost
+    # deterministic replay still succeeds, does not invoke the provider
+    # again, and does not charge cost twice.
+    p8 = repo("identity-stable")
+    db8 = tmp / "identity-stable.sqlite3"
+    rid8 = "run-identity-stable"
+    calls8 = {"runner": 0, "finalizer": 0}
+    @supervisor.register_runner
+    class IdentityStableRunner:
+        runner_id = "terminal-identity-stable"
+        requires_capability_receipt = True
+        def preflight(self):
+            return supervisor.RunnerReadiness(True)
+        def run(self, *args, **kwargs):
+            calls8["runner"] += 1
+            return supervisor.RunnerResult(
+                ok=True, returncode=0, cost_usd=3.0,
+                stdout="ok", stderr="", cost_known=True,
+                tokens_known=True, effective_model="model-a",
+            )
+    supervisor.enqueue(canonical_repo=p8, run_id=rid8, db_path=db8, runner=IdentityStableRunner.runner_id)
+    work8 = wo_for(p8, rid8)
+    ready8 = {"n": 0}
+    def first_not_ready_then_ready8(_wo):
+        ready8["n"] += 1
+        return (False, "not-yet") if ready8["n"] == 1 else (True, "ready")
+    supervisor.packet_mod.parse_packet_file = lambda path: ({}, "")
+    supervisor.dispatch_mod.claim_next = lambda **kwargs: dict(work8)
+    supervisor.dispatch_mod.semantic_result_ready = first_not_ready_then_ready8
+    capabilities.read_resolution_receipt = lambda *a, **k: {
+        "requested_runner_profile": {"model": "model-a"}
+    }
+    supervisor.dispatch_mod.finalize_work_order = lambda *a, **k: (
+        calls8.__setitem__("finalizer", calls8["finalizer"] + 1)
+        or {"finalized": True}
+    )
+    out8 = supervisor.run_one(db_path=db8)
+    assert out8["ok"] is True, out8
+    # Re-queue without mutating anything (cost preserved).
+    with _sup._connect(db8) as conn:
+        row = conn.execute("SELECT * FROM jobs WHERE run_id=?", (rid8,)).fetchone()
+        conn.execute(
+            """UPDATE jobs SET status='QUEUED',
+               last_failure_class=NULL, last_failure_reason=NULL,
+               last_error=NULL, next_attempt_at=0
+               WHERE id=?""",
+            (int(row["id"]),),
+        )
+        conn.commit()
+    replay8 = supervisor.run_one(db_path=db8)
+    assert replay8["ok"] is True, replay8
+    assert replay8["action"].endswith("_REPLAY_FINALIZED"), replay8
+    # Runner never invoked again; total cost stays at the original 3.0.
+    assert calls8 == {"runner": 1, "finalizer": 2}, calls8
+    with _sup._connect_readonly(db8) as conn:
+        job = conn.execute("SELECT * FROM jobs WHERE run_id=?", (rid8,)).fetchone()
+        assert abs(float(job["total_cost_usd"]) - 3.0) < 1e-9, dict(job)
 finally:
     supervisor.dispatch_mod.claim_next = real_claim
     supervisor.dispatch_mod.semantic_result_ready = real_ready
@@ -243,6 +527,10 @@ finally:
     supervisor.dispatch_mod.finalize_work_order = real_finalize
 
 print("SEMANTIC_REPLAY_ACCEPTANCE_CRASH_WINDOW=PASS")
+print("SEMANTIC_ACCEPTANCE_INPUT_BINDING=PASS")
+print("SEMANTIC_REPLAY_EXACT_ARTIFACT=PASS")
+print("SEMANTIC_REPLAY_EXACT_CANDIDATE=PASS")
+print("SEMANTIC_COST_EXACTLY_ONCE=PASS")
 PY
 
 python3 -B - <<'PY'
