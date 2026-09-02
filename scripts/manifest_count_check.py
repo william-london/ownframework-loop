@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Manifest structural count truth check (v0.3.3 Repair C).
+"""Manifest structural count truth check.
 
 The payload manifest at <root>/.payload.manifest has two structurally
 distinct sections:

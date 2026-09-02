@@ -133,10 +133,30 @@ pass "active review skill waits before first start"
 
 # Cross-adapter coordinator parity: host-specific prose may differ, but the
 # execution-authority doctrine must remain aligned.
+# Shared adapter doctrine: invariants must appear in BOTH Claude and Codex
+# skill surfaces. The check is whitespace- and case-insensitive so legitimate
+# prose differences (line wrapping, punctuation, capitalization) do not
+# require byte-identical formatting. Use ONLY for shared doctrine.
 require_pair_phrase() {
   local left="$1" right="$2" phrase="$3"
-  grep -Fiq "$phrase" "$ROOT_DIR/$left" || fail "$left missing shared adapter doctrine: $phrase"
-  grep -Fiq "$phrase" "$ROOT_DIR/$right" || fail "$right missing shared adapter doctrine: $phrase"
+  python3 -B - "$ROOT_DIR/$left" "$ROOT_DIR/$right" "$phrase" <<'PY'
+import re, sys, unicodedata
+left_path, right_path, phrase = sys.argv[1], sys.argv[2], sys.argv[3]
+
+def normalize(text):
+    # Unicode-safe: NFKC then collapse all whitespace runs to single ASCII space.
+    text = unicodedata.normalize("NFKC", text)
+    text = re.sub(r"\s+", " ", text)
+    return text.casefold()
+
+needle = normalize(phrase)
+for path in (left_path, right_path):
+    with open(path, encoding="utf-8") as fh:
+        body = normalize(fh.read())
+    if needle not in body:
+        raise SystemExit(f"{path} missing shared adapter doctrine (normalized): {phrase!r}")
+PY
+  pass "shared adapter doctrine present (normalized): $phrase"
 }
 
 require_pair_phrase "skills/spec/SKILL.md" ".agents/skills/of-loop-spec/SKILL.md" "ofloop supervisor enqueue <repo> <run-id>"
@@ -144,7 +164,7 @@ require_pair_phrase "skills/spec/SKILL.md" ".agents/skills/of-loop-spec/SKILL.md
 
 require_pair_phrase "skills/build/SKILL.md" ".agents/skills/of-loop-build/SKILL.md" "ofloop supervisor enqueue <repo> <run-id>"
 require_pair_phrase "skills/build/SKILL.md" ".agents/skills/of-loop-build/SKILL.md" "No raw worktree/branch creation or removal"
-require_pair_phrase "skills/build/SKILL.md" ".agents/skills/of-loop-build/SKILL.md" "no push, merge, deploy,"
+require_pair_phrase "skills/build/SKILL.md" ".agents/skills/of-loop-build/SKILL.md" "no push, merge, deploy, publish"
 
 require_pair_phrase "skills/review/SKILL.md" ".agents/skills/of-loop-review/SKILL.md" "ofloop supervisor enqueue <repo> <run-id>"
 require_pair_phrase "skills/review/SKILL.md" ".agents/skills/of-loop-review/SKILL.md" "builder owns first start"
@@ -173,12 +193,28 @@ root = Path(sys.argv[1])
 files = sorted(p for p in (root / "examples").glob("*.md") if p.name != "README.md")
 if not files:
     raise SystemExit("no packet examples found")
+# Examples are completed packets, not templates: placeholders, TBD/TODO, and
+# missing runner_profile are forbidden. The packet JSON inside each markdown
+# must parse, admit, and explicitly name a runner_profile.
+import re
+_PLACEHOLDER_RE = re.compile(r"<(repo|path|branch|run-id|runcount)>", re.IGNORECASE)
+forbidden = ("<repo>", "<path>", "<branch>", "<run-id>", "TBD", "TODO:", "TODO ")
 for path in files:
+    text = path.read_text(encoding="utf-8")
+    for needle in forbidden:
+        if needle in text:
+            raise SystemExit(f"{path.relative_to(root)} contains forbidden authoring placeholder {needle!r}")
+    if _PLACEHOLDER_RE.search(text):
+        raise SystemExit(f"{path.relative_to(root)} contains placeholder-like angular-bracket token")
     meta, _ = packet.parse_packet_file(path)
     errors = packet.validate_packet_for_approval(meta)
     if errors:
         raise SystemExit(f"{path.relative_to(root)} invalid: " + "; ".join(errors))
+    if "runner_profile" not in meta:
+        raise SystemExit(f"{path.relative_to(root)} missing explicit runner_profile")
 print(f"EXAMPLE_PACKET_CONTRACTS=PASS count={len(files)}")
+print("EXAMPLES_PLACEHOLDER_FREE=PASS")
+print("EXAMPLES_EXPLICIT_RUNNER_PROFILE=PASS")
 PY
 pass "packet examples validate against current executable contracts"
 

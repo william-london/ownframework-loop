@@ -1,0 +1,13 @@
+# OwnFramework Loop — non-canonical test exclusion list.
+#
+# Each line is a path relative to repo root. Tests listed here exist in the
+# tests/ tree but are intentionally excluded from the canonical release
+# gate. Add a path here ONLY when:
+#   * the test is a manual-only fixture (e.g. canary lifecycle scripts),
+#   * the test is a debug-only helper not part of the canonical contract, or
+#   * the test was deliberately demoted from the release gate for a
+#     documented reason.
+#
+# This file currently lists no excluded tests; it exists so the
+# `test_no_silent_tests` gate has a stable surface to inspect. Empty
+# lines and lines starting with `#` are ignored.

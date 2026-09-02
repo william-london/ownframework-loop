@@ -78,3 +78,41 @@ PY
 [[ "$MANAGED_PLUGIN_VERSION" != "999.0.0" ]] || fail "dirty plugin bytes leaked into managed core"
 
 echo "V085_DISTRIBUTION_PARITY=PASS"
+
+# Commissioned service environment allowlist must remain consistent across
+# the three maintained surfaces: supervisor runtime loader, macOS installer,
+# Linux installer. Any drift is a fail-closed regression.
+python3 -B - "$ROOT_DIR" <<'PY'
+import re, sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+
+def from_supervisor_py():
+    text = (root / "lib/ownframework_loop/supervisor.py").read_text()
+    m = re.search(r"_SERVICE_ENV_ALLOWED_KEYS = frozenset\(\{([^}]+)\}\)", text, re.DOTALL)
+    return sorted(re.findall(r'"([^"]+)"', m.group(1)))
+
+def from_installer(path):
+    text = Path(path).read_text()
+    in_block = False
+    items = []
+    for line in text.splitlines():
+        if '"ANTHROPIC_API_KEY"' in line or in_block:
+            in_block = True
+            items.extend(re.findall(r'"([A-Z_]+)"', line))
+            if '"CLAUDE_CONFIG_DIR"' in line:
+                in_block = False
+                break
+    return sorted(set(items))
+
+sur = from_supervisor_py()
+mac = from_installer(root / "scripts/supervisor/install-macos.sh")
+lin = from_installer(root / "scripts/supervisor/install-linux.sh")
+
+assert sur == mac == lin, (
+    f"service-env allowlist drift: "
+    f"supervisor.py={sur} install-macos.sh={mac} install-linux.sh={lin}"
+)
+print(f"SERVICE_ENV_PLATFORM_PARITY=PASS keys={len(sur)}")
+PY

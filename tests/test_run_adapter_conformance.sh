@@ -39,6 +39,19 @@ for adapter_id in ("claude-code", "generic-cli", "codex"):
     failures = doctor_adapter(root, adapter_id)
     assert failures == [], (adapter_id, failures)
 
+# Adapter metadata ↔ durable supervisor registry drift-proof: every adapter
+# claiming `supervisor_runner_supported` MUST correspond to a runner actually
+# registered with the durable supervisor, and every registered durable
+# supervisor runner MUST have adapter metadata declaring that support. These
+# two authorities cannot silently drift apart.
+from ownframework_loop import supervisor as _sup
+registered = set(_sup.registered_runner_ids())
+claimed = {a.adapter_id for a in adapters.values() if a.supervisor_runner_supported}
+assert registered == claimed, (
+    f"runner-registry vs adapter-metadata drift: "
+    f"registered={sorted(registered)} claimed={sorted(claimed)}"
+)
+
 from ownframework_loop import guards
 for command in (
     "ofloop spec approve /tmp/repo run-1",

@@ -7,15 +7,14 @@ Exit codes:
   12 ledger unreadable/incompatible
   13 unfinished runtime-generation dependency blocks replacement
 
-The canonical v0.8.x supervisor.sqlite3 carries the full jobs +
-semantic_attempts schema including worker_pid, runtime_generation, etc.
-A legacy pre-runtime_generation ledger does NOT carry runtime_generation.
-An even older fixture may not carry worker_pid. The probe recognizes
-that the absence of a column / table is a property of the ledger schema,
-not a probe failure: it consults PRAGMA table_info and sqlite_master
-before issuing any column- or table-dependent SELECT, so a minimal
-fixture never trips a false-positive ledger_probe_failed
-/ OperationalError.
+The supervisor.sqlite3 ledger carries the full jobs + semantic_attempts
+schema including worker_pid, runtime_generation, etc. A legacy
+pre-runtime_generation ledger does NOT carry runtime_generation. An even
+older fixture may not carry worker_pid. The probe recognizes that the
+absence of a column / table is a property of the ledger schema, not a
+probe failure: it consults PRAGMA table_info and sqlite_master before
+issuing any column- or table-dependent SELECT, so a minimal fixture never
+trips a false-positive ledger_probe_failed / OperationalError.
 """
 from __future__ import annotations
 

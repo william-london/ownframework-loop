@@ -164,7 +164,7 @@ if [[ "$INSTALLED_MODE" -eq 1 ]]; then
     bad "payload manifest verification FAILED — installed payload has drifted from manifest"
   fi
 
-  # v0.3.3 Repair C: structural manifest count truth.
+  # Structural manifest count truth.
   # Require header/file-entry count + active-file count to be reported
   # and assert equality so a partial / over-large manifest is detected.
   if ! PYTHONDONTWRITEBYTECODE=1 python3 -B "$ROOT/scripts/manifest_count_check.py" --root "$ROOT" --manifest "$MANIFEST"; then
@@ -208,7 +208,7 @@ from ownframework_loop import (
 print('  PASS: Python core library imports cleanly')
 "
 
-# 6. CLI runs (against this root, regardless of source/installed). Audit v0.3.0
+# 6. CLI runs (against this root, regardless of source/installed).
 # fixed: the previous `cmd && ok "..."` pattern silently continued past a
 # non-zero exit (with `set -uo pipefail` and no `-e`, the failure was masked
 # and the script eventually reported PASS).

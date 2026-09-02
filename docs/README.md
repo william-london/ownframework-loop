@@ -17,7 +17,6 @@ surfaces on `master`.
 - [`SECURITY_MODEL.md`](SECURITY_MODEL.md) — trust, sandbox, and authority boundaries.
 - [`PERMISSIONS.md`](PERMISSIONS.md) — permission model.
 - [`SANDBOX.md`](SANDBOX.md) — semantic-worker containment.
-- [`AUDIT_REPLAY.md`](AUDIT_REPLAY.md) — evidence and replay semantics.
 
 ## Extension and operations
 

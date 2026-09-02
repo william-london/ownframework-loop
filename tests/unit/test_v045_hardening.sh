@@ -111,6 +111,26 @@ print("PASS clean exact reviewer can write verdict")
 PY
 
 echo dirty > "$RWT/uncommitted.txt"
+# Untracked files do NOT modify the reviewed candidate SHA. The verdict
+# writer must remain authoritative so packet-declared validation commands
+# that produce coverage reports or build caches cannot wedge the run.
+if REPO="$REPO" RID="$RID" BASE="$BASE" python3 -B <<'PY'
+import os
+from pathlib import Path
+from ownframework_loop import verdicts
+repo=Path(os.environ["REPO"])
+try:
+    verdicts.write_verdict(repo, os.environ["RID"], {"candidate_sha_reviewed": os.environ["BASE"]})
+    raise SystemExit(0)
+except RuntimeError:
+    raise SystemExit(1)
+PY
+then pass "untracked-only reviewer dirt tolerated by verdict writer"; else fail "untracked-only reviewer dirt refused"; fi
+
+# A tracked mutation (which DOES modify the reviewed SHA) must still be
+# refused, even though HEAD has not moved.
+echo "tracked mutation" > "$RWT/src_module.py"
+git -C "$RWT" add src_module.py >/dev/null 2>&1
 if REPO="$REPO" RID="$RID" BASE="$BASE" python3 -B <<'PY'
 import os
 from pathlib import Path
@@ -122,7 +142,7 @@ except RuntimeError:
     raise SystemExit(0)
 raise SystemExit(1)
 PY
-then pass "dirty reviewer refused before authoritative verdict"; else fail "dirty reviewer accepted"; fi
+then pass "tracked-mutation reviewer refused before authoritative verdict"; else fail "tracked-mutation reviewer accepted"; fi
 
 # PROGRAM provenance is a valid resolver fallback when approval is absent.
 BREPO="$(make_tmp_repo)"

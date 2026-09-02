@@ -30,5 +30,31 @@ with tempfile.TemporaryDirectory() as td:
 
     assert not runner_profiles.validate_profile_name("deep")
     assert runner_profiles.validate_profile_name("../deep")
+
+    # Strict profile refuses every moving Claude Code alias as a pinned
+    # identity, including the current `fable` headliner in `claude --help`.
+    # `default` is the implicit no-pin profile and is excluded from this loop.
+    _moving = [
+        ("best", "best"),
+        ("sonnet", "sonnet"),
+        ("opus", "opus"),
+        ("haiku", "haiku"),
+        ("fable", "fable"),
+        ("sonnet_1m", "sonnet[1m]"),
+        ("opus_1m", "opus[1m]"),
+        ("opusplan", "opusplan"),
+    ]
+    for profile_name, moving in _moving:
+        path.write_text(json.dumps({
+            "schema": runner_profiles.MANIFEST_SCHEMA,
+            "profiles": {profile_name: {"provider": "claude-code", "model": moving}},
+        }))
+        path.chmod(0o600)
+        try:
+            runner_profiles.resolve_profile(profile_name, provider="claude-code")
+        except runner_profiles.RunnerProfileError as exc:
+            assert "moving" in str(exc).lower() or "alias" in str(exc).lower(), (moving, exc)
+        else:
+            raise AssertionError(f"strict profile accepted moving alias {moving!r}")
 print("OF_LOOP_V091_RUNNER_PROFILES=PASS")
 PY

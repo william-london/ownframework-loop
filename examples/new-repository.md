@@ -30,7 +30,7 @@ the candidate branch.
   "protected_paths": ["AGENTS.md", "CLAUDE.md", ".claude/", ".ownframework-loop/", "state/"],
   "runner_profile": "default",
   "required_validation": [
-    { "name": "git_identity", "command": "git -C <repo> branch --show-current", "kind": "fast", "expected_exit_code": 0 }
+    { "name": "git_identity", "command": "git -C /srv/repos/edge-fetcher rev-parse --abbrev-ref HEAD", "kind": "fast", "expected_exit_code": 0 }
   ],
   "work_units": [
     { "id": "UNIT-1", "title": "Bootstrap repo + initial commit", "scope": "git init -b master, write README.md and .gitignore, make initial commit", "acceptance": ["AC-1", "AC-2"] }
