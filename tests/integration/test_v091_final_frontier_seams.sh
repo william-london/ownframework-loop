@@ -68,10 +68,10 @@ assert any(
     f.get("pattern_id") == "aws_access_key" for f in token_findings
 ), token_findings
 
-# POSIX symlink targets are arbitrary filesystem bytes, not necessarily
-# UTF-8. The candidate-byte reader must round-trip those bytes exactly
-# instead of leaking UnicodeEncodeError on surrogate-escaped target text.
-if os.name == "posix":
+# Linux permits arbitrary non-UTF-8 symlink target bytes. Exercise the exact
+# filesystem-byte round trip there; macOS still exercises ordinary symlink
+# candidate-byte semantics above without assuming identical byte-path APIs.
+if sys.platform.startswith("linux"):
     raw_link = os.fsencode(scan_dir / "raw-link")
     raw_target = b"raw-\xff-target"
     os.symlink(raw_target, raw_link)
