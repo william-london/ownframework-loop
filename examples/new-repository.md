@@ -20,7 +20,7 @@ the candidate branch.
   },
   "acceptance_criteria": [
     { "id": "AC-1", "text": "Repo exists at the absolute path with branch master and zero remotes", "verification": "ofloop new-repo /srv/repos edge-fetcher --init-baseline" },
-    { "id": "AC-2", "text": "Minimal bootstrap baseline (README, .gitignore) is committed", "verification": "git -C /srv/repos/edge-fetcher show HEAD" }
+    { "id": "AC-2", "text": "Minimal bootstrap baseline (README.md, .gitignore) is committed", "verification": "git -C /srv/repos/edge-fetcher show HEAD" }
   ],
   "non_goals": [
     { "id": "NG-1", "text": "Do not create a remote" },
@@ -33,7 +33,7 @@ the candidate branch.
     { "name": "git_identity", "command": "git -C <repo> branch --show-current", "kind": "fast", "expected_exit_code": 0 }
   ],
   "work_units": [
-    { "id": "UNIT-1", "title": "Bootstrap repo + initial commit", "scope": "git init -b master, write README and .gitignore, make initial commit", "acceptance": ["AC-1", "AC-2"] }
+    { "id": "UNIT-1", "title": "Bootstrap repo + initial commit", "scope": "git init -b master, write README.md and .gitignore, make initial commit", "acceptance": ["AC-1", "AC-2"] }
   ],
   "risk_budget": {
     "max_diff_lines": 100,
