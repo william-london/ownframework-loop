@@ -512,10 +512,15 @@ def finalize_review(
     post_review_porcelain_lines = list(post_review_classification.get("porcelain") or [])
 
     tracked_mutation_check = {
+        # Only TRACKED mutations invalidate the reviewed candidate: a tracked
+        # modification/deletion/staged change rewrites bytes the verdict
+        # claims to describe. Untracked files do NOT modify the reviewed
+        # SHA and are tolerated by the verdict-write cleanliness check so
+        # common packet-declared validation commands (coverage reports,
+        # build caches) cannot wedge the run.
         "detected": bool(post_review_classification.get("has_tracked_modified"))
                     or bool(post_review_classification.get("has_tracked_deleted"))
-                    or bool(post_review_classification.get("has_staged"))
-                    or bool(post_review_classification.get("has_untracked")),
+                    or bool(post_review_classification.get("has_staged")),
         "before_sha": pre_review_head,
         "after_sha": pre_review_head,
         "pre_review_porcelain_count": len(pre_review_porcelain_lines),
@@ -781,29 +786,17 @@ def finalize_review(
     # 20. Persist.
     verdicts.write_verdict(canonical_repo, run_id, new_verdict)
 
-    # 21. Append event.
-    state_mod.append_event(
-        canonical_repo, run_id,
-        event_type="review_finalized",
-        old_state=state_mod.load_verified(canonical_repo, run_id).get("state"),
-        new_state=next_state,
-        actor=actor,
-        commit_sha=receipt_candidate_sha,
-        reason=f"deterministic finalizer -> verdict={verdict} -> {next_state}",
-        extras={
-            "verdict": verdict,
-            "failure_reason": failure_reason,
-            "must_fix_count": len(must_fix),
-            "ac_fail_count": len(ac_fail),
-            "ng_violated_count": len(ng_violated),
-            "hard_secret_blocks": len(hard_secret_blocks),
-            "validation_pass": validation_pass,
-        },
-    )
-
-    # 22. Transition if appropriate.
+    # 22. Transition if appropriate. The audit-trail event is appended
+    # AFTER the transition has durably succeeded, and an unexpected state
+    # (concurrent mutation by a different actor) fails closed instead of
+    # silently no-op'ing.
     cur = state_mod.load_verified(canonical_repo, run_id)
-    if cur.get("state") != next_state and transitions.is_valid(cur.get("state"), next_state):
+    if cur.get("state") == next_state:
+        # Idempotent replay: a previous successful finalizer already advanced
+        # the state; the audit-trail event must still be appended below for
+        # THIS invocation.
+        pass
+    elif transitions.is_valid(cur.get("state"), next_state):
         # Defect 3 (v0.4.4): in PROGRAM mode, an APPROVED review must
         # route through the single deterministic helper that finalizes
         # the current checkpoint AND advances to the next one (or marks
@@ -881,5 +874,30 @@ def finalize_review(
                     now = state_mod.load_verified(canonical_repo, run_id)
                     if (now or {}).get("state") != "READY_TO_BUILD":
                         raise
+    else:
+        raise RuntimeError(
+            f"review finalizer cannot transition {cur.get('state')!r} -> {next_state!r}; "
+            "concurrent state mutation must be reconciled before finalization"
+        )
+
+    # 23. Append event AFTER the transition has durably succeeded.
+    state_mod.append_event(
+        canonical_repo, run_id,
+        event_type="review_finalized",
+        old_state=cur.get("state"),
+        new_state=next_state,
+        actor=actor,
+        commit_sha=receipt_candidate_sha,
+        reason=f"deterministic finalizer -> verdict={verdict} -> {next_state}",
+        extras={
+            "verdict": verdict,
+            "failure_reason": failure_reason,
+            "must_fix_count": len(must_fix),
+            "ac_fail_count": len(ac_fail),
+            "ng_violated_count": len(ng_violated),
+            "hard_secret_blocks": len(hard_secret_blocks),
+            "validation_pass": validation_pass,
+        },
+    )
 
     return new_verdict

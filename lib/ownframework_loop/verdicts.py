@@ -106,14 +106,22 @@ def _assert_exact_clean_review_candidate(
         )
     if not git_checks.commit_exists(canonical_repo, expected_sha):
         raise RuntimeError("refusing REVIEW_VERDICT: reviewed candidate is not a commit")
-    cleanliness = git_checks.dirty_status(wt)
-    if cleanliness == "unknown":
+    # Tracked mutations rewrite the bytes the verdict describes and are
+    # refused. Untracked files (e.g. validation-generated coverage reports
+    # or build caches) do NOT modify the reviewed SHA and are tolerated so
+    # the verdict can land durably. Classification is the authoritative
+    # check; the binary dirty_status is a coarse fallback only.
+    classification = git_checks.dirty_classification(wt)
+    if classification.get("status") == "unknown":
         raise RuntimeError(
             "refusing REVIEW_VERDICT: reviewer worktree cleanliness is unknown"
         )
-    if cleanliness == "dirty":
+    if classification.get("has_tracked_modified") \
+            or classification.get("has_tracked_deleted") \
+            or classification.get("has_staged"):
         raise RuntimeError(
-            "refusing REVIEW_VERDICT: reviewer worktree is dirty; reviewed SHA does not describe verifier filesystem"
+            "refusing REVIEW_VERDICT: reviewer worktree has tracked mutation; "
+            "reviewed SHA does not describe verifier filesystem"
         )
 
 

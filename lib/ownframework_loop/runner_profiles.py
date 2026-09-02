@@ -19,7 +19,7 @@ CONTRACT_REVISION = "runner-profile-contract/v1"
 PROFILE_NAME_RE = re.compile(r"^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$")
 _ALLOWED_EFFORT = frozenset({"low", "medium", "high", "xhigh", "max"})
 _MOVING_MODEL_ALIASES = frozenset({
-    "default", "best", "sonnet", "opus", "haiku",
+    "default", "best", "sonnet", "opus", "haiku", "fable",
     "sonnet[1m]", "opus[1m]", "opusplan",
 })
 

@@ -735,7 +735,48 @@ def finalize_build(
     else:
         receipts.write_receipt(canonical_repo, run_id, receipt)
 
-    # 22. Append event.
+    # 22-24. Apply finalizer-derived state and the top-level transition in
+    # ONE STATE_TXN-backed mutation.  Previously the derived counters were
+    # saved while the run was still BUILDING and the transition happened
+    # afterward; a crash between those writes made replay of the same claimed
+    # pass increment no_progress_streak a second time. The audit-trail event
+    # is appended AFTER the transition succeeds so the event chain can never
+    # claim a transition that did not happen, and an unexpected state
+    # (concurrent mutation by a different actor) fails closed instead of
+    # silently no-op'ing.
+    cur = state_mod.load_verified(canonical_repo, run_id)
+    program_block: dict[str, Any] | None = None
+    if program_source_check is not None and state_mod.is_program_state(cur):
+        candidate_block = cur.get("program") or {}
+        counters = candidate_block.get("cumulative_counters")
+        if isinstance(counters, dict):
+            counters["files_changed_unique"] = program_source_check["files_changed_unique"]
+            counters["diff_lines_total"] = program_source_check["diff_lines_total"]
+            program_block = candidate_block
+
+    if cur.get("state") == next_state:
+        # Idempotent replay: a previous successful finalizer already advanced
+        # the state; we must not transition again but we still need to record
+        # the audit-trail event for THIS invocation.
+        pass
+    elif transitions.is_valid(cur.get("state"), next_state):
+        state_mod.transition(
+            canonical_repo, run_id,
+            to_state=next_state,
+            actor=actor,
+            reason=f"finalizer next_state={next_state}",
+            commit_sha=candidate_sha,
+            no_progress_streak=no_progress_streak,
+            build_pass_count=int(new_build_pass_count),
+            program_block=program_block,
+        )
+    else:
+        raise RuntimeError(
+            f"build finalizer cannot transition {cur.get('state')!r} -> {next_state!r}; "
+            "concurrent state mutation must be reconciled before finalization"
+        )
+
+    # 25. Append event AFTER the transition has durably succeeded.
     state_mod.append_event(
         canonical_repo, run_id,
         event_type="build_finalized",
@@ -754,36 +795,6 @@ def finalize_build(
             "scope_findings": len(scope_findings),
         },
     )
-
-    # 23-24. Apply finalizer-derived state and the top-level transition in
-    # ONE STATE_TXN-backed mutation.  Previously the derived counters were
-    # saved while the run was still BUILDING and the transition happened
-    # afterward; a crash between those writes made replay of the same claimed
-    # pass increment no_progress_streak a second time.
-    cur = state_mod.load_verified(canonical_repo, run_id)
-    # Authoritative counter/program updates travel through the typed owner
-    # parameters; `commit_sha` owns last_candidate_sha. Generic extras can
-    # never mutate STATE.json.
-    program_block: dict[str, Any] | None = None
-    if program_source_check is not None and state_mod.is_program_state(cur):
-        candidate_block = cur.get("program") or {}
-        counters = candidate_block.get("cumulative_counters")
-        if isinstance(counters, dict):
-            counters["files_changed_unique"] = program_source_check["files_changed_unique"]
-            counters["diff_lines_total"] = program_source_check["diff_lines_total"]
-            program_block = candidate_block
-
-    if cur.get("state") != next_state and transitions.is_valid(cur.get("state"), next_state):
-        state_mod.transition(
-            canonical_repo, run_id,
-            to_state=next_state,
-            actor=actor,
-            reason=f"finalizer next_state={next_state}",
-            commit_sha=candidate_sha,
-            no_progress_streak=no_progress_streak,
-            build_pass_count=int(new_build_pass_count),
-            program_block=program_block,
-        )
 
     if next_state == "CHANGES_REQUESTED":
         # Single-mode post-hook (mirrors review_finalize): the generic FSM has
