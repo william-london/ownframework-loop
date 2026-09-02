@@ -54,12 +54,17 @@ All current packets carry:
 v3 PROGRAM packets may additionally define `execution_mode=program` and a
 finite `checkpoint_graph`.
 
-Optional portable execution declarations are:
+Portable execution declarations include:
 
-- `capabilities`: semantic capability names such as `toolchain.python`,
-  `package.uv`, or `browser.playwright.chromium`; never host paths;
-- `runner_profile`: a trusted operator/core-owned profile name. Profiles may
-  choose semantic model/effort only and cannot express security-authority flags.
+- `capabilities`: schema-optional semantic capability names such as
+  `toolchain.python`, `package.uv`, or `browser.playwright.chromium`; never
+  host paths;
+- `runner_profile`: schema-optional for compatibility, but explicitly written
+  in every newly authored current packet. It is a trusted operator/core-owned
+  profile name. `default` intentionally accepts the live runner's provider
+  default; a named profile may choose model/effort only and cannot express
+  security-authority flags. Commissioned Claude workers do not inherit
+  interactive `settings.json` model choice.
 
 ## Read-only network and capability authority
 

@@ -49,11 +49,17 @@ execution clock.
 
 ## Current adapters/runners
 
-- `claude-code`: stable, live-verified, hardened; first production semantic
-  runner and optional interactive plugin adapter.
-- `generic-cli`: vendor-neutral portability floor.
-- `codex`: experimental Agent Skills adapter; static/distribution evidence
-  only until real lifecycle proof exists.
+Adapter availability and durable-runner availability are separate claims.
+
+- `claude-code`: stable, live-verified, hardened adapter **and** the only
+  currently registered production supervisor runner.
+- `generic-cli`: vendor-neutral portability floor; no registered supervisor
+  runner implementation.
+- `codex`: experimental Agent Skills adapter; no registered supervisor runner
+  implementation until authenticated lifecycle/containment proof exists.
+
+The supervisor refuses an unregistered runner at enqueue before durable job
+creation.
 
 ## Promotion
 

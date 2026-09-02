@@ -69,11 +69,13 @@ creates the immutable execution seal.
 ofloop supervisor enqueue <repo> <run-id>
 ```
 
-The default runner is currently `claude-code`. Runner selection is explicit
-when another registered live runner exists:
+The only currently registered durable semantic runner is `claude-code`.
+`--runner` accepts registered live runner IDs only; installing an adapter such
+as Codex does not make it an unattended supervisor runner. When another runner
+is actually registered and commissioned, selection may be explicit:
 
 ```bash
-ofloop supervisor enqueue <repo> <run-id> --runner <runner-id>
+ofloop supervisor enqueue <repo> <run-id> --runner <registered-runner-id>
 ```
 
 Once the durable service is commissioned, no terminal session needs to remain

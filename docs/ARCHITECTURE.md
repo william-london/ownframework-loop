@@ -146,7 +146,9 @@ plugin surface.
 ### Portable Agent Skills / Codex
 
 `.agents/skills/` carries portable skills. Codex consumes those skills through
-its experimental adapter.
+its experimental adapter. This is foreground adapter portability, not a claim
+that Codex is a durable supervisor runner; the live runner registry currently
+contains only `claude-code`.
 
 ### Generic CLI
 

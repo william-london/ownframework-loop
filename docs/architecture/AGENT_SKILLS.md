@@ -29,9 +29,12 @@ ofloop capabilities preflight <repo> <capability>...
 ofloop capabilities profile <name>
 ```
 
-Packets request `capabilities` and, optionally, a trusted `runner_profile`
-name. Packet `network_read_allowlist` is only the packet-specific portion of
-read authority; capability contracts may add their exact required read hosts.
+Packets may request `capabilities`. Newly authored current packets write a
+trusted `runner_profile` name explicitly even though the schema keeps the
+field optional for compatibility. `default` means provider default, not
+interactive host-settings inheritance. Packet `network_read_allowlist` is only
+the packet-specific portion of read authority; capability contracts may add
+their exact required read hosts.
 The effective union and runner-profile identity are sealed into the immutable
 run-level capability binding before provider execution.
 
