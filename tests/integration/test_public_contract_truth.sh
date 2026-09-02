@@ -152,7 +152,7 @@ require_pair_phrase "skills/review/SKILL.md" ".agents/skills/of-loop-review/SKIL
 
 for f in "$ROOT_DIR/skills/spec/SKILL.md" "$ROOT_DIR/.agents/skills/of-loop-spec/SKILL.md"; do
   grep -Fq 'Always write `runner_profile`' "$f" || fail "spec adapter does not require explicit runner_profile: $f"
-  grep -Fq 'does not inherit interactive user/project/local' "$f" || fail "spec adapter misstates interactive settings inheritance: $f"
+  grep -Fq 'does not reread interactive user/project/local' "$f" || fail "spec adapter misstates interactive settings inheritance: $f"
 done
 for f in "$ROOT_DIR/skills/build/SKILL.md" "$ROOT_DIR/.agents/skills/of-loop-build/SKILL.md"; do
   grep -Fq 'first claim may auto-seal' "$f" || fail "build adapter drifted first-start semantics: $f"
