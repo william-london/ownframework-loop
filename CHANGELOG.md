@@ -3,9 +3,10 @@
 All notable source/master release-line changes to OwnFramework Loop are documented here.
 
 **Publication status:** 0.9.1 is the current closed source/master line and its
-source-hardening gates are complete. It is not yet a published GitHub
-Release/tag. **v0.8.4** remains the immutable published baseline until a
-separate 0.9.1 release is created.
+source-hardening gates are complete. **v0.9.1** is the current published
+GitHub Release at `d23cadca751c9ed37b5eeab25415c8b0574dae4e`.
+**v0.8.4** (`134a7ce543e2d5858b3a4613c49d49959fe0b029`) remains the
+immutable historical baseline of the previous published line.
 The complete historical changelog through 0.5.2 is preserved at
 [`docs/history/CHANGELOG-through-0.5.2.md`](docs/history/CHANGELOG-through-0.5.2.md).
 

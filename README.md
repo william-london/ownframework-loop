@@ -2,10 +2,10 @@
 
 Source/master release line: **0.9.1**
 
-Latest published GitHub Release: **v0.8.4** at
-`134a7ce543e2d5858b3a4613c49d49959fe0b029`. The 0.9.1 source line is closed
-and validated on `master`; GitHub Release publication is a separate
-distribution step.
+Latest published GitHub Release: **v0.9.1** at
+`d23cadca751c9ed37b5eeab25415c8b0574dae4e`. v0.8.4
+(`134a7ce543e2d5858b3a4613c49d49959fe0b029`) remains the immutable
+historical baseline of the previous published line.
 
 OwnFramework Loop is a vendor-neutral, execution-sealed engineering runtime for
 autonomous coding agents.

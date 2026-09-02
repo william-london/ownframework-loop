@@ -71,7 +71,7 @@ try:
     m = re.search(r"Source/master release line:\s*\*\*([0-9]+\.[0-9]+\.[0-9]+)\*\*", text)
     readme_ver = m.group(1) if m else ""
     check("README source/master release line", readme_ver == EXPECTED, f"= {readme_ver!r}, expected {EXPECTED!r}")
-    check("README published release truth", "Latest published GitHub Release: **v0.8.4**" in text and "134a7ce543e2d5858b3a4613c49d49959fe0b029" in text)
+    check("README published release truth", f"Latest published GitHub Release: **v{EXPECTED}**" in text and "d23cadca751c9ed37b5eeab25415c8b0574dae4e" in text)
     check("README workspace concurrency truth", "execution ownership is that" in text and "run-frozen candidate branch" in text and "may run concurrently" in text)
 except Exception as e:
     check("README readable", False, f"({e})")
@@ -83,7 +83,7 @@ try:
     m = re.search(r"source/master supported line in this repository is\s*\*\*([0-9]+\.[0-9]+\.[0-9]+)\*\*", text)
     sec_ver = m.group(1) if m else ""
     check("SECURITY source/master supported line", sec_ver == EXPECTED, f"= {sec_ver!r}, expected {EXPECTED!r}")
-    check("SECURITY published release truth", "latest published GitHub Release is **v0.8.4**" in text and "134a7ce543e2d5858b3a4613c49d49959fe0b029" in text)
+    check("SECURITY published release truth", f"latest published GitHub Release is **v{EXPECTED}**" in text and "d23cadca751c9ed37b5eeab25415c8b0574dae4e" in text)
 except Exception as e:
     check("SECURITY readable", False, f"({e})")
     sec_ver = ""
@@ -113,5 +113,5 @@ print()
 if failures:
     print(f"  VERSION_TRUTH=FAIL ({len(failures)} mismatch(es))")
     sys.exit(1)
-print(f"  VERSION_TRUTH=PASS (source line = {EXPECTED}; published release = v0.8.4; v0.9.1 workspace doctrine current)")
+print(f"  VERSION_TRUTH=PASS (source line = {EXPECTED}; published release = v{EXPECTED}; v0.9.1 workspace doctrine current)")
 PYEOF
