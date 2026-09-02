@@ -94,7 +94,14 @@ order = {
 }
 
 supervisor.dispatch_mod.claim_next = lambda **kwargs: dict(order)
-supervisor.dispatch_mod.semantic_result_ready = lambda work_order: (False, "builder_summary_empty")
+# Test-only semantic lifecycle seam: incomplete before the fake provider runs,
+# complete after its successful result. Production now requires this readiness
+# proof before publishing durable finalization entitlement.
+supervisor.dispatch_mod.semantic_result_ready = lambda work_order: (
+    (False, "builder_summary_empty")
+    if WaitThenReadyRunner.calls == 0
+    else (True, "ready")
+)
 finalize_calls = []
 def fake_finalize(work_order, **kwargs):
     finalize_calls.append(dict(kwargs))
