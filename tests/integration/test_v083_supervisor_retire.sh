@@ -39,7 +39,7 @@ tmp.mkdir(parents=True, exist_ok=True)
 
 # The installer is part of the canonical source under test, not a fixture;
 # invoke it directly so the regression proves the SAME script operators run.
-installer = src / "install-supervisor-macos.sh"
+installer = src / "scripts" / "supervisor" / "install-macos.sh"
 assert installer.is_file(), f"missing installer: {installer}"
 
 from ownframework_loop import supervisor

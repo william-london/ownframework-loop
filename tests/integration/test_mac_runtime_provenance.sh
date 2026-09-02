@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # v0.6.1 Mac runtime-provenance closure — 8 regression tests.
 #
-# Proves install-supervisor-macos.sh writes consistent runtime
+# Proves scripts/supervisor/install-macos.sh writes consistent runtime
 # provenance and the generated plist + provenance agree byte-for-byte
 # on the Claude executable path, the STATE_ROOT, and source identity.
 # The tests do NOT actually invoke launchctl; they invoke only the
@@ -36,7 +36,7 @@ fi
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/../.." && pwd)"
-INSTALLER="$ROOT/install-supervisor-macos.sh"
+INSTALLER="$ROOT/scripts/supervisor/install-macos.sh"
 LIB="$ROOT/lib"
 EXPECTED_VERSION="$(PYTHONPATH="$LIB" python3 - <<'PY'
 from ownframework_loop import __version__

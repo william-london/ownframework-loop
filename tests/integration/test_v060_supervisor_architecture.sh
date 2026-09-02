@@ -147,22 +147,22 @@ pass "supervisor is execution clock, not second engineering state machine"
 
 # 8. Platform service packaging is syntax-valid and service-manager-specific.
 for script in \
-  install-supervisor.sh uninstall-supervisor.sh \
-  install-supervisor-macos.sh uninstall-supervisor-macos.sh \
-  install-supervisor-linux.sh uninstall-supervisor-linux.sh \
-  scripts/refresh-existing-supervisor.sh \
-  scripts/refresh-existing-supervisor-macos.sh \
-  scripts/refresh-existing-supervisor-linux.sh
+  bin/install-supervisor bin/uninstall-supervisor \
+  scripts/supervisor/install-macos.sh scripts/supervisor/uninstall-macos.sh \
+  scripts/supervisor/install-linux.sh scripts/supervisor/uninstall-linux.sh \
+  scripts/supervisor/refresh.sh \
+  scripts/supervisor/refresh-macos.sh \
+  scripts/supervisor/refresh-linux.sh
 do
   bash -n "$ROOT/$script"
 done
-grep -Fq 'launchctl bootstrap' "$ROOT/install-supervisor-macos.sh" \
+grep -Fq 'launchctl bootstrap' "$ROOT/scripts/supervisor/install-macos.sh" \
   || fail "macOS supervisor installer does not bootstrap launchd"
-grep -Fq 'systemctl' "$ROOT/install-supervisor-linux.sh" \
+grep -Fq 'systemctl' "$ROOT/scripts/supervisor/install-linux.sh" \
   || fail "Linux supervisor installer does not use systemd-user"
-grep -Fq 'Darwin)' "$ROOT/install-supervisor.sh" \
+grep -Fq 'Darwin)' "$ROOT/bin/install-supervisor" \
   || fail "platform wrapper missing macOS path"
-grep -Fq 'Linux)' "$ROOT/install-supervisor.sh" \
+grep -Fq 'Linux)' "$ROOT/bin/install-supervisor" \
   || fail "platform wrapper missing Linux path"
 pass "macOS/Linux supervisor service packaging is present"
 

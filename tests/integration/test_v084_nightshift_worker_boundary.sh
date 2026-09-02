@@ -15,9 +15,9 @@ grep -Fq "WHERE status NOT IN ('DONE','RETIRED')" "$ROOT_DIR/scripts/probe-super
   || fail "shared runtime dependency probe must exclude DONE + RETIRED"
 grep -Fq 'probe-supervisor-runtime-dependencies.py' "$ROOT_DIR/install.sh" \
   || fail "core installer must use shared runtime dependency probe"
-grep -Fq 'probe-supervisor-runtime-dependencies.py' "$ROOT_DIR/install-supervisor-macos.sh" \
+grep -Fq 'probe-supervisor-runtime-dependencies.py' "$ROOT_DIR/scripts/supervisor/install-macos.sh" \
   || fail "macOS supervisor installer must use shared runtime dependency probe"
-grep -Fq 'probe-supervisor-runtime-dependencies.py' "$ROOT_DIR/install-supervisor-linux.sh" \
+grep -Fq 'probe-supervisor-runtime-dependencies.py' "$ROOT_DIR/scripts/supervisor/install-linux.sh" \
   || fail "Linux supervisor installer must use shared runtime dependency probe"
 pass "core + platform installers share one DONE/RETIRED runtime-dependency contract"
 

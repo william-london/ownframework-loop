@@ -14,7 +14,7 @@ export OFLOOP_AGENT_SKILLS_DIR="$TMP/skills"
 export XDG_STATE_HOME="$TMP/state"
 mkdir -p "$HOME" "$OFLOOP_BIN_DIR" "$OFLOOP_AGENT_SKILLS_DIR" "$XDG_STATE_HOME"
 
-bash install-adapter.sh codex | tee "$TMP/install.txt"
+./bin/install-adapter codex | tee "$TMP/install.txt"
 grep -F 'ADAPTER_INSTALL=PASS' "$TMP/install.txt" >/dev/null
 grep -F 'ADAPTER=codex' "$TMP/install.txt" >/dev/null
 EXPECTED_VERSION="$(PYTHONDONTWRITEBYTECODE=1 python3 -B -c "import sys; sys.path.insert(0, '$ROOT/lib'); from ownframework_loop import __version__; print(__version__)")"
@@ -33,12 +33,12 @@ for skill in of-loop-spec of-loop-build of-loop-review of-loop-status; do
   grep -F "managed_object=agent-skill:$skill" "$marker" >/dev/null
 done
 
-bash install-adapter.sh codex >/dev/null
+./bin/install-adapter codex >/dev/null
 
-bash uninstall-adapter.sh codex >/dev/null
+./bin/uninstall-adapter codex >/dev/null
 mkdir -p "$OFLOOP_AGENT_SKILLS_DIR/of-loop-spec"
 printf 'user-owned\n' > "$OFLOOP_AGENT_SKILLS_DIR/of-loop-spec/SKILL.md"
-if bash install-adapter.sh codex >"$TMP/conflict.txt" 2>&1; then
+if ./bin/install-adapter codex >"$TMP/conflict.txt" 2>&1; then
   echo 'FAIL: installer replaced unmanaged Agent Skill' >&2
   exit 1
 fi
@@ -54,7 +54,7 @@ check_bad_marker() {
   mkdir -p "$dest"
   printf 'user-owned-%s\n' "$label" > "$dest/SKILL.md"
   printf '%s' "$marker_body" > "$dest/.ownframework-loop-managed"
-  if bash uninstall-adapter.sh codex >"$TMP/bad-marker-$label.txt" 2>&1; then
+  if ./bin/uninstall-adapter codex >"$TMP/bad-marker-$label.txt" 2>&1; then
     echo "FAIL: $label marker authorized destructive Codex uninstall" >&2
     exit 1
   fi
@@ -69,7 +69,7 @@ check_bad_marker copied-object $'adapter=codex\nmanaged_object=agent-skill:of-lo
 check_bad_marker malformed-extra "$(printf 'adapter=codex\nmanaged_object=agent-skill:of-loop-spec\nversion=%s\ncore_root=%s\nBROKEN-LINE\n' "$EXPECTED_VERSION" "$CORE_ROOT_EARLY")"
 check_bad_marker duplicate-key "$(printf 'adapter=codex\nadapter=codex\nmanaged_object=agent-skill:of-loop-spec\nversion=%s\ncore_root=%s\n' "$EXPECTED_VERSION" "$CORE_ROOT_EARLY")"
 
-bash install-adapter.sh codex >/dev/null
+./bin/install-adapter codex >/dev/null
 CORE_ROOT="$(PYTHONDONTWRITEBYTECODE=1 python3 -B - "$OFLOOP_BIN_DIR/ofloop" <<'PY'
 import sys
 from pathlib import Path
@@ -77,7 +77,7 @@ print(Path(sys.argv[1]).resolve(strict=False).parent.parent)
 PY
 )"
 test -d "$CORE_ROOT"
-bash uninstall-adapter.sh codex | tee "$TMP/uninstall.txt"
+./bin/uninstall-adapter codex | tee "$TMP/uninstall.txt"
 grep -F 'ADAPTER_UNINSTALL=PASS' "$TMP/uninstall.txt" >/dev/null
 grep -F 'CORE_PRESERVED=yes' "$TMP/uninstall.txt" >/dev/null
 test -x "$OFLOOP_BIN_DIR/ofloop"

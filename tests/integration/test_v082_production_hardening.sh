@@ -209,7 +209,7 @@ PY
 set +e
 IOUT="$(HOME="$IHOME" XDG_STATE_HOME="$IXDG" PATH="$SHIMS:$PATH" LC_COUNT="$TMP/lc-count" \
   OFLOOP_BIN="$ROOT_DIR/bin/ofloop" \
-  bash "$ROOT_DIR/install-supervisor-macos.sh" 2>&1)"
+  bash "$ROOT_DIR/scripts/supervisor/install-macos.sh" 2>&1)"
 IRC=$?
 set -e
 [[ "$IRC" -eq 14 ]] || fail "T8 expected bootstrap refusal rc14, got rc=$IRC out=$IOUT"
@@ -253,7 +253,7 @@ HOME="$S2HOME" XDG_STATE_HOME="$S2XDG" PATH="$S2SHIMS:$PATH" \
   ANTHROPIC_AUTH_TOKEN="sk-test-auth-token-capture" \
   ANTHROPIC_BASE_URL="https://api.example.invalid/anthropic" \
   ANTHROPIC_MODEL="claude-test-model" \
-  bash "$ROOT_DIR/install-supervisor-macos.sh" >/dev/null 2>&1 \
+  bash "$ROOT_DIR/scripts/supervisor/install-macos.sh" >/dev/null 2>&1 \
   || fail "T8b macOS supervisor install failed"
 [[ -f "$S2PLIST" ]] || fail "T8b plist not written"
 [[ -f "$S2PROV" ]] || fail "T8b provenance not written"
@@ -304,7 +304,7 @@ NCSERVICE_ENV="$NCXDG/ownframework-loop/service-env.json"
 HOME="$NCHOME" XDG_STATE_HOME="$NCXDG" PATH="$MINIMAL_PATH:$NCSHIMS" \
   OFLOOP_BIN="$ROOT_DIR/bin/ofloop" \
   ANTHROPIC_AUTH_TOKEN="sk-leaked" \
-  bash "$ROOT_DIR/install-supervisor-macos.sh" >/dev/null 2>&1 \
+  bash "$ROOT_DIR/scripts/supervisor/install-macos.sh" >/dev/null 2>&1 \
   || fail "T8b idle-only macOS supervisor install failed"
 [[ -f "$NCPLIST" ]] || fail "T8b idle-only plist not written"
 NCPLIST_ENV="$(python3 -c "import plistlib,sys; d=plistlib.load(open(sys.argv[1],'rb')); print('\n'.join(f'{k}={v}' for k,v in d.get('EnvironmentVariables',{}).items()))" "$NCPLIST" 2>/dev/null || true)"
