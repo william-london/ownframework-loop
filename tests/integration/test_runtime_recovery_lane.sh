@@ -325,9 +325,6 @@ print("A06_ACTIVE_CAP_CRASH_RECOVERY_PRESERVES_UNKNOWN=yes")
 # ------------------------------------------------------------------
 db8 = tmp / "launch.sqlite3"
 repo8 = new_repo("launch")
-supervisor.enqueue(
-    canonical_repo=repo8, run_id="run-launch", db_path=db8, runner="lane-launch-fail"
-)
 
 @supervisor.register_runner
 class LaneLaunchFail:
@@ -340,6 +337,11 @@ class LaneLaunchFail:
         except OSError as exc:
             raise supervisor.WorkerLaunchError("synthetic real Popen failure") from exc
         raise AssertionError("missing executable unexpectedly launched")
+
+enrolled8 = supervisor.enqueue(
+    canonical_repo=repo8, run_id="run-launch", db_path=db8, runner="lane-launch-fail"
+)
+assert enrolled8["ok"] is True and enrolled8["runner"] == "lane-launch-fail", enrolled8
 
 real_claim = supervisor.dispatch_mod.claim_next
 real_ready = supervisor.dispatch_mod.semantic_result_ready
