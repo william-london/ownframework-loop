@@ -899,6 +899,11 @@ def _browser_runtime_proof_status(
         return False, f"browser runtime proof stale: {exc}", None
     if claimed_client != current_client:
         return False, "browser runtime proof stale: Playwright client drift", None
+    canonical_playwright_version = str(
+        current_client.get("distribution_version") or ""
+    )
+    if str(doc.get("playwright_version") or "") != canonical_playwright_version:
+        return False, "browser runtime proof stale: Playwright version identity mismatch", None
 
     asset_root_value = doc.get("browser_asset_root")
     if not isinstance(asset_root_value, str) or not asset_root_value:
@@ -988,6 +993,13 @@ def write_browser_runtime_proof(
         raise CapabilityResolutionError(
             "Playwright client identity changed between canary launch and proof write"
         )
+    canonical_playwright_version = str(
+        current_client.get("distribution_version") or ""
+    )
+    if str(playwright_version or "") != canonical_playwright_version:
+        raise CapabilityResolutionError(
+            "caller Playwright version does not match verified client distribution identity"
+        )
     body = {
         "schema": BROWSER_RUNTIME_PROOF_SCHEMA,
         "capability": name,
@@ -996,7 +1008,7 @@ def write_browser_runtime_proof(
         "browser_asset_merkle_sha256": asset_merkle_sha256,
         "browser_cache_env": "PLAYWRIGHT_BROWSERS_PATH",
         "playwright_client_identity": current_client,
-        "playwright_version": playwright_version,
+        "playwright_version": canonical_playwright_version,
         "browser_version": browser_version,
         "platform_identity": platform_identity(),
         "semantic_runtime_fingerprint": semantic_runtime_fingerprint(),

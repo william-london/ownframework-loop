@@ -1730,11 +1730,17 @@ def _build_parser() -> argparse.ArgumentParser:
                 ),
             )
             runner_profiles_mod.verify_profile_integrity(profile)
-            runner_profiles_mod.verify_effort_attestation(profile)
+            effort_attestation = runner_profiles_mod.verify_effort_attestation(profile)
+            if effort_attestation is not None:
+                profile = dict(profile)
+                profile["effort_attestation"] = effort_attestation
         except runner_profiles_mod.RunnerProfileError as exc:
             _emit({"ok": False, "error": str(exc)}, exit_code=2)
             return
         out["runner_profile"] = runner_profiles_mod.public_summary(profile)
+        diagnostic_override = bool(args.manifest or args.profile_manifest)
+        out["launch_parity"] = not diagnostic_override
+        out["diagnostic_override"] = diagnostic_override
         out["ok"] = True
         _emit(out)
 

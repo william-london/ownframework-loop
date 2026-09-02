@@ -202,35 +202,28 @@ def scan_path_for_secrets_strict(path: Path) -> list[dict[str, Any]]:
 
 
 def scan_path_for_secrets_redacted(path: Path) -> list[dict[str, Any]]:
-    """Scan a file with redacted output. Refuses on read errors."""
+    """Fully scan one file with redacted findings, or fail closed.
+
+    Redaction changes only what findings disclose. It must never change the
+    completeness contract: unreadable or over-limit input is UNKNOWN evidence,
+    not a clean scan.
+    """
     try:
         with open(path, "rb") as f:
             data = f.read(MAX_INPUT_BYTES + 1)
-    except OSError:
-        return []
+    except OSError as exc:
+        raise SecretScanIncomplete(f"secret scan unreadable: {path}") from exc
     if len(data) > MAX_INPUT_BYTES:
-        data = data[:MAX_INPUT_BYTES]
-        truncated = True
-    else:
-        truncated = False
+        raise SecretScanIncomplete(
+            f"secret scan incomplete: {path} exceeds {MAX_INPUT_BYTES} bytes"
+        )
     try:
         text = data.decode("utf-8", errors="replace")
-    except Exception:
-        return []
+    except Exception as exc:
+        raise SecretScanIncomplete(f"secret scan undecodable: {path}") from exc
     findings = scan_text(text, source=str(path))
-    if truncated:
-        # Add a single truncation marker so the caller can record it.
-        findings.append({
-            "pattern_id": "scan_truncated",
-            "severity": "info",
-            "sha256": "",
-            "redacted_prefix": "",
-            "count": 0,
-            "line": None,
-            "source": str(path),
-            "disposition": "scan_truncated",
-            "truncated_bytes": MAX_INPUT_BYTES,
-        })
+    if any(f.get("pattern_id") == "scan_truncated" for f in findings):
+        raise SecretScanIncomplete(f"secret scan incomplete: {path}")
     return findings
 
 

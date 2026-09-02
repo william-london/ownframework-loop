@@ -94,11 +94,6 @@ def main() -> int:
 
     playwright_version = ""
     browser_version = ""
-    try:
-        import playwright as _pw_mod
-        playwright_version = str(getattr(_pw_mod, "__version__", "") or "")
-    except Exception:  # noqa: BLE001
-        playwright_version = ""
 
     try:
         with sync_playwright() as pw:
@@ -133,6 +128,10 @@ def main() -> int:
             client_identity = {}
         result["browser_asset_merkle_sha256"] = merkle
         result["playwright_client_identity"] = client_identity
+        # The verified installed distribution is the canonical version
+        # identity; the top-level convenience field may never disagree.
+        playwright_version = str(client_identity.get("distribution_version") or "")
+        result["playwright_version"] = playwright_version
 
     if write_proof and result.get("ok"):
         proof = cap_mod.write_browser_runtime_proof(

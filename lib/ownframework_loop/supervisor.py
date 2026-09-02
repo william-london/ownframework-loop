@@ -858,6 +858,7 @@ def _connect(path: Path) -> sqlite3.Connection:
           returncode INTEGER,
           cost_usd REAL NOT NULL DEFAULT 0,
           cost_accounted INTEGER NOT NULL DEFAULT 0,
+          semantic_accepted INTEGER NOT NULL DEFAULT 0,
           cost_known INTEGER NOT NULL DEFAULT 1,
           launch_gate_version INTEGER NOT NULL DEFAULT 0,
           input_tokens INTEGER NOT NULL DEFAULT 0,
@@ -961,6 +962,10 @@ def _connect(path: Path) -> sqlite3.Connection:
         "deadline_at": "ALTER TABLE semantic_attempts ADD COLUMN deadline_at REAL",
         "worker_start_identity": "ALTER TABLE semantic_attempts ADD COLUMN worker_start_identity TEXT",
         "cost_known": "ALTER TABLE semantic_attempts ADD COLUMN cost_known INTEGER NOT NULL DEFAULT 1",
+        # Historical attempts are intentionally NOT backfilled. Absence of a
+        # durable acceptance publication is ambiguous across a crash and must
+        # therefore remain replay-ineligible.
+        "semantic_accepted": "ALTER TABLE semantic_attempts ADD COLUMN semantic_accepted INTEGER NOT NULL DEFAULT 0",
         "launch_gate_version": "ALTER TABLE semantic_attempts ADD COLUMN launch_gate_version INTEGER NOT NULL DEFAULT 0",
         "input_tokens": "ALTER TABLE semantic_attempts ADD COLUMN input_tokens INTEGER NOT NULL DEFAULT 0",
         "output_tokens": "ALTER TABLE semantic_attempts ADD COLUMN output_tokens INTEGER NOT NULL DEFAULT 0",
@@ -1437,6 +1442,8 @@ def _attempt_provenance_gate(
         return False, "semantic_replay_attempt_role_mismatch", None
     if not bool(int(attempt["cost_accounted"] or 0)):
         return False, "semantic_replay_attempt_unaccounted", None
+    if not bool(int(attempt["semantic_accepted"] or 0)):
+        return False, "semantic_replay_attempt_not_accepted", None
     if attempt["failure_class"] or attempt["failure_reason"]:
         return False, "semantic_replay_attempt_previously_failed", None
     runner_impl = _runner(str(job["runner"]))
@@ -1580,6 +1587,53 @@ def _account_attempt_cost(
         conn.commit()
     row = conn.execute("SELECT total_cost_usd FROM jobs WHERE id=?", (int(job_id),)).fetchone()
     return float(row[0] or 0.0)
+
+
+def _publish_semantic_acceptance(
+    conn: sqlite3.Connection,
+    *,
+    job_id: int,
+    attempt_id: str,
+) -> None:
+    """Durably authorize deterministic finalization for one exact attempt.
+
+    This publication is intentionally separate from resource accounting.
+    Callers may reach it only after the live RunnerResult succeeded, required
+    capability receipt/model checks passed, and the semantic artifact was
+    proven ready for deterministic finalization. Historical/ambiguous rows
+    default to semantic_accepted=0 and are never inferred accepted.
+    """
+    conn.execute("BEGIN IMMEDIATE")
+    attempt = conn.execute(
+        "SELECT * FROM semantic_attempts WHERE attempt_id=? AND job_id=?",
+        (attempt_id, int(job_id)),
+    ).fetchone()
+    if attempt is None:
+        conn.rollback()
+        raise RuntimeError(f"semantic attempt missing: {attempt_id}")
+    if not bool(int(attempt["cost_accounted"] or 0)):
+        conn.rollback()
+        raise RuntimeError("semantic acceptance requires durable resource accounting")
+    if attempt["failure_class"] or attempt["failure_reason"]:
+        conn.rollback()
+        raise RuntimeError("failed semantic attempt cannot be accepted")
+    if bool(int(attempt["semantic_accepted"] or 0)):
+        conn.commit()
+        return
+    cur = conn.execute(
+        """UPDATE semantic_attempts
+              SET semantic_accepted=1
+            WHERE attempt_id=? AND job_id=?
+              AND cost_accounted=1
+              AND semantic_accepted=0
+              AND failure_class IS NULL
+              AND failure_reason IS NULL""",
+        (attempt_id, int(job_id)),
+    )
+    if cur.rowcount != 1:
+        conn.rollback()
+        raise RuntimeError("semantic acceptance publication lost its authority fence")
+    conn.commit()
 
 
 def _remaining_funded_cost_budget(max_total_cost_usd: float, spent_cost_usd: float) -> float | None:
@@ -4885,6 +4939,22 @@ def run_one(*, db_path: Path | None = None, timeout_seconds: int = 0) -> dict[st
                     "cost_usd": result.cost_usd,
                     **policy,
                 }
+
+            # A successful provider envelope is not itself replay authority.
+            # Prove the exact semantic artifact is structurally ready, then
+            # publish an explicit durable entitlement BEFORE deterministic
+            # finalization. A crash before this point fails closed; a crash
+            # after it may legitimately replay at zero semantic cost.
+            acceptance_ready, acceptance_reason = dispatch_mod.semantic_result_ready(
+                work_order
+            )
+            if not acceptance_ready:
+                raise dispatch_mod.SemanticResultIncomplete(acceptance_reason)
+            _publish_semantic_acceptance(
+                conn,
+                job_id=int(job["id"]),
+                attempt_id=attempt_id,
+            )
 
             finalizer_timeout: int | None = None
             if max_wall > 0:
