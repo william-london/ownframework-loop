@@ -70,7 +70,7 @@ try:
         raise AssertionError("failed-provider accounting crash did not fire")
     except CrashWindow:
         pass
-    with supervisor._connect_readonly(db) as conn:
+    with supervisor._connect(db) as conn:
         job = conn.execute("SELECT * FROM jobs WHERE run_id=?", (rid,)).fetchone()
         attempt = conn.execute(
             "SELECT * FROM semantic_attempts WHERE job_id=?", (int(job["id"]),)
@@ -79,6 +79,18 @@ try:
         assert int(attempt["semantic_accepted"]) == 0, dict(attempt)
         assert attempt["failure_class"] is None and attempt["failure_reason"] is None, dict(attempt)
         assert abs(float(job["total_cost_usd"]) - 1.25) < 1e-9, dict(job)
+        # This fake runner has no child process. Model the durable ownership
+        # snapshot a real on_start publication leaves so replacement-supervisor
+        # crash reconciliation can observe a dead exact attempt owner.
+        conn.execute(
+            """UPDATE jobs SET worker_pid=99999999, worker_started_at=1,
+               worker_pgid=99999999, worker_deadline_at=1,
+               worker_start_identity='synthetic-dead-owner',
+               worker_role='builder', worker_attempt_id=?
+               WHERE id=?""",
+            (attempt["attempt_id"], int(job["id"])),
+        )
+        conn.commit()
     supervisor.dispatch_mod.semantic_result_ready = lambda _wo: (True, "ready")
     capabilities.read_resolution_receipt = lambda *a, **k: {
         "requested_runner_profile": {"model": "model-a"}
@@ -129,7 +141,7 @@ try:
         raise AssertionError("accepted pre-finalizer crash did not fire")
     except CrashWindow:
         pass
-    with supervisor._connect_readonly(db2) as conn:
+    with supervisor._connect(db2) as conn:
         job = conn.execute("SELECT * FROM jobs WHERE run_id=?", (rid2,)).fetchone()
         attempt = conn.execute(
             "SELECT * FROM semantic_attempts WHERE job_id=?", (int(job["id"]),)
@@ -137,6 +149,15 @@ try:
         assert int(attempt["semantic_accepted"]) == 1, dict(attempt)
         assert int(attempt["cost_accounted"]) == 1, dict(attempt)
         assert abs(float(job["total_cost_usd"]) - 2.5) < 1e-9, dict(job)
+        conn.execute(
+            """UPDATE jobs SET worker_pid=99999999, worker_started_at=1,
+               worker_pgid=99999999, worker_deadline_at=1,
+               worker_start_identity='synthetic-dead-owner',
+               worker_role='builder', worker_attempt_id=?
+               WHERE id=?""",
+            (attempt["attempt_id"], int(job["id"])),
+        )
+        conn.commit()
 
     supervisor.dispatch_mod.semantic_result_ready = lambda _wo: (True, "ready")
     def replay_finalizer(*a, **k):
