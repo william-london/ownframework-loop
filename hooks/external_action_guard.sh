@@ -47,10 +47,17 @@ if [[ -z "$cwd" ]]; then
   cwd="$(pwd 2>/dev/null || true)"
 fi
 
-if [[ -z "${CLAUDE_PLUGIN_ROOT:-}" ]]; then
-  echo "  [of-loop hook] CLAUDE_PLUGIN_ROOT not provided; refusing for safety" 1>&2
+# Same dual-root contract as block_dangerous_bash.sh /
+# block_protected_paths.sh: OFLOOP_PLUGIN_ROOT is the explicit fallback for
+# non-Claude-Code adapter hosts and foreground/test lanes. Checking only
+# CLAUDE_PLUGIN_ROOT here would refuse every external action in those lanes
+# while the sibling guards proceed — an inconsistent guard posture.
+if [[ -z "${CLAUDE_PLUGIN_ROOT:-}" && -z "${OFLOOP_PLUGIN_ROOT:-}" ]]; then
+  echo "  [of-loop hook] CLAUDE_PLUGIN_ROOT not provided by Claude Code and OFLOOP_PLUGIN_ROOT not set in environment; refusing for safety" 1>&2
   exit 2
 fi
+PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-${OFLOOP_PLUGIN_ROOT}}"
+export CLAUDE_PLUGIN_ROOT="$PLUGIN_ROOT"
 
 context="$(CLAUDE_PLUGIN_ROOT="$CLAUDE_PLUGIN_ROOT" python3 -B - "$cwd" 2>/dev/null <<'PY_END' || echo "CTX_ERROR"
 import json, sys, os

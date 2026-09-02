@@ -1316,7 +1316,16 @@ def read_resolution_receipt(
     if not isinstance(requested_profile, dict):
         raise CapabilityResolutionError("capability receipt missing requested runner profile")
     from . import capability_binding as _binding_mod
-    binding = _binding_mod._read(_binding_mod.binding_path(canonical_repo, run_id))
+    try:
+        binding = _binding_mod._read(_binding_mod.binding_path(canonical_repo, run_id))
+    except _binding_mod.CapabilityBindingError as exc:
+        # A receipt whose run binding cannot be proven is an invalid receipt.
+        # Callers contractually catch CapabilityResolutionError; letting the
+        # binding error type (or a raw OSError from a vanished file) escape
+        # would misclassify a sealed-run authority failure.
+        raise CapabilityResolutionError(
+            f"capability receipt cannot verify run binding: {exc}"
+        ) from exc
     if payload.get("run_binding_sha256") != binding.get("binding_sha256"):
         raise CapabilityResolutionError("capability receipt run-binding digest mismatch")
     projection = _binding_mod.stable_projection(payload, requested_profile)

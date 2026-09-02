@@ -69,6 +69,7 @@ tests/integration/test_v084_packet_network_read_authority.sh
 tests/integration/test_v084_core_install_portability.sh
 tests/integration/test_v084_linux_supervisor_service.sh
 tests/integration/test_runtime_recovery_lane.sh
+tests/integration/test_v091_tokens_unknown_accounting.sh
 tests/integration/test_v085_program_repair_crash_atomicity.sh
 tests/integration/test_v085_build_finalize_replay_atomicity.sh
 tests/integration/test_v084_static_call_graph_correction.sh
@@ -97,3 +98,4 @@ tests/integration/test_final_source_closure.sh
 tests/integration/test_source_authority_final.sh
 tests/integration/test_single_claim_atomicity.sh
 tests/integration/test_v091_terminal_source_closure.sh
+tests/integration/test_v091_final_frontier_seams.sh

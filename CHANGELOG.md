@@ -47,6 +47,29 @@ The complete historical changelog through 0.5.2 is preserved at
 - capability-resolution failures are terminalized as proven pre-provider
   semantic attempts instead of leaving a reserved attempt for stale recovery.
 
+### Final-frontier seam repairs (post-publication 2026-09-02)
+
+A post-publication adversarial seam sweep repaired five confirmed defects
+without changing the frozen architecture:
+
+- TOKENS_UNKNOWN terminalization now accounts the completed semantic attempt
+  exactly once (live and crash-recovery paths): a proven provider cost lands
+  in the durable ledger before quarantine, an unproven cost records honest
+  `cost_known=0`, and the historical-cost gate counts TOKENS_UNKNOWN attempts
+  so a funded cost ceiling still fails closed after resume;
+- the authoritative secret scanner never follows symlinks; a changed symlink
+  is scanned as its candidate bytes (the git-stored target path) instead of
+  host bytes the candidate does not contain;
+- a vanished/unreadable capability binding fails closed as
+  `CapabilityBindingError`, and receipt reads translate binding failures into
+  `CapabilityResolutionError` so replay/strict-profile gates keep their
+  contractual refusal classification;
+- the external-action guard honors the same `OFLOOP_PLUGIN_ROOT` fallback as
+  its sibling guards, removing an inconsistent all-refuse posture for
+  adapter/foreground lanes;
+- capability-binding publication tightens a pre-existing run directory to
+  private mode, matching the managed cache-root contract.
+
 ### Terminal source hardening
 
 - semantic replay is authorized only after durable resource accounting and an

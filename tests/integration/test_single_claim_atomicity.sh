@@ -5,6 +5,14 @@ TESTS_DIR="$(cd "$(dirname "$0")" && pwd)"
 export PYTHONPATH="$LIB_DIR${PYTHONPATH:+:$PYTHONPATH}"
 
 T="$(make_tmp_repo)"
+# This test creates fixed-name sibling scratch repos next to "$T". An
+# interrupted prior gate run can leave them behind, and a bare mkdir would
+# then wedge the canonical gate with FileExistsError. Clear the exact names
+# before use so the test is idempotent under leftover state.
+SCRATCH_PARENT="$(dirname "$T")"
+rm -rf "$SCRATCH_PARENT/bad-initial" "$SCRATCH_PARENT/legacy" \
+       "$SCRATCH_PARENT/legacy-cli" "$SCRATCH_PARENT/review" \
+       "$SCRATCH_PARENT/cap"
 mkdir -p "$T/src"; echo x > "$T/src/a.py"
 git -C "$T" add . && git -C "$T" commit -m src >/dev/null
 RID="$(make_approved_run "$T" BUG low "single-claim-atomicity")"

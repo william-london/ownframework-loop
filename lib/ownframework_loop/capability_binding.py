@@ -68,7 +68,16 @@ def stable_projection(resolution: dict[str, Any], runner_profile: dict[str, Any]
 def _read(path: Path) -> dict[str, Any]:
     if path.is_symlink():
         raise CapabilityBindingError("capability binding must not be a symlink")
-    st = path.stat()
+    try:
+        st = path.stat()
+    except OSError as exc:
+        # A missing/unreadable binding must fail closed as the module's own
+        # error type. Letting FileNotFoundError escape would bypass callers'
+        # CapabilityBindingError handling and misclassify a sealed-run
+        # authority failure as a generic configuration fault.
+        raise CapabilityBindingError(
+            f"capability binding unreadable: {type(exc).__name__}"
+        ) from exc
     if not stat.S_ISREG(st.st_mode):
         raise CapabilityBindingError("capability binding must be a regular file")
     if hasattr(os, "getuid") and st.st_uid != os.getuid():
@@ -137,6 +146,13 @@ def ensure_run_binding(
             "executed/historical run has no v0.9.1 capability binding; refusing silent rebind"
         )
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    try:
+        # mkdir(exist_ok=True) leaves a pre-existing directory's mode intact;
+        # tighten it explicitly so the sealed authority artifact never sits
+        # in a group/world-listable directory.
+        os.chmod(path.parent, 0o700)
+    except OSError:
+        pass
     payload = {"schema": SCHEMA, "run_id": run_id, "projection": projection, "binding_sha256": digest}
     encoded = json.dumps(payload, indent=2, sort_keys=True) + "\n"
     if _publish_complete_no_replace(path, encoded):

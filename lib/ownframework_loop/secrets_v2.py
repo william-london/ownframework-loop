@@ -28,6 +28,7 @@ output and records truncation.
 from __future__ import annotations
 
 import hashlib
+import os
 import re
 from pathlib import Path
 from typing import Any
@@ -178,6 +179,21 @@ def scan_text(text: str, *, source: str = "stdin") -> list[dict[str, Any]]:
     return findings
 
 
+def _read_candidate_bytes(path: Path) -> bytes:
+    """Read exactly the bytes the candidate stores for one changed path.
+
+    A changed symlink's candidate bytes are its target path (the git blob
+    content), never the external target's contents. Following the link would
+    scan host bytes that are not part of the candidate: a binary-format
+    external secret could then decode to pattern-free garbage and certify a
+    clean scan for bytes the candidate does not contain.
+    """
+    if os.path.islink(str(path)):
+        return os.readlink(str(path)).encode("utf-8")
+    with open(path, "rb") as f:
+        return f.read(MAX_INPUT_BYTES + 1)
+
+
 def scan_path_for_secrets_strict(path: Path) -> list[dict[str, Any]]:
     """Fully scan one changed file or fail closed.
 
@@ -186,8 +202,7 @@ def scan_path_for_secrets_strict(path: Path) -> list[dict[str, Any]]:
     that no secret exists.
     """
     try:
-        with open(path, "rb") as f:
-            data = f.read(MAX_INPUT_BYTES + 1)
+        data = _read_candidate_bytes(path)
     except OSError as exc:
         raise SecretScanIncomplete(f"secret scan unreadable: {path}") from exc
     if len(data) > MAX_INPUT_BYTES:
@@ -209,8 +224,7 @@ def scan_path_for_secrets_redacted(path: Path) -> list[dict[str, Any]]:
     not a clean scan.
     """
     try:
-        with open(path, "rb") as f:
-            data = f.read(MAX_INPUT_BYTES + 1)
+        data = _read_candidate_bytes(path)
     except OSError as exc:
         raise SecretScanIncomplete(f"secret scan unreadable: {path}") from exc
     if len(data) > MAX_INPUT_BYTES:
