@@ -226,12 +226,14 @@ unreviewed local setting from silently changing model, tools, MCP, sandbox, or
 other authority after a packet was prepared.
 
 Every newly authored current packet should therefore carry `runner_profile`
-explicitly. `"default"` means the operator intentionally accepts the live
-runner's provider default; it does **not** mean "reuse whatever model my
-interactive Claude session currently uses." To pin MiniMax, Qwen, Claude, or
-another model reachable through the commissioned Claude CLI, put the exact
-provider model selector in an operator-owned named runner profile and put only
-that profile name in the packet. Provider endpoint/authentication and model
+explicitly. `"default"` means **no Loop model pin**: the worker uses the
+commissioned runner environment's effective model selection (for example a
+captured `ANTHROPIC_MODEL`) or, when none is commissioned, Claude's provider
+default. It does **not** reread the model from an interactive
+`~/.claude/settings.json`. To pin MiniMax, Qwen, Claude, or another model
+reachable through the commissioned Claude CLI, put the exact provider model
+selector in an operator-owned named runner profile and put only that profile
+name in the packet. Provider endpoint/authentication and model
 alias environment belong in the private commissioned service environment, not
 in the packet.
 

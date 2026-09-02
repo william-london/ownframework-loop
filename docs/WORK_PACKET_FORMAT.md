@@ -61,10 +61,11 @@ Portable execution declarations include:
   host paths;
 - `runner_profile`: schema-optional for compatibility, but explicitly written
   in every newly authored current packet. It is a trusted operator/core-owned
-  profile name. `default` intentionally accepts the live runner's provider
-  default; a named profile may choose model/effort only and cannot express
-  security-authority flags. Commissioned Claude workers do not inherit
-  interactive `settings.json` model choice.
+  profile name. `default` means no Loop model pin: the commissioned runner
+  environment may select the model (for example through `ANTHROPIC_MODEL`),
+  otherwise the provider default applies. A named profile may choose
+  model/effort only and cannot express security-authority flags. Commissioned
+  Claude workers do not reread interactive `settings.json` model choice.
 
 ## Read-only network and capability authority
 

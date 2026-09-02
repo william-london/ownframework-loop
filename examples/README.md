@@ -21,6 +21,7 @@ Current examples:
   promotion.
 
 Newly authored current packets should write `runner_profile` explicitly.
-`"default"` intentionally accepts the registered runner's provider default;
-it does not inherit an interactive Claude `settings.json`. Use an
-operator-owned named profile when a specific model is required.
+`"default"` means no Loop model pin: the commissioned runner environment may
+select the model, otherwise the provider default applies. It does not reread an
+interactive Claude `settings.json`. Use an operator-owned named profile when a
+specific model must be pinned and proved.

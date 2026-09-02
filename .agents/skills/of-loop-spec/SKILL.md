@@ -34,8 +34,10 @@ This skill is a host adapter over the deterministic ofloop core.
    profile NAME when the mission needs an operator-commissioned model/effort
    policy; packets never carry raw Claude flags. Always write `runner_profile`
    explicitly in newly authored current packets. Use `default` only when the
-   operator intentionally accepts the live runner's provider default. The
-   commissioned Claude runner does not inherit interactive user/project/local
+   operator intentionally accepts **no Loop model pin**: the commissioned
+   runner environment may select the model (for example through
+   `ANTHROPIC_MODEL`), otherwise the provider default applies. The
+   commissioned Claude runner does not reread interactive user/project/local
    Claude settings (including `~/.claude/settings.json`); a specific model
    belongs in a trusted named runner profile, while provider endpoint/auth
    belongs in the private commissioned service environment. Use

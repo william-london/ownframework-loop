@@ -45,6 +45,13 @@ root as private `service-env.json` rather than embedded in the launchd plist or
 systemd unit. On macOS OAuth remains Keychain-backed. On Linux only the exact
 private Claude credential file may be reopened to the sandbox when required.
 
+The installer captures only supported provider/auth/model variables that are
+present in its own process environment. It does not later reread interactive
+Claude settings. Therefore `runner_profile: "default"` means no Loop model
+pin and follows the commissioned runner environment's effective model selection
+(for example `ANTHROPIC_MODEL`) or provider default. Use a named runner profile
+when the packet must pin and prove an exact model identity.
+
 ## 3. Human-originated SPEC
 
 Create and inspect the mission using a supported adapter/core workflow.

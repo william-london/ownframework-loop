@@ -93,8 +93,9 @@ against schemas/work-packet.schema.json before execution.
 Capability/profile notes:
 - capabilities are portable semantic names, never host paths or daemon sockets.
 - runner_profile is a trusted profile name and should be explicit in every newly
-  authored current packet. "default" intentionally accepts provider default;
-  it does not inherit interactive ~/.claude/settings.json model selection.
+  authored current packet. "default" means no Loop model pin: use the
+  commissioned runner environment's model selection or provider default. It
+  does not reread interactive ~/.claude/settings.json model selection.
   Packets cannot inject Claude flags.
 - network_read_allowlist adds packet-specific read domains. Capability contracts
   may derive additional required read domains; the effective union is run-bound.

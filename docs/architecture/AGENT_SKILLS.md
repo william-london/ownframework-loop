@@ -31,8 +31,9 @@ ofloop capabilities profile <name>
 
 Packets may request `capabilities`. Newly authored current packets write a
 trusted `runner_profile` name explicitly even though the schema keeps the
-field optional for compatibility. `default` means provider default, not
-interactive host-settings inheritance. Packet `network_read_allowlist` is only
+field optional for compatibility. `default` means no Loop model pin: use the
+commissioned runner environment's effective model selection or provider
+default, never interactive host-settings inheritance. Packet `network_read_allowlist` is only
 the packet-specific portion of read authority; capability contracts may add
 their exact required read hosts.
 The effective union and runner-profile identity are sealed into the immutable

@@ -194,8 +194,10 @@ immutable model identity and are refused in strict profiles.
 Commissioned Claude workers run in restricted mode and intentionally exclude
 interactive user/project/local settings, including `~/.claude/settings.json`.
 Those files are not model authority for unattended execution. A current packet
-should name `runner_profile` explicitly; `default` means provider default,
-not "inherit my interactive Claude model." A specific MiniMax, Qwen, Claude, or
+should name `runner_profile` explicitly; `default` means no Loop model pin.
+The commissioned runner environment may select the model (for example through
+`ANTHROPIC_MODEL`), otherwise Claude's provider default applies. It never means
+"reread my interactive Claude model." A specific MiniMax, Qwen, Claude, or
 other model exposed through the commissioned Claude CLI belongs in an
 operator-owned named profile.
 
