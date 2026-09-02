@@ -48,16 +48,41 @@ CHANGES_REQUESTED -> BLOCKED
 CHANGES_REQUESTED -> STOPPED
 ```
 
-There is intentionally no generic `CHANGES_REQUESTED -> BUILDING` edge. In
-single-run mode the deterministic finalizers apply a post-hook that returns
-the run to `READY_TO_BUILD` inside the same finalize sequence (with the
-reviewer-funded repair entitlement claimed atomically by
-`transition_funded_repair`, exposed for the review lane as
-`transition_review_rejection_with_repair`), so the next build claim always
-starts from a generic-FSM state. In PROGRAM mode the unified claim owner
-performs the claim edge (including `CHANGES_REQUESTED -> BUILDING`) atomically
-under the run lock with explicit claim-edge legality, because the program
-claim is itself serialized transition authority.
+There is intentionally NO generic `CHANGES_REQUESTED -> BUILDING` FSM edge
+in `transitions.ALLOWED`. The two paths that legitimately cross that edge
+are both owner-scoped and crash-bounded; neither exposes a generic
+transition available to arbitrary callers:
+
+* **SINGLE mode.** The deterministic build/review finalizers and the
+  foreground `build transition` owner each apply a post-hook that returns
+  the run to `READY_TO_BUILD` inside the same finalize sequence (with the
+  reviewer-funded repair entitlement claimed atomically by
+  `state.transition_funded_repair`, exposed for the review lane as
+  `state.transition_review_rejection_with_repair`), so the next build claim
+  normally starts from a generic-FSM state. If a SINGLE run crashes
+  between the funded-repair transaction and that post-hook, the SINGLE
+  atomic claim owner (`state.claim_single_pass`, `pass_kind="build"`) may
+  recover through a narrow owner-only `CHANGES_REQUESTED -> BUILDING`
+  edge; the regular `transitions.assert_valid()` check is intentionally
+  skipped for that one case so a stranded SINGLE run remains claimable
+  without re-charging `repair_round`. The reconciler (`reconcile.py`,
+  action `complete_single_mode_changes_requested_post_hook`) handles the
+  normal crash recovery by completing the missing post-hook back to
+  `READY_TO_BUILD`; the claim-owner recovery edge is the second-line
+  fallback when reconciliation has not yet run.
+
+* **PROGRAM mode.** The unified claim owner
+  (`program.claim_build_pass` / `program.claim_review_pass` via
+  `program._unified_claim_pass`) performs the claim edge
+  (`CHANGES_REQUESTED -> BUILDING`) atomically under the run lock with an
+  explicit `_CLAIM_OWNER_EDGES` whitelist. PROGRAM runs legitimately
+  rest in `CHANGES_REQUESTED` between claim rounds; only the unified
+  claim owner, never a generic FSM transition, advances the host state.
+
+Both paths flow through their owner functions under flock with the run
+lock, counter funding, and STATE/EVENTS integrity verified in the same
+`STATE_TXN`. Generic `state.transition()` callers cannot reach
+`CHANGES_REQUESTED -> BUILDING`; the FSM rejects the edge.
 
 `APPROVED` and `BLOCKED` are terminal in single-run mode. PROGRAM continuation is a narrow extension: when unfinished checkpoint work remains, the host run may continue to `READY_TO_BUILD` through `state.program_transition()`. `STOPPED` is always absorbing. Once a PROGRAM has no claimable checkpoint, terminal host states have no outbound edge.
 
