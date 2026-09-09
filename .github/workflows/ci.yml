@@ -1,15 +1,9 @@
 name: CI
 
 on:
-  push:
-    branches:
-      - master
-      - 'hardening/**'
-  pull_request:
-    branches:
-      - master
+  # Automatic GitHub Actions triggers disabled by owner request.
+  # Keep the workflow definition available for an explicit manual run only.
   workflow_dispatch:
-
 permissions:
   contents: read
 
