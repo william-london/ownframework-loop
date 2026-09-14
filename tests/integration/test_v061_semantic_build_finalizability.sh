@@ -241,7 +241,8 @@ PRE_BRANCH=$(git -C "$WT3" branch --show-current)
 echo "before recovery: build_pass_count=$PRE_BUILD_PASS repair_round=$PRE_REPAIR branch=$PRE_BRANCH"
 
 # Fresh "builder" for the SAME pass: inspect, commit intended change, drop
-# out-of-scope junk. Build pass / branch / repair_round NEVER incremented.
+# only the dirty untracked junk. The committed ordinary scope drift is then
+# exposed to deterministic finalization and funds one bounded repair round.
 PYTHONPATH="$LIB_DIR" python3 - "$WT3" <<'PY'
 import subprocess, sys
 from pathlib import Path
@@ -269,8 +270,11 @@ echo "after recovery:  build_pass_count=$POST_BUILD_PASS repair_round=$POST_REPA
 
 [[ "$PRE_BUILD_PASS" == "$POST_BUILD_PASS" ]] \
   || fail "TEST 3: build_pass_count changed ($PRE_BUILD_PASS -> $POST_BUILD_PASS); recovery must reuse the SAME pass"
-[[ "$PRE_REPAIR" == "$POST_REPAIR" ]] \
-  || fail "TEST 3: repair_round changed ($PRE_REPAIR -> $POST_REPAIR); recovery must not invent repair"
+[[ "$POST_REPAIR" == "1" ]] \
+  || fail "TEST 3: ordinary scope drift must fund exactly one repair round ($PRE_REPAIR -> $POST_REPAIR)"
+POST_STATE=$(jq -r '.state' "$REPO3/.ownframework-loop/$RID3/STATE.json")
+[[ "$POST_STATE" == "READY_TO_BUILD" ]] \
+  || fail "TEST 3: ordinary scope drift must remain claimable for repair (state=$POST_STATE)"
 [[ "$PRE_BRANCH" == "$POST_BRANCH" ]] \
   || fail "TEST 3: candidate branch changed ($PRE_BRANCH -> $POST_BRANCH); recovery must keep the same branch"
 [[ -f "$REPO3/.ownframework-loop/$RID3/BUILD_RECEIPT.json" ]] \
