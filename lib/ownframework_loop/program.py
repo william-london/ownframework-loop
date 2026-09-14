@@ -110,6 +110,39 @@ def current_checkpoint_acceptance_criterion_ids(
     raise ProgramStateError(f"current checkpoint {cp_id!r} missing from packet graph")
 
 
+def resolve_effective_required_validation(
+    packet: dict[str, Any],
+    state: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Resolve the validations authoritative for the current execution point.
+
+    Top-level validations are global and therefore run for every checkpoint.
+    PROGRAM checkpoint-local validations are appended only for the exact
+    current checkpoint.  This intentionally never inspects future checkpoints
+    and preserves the historical SINGLE-mode list unchanged.
+    """
+    effective = list(packet.get("required_validation") or [])
+    if not is_program_state(state):
+        return effective
+
+    program_state = state.get("program") or {}
+    current = list(program_state.get("current_checkpoints") or [])
+    if not current:
+        raise ProgramStateError("PROGRAM state has no current checkpoint")
+    cp_id = current[0]
+    checkpoints = (packet.get("checkpoint_graph") or {}).get("checkpoints") or []
+    for checkpoint in checkpoints:
+        if isinstance(checkpoint, dict) and checkpoint.get("id") == cp_id:
+            local = checkpoint.get("required_validation") or []
+            if not isinstance(local, list):
+                raise ProgramStateError(
+                    f"checkpoint {cp_id} required_validation must be a list"
+                )
+            effective.extend(local)
+            return effective
+    raise ProgramStateError(f"current checkpoint {cp_id!r} missing from packet graph")
+
+
 def validate_checkpoint_graph(packet: dict[str, Any]) -> list[str]:
     errors: list[str] = []
     cg = packet.get("checkpoint_graph")

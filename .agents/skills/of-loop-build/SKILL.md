@@ -52,6 +52,13 @@ sealing command. No ofloop loop run.
 5. Invoke one fresh of-builder with exactly the prepared context.
 6. The agent engineers only in the prepared worktree and fills only the exact
    pass-scoped semantic result.
+   Before declaring `candidate_ready`, inspect the exact baseline-to-candidate
+   changed-path set and compare it with the frozen packet's `allowed_paths`,
+   `protected_paths`, and elevated/sensitive rules. Remove accidental ordinary
+   out-of-scope changes when that is safe within the mission; never knowingly
+   declare a candidate that retains them. This is a semantic self-check only:
+   the deterministic finalizer remains authoritative and protected paths,
+   hard secrets, source ceilings, and identity breaches remain terminal.
 7. Call ofloop build finalize <repo> <run-id> <agent_result_path>.
 8. Emit ofloop build marker <repo> <run-id>.
 

@@ -513,7 +513,7 @@ def finalize_build(
 
     # 15. Execute required validation commands.
     validations: list[dict[str, Any]] = []
-    for v in meta.get("required_validation") or []:
+    for v in program_mod.resolve_effective_required_validation(meta, state):
         cmd = (v or {}).get("command") or ""
         name = (v or {}).get("name") or "validation"
         kind = (v or {}).get("kind") or "fast"
@@ -660,7 +660,32 @@ def finalize_build(
     elif protected_findings:
         next_state = "BLOCKED"
     elif scope_findings:
-        next_state = "BLOCKED"
+        # Ordinary scope drift is repairable: the fresh builder receives the
+        # authoritative receipt findings through dispatch and must remove the
+        # unauthorized path. Protected paths and other hard boundaries above
+        # remain terminal BLOCKED.
+        next_state = "CHANGES_REQUESTED"
+        # A scope repair is a funded repair round, just like a rejected
+        # review.  Preflight the packet-bound entitlement so exhaustion is
+        # terminal rather than exposing an unfunded CHANGES_REQUESTED state.
+        repair_cap = limits_mod.effective_cap("repair_round", meta)
+        repair_used = int(state.get("repair_round") or 0)
+        if state_mod.is_program_state(state):
+            program_state = state.get("program") or {}
+            cp_id = (program_state.get("current_checkpoints") or [None])[0]
+            cp_meta = next(
+                (cp for cp in (meta.get("checkpoint_graph") or {}).get("checkpoints", [])
+                 if isinstance(cp, dict) and cp.get("id") == cp_id),
+                None,
+            )
+            if cp_meta is None:
+                raise RuntimeError(f"current checkpoint {cp_id!r} missing from packet")
+            repair_cap = min(
+                int(repair_cap) if repair_cap is not None else int(cp_meta["risk_budget"]["max_repair_rounds"]),
+                int(cp_meta["risk_budget"]["max_repair_rounds"]),
+            )
+        if repair_cap is not None and repair_used >= int(repair_cap):
+            next_state = "BLOCKED"
     elif not validation_pass:
         # Mandatory validation failed; transition to CHANGES_REQUESTED
         # so the builder can repair. Only BLOCK if the failure is hard.
@@ -762,16 +787,31 @@ def finalize_build(
         # the audit-trail event for THIS invocation.
         pass
     elif transitions.is_valid(cur.get("state"), next_state):
-        state_mod.transition(
-            canonical_repo, run_id,
-            to_state=next_state,
-            actor=actor,
-            reason=f"finalizer next_state={next_state}",
-            commit_sha=candidate_sha,
-            no_progress_streak=no_progress_streak,
-            build_pass_count=int(new_build_pass_count),
-            program_block=program_block,
-        )
+        if next_state == "CHANGES_REQUESTED" and scope_findings:
+            funded = state_mod.transition_funded_repair(
+                canonical_repo,
+                run_id,
+                packet=meta,
+                actor=actor,
+                commit_sha=candidate_sha,
+                allowed_sources=frozenset({"BUILDING"}),
+                claimed_reason="ordinary out-of-scope change; repair entitlement claimed atomically",
+            )
+            if not funded.get("repair_claimed"):
+                raise RuntimeError(
+                    "scope repair entitlement was not funded despite available preflight"
+                )
+        else:
+            state_mod.transition(
+                canonical_repo, run_id,
+                to_state=next_state,
+                actor=actor,
+                reason=f"finalizer next_state={next_state}",
+                commit_sha=candidate_sha,
+                no_progress_streak=no_progress_streak,
+                build_pass_count=int(new_build_pass_count),
+                program_block=program_block,
+            )
     else:
         raise RuntimeError(
             f"build finalizer cannot transition {cur.get('state')!r} -> {next_state!r}; "

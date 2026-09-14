@@ -177,6 +177,42 @@
                 },
                 "description": "Exact top-level acceptance-criterion IDs owned by this checkpoint. When present on one checkpoint it must be present on every checkpoint."
               },
+              "required_validation": {
+                "type": "array",
+                "description": "Additional validations authoritative only while this checkpoint is being finalized or reviewed; top-level required_validation remains global.",
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "name",
+                    "command",
+                    "kind"
+                  ],
+                  "properties": {
+                    "name": {
+                      "type": "string"
+                    },
+                    "command": {
+                      "type": "string"
+                    },
+                    "kind": {
+                      "type": "string",
+                      "enum": [
+                        "fast",
+                        "full",
+                        "secret",
+                        "scope"
+                      ]
+                    },
+                    "expected_exit_code": {
+                      "type": "integer"
+                    },
+                    "expected_marker": {
+                      "type": "string"
+                    }
+                  }
+                }
+              },
               "risk_budget": {
                 "type": "object",
                 "additionalProperties": false,

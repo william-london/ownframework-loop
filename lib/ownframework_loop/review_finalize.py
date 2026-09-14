@@ -405,7 +405,7 @@ def finalize_review(
     # 12. Run required validations from the packet (re-run for verifier freshness).
     validations: list[dict[str, Any]] = []
     validation_pass = True
-    for v in meta.get("required_validation") or []:
+    for v in program_mod.resolve_effective_required_validation(meta, active_state):
         if not _validation_shape_ok(v):
             continue
         cmd = v["command"]

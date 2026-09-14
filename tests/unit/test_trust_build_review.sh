@@ -136,7 +136,7 @@ assert_eq "$REAL_FC" "1" "fabricated diff counts are ignored (real diff counts a
 # 17. real diff counts are code-computed (covered by 16)
 pass "real diff counts are code-computed"
 
-# 18. out-of-scope path is rejected (next_state=BLOCKED)
+# 18. ordinary out-of-scope path is repairable but never reviewable
 T3="$(make_tmp_repo)"
 RID3="$(make_approved_run "$T3" BUG low "scope")"
 "$OFLOOP_BIN" build claim "$T3" "$RID3" >/dev/null 2>&1
@@ -146,9 +146,11 @@ mkdir -p "$WT3/elsewhere" && echo "x" > "$WT3/elsewhere/x.py"
 git -C "$WT3" add elsewhere/x.py && git -C "$WT3" commit -m x >/dev/null 2>&1
 semantic_build_finalize "$T3" "$RID3" >/dev/null 2>&1 || true
 NEXT3="$(python3 -c "import json; r=json.load(open('$T3/.ownframework-loop/$RID3/BUILD_RECEIPT.json')); print(r['next_state'])")"
-assert_eq "$NEXT3" "BLOCKED" "out-of-scope path is rejected"
+assert_eq "$NEXT3" "CHANGES_REQUESTED" "ordinary out-of-scope path requests repair"
+STATE3="$(python3 -c "import json; print(json.load(open('$T3/.ownframework-loop/$RID3/STATE.json'))['state'])")"
+assert_eq "$STATE3" "READY_TO_BUILD" "ordinary out-of-scope path does not reach review"
 
-# 19. unapproved sensitive path is rejected (next_state=BLOCKED)
+# 19. unapproved ordinary root path is repairable (next_state=CHANGES_REQUESTED)
 T4="$(make_tmp_repo)"
 RID4="$(make_approved_run "$T4" BUG low "sensitive-blocked")"
 "$OFLOOP_BIN" build claim "$T4" "$RID4" >/dev/null 2>&1
@@ -157,7 +159,7 @@ git -C "$T4" worktree add -b "factory/candidate/$RID4" "$WT4" master >/dev/null 
 echo "x" > "$WT4/AGENTS.md" && git -C "$WT4" add AGENTS.md && git -C "$WT4" commit -m x >/dev/null 2>&1
 semantic_build_finalize "$T4" "$RID4" >/dev/null 2>&1 || true
 NEXT4="$(python3 -c "import json; r=json.load(open('$T4/.ownframework-loop/$RID4/BUILD_RECEIPT.json')); print(r['next_state'])")"
-assert_eq "$NEXT4" "BLOCKED" "unapproved sensitive path is rejected"
+assert_eq "$NEXT4" "CHANGES_REQUESTED" "unapproved ordinary root path requests repair"
 
 # 20. approved elevated path succeeds
 T5="$(make_tmp_repo)"
@@ -506,10 +508,10 @@ print('OK' if ok else 'REJECTED:'+','.join(v))
 ")"
 assert_contains "$out64" "REJECTED" "unbounded or malformed budget is rejected"
 
-# 65. AGENTS.md edit blocked when not elevated (covered by test 19)
-pass "AGENTS.md edit blocked when not elevated"
+# 65. AGENTS.md edit requests repair when not elevated (covered by test 19)
+pass "AGENTS.md edit requests repair when not elevated"
 
-# 66. .claude/ edit blocked when not elevated
+# 66. .claude/ edit requests repair when not elevated
 T13="$(make_tmp_repo)"
 RID13="$(make_approved_run "$T13" BUG low "claude-blocked")"
 "$OFLOOP_BIN" build claim "$T13" "$RID13" >/dev/null 2>&1
@@ -519,7 +521,7 @@ mkdir -p "$WT13/.claude" && echo "x" > "$WT13/.claude/x.md"
 git -C "$WT13" add .claude/x.md && git -C "$WT13" commit -m x >/dev/null 2>&1
 semantic_build_finalize "$T13" "$RID13" >/dev/null 2>&1 || true
 NEXT66="$(python3 -c "import json; r=json.load(open('$T13/.ownframework-loop/$RID13/BUILD_RECEIPT.json')); print(r['next_state'])")"
-assert_eq "$NEXT66" "BLOCKED" ".claude/ edit blocked when not elevated"
+assert_eq "$NEXT66" "CHANGES_REQUESTED" ".claude/ edit requests repair when not elevated"
 
 # ---------- STATE AND NO-WORK TESTS 67-73 ----------
 

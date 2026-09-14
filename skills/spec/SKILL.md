@@ -177,6 +177,12 @@ Before a v3 PROGRAM is considered ready:
   envelopes from the sums of checkpoint-local budgets;
 - ensure a global repair allowance is realizable by the global build/review
   allowance;
+- for PROGRAM validation, top-level `required_validation` is a global gate and
+  MUST be satisfiable from the first checkpoint onward. A gate that becomes
+  satisfiable only after CP-N belongs in that checkpoint's
+  `checkpoint_graph.checkpoints[N].required_validation` (and in later
+  checkpoints too when continuous proof is intended); never place a known
+  later-only gate in the top-level list.
 - choose `max_pass_runtime_seconds` for the complexity of one semantic pass
   (up to 28800 per pass; the undeclared fallback fuse is 3600, so any pass
   that legitimately needs longer than one hour must declare its budget);
