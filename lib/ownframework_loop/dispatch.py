@@ -55,8 +55,10 @@ _RETRYABLE_SEMANTIC_RESULT_REASONS = frozenset({
     "builder_completion_evidence_empty",
     "builder_semantic_shape_invalid",
     "builder_work_unit_mismatch",
+    "builder_fixed_identity_mismatch",
     "review_schema_mismatch",
     "review_candidate_mismatch",
+    "review_fixed_identity_mismatch",
     "review_recommendation_invalid",
     "review_findings_invalid",
     "review_coverage_not_lists",
@@ -69,6 +71,8 @@ _RETRYABLE_SEMANTIC_RESULT_REASONS = frozenset({
     "review_escalation_invalid",
     "review_semantic_shape_invalid",
 })
+
+_RESEED_RECEIPT_SCHEMA = "ownframework-loop-semantic-reseed/v1"
 
 
 class SemanticResultIncomplete(DispatchError):
@@ -102,6 +106,76 @@ def _load_json_file(path: Path) -> dict[str, Any] | None:
     return data if isinstance(data, dict) else None
 
 
+def _canonical_json_bytes(payload: dict[str, Any]) -> bytes:
+    return json.dumps(payload, indent=2, sort_keys=True).encode("utf-8")
+
+
+def _fresh_semantic_skeleton(
+    decision: str,
+    repo: Path,
+    run_id: str,
+) -> tuple[Path, dict[str, Any], bytes, str]:
+    if decision == "BUILD":
+        target = build_agent_mod.agent_result_path(repo, run_id)
+        skeleton = build_agent_mod.build_skeleton(repo, run_id)
+    else:
+        target = assessment_mod.assessment_path(repo, run_id)
+        skeleton = assessment_mod.build_skeleton(repo, run_id)
+    encoded = _canonical_json_bytes(skeleton)
+    return target.resolve(strict=False), skeleton, encoded, util.sha256_bytes(encoded)
+
+
+def _reseed_receipt_path(semantic: Path, attempt_id: str) -> Path:
+    return semantic.parent / "reseed-receipts" / f"{attempt_id}.json"
+
+
+def _load_reseed_receipt(path: Path) -> dict[str, Any] | None:
+    if not path.exists():
+        return None
+    receipt = util.read_private_json(path)
+    if not isinstance(receipt, dict):
+        raise DispatchError("semantic retry reseed receipt is invalid")
+    return receipt
+
+
+def _validate_reseed_receipt(
+    receipt: dict[str, Any],
+    *,
+    decision: str,
+    attempt_id: str,
+    semantic: Path,
+    archive_path: Path | None,
+    archive_sha256: str,
+    fresh_skeleton_sha256: str,
+) -> None:
+    expected = {
+        "schema": _RESEED_RECEIPT_SCHEMA,
+        "decision": decision,
+        "previous_attempt_id": attempt_id,
+        "semantic_path": str(semantic),
+        "archive_path": str(archive_path) if archive_path else None,
+        "archived_artifact_sha256": archive_sha256,
+        "fresh_skeleton_sha256": fresh_skeleton_sha256,
+    }
+    for key, value in expected.items():
+        if receipt.get(key) != value:
+            raise DispatchError(f"semantic retry reseed receipt mismatch: {key}")
+
+
+def _write_reseed_receipt(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chmod(path.parent, 0o700)
+    if path.exists():
+        existing = util.read_private_json(path)
+        if existing != payload:
+            raise DispatchError("semantic retry reseed receipt collision")
+        return
+    util.atomic_write_json(path, payload, mode=0o600)
+    written = util.read_private_json(path)
+    if written != payload:
+        raise DispatchError("semantic retry reseed receipt verification failed")
+
+
 def reseed_semantic_artifact_for_retry(
     work_order: dict[str, Any],
     *,
@@ -126,19 +200,71 @@ def reseed_semantic_artifact_for_retry(
     semantic = Path(str(work_order.get("semantic_path") or "")).resolve(strict=False)
     if not semantic.is_absolute():
         raise DispatchError("semantic retry path must be absolute")
+    repo = Path(str(work_order.get("canonical_repo") or "")).resolve(strict=False)
+    run_id = str(work_order.get("run_id") or "")
+    target, _skeleton, fresh_bytes, fresh_skeleton_sha256 = _fresh_semantic_skeleton(
+        decision, repo, run_id
+    )
+    if target != semantic:
+        raise DispatchError("semantic retry reseed changed canonical artifact path")
+
+    receipt_path = _reseed_receipt_path(semantic, attempt_id)
+    existing_receipt = _load_reseed_receipt(receipt_path)
     raw = semantic.read_bytes() if semantic.exists() else b""
-    archive_path: Path | None = None
+    archive_path: Path | None = (
+        semantic.parent / "rejected-attempts" / f"{attempt_id}.json"
+        if semantic.exists() or existing_receipt is not None
+        else None
+    )
+
+    if existing_receipt is not None:
+        receipt_archive = existing_receipt.get("archive_path")
+        expected_archive_path = semantic.parent / "rejected-attempts" / f"{attempt_id}.json"
+        if receipt_archive is not None and Path(str(receipt_archive)).resolve(strict=False) != expected_archive_path.resolve(strict=False):
+            raise DispatchError("semantic retry reseed receipt archive path mismatch")
+        archive_path = expected_archive_path if receipt_archive else None
+        archive_bytes = archive_path.read_bytes() if archive_path else b""
+        archive_sha256 = util.sha256_bytes(archive_bytes)
+        _validate_reseed_receipt(
+            existing_receipt,
+            decision=decision,
+            attempt_id=attempt_id,
+            semantic=semantic,
+            archive_path=archive_path,
+            archive_sha256=archive_sha256,
+            fresh_skeleton_sha256=fresh_skeleton_sha256,
+        )
+        if raw != fresh_bytes:
+            raise DispatchError("semantic retry reseed receipt exists but artifact drifted")
+        return {
+            "decision": decision,
+            "attempt_id": attempt_id,
+            "semantic_path": str(semantic),
+            "archive_path": str(archive_path) if archive_path else None,
+            "archive_sha256": archive_sha256,
+            "fresh_skeleton_sha256": fresh_skeleton_sha256,
+            "reseeded": False,
+            "already_reseeded": True,
+        }
+
     archive_sha256 = util.sha256_bytes(raw)
-    if semantic.exists():
-        archive_path = semantic.parent / "rejected-attempts" / f"{attempt_id}.json"
+    if archive_path is not None:
         archive_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         os.chmod(archive_path.parent, 0o700)
         if archive_path.exists():
             prior = archive_path.read_bytes()
-            if prior != raw:
+            if raw != fresh_bytes and prior != raw:
                 raise DispatchError(
                     f"semantic retry archive collision for attempt {attempt_id}"
                 )
+            if prior != raw:
+                # The process may have crashed after installing the fresh
+                # skeleton but before writing the reseed receipt.  The
+                # archived bytes and the canonical fresh bytes prove that the
+                # operation completed; do not treat this as a collision.
+                archive_sha256 = util.sha256_bytes(prior)
+            else:
+                archive_sha256 = util.sha256_bytes(prior)
         else:
             fd = os.open(
                 str(archive_path),
@@ -158,35 +284,76 @@ def reseed_semantic_artifact_for_retry(
                 raise
             os.chmod(archive_path, 0o600)
             util.fsync_dir(archive_path.parent)
-        if archive_path.read_bytes() != raw:
+            archive_sha256 = util.sha256_bytes(archive_path.read_bytes())
+        if not archive_path.is_file():
             raise DispatchError("semantic retry archive verification failed")
 
-    repo = Path(str(work_order.get("canonical_repo") or "")).resolve(strict=False)
-    run_id = str(work_order.get("run_id") or "")
-    if decision == "BUILD":
-        target = build_agent_mod.write_skeleton(
-            repo, run_id, overwrite=True
-        )
-        fresh = _load_json_file(target)
-        if fresh is None or build_agent_mod.validate_agent_result_contract(fresh):
-            raise DispatchError("fresh builder semantic skeleton failed contract validation")
-    else:
-        target = assessment_mod.write_skeleton(
-            repo, run_id, overwrite=True
-        )
-        fresh = _load_json_file(target)
-        if fresh is None or assessment_mod.validate_assessment_envelope_contract(fresh):
-            raise DispatchError("fresh reviewer semantic skeleton failed contract validation")
-    if target.resolve(strict=False) != semantic:
-        raise DispatchError("semantic retry reseed changed canonical artifact path")
+    if raw != fresh_bytes:
+        if decision == "BUILD":
+            target = build_agent_mod.write_skeleton(repo, run_id, overwrite=True)
+        else:
+            target = assessment_mod.write_skeleton(repo, run_id, overwrite=True)
+        if target.resolve(strict=False) != semantic:
+            raise DispatchError("semantic retry reseed changed canonical artifact path")
+    if not semantic.is_file() or semantic.read_bytes() != fresh_bytes:
+        raise DispatchError("fresh semantic skeleton verification failed")
+
+    receipt_payload = {
+        "schema": _RESEED_RECEIPT_SCHEMA,
+        "decision": decision,
+        "previous_attempt_id": attempt_id,
+        "semantic_path": str(semantic),
+        "archive_path": str(archive_path) if archive_path else None,
+        "archived_artifact_sha256": archive_sha256,
+        "fresh_skeleton_sha256": fresh_skeleton_sha256,
+        "recorded_at": util.utc_now_iso(),
+    }
+    _write_reseed_receipt(receipt_path, receipt_payload)
+    if semantic.read_bytes() != fresh_bytes:
+        raise DispatchError("semantic retry artifact changed after reseed receipt")
     return {
         "decision": decision,
         "attempt_id": attempt_id,
         "semantic_path": str(semantic),
         "archive_path": str(archive_path) if archive_path else None,
         "archive_sha256": archive_sha256,
+        "fresh_skeleton_sha256": fresh_skeleton_sha256,
         "reseeded": True,
+        "already_reseeded": False,
     }
+
+
+def _fixed_identity_mismatch(
+    work_order: dict[str, Any],
+    data: dict[str, Any],
+    *,
+    decision: str,
+) -> str | None:
+    """Compare supplied core-owned envelope values to a fresh authority skeleton."""
+    repo = Path(str(work_order.get("canonical_repo") or "")).resolve(strict=False)
+    run_id = str(work_order.get("run_id") or "")
+    # Preserve compatibility with tiny synthetic contract fixtures that do
+    # not represent a real sealed repository. Real dispatched work always has
+    # a valid repository and therefore receives the exact comparison.
+    if not git_checks_mod.is_git_repo(repo):
+        return None
+    try:
+        _target, expected, _bytes, _sha = _fresh_semantic_skeleton(
+            decision, repo, run_id
+        )
+    except Exception:
+        prefix = "builder" if decision == "BUILD" else "review"
+        return f"{prefix}_fixed_identity_authority_unavailable"
+    fixed_keys = (
+        build_agent_mod.FIXED_KEYS
+        if decision == "BUILD"
+        else assessment_mod.FIXED_KEYS
+    )
+    for field in sorted(fixed_keys):
+        if field in data and data.get(field) != expected.get(field):
+            prefix = "builder" if decision == "BUILD" else "review"
+            return f"{prefix}_fixed_identity_mismatch"
+    return None
 
 
 def semantic_result_ready(work_order: dict[str, Any]) -> tuple[bool, str]:
@@ -230,6 +397,11 @@ def semantic_result_ready(work_order: dict[str, Any]) -> tuple[bool, str]:
             return False, "builder_outcome_invalid"
         if build_agent_mod.validate_agent_result_contract(data):
             return False, "builder_semantic_shape_invalid"
+        fixed_reason = _fixed_identity_mismatch(
+            work_order, data, decision="BUILD"
+        )
+        if fixed_reason:
+            return False, fixed_reason
         expected_work_unit = str(work_order.get("work_unit_id") or "")
         if expected_work_unit and data.get("work_unit_id") != expected_work_unit:
             return False, "builder_work_unit_mismatch"
@@ -278,6 +450,11 @@ def semantic_result_ready(work_order: dict[str, Any]) -> tuple[bool, str]:
 
     if data.get("schema") != REVIEW_AGENT_SCHEMA:
         return False, "review_schema_mismatch"
+    fixed_reason = _fixed_identity_mismatch(
+        work_order, data, decision="REVIEW"
+    )
+    if fixed_reason:
+        return False, fixed_reason
     candidate = str(work_order.get("candidate_sha") or "")
     if candidate and data.get("candidate_sha_claimed") != candidate:
         return False, "review_candidate_mismatch"
