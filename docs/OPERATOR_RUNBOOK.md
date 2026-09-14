@@ -49,14 +49,32 @@ The installer captures only supported provider/auth/model variables that are
 present in its own process environment. It does not later reread interactive
 Claude settings. Therefore `runner_profile: "default"` means no Loop model
 pin and follows the commissioned runner environment's effective model selection
-(for example `ANTHROPIC_MODEL`) or provider default. Use a named runner profile
-when the packet must pin and prove an exact model identity.
+(for example `ANTHROPIC_MODEL`) or provider default. A trusted workstation
+profile named `primary` is the normal adapter convention when the operator wants
+an exact reusable model/effort policy without per-run tuning.
 
-## 3. Human-originated SPEC
+## 3. Human-originated mission
 
-Create and inspect the mission using a supported adapter/core workflow.
+A normal operator interaction is one request, not a sequence of tuning steps.
+When the human asks a supported adapter to implement/build/fix/finish/run work,
+the adapter should:
 
-The packet defines:
+1. inspect enough repository truth to create a bounded packet;
+2. create the run and packet;
+3. infer the smallest portable capability set needed by the entire mission;
+4. select the operator-explicit profile, otherwise trusted `primary` when
+   commissioned, otherwise `default`;
+5. validate the packet;
+6. preflight the exact capability/profile envelope for builder and reviewer;
+7. enqueue the run with supervisor defaults; and
+8. report the run id and durable supervisor status.
+
+This behavior applies whether the human invokes the explicit spec skill or uses
+a plain-language request that tells the host agent to create a Loop packet and
+carry out the work. An explicit draft/spec/plan/inspect-only request stops before
+enqueue.
+
+The packet still defines:
 
 - repo and baseline;
 - execution mode/checkpoints;
@@ -64,26 +82,38 @@ The packet defines:
 - acceptance criteria/non-goals;
 - validation;
 - finite execution/source budgets;
-- optional exact-host `network_read_allowlist`;
+- portable capabilities and trusted runner profile;
+- optional exact-host `network_read_allowlist` extras;
 - human-only promotion authority.
 
-There is no normal second approval/token ceremony. First actionable BUILD start
-creates the immutable execution seal.
+There is no routine second approval/token/enqueue ceremony. First actionable
+BUILD start creates the immutable execution seal.
 
-## 4. Enqueue
+## 4. Durable enqueue and defaults
+
+The adapter's normal execution-intent flow performs:
 
 ```bash
 ofloop supervisor enqueue <repo> <run-id>
 ```
 
-The only currently registered durable semantic runner is `claude-code`.
-`--runner` accepts registered live runner IDs only; installing an adapter such
-as Codex does not make it an unattended supervisor runner. When another runner
-is actually registered and commissioned, selection may be explicit:
+automatically after packet validation and both-role host preflight succeed.
+The core supplies established defaults rather than asking the operator to tune
+them per repository:
 
-```bash
-ofloop supervisor enqueue <repo> <run-id> --runner <registered-runner-id>
-```
+- cost and token ceilings are disabled unless deliberately requested;
+- packet `risk_budget.max_runtime_seconds` becomes the normal whole-run wall
+  ceiling when declared;
+- packet pass/build/review/repair budgets bound semantic work;
+- persistent supervisor configuration owns machine concurrency;
+- the packet's trusted runner profile owns model/effort policy;
+- retry/backoff policy comes from the supervisor defaults unless deliberately
+  overridden.
+
+Manual enqueue remains a supported recovery/administrative surface, not the
+normal human workflow. The only currently registered durable semantic runner is
+`claude-code`; installing another adapter does not make it an unattended
+supervisor runner until it is explicitly registered and commissioned.
 
 Once the durable service is commissioned, no terminal session needs to remain
 open.
