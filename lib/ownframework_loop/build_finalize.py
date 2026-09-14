@@ -495,7 +495,9 @@ def finalize_build(
             secret_findings.append({
                 "path": path,
                 "pattern_id": hit["pattern_id"],
-                "severity": hit["severity"],
+                "severity": secrets_v2.normalize_public_artifact_severity(
+                    hit["severity"]
+                ),
                 "sha256": hit["sha256"],
                 "redacted_prefix": hit["redacted_prefix"],
                 "line": hit.get("line"),

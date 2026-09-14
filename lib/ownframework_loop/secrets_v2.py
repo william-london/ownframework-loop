@@ -60,9 +60,32 @@ MAX_INPUT_BYTES = 4 * 1024 * 1024  # 4 MiB
 # Hard ceiling on number of findings per source.
 MAX_FINDINGS_PER_SOURCE = 32
 
+# Scanner findings are an internal contract. Authoritative build/review
+# artifacts intentionally expose a smaller, stable vocabulary.
+_PUBLIC_ARTIFACT_SEVERITY = {
+    "hard": "hard",
+    "heuristic": "soft",
+    "info": "informational",
+}
+
 
 class SecretScanIncomplete(RuntimeError):
     """Authoritative secret proof could not inspect the complete file."""
+
+
+def normalize_public_artifact_severity(internal_severity: str) -> str:
+    """Translate an internal scanner severity into the public artifact enum.
+
+    This is the single scanner-to-artifact boundary used by both build and
+    review finalization. Unknown internal values fail closed instead of being
+    silently downgraded into a less serious public category.
+    """
+    try:
+        return _PUBLIC_ARTIFACT_SEVERITY[internal_severity]
+    except (KeyError, TypeError) as exc:
+        raise ValueError(
+            f"unsupported secret scanner severity: {internal_severity!r}"
+        ) from exc
 
 
 def _sha256_of_value(s: str) -> str:
