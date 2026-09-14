@@ -1,8 +1,13 @@
 name: CI
 
 on:
-  # Automatic GitHub Actions triggers disabled by owner request.
-  # Keep the workflow definition available for an explicit manual run only.
+  # Automatic GitHub Actions triggers disabled by owner request for
+  # master/main and other persistent branches; only bounded hardening
+  # branches are hosted-CI eligible via pull_request filter, plus the
+  # retained manual workflow_dispatch entry point.
+  pull_request:
+    branches:
+      - 'hardening/**'
   workflow_dispatch:
 permissions:
   contents: read
