@@ -100,6 +100,9 @@ This skill is a host adapter over the deterministic ofloop core.
    An already commissioned launchd/systemd service consumes the job without an
    open terminal. Only use `ofloop supervisor serve` when no durable service is
    commissioned and the operator explicitly wants foreground/debug operation.
+   Optional foreground builder/reviewer debug commands (e.g. `/of-loop:build <run-id>`,
+   `/of-loop:review <run-id>`) are available only when the operator explicitly
+   asks for foreground hand-off and a durable service is already commissioned.
 10. If the request is **draft-only intent**, do not enqueue. Return the packet
     identity and preflight/readiness findings only.
 11. Return a concise result containing:
