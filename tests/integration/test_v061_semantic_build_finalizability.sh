@@ -102,6 +102,8 @@ approval_path.write_text(json.dumps(approval_doc, indent=2, sort_keys=True) + "\
 approval_path.chmod(0o600)
 PY
 
+  ensure_test_capability_binding "$repo" "$rid"
+
   wt="$repo/.worktrees/ownframework-loop/$rid/builder"
   git -C "$repo" worktree add -b "factory/candidate/$rid" "$wt" master >/dev/null 2>&1
   mkdir -p "$wt/src"

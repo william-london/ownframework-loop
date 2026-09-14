@@ -127,10 +127,12 @@ assert_eq "$(jq -r '.build_pass_count' "$T/.ownframework-loop/$RID/STATE.json")"
 # 6. Packet-supplied validation commands are mechanically classified before execution.
 # v0.8.2 centralizes the layered structural + external-action decision in one
 # deterministic policy module consumed by both finalizers.
-grep -Fq 'validation_policy.classify_required_validation' "$ROOT/lib/ownframework_loop/build_finalize.py" \
-  || fail "build finalizer missing required-validation authority policy"
-grep -Fq 'validation_policy.classify_required_validation' "$ROOT/lib/ownframework_loop/review_finalize.py" \
-  || fail "review finalizer missing required-validation authority policy"
+grep -Fq 'validation_executor.run_required_validation' "$ROOT/lib/ownframework_loop/build_finalize.py" \
+  || fail "build finalizer missing shared required-validation executor"
+grep -Fq 'validation_executor.run_required_validation' "$ROOT/lib/ownframework_loop/review_finalize.py" \
+  || fail "review finalizer missing shared required-validation executor"
+grep -Fq 'validation_policy.classify_required_validation' "$ROOT/lib/ownframework_loop/validation_executor.py" \
+  || fail "shared required-validation executor missing authority policy"
 grep -Fq 'external_action.classify_tool_call' "$ROOT/lib/ownframework_loop/validation_policy.py" \
   || fail "required-validation policy missing external-action classifier"
 grep -Fq 'guards.classify_bash_command' "$ROOT/lib/ownframework_loop/validation_policy.py" \

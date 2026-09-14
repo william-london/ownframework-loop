@@ -123,9 +123,10 @@ grep -Fq 'candidate_branch = git_checks.require_current_branch(builder_wt)' "$RO
 if grep -Fq 'or f"factory/candidate/{run_id}"' "$ROOT_DIR/lib/ownframework_loop/build_finalize.py"; then
   fail "build finalizer still fabricates branch identity"
 fi
-grep -Fq 'v.get("expected_exit_code")' "$ROOT_DIR/lib/ownframework_loop/build_finalize.py"
-grep -Fq 'v.get("expected_marker")' "$ROOT_DIR/lib/ownframework_loop/build_finalize.py"
-grep -Fq 'v.get("expected_marker")' "$ROOT_DIR/lib/ownframework_loop/review_finalize.py"
+grep -Fq 'validation.get("expected_exit_code")' "$ROOT_DIR/lib/ownframework_loop/validation_executor.py"
+grep -Fq 'validation.get("expected_marker")' "$ROOT_DIR/lib/ownframework_loop/validation_executor.py"
+grep -Fq 'validation_executor.run_required_validation' "$ROOT_DIR/lib/ownframework_loop/build_finalize.py"
+grep -Fq 'validation_executor.run_required_validation' "$ROOT_DIR/lib/ownframework_loop/review_finalize.py"
 grep -Fq 'reviewer path {wt} is not a registered worktree' "$ROOT_DIR/lib/ownframework_loop/worktrees.py"
 
 echo "V061_AUTHORITY_TAIL_HARDENING=PASS"

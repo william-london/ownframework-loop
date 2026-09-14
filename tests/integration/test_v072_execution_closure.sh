@@ -69,6 +69,7 @@ execution_start.ensure_executable(
     binding_method="build_start",
 )
 PY
+  ensure_test_capability_binding "$repo" "$rid"
   echo "$rid"
 }
 
@@ -218,6 +219,7 @@ execution_start.ensure_executable(
     binding_method="build_start",
 )
 PY
+  ensure_test_capability_binding "$repo" "$rid"
   echo "$rid"
 }
 

@@ -193,6 +193,29 @@ def validate_checkpoint_graph(packet: dict[str, Any]) -> list[str]:
             v = rb.get(k)
             if not isinstance(v, int) or v < 1 or v > mx:
                 errors.append(f"{cid}: {k} must be int in [1..{mx}], got {v!r}")
+        build_cap = rb.get("max_build_passes")
+        review_cap = rb.get("max_review_passes")
+        repair_cap = rb.get("max_repair_rounds")
+        if (
+            isinstance(build_cap, int)
+            and isinstance(repair_cap, int)
+            and build_cap < 1 + repair_cap
+        ):
+            errors.append(
+                f"{cid}: max_build_passes={build_cap} cannot realize "
+                f"max_repair_rounds={repair_cap}; need >= {1 + repair_cap} "
+                "including initial build"
+            )
+        if (
+            isinstance(review_cap, int)
+            and isinstance(repair_cap, int)
+            and review_cap < 1 + repair_cap
+        ):
+            errors.append(
+                f"{cid}: max_review_passes={review_cap} cannot realize "
+                f"max_repair_rounds={repair_cap}; need >= {1 + repair_cap} "
+                "including initial review"
+            )
         deps = cp.get("depends_on", [])
         if not isinstance(deps, list):
             errors.append(f"{cid}: depends_on must be a list")

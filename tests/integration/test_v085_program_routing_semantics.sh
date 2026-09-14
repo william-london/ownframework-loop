@@ -42,6 +42,24 @@ meta = {
 packet_path.write_text("```json\n" + json.dumps(meta, indent=2, sort_keys=True)
                        + "\n```\n", encoding="utf-8")
 PY
+  # Direct deterministic-finalizer tests must model the commissioned
+  # supervisor boundary explicitly: production semantic workers create this
+  # immutable binding before finalization.
+  python3 -B - "$repo" "$rid" <<'PY'
+import sys
+from pathlib import Path
+from ownframework_loop import capabilities, capability_binding, runner_profiles, runtime_env
+repo = Path(sys.argv[1]); rid = sys.argv[2]
+resolution = capabilities.resolve_capabilities(
+    [], canonical_repo=repo, role="reviewer",
+    repo_cache_root=runtime_env.repo_tool_cache_dir(repo),
+    ephemeral_cache_root=runtime_env.runtime_cache_dir(repo, rid, "validation") / "capability-cache",
+    packet_network_allowlist=[],
+)
+profile = runner_profiles.resolve_profile("default", provider="claude-code")
+runner_profiles.verify_profile_integrity(profile)
+capability_binding.ensure_run_binding(repo, rid, resolution, profile, allow_create=True)
+PY
   echo "$rid"
 }
 
@@ -94,7 +112,7 @@ claim_review() {
 }
 
 # BUILD_VALIDATION_RETRY: validation fails before REVIEW is possible. The next
-# BUILD is eligible without a reviewer and without a repair round.
+# BUILD is eligible only after one funded repair round, without a reviewer.
 REPO_BUILD="$(make_tmp_repo)"
 RID_BUILD="$(make_program_packet "$REPO_BUILD" build-validation-retry 'test -f src/validation.ok')"
 IFS='|' read -r WT BSEM < <(claim_build "$REPO_BUILD" "$RID_BUILD" validation-retry)
@@ -106,7 +124,7 @@ fill_build "$BSEM" "$RID_BUILD" initial-validation-failure
 STATE_BUILD="$REPO_BUILD/.ownframework-loop/$RID_BUILD/STATE.json"
 assert_eq "$(jq -r '.state' "$STATE_BUILD")" "CHANGES_REQUESTED" "BUILD_VALIDATION_RETRY next state"
 assert_eq "$(jq -r '.review_pass_count' "$STATE_BUILD")" "0" "BUILD_VALIDATION_RETRY review count"
-assert_eq "$(jq -r '.repair_round' "$STATE_BUILD")" "0" "BUILD_VALIDATION_RETRY repair count"
+assert_eq "$(jq -r '.repair_round' "$STATE_BUILD")" "1" "BUILD_VALIDATION_RETRY repair count"
 IFS='|' read -r WT2 BSEM2 < <(claim_build "$REPO_BUILD" "$RID_BUILD" validation-retry-repair)
 assert_eq "$WT2" "$WT" "BUILD_VALIDATION_RETRY reuses candidate worktree"
 printf 'ok\n' > "$WT2/src/validation.ok"
@@ -116,7 +134,7 @@ fill_build "$BSEM2" "$RID_BUILD" validation-retry-success
 assert_eq "$(jq -r '.state' "$STATE_BUILD")" "READY_FOR_REVIEW" "BUILD_VALIDATION_RETRY recovered state"
 assert_eq "$(jq -r '.build_pass_count' "$STATE_BUILD")" "2" "BUILD_VALIDATION_RETRY build count"
 assert_eq "$(jq -r '.review_pass_count' "$STATE_BUILD")" "0" "BUILD_VALIDATION_RETRY no reviewer"
-assert_eq "$(jq -r '.repair_round' "$STATE_BUILD")" "0" "BUILD_VALIDATION_RETRY no funded repair"
+assert_eq "$(jq -r '.repair_round' "$STATE_BUILD")" "1" "BUILD_VALIDATION_RETRY funded repair"
 echo "BUILD_VALIDATION_RETRY=PASS"
 
 # REVIEW_FUNDED_REPAIR: a passing build reaches REVIEW, whose rejection

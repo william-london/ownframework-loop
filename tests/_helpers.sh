@@ -78,6 +78,32 @@ make_tmp_run() {
   echo "$latest"
 }
 
+# Direct finalizer tests model the supervisor's pre-provider commissioning
+# boundary explicitly. Production workers create this immutable binding before
+# the first semantic call; deterministic validation then reuses it.
+ensure_test_capability_binding() {
+  local repo="$1" run_id="$2"
+  python3 - "$repo" "$run_id" <<'PY'
+import sys
+from pathlib import Path
+from ownframework_loop import capabilities, capability_binding, packet, runner_profiles, runtime_env
+repo = Path(sys.argv[1]).resolve(strict=False); run_id = sys.argv[2]
+meta, _ = packet.parse_packet_file(repo / ".ownframework-loop" / run_id / "WORK_PACKET.md")
+resolution = capabilities.resolve_capabilities(
+    list(meta.get("capabilities") or []), canonical_repo=repo, role="reviewer",
+    repo_cache_root=runtime_env.repo_tool_cache_dir(repo),
+    ephemeral_cache_root=runtime_env.runtime_cache_dir(repo, run_id, "validation") / "capability-cache",
+    packet_network_allowlist=list(meta.get("network_read_allowlist") or []),
+)
+profile = runner_profiles.resolve_profile(str(meta.get("runner_profile") or "default"), provider="claude-code")
+runner_profiles.verify_profile_integrity(profile)
+effort_attestation = runner_profiles.verify_effort_attestation(profile)
+if effort_attestation is not None:
+    profile = dict(profile); profile["effort_attestation"] = effort_attestation
+capability_binding.ensure_run_binding(repo, run_id, resolution, profile, allow_create=True)
+PY
+}
+
 write_packet() {
   local repo="$1" run_id="$2" packet_md="$3"
   local target="$repo/.ownframework-loop/$run_id/WORK_PACKET.md"

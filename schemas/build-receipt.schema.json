@@ -132,6 +132,32 @@
           "stdout_truncated": {
             "type": "boolean"
           },
+          "stderr_truncated": {
+            "type": "boolean"
+          },
+          "output_truncated": {
+            "type": "boolean"
+          },
+          "stdout_excerpt_redacted": {
+            "type": "string"
+          },
+          "stderr_excerpt_redacted": {
+            "type": "string"
+          },
+          "stdout_sha256": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "stderr_sha256": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "diagnostic_stdout_path": {
+            "type": "string"
+          },
+          "diagnostic_stderr_path": {
+            "type": "string"
+          },
           "skipped": {
             "type": "boolean"
           },

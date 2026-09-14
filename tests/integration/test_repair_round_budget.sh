@@ -101,15 +101,15 @@ packet_md = ("""```json
         "scope": "src/",
         "depends_on": [],
         "risk_budget": {
-          "max_build_passes": 3,
-          "max_review_passes": 3,
+          "max_build_passes": PASS_CAP,
+          "max_review_passes": PASS_CAP,
           "max_repair_rounds": MAX_ROUNDS
         }
       }
     ]
   }
 }
-```""").replace("REPO", str(repo)).replace("MAX_ROUNDS", str(max_rounds))
+```""").replace("REPO", str(repo)).replace("MAX_ROUNDS", str(max_rounds)).replace("PASS_CAP", str(max(3, max_rounds + 1)))
 
 run_id = "run-repair-" + str(max_rounds)
 run_dir = repo / ".ownframework-loop" / run_id

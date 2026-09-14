@@ -255,6 +255,82 @@ def hermetic_subprocess_env(
     return env
 
 
+def commissioned_validation_env(
+    canonical_repo: Path,
+    run_id: str,
+    packet: dict[str, Any],
+) -> dict[str, str]:
+    """Build the deterministic validation environment from the sealed run binding.
+
+    Semantic workers receive a capability resolution at launch time.  Required
+    validation used to receive only the supervisor's ambient environment,
+    which made BUILD and REVIEW sensitive to PATH and cache differences.  A
+    validator instead re-resolves exactly the capability names frozen in the
+    run binding, verifies the current host resolution against that binding,
+    and uses one role-neutral validation cache for both finalizers.
+    """
+    from . import capability_binding, capabilities, runner_profiles
+
+    binding = capability_binding._read(
+        capability_binding.binding_path(canonical_repo, run_id)
+    )
+    projection = binding.get("projection") or {}
+    requested = projection.get("requested")
+    requested_profile = projection.get("requested_runner_profile") or {}
+    if not isinstance(requested, list):
+        raise capability_binding.CapabilityBindingError(
+            "sealed capability binding has no requested capability list"
+        )
+    if not isinstance(requested_profile, dict):
+        raise capability_binding.CapabilityBindingError(
+            "sealed capability binding has no requested runner profile"
+        )
+
+    profile = runner_profiles.resolve_profile(
+        str(requested_profile.get("name") or ""),
+        provider=str(requested_profile.get("provider") or ""),
+    )
+    runner_profiles.verify_profile_integrity(profile)
+    attestation = runner_profiles.verify_effort_attestation(profile)
+    bound_attestation = requested_profile.get("effort_attestation")
+    if attestation != bound_attestation:
+        raise runner_profiles.RunnerProfileError(
+            "sealed runner effort attestation changed after run binding"
+        )
+    if profile.get("identity_sha256") != requested_profile.get("identity_sha256"):
+        raise runner_profiles.RunnerProfileError(
+            "sealed runner profile identity changed after run binding"
+        )
+    if attestation is not None:
+        profile = dict(profile)
+        profile["effort_attestation"] = attestation
+
+    resolution = capabilities.resolve_capabilities(
+        [str(item) for item in requested],
+        canonical_repo=canonical_repo,
+        role="reviewer",
+        repo_cache_root=repo_tool_cache_dir(canonical_repo),
+        ephemeral_cache_root=(
+            runtime_cache_dir(canonical_repo, run_id, "validation")
+            / "capability-cache"
+        ),
+        packet_network_allowlist=[
+            str(item) for item in (packet.get("network_read_allowlist") or [])
+        ],
+    )
+    capabilities.verify_resolution_integrity(resolution)
+    capability_binding.verify_run_binding(
+        canonical_repo, run_id, resolution, profile
+    )
+    return hermetic_subprocess_env(
+        canonical_repo,
+        run_id,
+        "validation",
+        capability_environment=dict(resolution.get("environment") or {}),
+        path_prepend=list(resolution.get("path_prepend") or []),
+    )
+
+
 __all__ = [
     "SCHEMA",
     "CAPABILITY_ENV_ALLOWED_KEYS",
@@ -266,4 +342,5 @@ __all__ = [
     "hermetic_subprocess_env",
     "runtime_cache_dir",
     "runtime_cache_path",
+    "commissioned_validation_env",
 ]

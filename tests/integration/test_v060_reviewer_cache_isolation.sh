@@ -92,6 +92,7 @@ approval_path.chmod(0o600)
 
 # Auto-seal leaves state at READY_TO_BUILD after the first build claim.
 PY
+ensure_test_capability_binding "$REPO" "$RUN_ID"
 
 # Create Python source + test in the BUILDER worktree. NO .gitignore at all.
 WT1="$REPO/.worktrees/ownframework-loop/$RUN_ID/builder"

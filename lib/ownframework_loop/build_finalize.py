@@ -45,14 +45,13 @@ from __future__ import annotations
 
 import json
 import re
-import time
 from pathlib import Path
 from typing import Any
 
 from . import (
     approval, git_checks, guards, integrity, limits as limits_mod,
     packet as packet_mod, program as program_mod, receipts, secrets_v2,
-    validation_policy,
+    validation_executor,
     state as state_mod, transitions, util, worktrees,
     build_agent as build_agent_mod,
 )
@@ -73,67 +72,6 @@ def _read_json(path: Path, default: Any = None) -> Any:
         return json.loads(path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
         return default
-
-
-def _run_validation_command(
-    cwd: Path,
-    command: str,
-    *,
-    timeout_seconds: int,
-    canonical_repo: Path,
-    run_id: str,
-) -> dict[str, Any]:
-    """Run a validation command, capture exit code, stdout, stderr, duration.
-
-    Read output via bounded subprocess so candidate diffs containing
-    embedded secrets never flow into the Python source as a string.
-
-    Uses hermetic_subprocess_env so Python bytecode, pytest cache, and
-    other ephemeral runtime state land in the supervisor-owned runtime-cache
-    directory rather than the exact-SHA candidate worktree. This keeps
-    the dirty-worktree check honest.
-    """
-    import subprocess
-    from . import runtime_env
-    start = time.monotonic()
-    try:
-        proc = subprocess.run(
-            ["/bin/sh", "-c", command],
-            cwd=str(cwd),
-            capture_output=True,
-            text=True,
-            timeout=timeout_seconds,
-            check=False,
-            env=runtime_env.hermetic_subprocess_env(canonical_repo, run_id, "validation"),
-        )
-        duration = time.monotonic() - start
-        # Cap captured output to 64 KiB to prevent unbounded memory.
-        max_capture = 64 * 1024
-        stdout = (proc.stdout or "")[:max_capture]
-        stderr = (proc.stderr or "")[:max_capture]
-        truncated = (len(proc.stdout or "") > max_capture) or (len(proc.stderr or "") > max_capture)
-        return {
-            "exit_code": int(proc.returncode),
-            "duration_seconds": float(duration),
-            "stdout": stdout,
-            "stderr": stderr,
-            "truncated": truncated,
-            "timed_out": False,
-        }
-    except subprocess.TimeoutExpired:
-        duration = time.monotonic() - start
-        return {
-            "exit_code": 124,
-            "duration_seconds": float(duration),
-            "stdout": "",
-            "stderr": "command timed out",
-            "truncated": False,
-            "timed_out": True,
-        }
-    except Exception as e:
-        raise RuntimeError(
-            f"validation command could not execute: {type(e).__name__}"
-        ) from e
 
 
 def _changed_paths_between(worktree: Path, baseline_sha: str, candidate_sha: str) -> list[str]:
@@ -514,55 +452,16 @@ def finalize_build(
     # 15. Execute required validation commands.
     validations: list[dict[str, Any]] = []
     for v in program_mod.resolve_effective_required_validation(meta, state):
-        cmd = (v or {}).get("command") or ""
-        name = (v or {}).get("name") or "validation"
-        kind = (v or {}).get("kind") or "fast"
         timeout = int(meta.get("required_runtime_proof", {}).get("max_runtime_seconds") or 600)
-        command_policy = validation_policy.classify_required_validation(
-            cmd, run_id=run_id
-        )
-        if not command_policy.get("allowed"):
-            raise RuntimeError(
-                "required_validation command refused by deterministic authority policy: "
-                + str(command_policy.get("reason") or "forbidden command")
-            )
-        result = _run_validation_command(
-            builder_wt,
-            cmd,
+        result = validation_executor.run_required_validation(
+            cwd=builder_wt,
+            validation=v,
             timeout_seconds=timeout,
             canonical_repo=canonical_repo,
             run_id=run_id,
+            packet=meta,
         )
-        expected_exit = int(
-            v.get("expected_exit_code")
-            if v.get("expected_exit_code") is not None
-            else 0
-        )
-        expected_marker = v.get("expected_marker")
-        marker_match = (
-            True
-            if expected_marker is None
-            else str(expected_marker) in (
-                str(result.get("stdout") or "") + str(result.get("stderr") or "")
-            )
-        )
-        passed = (
-            not bool(result["timed_out"])
-            and int(result["exit_code"]) == expected_exit
-            and marker_match
-        )
-        validations.append({
-            "name": name,
-            "command": cmd,
-            "kind": kind,
-            "exit_code": int(result["exit_code"]),
-            "duration_seconds": float(result["duration_seconds"]),
-            "expected_exit_code": expected_exit,
-            "passed": passed,
-            "timed_out": result["timed_out"],
-            "stdout_truncated": result["truncated"],
-            "marker_match": marker_match,
-        })
+        validations.append(result)
 
     # 16. Validation succeeds only when every declared command satisfies its
     # own exit-code/marker contract and no command timed out.
@@ -625,13 +524,10 @@ def finalize_build(
     #   - resume of the same claimed pass produces the same number.
     #
     # Repair-round limits are deliberately NOT decided here. They are
-    # enforced fail-closed at repair-claim time (review finalize /
-    # build-transition repair claim / program claim_repair_round): once a
-    # review rejects and no funded repair round remains, the run seals
-    # BLOCKED before any builder pass can start. Blocking HERE on
-    # repair_round >= cap would starve the final funded repair of its
-    # review: the repaired candidate must always be allowed to prove
-    # itself in review.
+    # enforced fail-closed at the same atomic repair owner used for scope,
+    # validation, and review failures. Blocking HERE on repair_round >= cap
+    # would starve the final funded repair of its review: the repaired
+    # candidate must always be allowed to prove itself in review.
     new_build_pass_count = int(state.get("build_pass_count") or 0)
     new_repair_round = int(state.get("repair_round") or 0)
     cap_build = limits_mod.effective_cap("build_pass_count", meta)
@@ -642,6 +538,12 @@ def finalize_build(
         )
     if cap_build is not None and new_build_pass_count > cap_build:
         raise RuntimeError(f"build_pass_count={new_build_pass_count} above cap={cap_build}")
+
+    repair_causes: list[str] = []
+    if scope_findings:
+        repair_causes.append("scope_drift")
+    if not validation_pass:
+        repair_causes.append("validation_failed")
 
     # 19. Derive next_state. (Approval binding was proven at step 1; there is
     # no path back to AWAITING_APPROVAL from BUILDING.)
@@ -688,8 +590,27 @@ def finalize_build(
             next_state = "BLOCKED"
     elif not validation_pass:
         # Mandatory validation failed; transition to CHANGES_REQUESTED
-        # so the builder can repair. Only BLOCK if the failure is hard.
+        # so the builder can repair. Only BLOCK if the failure is hard or the
+        # funded repair envelope is exhausted.
         next_state = "CHANGES_REQUESTED"
+        repair_cap = limits_mod.effective_cap("repair_round", meta)
+        repair_used = int(state.get("repair_round") or 0)
+        if state_mod.is_program_state(state):
+            program_state = state.get("program") or {}
+            cp_id = (program_state.get("current_checkpoints") or [None])[0]
+            cp_meta = next(
+                (cp for cp in (meta.get("checkpoint_graph") or {}).get("checkpoints", [])
+                 if isinstance(cp, dict) and cp.get("id") == cp_id),
+                None,
+            )
+            if cp_meta is None:
+                raise RuntimeError(f"current checkpoint {cp_id!r} missing from packet")
+            repair_cap = min(
+                int(repair_cap) if repair_cap is not None else int(cp_meta["risk_budget"]["max_repair_rounds"]),
+                int(cp_meta["risk_budget"]["max_repair_rounds"]),
+            )
+        if repair_cap is not None and repair_used >= int(repair_cap):
+            next_state = "BLOCKED"
     elif outcome_requested == "blocked":
         next_state = "BLOCKED"
     elif outcome_requested == "stopped":
@@ -787,7 +708,7 @@ def finalize_build(
         # the audit-trail event for THIS invocation.
         pass
     elif transitions.is_valid(cur.get("state"), next_state):
-        if next_state == "CHANGES_REQUESTED" and scope_findings:
+        if next_state == "CHANGES_REQUESTED" and repair_causes:
             funded = state_mod.transition_funded_repair(
                 canonical_repo,
                 run_id,
@@ -795,11 +716,16 @@ def finalize_build(
                 actor=actor,
                 commit_sha=candidate_sha,
                 allowed_sources=frozenset({"BUILDING"}),
-                claimed_reason="ordinary out-of-scope change; repair entitlement claimed atomically",
+                claimed_reason=(
+                    "build finalization requested repair: "
+                    + "+".join(repair_causes)
+                    + "; repair entitlement claimed atomically"
+                ),
             )
-            if not funded.get("repair_claimed"):
+            next_state = str(funded.get("state") or "")
+            if next_state == "CHANGES_REQUESTED" and not funded.get("repair_claimed"):
                 raise RuntimeError(
-                    "scope repair entitlement was not funded despite available preflight"
+                    "build repair entitlement was not funded despite available preflight"
                 )
         else:
             state_mod.transition(
@@ -843,9 +769,10 @@ def finalize_build(
         # no CHANGES_REQUESTED -> BUILDING edge, so a run left resting in
         # CHANGES_REQUESTED could never be claimed again. Move single-mode
         # runs back to READY_TO_BUILD so the next build pass is reachable.
-        # BUILD_VALIDATION_RETRY intentionally does not charge repair_round.
         # PROGRAM runs keep CHANGES_REQUESTED because the unified program
-        # claim owner atomically claims the next build from that state.
+        # claim owner atomically claims the next builder from that state.
+        # Both scope drift and validation failure have already funded exactly
+        # one repair round through the shared owner above.
         cur_after = state_mod.load_verified(canonical_repo, run_id)
         if (
             not state_mod.is_program_state(cur_after)

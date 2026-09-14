@@ -199,6 +199,7 @@ meta = json.loads(m.group(1))
 meta["required_validation"] = [{"name": "echo-test", "command": "echo hello", "kind": "fast", "expected_exit_code": 0}]
 pp.write_text(re.sub(r"```json\n.*?\n```", "```json\n" + json.dumps(meta, indent=2) + "\n```", text, count=1, flags=re.DOTALL))
 PY
+ensure_test_capability_binding "$T6" "$RID6"
 "$OFLOOP_BIN" build claim "$T6" "$RID6" >/dev/null 2>&1
 WT6="$T6/.worktrees/ownframework-loop/$RID6/builder"
 git -C "$T6" worktree add -b "factory/candidate/$RID6" "$WT6" master >/dev/null 2>&1
@@ -224,6 +225,7 @@ meta = json.loads(m.group(1))
 meta["required_validation"] = [{"name": "must-fail", "command": "false", "kind": "fast", "expected_exit_code": 0}]
 pp.write_text(re.sub(r"```json\n.*?\n```", "```json\n" + json.dumps(meta, indent=2) + "\n```", text, count=1, flags=re.DOTALL))
 PY
+ensure_test_capability_binding "$T7" "$RID7"
 "$OFLOOP_BIN" build claim "$T7" "$RID7" >/dev/null 2>&1
 WT7="$T7/.worktrees/ownframework-loop/$RID7/builder"
 git -C "$T7" worktree add -b "factory/candidate/$RID7" "$WT7" master >/dev/null 2>&1

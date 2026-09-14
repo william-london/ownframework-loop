@@ -3,9 +3,10 @@
 #
 # 1. BUILD_VALIDATION_RETRY continuity: the generic FSM has no
 #    CHANGES_REQUESTED -> BUILDING edge, so a single-mode run whose required
-#    validation fails must land back on READY_TO_BUILD (deterministic
-#    post-hook) or the next build claim can never happen. This regressed
-#    silently because program mode claims directly from CHANGES_REQUESTED.
+#    validation fails must fund one repair and land back on READY_TO_BUILD
+#    (deterministic post-hook) or the next build claim can never happen. This
+#    regressed silently because program mode claims directly from
+#    CHANGES_REQUESTED.
 # 2. Foreground `build transition --to CHANGES_REQUESTED` (single mode) must
 #    fund the repair round and return the run to a claimable state.
 # 3. Protocol-authoritative state fields cannot be overridden by caller
@@ -69,6 +70,17 @@ execution_start.ensure_executable(
     canonical_repo=Path(sys.argv[1]), run_id=sys.argv[2],
     actor="test", binding_method="build_start",
 )
+from ownframework_loop import capabilities, capability_binding, runner_profiles, runtime_env
+repo = Path(sys.argv[1]); rid = sys.argv[2]
+resolution = capabilities.resolve_capabilities(
+    [], canonical_repo=repo, role="reviewer",
+    repo_cache_root=runtime_env.repo_tool_cache_dir(repo),
+    ephemeral_cache_root=runtime_env.runtime_cache_dir(repo, rid, "validation") / "capability-cache",
+    packet_network_allowlist=[],
+)
+profile = runner_profiles.resolve_profile("default", provider="claude-code")
+runner_profiles.verify_profile_integrity(profile)
+capability_binding.ensure_run_binding(repo, rid, resolution, profile, allow_create=True)
 PY
 
 "$OFLOOP" build claim "$T" "$RID" >/dev/null
@@ -94,7 +106,7 @@ assert_eq "$RECEIPT_NEXT" "CHANGES_REQUESTED" "receipt records the validation-re
 STATE="$(python3 -c "import json;print(json.load(open('$T/.ownframework-loop/$RID/STATE.json'))['state'])")"
 assert_eq "$STATE" "READY_TO_BUILD" "single-mode validation retry lands claimable READY_TO_BUILD"
 REPAIR="$(python3 -c "import json;print(json.load(open('$T/.ownframework-loop/$RID/STATE.json')).get('repair_round',0))")"
-assert_eq "$REPAIR" "0" "build-validation retry does not charge repair_round"
+assert_eq "$REPAIR" "1" "build-validation retry charges repair_round"
 
 OUT="$("$OFLOOP" build claim "$T" "$RID")"
 assert_eq "$(printf '%s' "$OUT" | jq -r '.build_pass_count')" "2" "next build pass is reachable and counted"

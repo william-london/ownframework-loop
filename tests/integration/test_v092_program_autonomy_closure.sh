@@ -18,13 +18,13 @@ cp0 = {
     "id": "CP-0", "title": "first", "scope": "first", "depends_on": [],
     "acceptance_criterion_ids": ["AC-1"],
     "required_validation": [validation("cp0", "printf CP0")],
-    "risk_budget": {"max_build_passes": 2, "max_review_passes": 2, "max_repair_rounds": 2},
+    "risk_budget": {"max_build_passes": 2, "max_review_passes": 2, "max_repair_rounds": 1},
 }
 cp1 = {
     "id": "CP-1", "title": "second", "scope": "second", "depends_on": ["CP-0"],
     "acceptance_criterion_ids": ["AC-2"],
     "required_validation": [validation("cp1", "printf CP1")],
-    "risk_budget": {"max_build_passes": 2, "max_review_passes": 2, "max_repair_rounds": 2},
+    "risk_budget": {"max_build_passes": 2, "max_review_passes": 2, "max_repair_rounds": 1},
 }
 base = {
     "schema": "ownframework-work-packet/v3", "packet_id": "checkpoint-validation",
@@ -48,6 +48,10 @@ assert [x["name"] for x in program.resolve_effective_required_validation(base, s
 assert [x["name"] for x in program.resolve_effective_required_validation(base, state1)] == ["global", "cp1"]
 assert [x["name"] for x in program.resolve_effective_required_validation({"required_validation": base["required_validation"]}, {})] == ["global"]
 assert not schema_validate.validate_packet(base)
+budget_bad = copy.deepcopy(base)
+budget_bad["checkpoint_graph"]["checkpoints"][0]["risk_budget"]["max_build_passes"] = 1
+budget_errors = packet.validate_packet_metadata(budget_bad)
+assert any("CP-0" in error and "cannot realize max_repair_rounds=1" in error for error in budget_errors), budget_errors
 bad = copy.deepcopy(base)
 bad["checkpoint_graph"]["checkpoints"][0]["required_validation"][0]["kind"] = "not-a-kind"
 assert schema_validate.validate_packet(bad), "malformed checkpoint validation must fail admission"
@@ -70,6 +74,7 @@ print("CHECKPOINT_VALIDATION_RESOLUTION=PASS")
 print("CHECKPOINT_SCHEMA_CONTRACT=PASS")
 print("BUILD_REVIEW_VALIDATION_PARITY=PASS")
 print("FUTURE_CHECKPOINT_ISOLATION=PASS")
+print("PER_CHECKPOINT_REALIZABILITY=PASS")
 print("SPEC_AND_BUILDER_CONTRACTS=PASS")
 PY
 

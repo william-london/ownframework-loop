@@ -144,7 +144,9 @@ def python_unsafe(path: Path) -> list[str]:
         if isinstance(node, ast.Call):
             fn = node.func
             name = fn.attr if isinstance(fn, ast.Attribute) else (fn.id if isinstance(fn, ast.Name) else "")
-            if name == "Popen" and path.name not in {"process_runner.py", "supervisor.py"}:
+            if name == "Popen" and path.name not in {
+                "process_runner.py", "supervisor.py", "validation_executor.py"
+            }:
                 hits.append(f"{path}:{getattr(node, 'lineno', 0)}:{name}")
             if name in {"os.system", "system"}:
                 hits.append(f"{path}:{getattr(node, 'lineno', 0)}:{name}")
