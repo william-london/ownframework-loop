@@ -22,7 +22,7 @@ assert_eq "$READY" "False|builder_schema_mismatch" "malformed builder schema is 
 RESEED="$(ORDER_JSON="$ORDER" python3 -c 'import json,os; from ownframework_loop import dispatch; print(json.dumps(dispatch.reseed_semantic_artifact_for_retry(json.loads(os.environ["ORDER_JSON"]),previous_attempt_id="builder-attempt-1"),sort_keys=True))')"
 ARCHIVE="$(printf '%s' "$RESEED" | jq -r '.archive_path')"
 assert_file_exists "$ARCHIVE" "malformed builder artifact archived"
-assert_eq "$(stat -f '%Lp' "$ARCHIVE")" "600" "builder archive mode"
+assert_eq "$(python3 -c 'import os,sys; print(format(os.stat(sys.argv[1]).st_mode & 0o777, "o"))' "$ARCHIVE")" "600" "builder archive mode"
 assert_eq "$(jq -r '.schema' "$SEM")" "ownframework-loop-build-agent-result/v1" "builder skeleton reseeded"
 assert_eq "$(git -C "$WT" rev-parse HEAD)" "$(git -C "$REPO" rev-parse "factory/candidate/$RUN")" "source work preserved"
 COLLISION="$(ORDER_JSON="$ORDER" python3 -c 'import json,os; from ownframework_loop import dispatch
@@ -42,7 +42,7 @@ assert_eq "$RREADY" "False|review_schema_mismatch" "malformed reviewer schema is
 RRESEED="$(RORDER_JSON="$RORDER" python3 -c 'import json,os; from ownframework_loop import dispatch; print(json.dumps(dispatch.reseed_semantic_artifact_for_retry(json.loads(os.environ["RORDER_JSON"]),previous_attempt_id="review-attempt-1"),sort_keys=True))')"
 RARCHIVE="$(printf '%s' "$RRESEED" | jq -r '.archive_path')"
 assert_file_exists "$RARCHIVE" "malformed reviewer artifact archived"
-assert_eq "$(stat -f '%Lp' "$RARCHIVE")" "600" "reviewer archive mode"
+assert_eq "$(python3 -c 'import os,sys; print(format(os.stat(sys.argv[1]).st_mode & 0o777, "o"))' "$RARCHIVE")" "600" "reviewer archive mode"
 assert_eq "$(jq -r '.schema' "$RSEM")" "ownframework-loop-review-agent-assessment/v1" "reviewer skeleton reseeded"
 
 python3 -c 'from ownframework_loop import assessment,build_agent; good={k:"x" for k in build_agent.FIXED_KEYS}; good.update({"schema":build_agent.SCHEMA_AGENT_RESULT,"builder_identity":"of-builder","outcome_requested":"candidate_ready"}); assert build_agent.validate_agent_result_contract({**good,"schema":"wrong"}); assert build_agent.validate_agent_result_contract({**good,"builder_identity":"wrong"}); assert any("unsupported top-level keys" in e for e in build_agent.validate_agent_result_contract({**good,"unexpected":True})); review={k:"x" for k in assessment.FIXED_KEYS}; review.update({"schema":assessment.SCHEMA_AGENT_ASSESSMENT,"reviewer_identity":"of-reviewer"}); assert any("unsupported top-level keys" in e for e in assessment.validate_assessment_envelope_contract({**review,"unexpected":True})); print("FIXED_FIELDS_AND_UNKNOWN_KEYS_FAIL_CLOSED=PASS")'
