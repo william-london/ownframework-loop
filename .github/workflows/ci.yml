@@ -1,11 +1,10 @@
 name: CI
 
 on:
-  # Automatic GitHub Actions triggers disabled by owner request for
-  # master/main and other persistent branches; only bounded hardening
-  # branches are hosted-CI eligible via pull_request filter, plus the
-  # retained manual workflow_dispatch entry point.
-  pull_request:
+  # Automatic GitHub Actions triggers remain disabled for master/main and
+  # other persistent branches. Only pushes to bounded hardening branches are
+  # automatic; workflow_dispatch remains available for explicit runs.
+  push:
     branches:
       - 'hardening/**'
   workflow_dispatch:
@@ -13,8 +12,9 @@ permissions:
   contents: read
 
 env:
-  # Push/manual prove github.sha; PR jobs intentionally prove the immutable PR
-  # head SHA rather than GitHub's synthetic merge commit.
+  # Push/manual prove github.sha. The PR fallback remains compatible with an
+  # explicitly restored PR event in a future workflow revision, but no PR
+  # event is enabled by this release line.
   OFLOOP_CI_EXPECTED_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
   OFLOOP_CI_EXPECTED_BRANCH: ${{ github.head_ref || github.ref_name }}
 
