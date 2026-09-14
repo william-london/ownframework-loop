@@ -52,8 +52,8 @@ This skill is a host adapter over the deterministic ofloop core.
      `ofloop capabilities profile primary` resolves successfully;
    * otherwise use `default` without asking a tuning question. `default` means
      no Loop model pin and follows the commissioned service environment/provider
-     default. The commissioned Claude runner does not reread interactive
-     user/project/local Claude settings, including `~/.claude/settings.json`.
+     default. The commissioned Claude runner does not reread interactive user/project/local Claude settings, including `~/.claude/settings.json`;
+     the Loop-owned `--settings` payload is authoritative for the worker.
 
    Provider endpoint/auth belongs in the private commissioned service
    environment. Use `network_read_allowlist` only for packet-specific extra
