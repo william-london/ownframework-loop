@@ -49,8 +49,31 @@ COUNTS_BEFORE="$(state_counts "$REPO" "$RUN")"
 write_poison "$SEM"
 READY="$(ORDER_JSON="$ORDER" python3 -c 'import json,os; from ownframework_loop import dispatch; print("|".join(map(str,dispatch.semantic_result_ready(json.loads(os.environ["ORDER_JSON"])))) )')"
 assert_eq "$READY" "False|builder_schema_mismatch" "builder poison is retryable"
-FIRST="$(ORDER_JSON="$ORDER" python3 -c 'import json,os; from ownframework_loop import dispatch; print(json.dumps(dispatch.reseed_semantic_artifact_for_retry(json.loads(os.environ["ORDER_JSON"]),previous_attempt_id="builder-crash-attempt"),sort_keys=True))')"
-ARCHIVE="$(printf '%s' "$FIRST" | jq -r '.archive_path')"
+FIRST="$(ORDER_JSON="$ORDER" python3 - <<'PY'
+import json, os
+from ownframework_loop import dispatch
+
+order = json.loads(os.environ["ORDER_JSON"])
+original = dispatch._write_reseed_receipt
+
+def crash_before_receipt(*args, **kwargs):
+    raise RuntimeError("simulated crash before reseed receipt")
+
+dispatch._write_reseed_receipt = crash_before_receipt
+try:
+    dispatch.reseed_semantic_artifact_for_retry(
+        order, previous_attempt_id="builder-crash-attempt"
+    )
+except RuntimeError as exc:
+    print(type(exc).__name__)
+else:
+    raise SystemExit("expected simulated reseed crash")
+finally:
+    dispatch._write_reseed_receipt = original
+PY
+)"
+assert_eq "$FIRST" "RuntimeError" "builder crash occurs after skeleton installation"
+ARCHIVE="$(dirname "$SEM")/rejected-attempts/builder-crash-attempt.json"
 assert_file_exists "$ARCHIVE" "builder malformed archive exists"
 SECOND="$(ORDER_JSON="$ORDER" python3 -c 'import json,os; from ownframework_loop import dispatch; print(json.dumps(dispatch.reseed_semantic_artifact_for_retry(json.loads(os.environ["ORDER_JSON"]),previous_attempt_id="builder-crash-attempt"),sort_keys=True))')"
 assert_eq "$(printf '%s' "$SECOND" | jq -r '.already_reseeded')" "true" "builder restart detects completed reseed"
@@ -75,8 +98,31 @@ RCOUNTS_BEFORE="$(state_counts "$REPO" "$RUN")"
 write_poison "$RSEM"
 RREADY="$(RORDER_JSON="$RORDER" python3 -c 'import json,os; from ownframework_loop import dispatch; print("|".join(map(str,dispatch.semantic_result_ready(json.loads(os.environ["RORDER_JSON"])))) )')"
 assert_eq "$RREADY" "False|review_schema_mismatch" "reviewer poison is retryable"
-R1="$(RORDER_JSON="$RORDER" python3 -c 'import json,os; from ownframework_loop import dispatch; print(json.dumps(dispatch.reseed_semantic_artifact_for_retry(json.loads(os.environ["RORDER_JSON"]),previous_attempt_id="reviewer-crash-attempt"),sort_keys=True))')"
-RARCHIVE="$(printf '%s' "$R1" | jq -r '.archive_path')"
+R1="$(RORDER_JSON="$RORDER" python3 - <<'PY'
+import json, os
+from ownframework_loop import dispatch
+
+order = json.loads(os.environ["RORDER_JSON"])
+original = dispatch._write_reseed_receipt
+
+def crash_before_receipt(*args, **kwargs):
+    raise RuntimeError("simulated crash before reseed receipt")
+
+dispatch._write_reseed_receipt = crash_before_receipt
+try:
+    dispatch.reseed_semantic_artifact_for_retry(
+        order, previous_attempt_id="reviewer-crash-attempt"
+    )
+except RuntimeError as exc:
+    print(type(exc).__name__)
+else:
+    raise SystemExit("expected simulated reseed crash")
+finally:
+    dispatch._write_reseed_receipt = original
+PY
+)"
+assert_eq "$R1" "RuntimeError" "reviewer crash occurs after skeleton installation"
+RARCHIVE="$(dirname "$RSEM")/rejected-attempts/reviewer-crash-attempt.json"
 R2="$(RORDER_JSON="$RORDER" python3 -c 'import json,os; from ownframework_loop import dispatch; print(json.dumps(dispatch.reseed_semantic_artifact_for_retry(json.loads(os.environ["RORDER_JSON"]),previous_attempt_id="reviewer-crash-attempt"),sort_keys=True))')"
 assert_eq "$(printf '%s' "$R2" | jq -r '.already_reseeded')" "true" "reviewer restart detects completed reseed"
 assert_eq "$(state_counts "$REPO" "$RUN")" "$RCOUNTS_BEFORE" "reviewer crash reseed preserves budgets"

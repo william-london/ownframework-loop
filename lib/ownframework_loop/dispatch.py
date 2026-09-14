@@ -110,6 +110,20 @@ def _canonical_json_bytes(payload: dict[str, Any]) -> bytes:
     return json.dumps(payload, indent=2, sort_keys=True).encode("utf-8")
 
 
+def _skeletons_equivalent(left: bytes, right: bytes) -> bool:
+    """Compare fresh semantic skeletons while ignoring their timestamp field."""
+    try:
+        left_doc = json.loads(left)
+        right_doc = json.loads(right)
+    except (TypeError, json.JSONDecodeError):
+        return False
+    if not isinstance(left_doc, dict) or not isinstance(right_doc, dict):
+        return False
+    left_doc.pop("timestamp", None)
+    right_doc.pop("timestamp", None)
+    return left_doc == right_doc
+
+
 def _fresh_semantic_skeleton(
     decision: str,
     repo: Path,
@@ -225,6 +239,11 @@ def reseed_semantic_artifact_for_retry(
         archive_path = expected_archive_path if receipt_archive else None
         archive_bytes = archive_path.read_bytes() if archive_path else b""
         archive_sha256 = util.sha256_bytes(archive_bytes)
+        recorded_fresh_skeleton_sha256 = str(
+            existing_receipt.get("fresh_skeleton_sha256") or ""
+        )
+        if not re.fullmatch(r"[0-9a-f]{64}", recorded_fresh_skeleton_sha256):
+            raise DispatchError("semantic retry reseed receipt fresh skeleton digest invalid")
         _validate_reseed_receipt(
             existing_receipt,
             decision=decision,
@@ -232,9 +251,9 @@ def reseed_semantic_artifact_for_retry(
             semantic=semantic,
             archive_path=archive_path,
             archive_sha256=archive_sha256,
-            fresh_skeleton_sha256=fresh_skeleton_sha256,
+            fresh_skeleton_sha256=recorded_fresh_skeleton_sha256,
         )
-        if raw != fresh_bytes:
+        if util.sha256_bytes(raw) != recorded_fresh_skeleton_sha256:
             raise DispatchError("semantic retry reseed receipt exists but artifact drifted")
         return {
             "decision": decision,
@@ -242,18 +261,23 @@ def reseed_semantic_artifact_for_retry(
             "semantic_path": str(semantic),
             "archive_path": str(archive_path) if archive_path else None,
             "archive_sha256": archive_sha256,
-            "fresh_skeleton_sha256": fresh_skeleton_sha256,
+            "fresh_skeleton_sha256": recorded_fresh_skeleton_sha256,
             "reseeded": False,
             "already_reseeded": True,
         }
 
     archive_sha256 = util.sha256_bytes(raw)
+    already_reseeded = False
     if archive_path is not None:
         archive_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         os.chmod(archive_path.parent, 0o700)
         if archive_path.exists():
             prior = archive_path.read_bytes()
-            if raw != fresh_bytes and prior != raw:
+            if (
+                raw != fresh_bytes
+                and not _skeletons_equivalent(raw, fresh_bytes)
+                and prior != raw
+            ):
                 raise DispatchError(
                     f"semantic retry archive collision for attempt {attempt_id}"
                 )
@@ -262,6 +286,9 @@ def reseed_semantic_artifact_for_retry(
                 # skeleton but before writing the reseed receipt.  The
                 # archived bytes and the canonical fresh bytes prove that the
                 # operation completed; do not treat this as a collision.
+                already_reseeded = True
+                fresh_bytes = raw
+                fresh_skeleton_sha256 = util.sha256_bytes(fresh_bytes)
                 archive_sha256 = util.sha256_bytes(prior)
             else:
                 archive_sha256 = util.sha256_bytes(prior)
@@ -295,6 +322,11 @@ def reseed_semantic_artifact_for_retry(
             target = assessment_mod.write_skeleton(repo, run_id, overwrite=True)
         if target.resolve(strict=False) != semantic:
             raise DispatchError("semantic retry reseed changed canonical artifact path")
+        # build_skeleton()/assessment.build_skeleton() include a current UTC
+        # timestamp, so the bytes materialized by write_skeleton() are the
+        # authoritative fresh skeleton for this reseed operation.
+        fresh_bytes = semantic.read_bytes()
+        fresh_skeleton_sha256 = util.sha256_bytes(fresh_bytes)
     if not semantic.is_file() or semantic.read_bytes() != fresh_bytes:
         raise DispatchError("fresh semantic skeleton verification failed")
 
@@ -318,8 +350,8 @@ def reseed_semantic_artifact_for_retry(
         "archive_path": str(archive_path) if archive_path else None,
         "archive_sha256": archive_sha256,
         "fresh_skeleton_sha256": fresh_skeleton_sha256,
-        "reseeded": True,
-        "already_reseeded": False,
+        "reseeded": not already_reseeded,
+        "already_reseeded": already_reseeded,
     }
 
 
