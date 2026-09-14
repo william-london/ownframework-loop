@@ -24,7 +24,23 @@ grep -Fq 'ACTUAL="$(git rev-parse HEAD)"' "$ASSERT" || fail "exact-SHA script do
 grep -Fq 'if [[ "$ACTUAL" != "$EXPECTED" ]]' "$ASSERT" || fail "exact-SHA script does not compare HEAD to event SHA"
 grep -Fq 'git checkout -q -B "$BRANCH" "$EXPECTED"' "$ASSERT" || fail "branch restoration is not pinned to expected SHA"
 grep -Fq 'CI_EXACT_SHA=PASS' "$ASSERT" || fail "exact-SHA proof marker missing"
-grep -Fq "'hardening/**'" "$WF" || fail "hardening branches are not hosted-CI eligible"
+
+# Hardening eligibility is a HEAD-branch property. GitHub pull_request.branches
+# filters the PR BASE branch, so merely finding the string hardening/** is not
+# sufficient. Prove the workflow has a push->branches hardening trigger and
+# does not pretend a PR base filter makes hardening head branches eligible.
+python3 - "$WF" <<'PY'
+from pathlib import Path
+import sys
+text = Path(sys.argv[1]).read_text()
+expected = "  push:\n    branches:\n      - 'hardening/**'\n"
+if expected not in text:
+    raise SystemExit("hardening branches are not hosted-CI eligible by push head ref")
+if "  pull_request:\n    branches:\n      - 'hardening/**'\n" in text:
+    raise SystemExit("hardening eligibility incorrectly uses pull_request base-branch filter")
+PY
+pass "hardening head branches trigger hosted CI on push, not PR base filtering"
+
 grep -Fq 'bash tests/external_runtime/claude_cli_surface.sh' "$WF" \
   || fail "current Claude invocation compatibility proof is not wired into hosted CI"
 
