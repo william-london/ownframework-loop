@@ -87,6 +87,10 @@ and controls the pass through its wall-clock budget.
    `escalation_recommended` is a JSON boolean, never a string; and
    `recommended_verdict` is one allowed uppercase enum. Repair the
    same assessment file if any check fails. Do not call the finalizer.
+   Also verify that the exact reviewer schema and all pre-populated fixed
+   identity fields are unchanged, and that no unexpected top-level keys were
+   introduced. If a fixed field is malformed when the process starts, stop
+   and report transport corruption; do not invent replacement identity.
 11. Stop. The parent calls the deterministic finalizer.
 
 Recommended verdict is exactly one of `APPROVED`, `CHANGES_REQUESTED`,

@@ -4741,6 +4741,36 @@ def run_one(*, db_path: Path | None = None, timeout_seconds: int = 0) -> dict[st
                     "finalized": finalized,
                 }
 
+            # A retryable semantic-shape failure belongs to the same claimed
+            # engineering pass, but its model-authored envelope is poisoned.
+            # Preserve that envelope privately and reseed the exact same
+            # canonical path before launching a fresh provider process. Resume
+            # intentionally clears operational error fields, so consult the
+            # durable prior attempt row as well as the job projection.
+            prior_attempt_id = str(job["latest_attempt_id"] or "")
+            prior_attempt_reason = ""
+            if prior_attempt_id:
+                prior_attempt = conn.execute(
+                    "SELECT status, failure_reason FROM semantic_attempts "
+                    "WHERE attempt_id=? AND job_id=?",
+                    (prior_attempt_id, int(job["id"])),
+                ).fetchone()
+                if prior_attempt is not None:
+                    prior_attempt_reason = str(prior_attempt["failure_reason"] or "")
+            prior_shape_failure = (
+                prior_attempt_id
+                and prior_attempt_reason == "semantic_result_incomplete"
+            ) or str(job["last_failure_reason"] or "") == "semantic_result_incomplete"
+            if (
+                not semantic_ready
+                and semantic_reason in dispatch_mod._RETRYABLE_SEMANTIC_RESULT_REASONS
+                and prior_shape_failure
+            ):
+                dispatch_mod.reseed_semantic_artifact_for_retry(
+                    work_order,
+                    previous_attempt_id=prior_attempt_id,
+                )
+
             readiness = _runner_preflight(str(job["runner"]))
             if not readiness.ready:
                 if readiness.classification == "environment_wait":

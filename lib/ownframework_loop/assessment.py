@@ -97,6 +97,26 @@ REQUIRED_ASSESSMENT_KEYS: frozenset[str] = frozenset(
         "recommended_verdict",
     }
 )
+FIXED_KEYS: frozenset[str] = frozenset(
+    {
+        "schema",
+        "run_id",
+        "candidate_sha_claimed",
+        "reviewer_worktree",
+        "reviewer_head_before",
+        "reviewer_head_after",
+        "packet_sha256_recomputed",
+        "approval_sha256",
+        "build_receipt_sha256",
+        "scope_findings",
+        "protected_findings",
+        "secret_findings",
+        "reviewer_identity",
+    }
+)
+ALLOWED_ASSESSMENT_KEYS: frozenset[str] = frozenset(
+    {*FIXED_KEYS, *FILLABLE_KEYS}
+)
 
 
 def validate_assessment_contract(assessment: Any) -> list[str]:
@@ -107,10 +127,9 @@ def validate_assessment_contract(assessment: Any) -> list[str]:
     model-authored shape contract so a pass cannot be declared ready and then
     rejected only because the two layers disagree about JSON types/enums.
     """
+    errors = validate_assessment_envelope_contract(assessment)
     if not isinstance(assessment, dict):
-        return ["review assessment must be an object"]
-
-    errors: list[str] = []
+        return errors
     for field in sorted(REQUIRED_ASSESSMENT_KEYS):
         if field not in assessment:
             errors.append(f"missing required field: {field}")
@@ -164,6 +183,32 @@ def validate_assessment_contract(assessment: Any) -> list[str]:
         and not isinstance(assessment.get("validation_results"), list)
     ):
         errors.append("validation_results must be a list")
+    return errors
+
+
+def validate_assessment_envelope_contract(assessment: Any) -> list[str]:
+    """Validate only core-owned reviewer envelope fields.
+
+    A pristine assessment skeleton intentionally contains empty semantic rows,
+    so retry reseeding must validate the envelope separately from completion
+    readiness.
+    """
+    if not isinstance(assessment, dict):
+        return ["review assessment must be an object"]
+    errors: list[str] = []
+    unknown = sorted(set(assessment) - ALLOWED_ASSESSMENT_KEYS)
+    if unknown:
+        errors.append("unsupported top-level keys: " + ",".join(unknown))
+    for field in sorted(FIXED_KEYS):
+        if field in assessment and field not in {"scope_findings", "protected_findings", "secret_findings"} and (
+            not isinstance(assessment.get(field), str)
+            or not str(assessment.get(field) or "").strip()
+        ):
+            errors.append(f"fixed field {field} must be a non-empty string")
+    if assessment.get("schema") != SCHEMA_AGENT_ASSESSMENT:
+        errors.append(f"schema must be {SCHEMA_AGENT_ASSESSMENT}")
+    if "reviewer_identity" in assessment and assessment.get("reviewer_identity") != "of-reviewer":
+        errors.append("reviewer_identity must be of-reviewer")
     return errors
 
 

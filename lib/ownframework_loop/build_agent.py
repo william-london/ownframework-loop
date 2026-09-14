@@ -83,6 +83,31 @@ ALLOWED_OUTCOMES: frozenset[str] = frozenset(
 REQUIRED_RESULT_KEYS: frozenset[str] = frozenset(
     {"schema", "run_id", "work_unit_id", "outcome_requested"}
 )
+FIXED_KEYS: frozenset[str] = frozenset(
+    {
+        "schema",
+        "run_id",
+        "work_unit_id",
+        "candidate_branch",
+        "baseline_sha",
+        "packet_sha256",
+        "approval_sha256",
+        "builder_identity",
+    }
+)
+ALLOWED_RESULT_KEYS: frozenset[str] = frozenset(
+    {
+        *FIXED_KEYS,
+        *FILLABLE_KEYS,
+        "evidence",
+        # Retained for compatibility with pre-v0.9 synthetic adapters. The
+        # authoritative finalizer ignores these model-provided measurements.
+        "candidate_sha_claimed",
+        "files_changed",
+        "added_lines",
+        "removed_lines",
+    }
+)
 
 
 def validate_agent_result_contract(result: Any) -> list[str]:
@@ -97,6 +122,21 @@ def validate_agent_result_contract(result: Any) -> list[str]:
         return ["builder semantic result must be an object"]
 
     errors: list[str] = []
+    unknown = sorted(set(result) - ALLOWED_RESULT_KEYS)
+    if unknown:
+        errors.append(
+            "unsupported top-level keys: " + ",".join(unknown)
+        )
+    for field in sorted(FIXED_KEYS):
+        # Older sealed packets and deterministic fixtures may legitimately
+        # omit identity fields that the finalizer can re-prove from the
+        # approval/state boundary.  When a model supplies one, however, it is
+        # transport-owned and must be a non-empty string.
+        if field in result and (
+            not isinstance(result.get(field), str)
+            or not str(result.get(field) or "").strip()
+        ):
+            errors.append(f"fixed field {field} must be a non-empty string")
     for field in sorted(REQUIRED_RESULT_KEYS):
         if field not in result:
             errors.append(f"missing required field: {field}")
@@ -106,6 +146,8 @@ def validate_agent_result_contract(result: Any) -> list[str]:
         errors.append("run_id must be a non-empty string")
     if not isinstance(result.get("work_unit_id"), str) or not str(result.get("work_unit_id") or "").strip():
         errors.append("work_unit_id must be a non-empty string")
+    if "builder_identity" in result and result.get("builder_identity") != "of-builder":
+        errors.append("builder_identity must be of-builder")
     if result.get("outcome_requested") not in ALLOWED_OUTCOMES:
         errors.append(f"outcome_requested must be one of {sorted(ALLOWED_OUTCOMES)}")
 

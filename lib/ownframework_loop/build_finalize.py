@@ -156,40 +156,7 @@ def _path_in_list(path: str, prefix: str) -> bool:
 
 
 def _build_agent_result_schema_ok(result: dict[str, Any]) -> tuple[bool, list[str]]:
-    errors: list[str] = []
-    for f in AGENT_RESULT_REQUIRED:
-        if f not in result:
-            errors.append(f"missing required field: {f}")
-    if result.get("schema") != SCHEMA_AGENT_RESULT:
-        errors.append(f"schema must be {SCHEMA_AGENT_RESULT}")
-    if result.get("outcome_requested") not in AGENT_RESULT_ALLOWED_OUTCOMES:
-        errors.append(f"outcome_requested must be one of {sorted(AGENT_RESULT_ALLOWED_OUTCOMES)}")
-    if (
-        not isinstance(result.get("work_unit_id"), str)
-        or not str(result.get("work_unit_id") or "").strip()
-    ):
-        errors.append("work_unit_id must be a non-empty string")
-    if "summary" in result and not isinstance(result.get("summary"), str):
-        errors.append("summary must be a string")
-    if "evidence" in result and not isinstance(result.get("evidence"), dict):
-        errors.append("evidence must be an object")
-    for field in ("blocker_reason", "escalation_reason", "notes"):
-        value = result.get(field)
-        if value is not None and not isinstance(value, str):
-            errors.append(f"{field} must be a string or null")
-    if (
-        "escalation_recommended" in result
-        and not isinstance(result.get("escalation_recommended"), bool)
-    ):
-        errors.append("escalation_recommended must be a boolean")
-    for field in ("unit_ids_completed", "acceptance_addressed"):
-        if field not in result:
-            continue
-        value = result.get(field)
-        if not isinstance(value, list):
-            errors.append(f"{field} must be a list")
-        elif any(not isinstance(item, str) or not item for item in value):
-            errors.append(f"{field} must contain only non-empty strings")
+    errors = build_agent_mod.validate_agent_result_contract(result)
     return (not errors), errors
 
 

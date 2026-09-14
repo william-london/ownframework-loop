@@ -129,6 +129,12 @@ print-mode role prompt and controls the pass through its wall-clock budget.
     `"true"` / `"false"`; and `unit_ids_completed` / `acceptance_addressed`
     are arrays containing only non-empty strings. Repair the same semantic
     artifact if any check fails.
+    Also verify that `schema` is exactly
+    `ownframework-loop-build-agent-result/v1`, every pre-populated fixed
+    identity field is unchanged, and the top-level key set contains no
+    model-invented fields. If a fixed field is malformed when the process
+    starts, stop and report transport corruption; do not invent replacement
+    identity values.
 12. Stop. The parent calls the deterministic finalizer.
 
 `outcome_requested` is exactly one of:

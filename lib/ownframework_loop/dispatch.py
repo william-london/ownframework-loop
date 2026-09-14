@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -53,6 +54,7 @@ _RETRYABLE_SEMANTIC_RESULT_REASONS = frozenset({
     "builder_summary_empty",
     "builder_completion_evidence_empty",
     "builder_semantic_shape_invalid",
+    "builder_work_unit_mismatch",
     "review_schema_mismatch",
     "review_candidate_mismatch",
     "review_recommendation_invalid",
@@ -100,6 +102,93 @@ def _load_json_file(path: Path) -> dict[str, Any] | None:
     return data if isinstance(data, dict) else None
 
 
+def reseed_semantic_artifact_for_retry(
+    work_order: dict[str, Any],
+    *,
+    previous_attempt_id: str,
+) -> dict[str, Any]:
+    """Archive a failed semantic envelope and reseed the same pass path.
+
+    A retryable semantic-shape failure is transport failure, not engineering
+    progress. The claimed pass, worktree, and canonical path remain fixed, but
+    the next provider must start from fresh core-owned bytes. The archive is
+    private forensic evidence and is never read by a finalizer.
+    """
+    decision = str(work_order.get("decision") or "")
+    if decision not in {"BUILD", "REVIEW"}:
+        raise DispatchError("semantic retry reseed requires BUILD or REVIEW")
+    attempt_id = str(previous_attempt_id or "")
+    if not attempt_id:
+        raise DispatchError("semantic retry reseed requires prior attempt identity")
+    if not re.fullmatch(r"[A-Za-z0-9._-]+", attempt_id):
+        raise DispatchError("semantic retry attempt identity is unsafe")
+
+    semantic = Path(str(work_order.get("semantic_path") or "")).resolve(strict=False)
+    if not semantic.is_absolute():
+        raise DispatchError("semantic retry path must be absolute")
+    raw = semantic.read_bytes() if semantic.exists() else b""
+    archive_path: Path | None = None
+    archive_sha256 = util.sha256_bytes(raw)
+    if semantic.exists():
+        archive_path = semantic.parent / "rejected-attempts" / f"{attempt_id}.json"
+        archive_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        os.chmod(archive_path.parent, 0o700)
+        if archive_path.exists():
+            prior = archive_path.read_bytes()
+            if prior != raw:
+                raise DispatchError(
+                    f"semantic retry archive collision for attempt {attempt_id}"
+                )
+        else:
+            fd = os.open(
+                str(archive_path),
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                0o600,
+            )
+            try:
+                with os.fdopen(fd, "wb") as handle:
+                    handle.write(raw)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+            except Exception:
+                try:
+                    archive_path.unlink()
+                except FileNotFoundError:
+                    pass
+                raise
+            os.chmod(archive_path, 0o600)
+            util.fsync_dir(archive_path.parent)
+        if archive_path.read_bytes() != raw:
+            raise DispatchError("semantic retry archive verification failed")
+
+    repo = Path(str(work_order.get("canonical_repo") or "")).resolve(strict=False)
+    run_id = str(work_order.get("run_id") or "")
+    if decision == "BUILD":
+        target = build_agent_mod.write_skeleton(
+            repo, run_id, overwrite=True
+        )
+        fresh = _load_json_file(target)
+        if fresh is None or build_agent_mod.validate_agent_result_contract(fresh):
+            raise DispatchError("fresh builder semantic skeleton failed contract validation")
+    else:
+        target = assessment_mod.write_skeleton(
+            repo, run_id, overwrite=True
+        )
+        fresh = _load_json_file(target)
+        if fresh is None or assessment_mod.validate_assessment_envelope_contract(fresh):
+            raise DispatchError("fresh reviewer semantic skeleton failed contract validation")
+    if target.resolve(strict=False) != semantic:
+        raise DispatchError("semantic retry reseed changed canonical artifact path")
+    return {
+        "decision": decision,
+        "attempt_id": attempt_id,
+        "semantic_path": str(semantic),
+        "archive_path": str(archive_path) if archive_path else None,
+        "archive_sha256": archive_sha256,
+        "reseeded": True,
+    }
+
+
 def semantic_result_ready(work_order: dict[str, Any]) -> tuple[bool, str]:
     """Prove that a semantic worker actually completed the claimed pass.
 
@@ -141,6 +230,9 @@ def semantic_result_ready(work_order: dict[str, Any]) -> tuple[bool, str]:
             return False, "builder_outcome_invalid"
         if build_agent_mod.validate_agent_result_contract(data):
             return False, "builder_semantic_shape_invalid"
+        expected_work_unit = str(work_order.get("work_unit_id") or "")
+        if expected_work_unit and data.get("work_unit_id") != expected_work_unit:
+            return False, "builder_work_unit_mismatch"
         summary = str(data.get("summary") or "").strip()
         if outcome == "candidate_ready":
             addressed = data.get("acceptance_addressed") or []
@@ -618,6 +710,7 @@ def claim_next(*, canonical_repo: Path, run_id: str) -> dict[str, Any]:
                     "worktree": prep.get("builder_worktree"),
                     "semantic_path": semantic_path,
                     "checkpoint_id": prep.get("cp_id"),
+                    "work_unit_id": prep.get("work_unit_id"),
                     "acceptance_criterion_ids": prep.get("acceptance_criterion_ids"),
                     "repair_context": repair_context,
                     "network_read_allowlist": list(pmeta.get("network_read_allowlist") or []),
@@ -747,5 +840,6 @@ __all__ = [
     "SCHEMA",
     "claim_next",
     "finalize_work_order",
+    "reseed_semantic_artifact_for_retry",
     "semantic_result_ready",
 ]
