@@ -1472,6 +1472,142 @@ def program_transition(
     return new
 
 
+def continue_blocked_program(
+    canonical_repo: Path,
+    run_id: str,
+    *,
+    packet: dict[str, Any],
+    actor: str,
+    reason: str,
+    commit_sha: str,
+    continuation_id: str,
+) -> dict[str, Any]:
+    """Fund one explicit continuation of a blocked PROGRAM checkpoint.
+
+    This is the protocol owner for the operator-authorized BLOCKED escape.
+    It deliberately combines the per-checkpoint repair counter, cumulative
+    repair counter, and ``BLOCKED -> READY_TO_BUILD`` transition under the
+    normal state transaction.  A repeated call after that transaction has
+    committed is an idempotent observation and never spends another repair.
+
+    The supervisor owns the cross-system continuation receipt and the
+    DONE->QUEUED ledger transition; this function owns only protocol state.
+    """
+    validate_run_id(run_id)
+    if not isinstance(reason, str) or not reason.strip():
+        raise ValueError("continuation reason must be non-empty")
+    if not isinstance(commit_sha, str) or not re.fullmatch(r"[0-9a-f]{40}", commit_sha):
+        raise ValueError("continuation candidate SHA must be a full commit SHA")
+    if not isinstance(continuation_id, str) or not re.fullmatch(r"[0-9a-f]{32,64}", continuation_id):
+        raise ValueError("continuation id is invalid")
+
+    sp = state_path(canonical_repo, run_id)
+    with flock_exclusive(lock_path(canonical_repo, run_id)):
+        _verify_mutation_integrity_locked(canonical_repo, run_id)
+        current = read_json(sp)
+        if not isinstance(current, dict) or not current:
+            raise FileNotFoundError(f"STATE.json missing for run {run_id}")
+        if current.get("schema") != PROGRAM_STATE_SCHEMA_VERSION:
+            raise ValueError("PROGRAM state required for continuation")
+        if str(current.get("last_candidate_sha") or "") != commit_sha:
+            raise transitions.InvalidTransitionError(
+                "continuation candidate SHA does not match STATE.json bound candidate"
+            )
+        program_state = current.get("program")
+        if not isinstance(program_state, dict):
+            raise ValueError("PROGRAM state missing program block")
+        from . import program as program_mod
+        ok, graph_reason = program_mod.verify_frozen_graph(packet, program_state)
+        if not ok:
+            raise ValueError(f"PROGRAM frozen-graph verification failed: {graph_reason}")
+        cp_id = program_mod.select_next_checkpoint(packet, program_state)
+        if not cp_id:
+            raise transitions.InvalidTransitionError(
+                "continuation refused: PROGRAM has no unfinished checkpoint"
+            )
+        if current.get("state") == "READY_TO_BUILD":
+            return {
+                "ok": True,
+                "continued": False,
+                "idempotent": True,
+                "state": "READY_TO_BUILD",
+                "checkpoint_id": cp_id,
+                "repair_round": int(current.get("repair_round") or 0),
+                "cumulative_repair_round_count": int(
+                    program_state["cumulative_counters"].get("repair_round_count", 0)
+                ),
+            }
+        if current.get("state") != "BLOCKED":
+            raise transitions.InvalidTransitionError(
+                "continuation requires BLOCKED or an already-continued READY_TO_BUILD state"
+            )
+
+        mirror = int(current.get("repair_round") or 0)
+        cumulative = int(
+            program_state["cumulative_counters"].get("repair_round_count", 0)
+        )
+        if mirror != cumulative:
+            raise ValueError(
+                f"repair counter mirror drift: top={mirror}, cumulative={cumulative}"
+            )
+        packet_cp = program_mod._resolve_packet_cp(packet, cp_id)
+        new_program = program_mod._bump_counter_one(
+            program_state,
+            cp_id=cp_id,
+            counter="repair_round_count",
+            packet_cp=packet_cp,
+        )
+        new = dict(current)
+        new["program"] = new_program
+        new["repair_round"] = mirror + 1
+        new["state"] = "READY_TO_BUILD"
+        new["terminal_reason"] = ""
+        now = utc_now_iso()
+        new["updated_at"] = now
+        new["last_actor"] = actor
+        history = list(current.get("state_history", []))
+        history.append({
+            "from": "BLOCKED",
+            "to": "READY_TO_BUILD",
+            "at": now,
+            "actor": actor,
+            "reason": reason,
+        })
+        new["state_history"] = history
+        _commit_state_event_locked(
+            canonical_repo,
+            run_id,
+            new,
+            event_type="program_continuation",
+            old_state="BLOCKED",
+            new_state="READY_TO_BUILD",
+            actor=actor,
+            commit_sha=commit_sha,
+            reason=reason,
+            extras={
+                "continuation_id": continuation_id,
+                "checkpoint_id": cp_id,
+                "repair_round_before": mirror,
+                "repair_round_after": mirror + 1,
+                "cumulative_repair_round_before": cumulative,
+                "cumulative_repair_round_after": cumulative + 1,
+            },
+        )
+    try:
+        fsync_dir(sp.parent)
+    except OSError:
+        pass
+    return {
+        "ok": True,
+        "continued": True,
+        "idempotent": False,
+        "state": "READY_TO_BUILD",
+        "checkpoint_id": cp_id,
+        "repair_round": mirror + 1,
+        "cumulative_repair_round_count": cumulative + 1,
+    }
+
+
 def _json_dumps(obj: Any) -> str:
     """Canonical JSON serialization for events.
 

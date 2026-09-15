@@ -30,7 +30,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import approval as approval_mod, branch_resolver as branch_resolver_mod, capabilities as capabilities_mod, capability_binding as capability_binding_mod, dispatch as dispatch_mod, dispatch_hold as dispatch_hold_mod, git_checks, packet as packet_mod, runner_profiles as runner_profiles_mod, runtime_env, state as state_mod, util, runtime_identity
+from . import approval as approval_mod, branch_resolver as branch_resolver_mod, capabilities as capabilities_mod, capability_binding as capability_binding_mod, dispatch as dispatch_mod, dispatch_hold as dispatch_hold_mod, git_checks, packet as packet_mod, program as program_mod, runner_profiles as runner_profiles_mod, runtime_env, state as state_mod, transitions, util, runtime_identity
 
 SCHEMA = "ownframework-loop-supervisor/v1"
 DISPATCH_HOLD_KIND = "PROGRAM_CHECKPOINT_BOUNDARY"
@@ -606,6 +606,11 @@ _LEGACY_BUDGET_DEFAULT_FINGERPRINT = (25.0, 0, 28800)
 DEFAULT_MAX_CONCURRENCY = 1
 IMPLEMENTATION_MAX_CONCURRENCY = 64
 _CONFIG_MAX_CONCURRENCY = "max_concurrency"
+_CONTINUATION_SCHEMA = "ownframework-loop-program-continuation/v1"
+_PROGRAM_READY_STATE = next(
+    value for value in transitions.STATES
+    if value.startswith("READY_TO_") and value.endswith("_BUILD")
+)
 
 
 def _repository_scheduling_identity(repo: Path) -> tuple[str, bool]:
@@ -668,6 +673,268 @@ def _packet_execution_mode(repo: Path, run_id: str) -> str:
     except (OSError, ValueError):
         return "SINGLE"
     return "PROGRAM" if str(meta.get("execution_mode") or "").lower() == "program" else "SINGLE"
+
+
+def _continuation_path(canonical_repo: Path, run_id: str, continuation_id: str) -> Path:
+    return (
+        state_mod.run_dir(canonical_repo, run_id)
+        / "continuations"
+        / f"{continuation_id}.json"
+    )
+
+
+def _continuation_id(run_id: str, checkpoint_id: str, candidate_sha: str, reason: str) -> str:
+    body = "\x00".join((run_id, checkpoint_id, candidate_sha, reason))
+    return hashlib.sha256(body.encode("utf-8")).hexdigest()[:32]
+
+
+def _continuation_read(path: Path) -> dict[str, Any] | None:
+    value = util.read_private_json(path)
+    return value if isinstance(value, dict) else None
+
+
+def _continuation_write(path: Path, payload: dict[str, Any]) -> None:
+    util.atomic_write_json(path, payload, mode=0o600)
+
+
+def _continuation_conflict(
+    repo_path: Path,
+    run_id: str,
+    *,
+    checkpoint_id: str,
+    candidate_sha: str,
+    continuation_id: str,
+) -> bool:
+    directory = state_mod.run_dir(repo_path, run_id) / "continuations"
+    if not directory.is_dir():
+        return False
+    for path in directory.glob("*.json"):
+        if path.name == f"{continuation_id}.json":
+            continue
+        value = _continuation_read(path)
+        if not isinstance(value, dict):
+            return True
+        if (
+            value.get("schema") == _CONTINUATION_SCHEMA
+            and value.get("run_id") == run_id
+            and value.get("checkpoint_id") == checkpoint_id
+            and value.get("candidate_sha") == candidate_sha
+            and value.get("status") in {"PENDING", "FUNDED", "QUEUED"}
+        ):
+            return True
+    return False
+
+
+def continue_program(
+    *,
+    canonical_repo: Path,
+    run_id: str,
+    reason: str,
+    expected_candidate_sha: str,
+    db_path: Path | None = None,
+) -> dict[str, Any]:
+    """Continue one unfinished, blocked PROGRAM checkpoint safely.
+
+    This public operator action is deliberately narrower than ``enqueue`` and
+    ``resume``.  It consumes one protocol repair entitlement through the
+    state owner, then reactivates the already-enrolled DONE ledger row without
+    rebinding runtime, resetting the execution clock, or changing accounting.
+    The private receipt makes the state/ledger boundary restart-safe.
+    """
+    state_mod.validate_run_id(run_id)
+    repo_path = Path(canonical_repo).expanduser().resolve(strict=False)
+    repo = str(repo_path)
+    reason = str(reason or "").strip()
+    expected_candidate_sha = str(expected_candidate_sha or "").strip().lower()
+    if not reason:
+        return {"schema": SCHEMA, "ok": False, "reason": "continuation_reason_required"}
+    if not re.fullmatch(r"[0-9a-f]{40}", expected_candidate_sha):
+        return {"schema": SCHEMA, "ok": False, "reason": "expected_candidate_sha_invalid"}
+    db = db_path or default_db_path()
+
+    with _managed_connect_readonly(db) as conn:
+        job, lookup_reason = _logical_job_row(conn, repo_path, run_id)
+        if job is None:
+            return {
+                "schema": SCHEMA, "ok": False, "reason": lookup_reason or "not_enqueued",
+                "repo": repo, "run_id": run_id,
+            }
+        job = dict(job)
+
+    if str(job.get("execution_mode") or "SINGLE").upper() != "PROGRAM":
+        return {"schema": SCHEMA, "ok": False, "reason": "continuation_requires_program_mode"}
+    if str(job.get("status") or "") not in {"DONE", "QUEUED"}:
+        return {
+            "schema": SCHEMA, "ok": False,
+            "reason": "continuation_requires_done_or_queued_enrollment",
+            "status": job.get("status"),
+        }
+    worker_pid = job.get("worker_pid")
+    if worker_pid and _pid_alive(int(worker_pid), float(job.get("worker_started_at") or 0) or None):
+        return {"schema": SCHEMA, "ok": False, "reason": "continuation_worker_still_alive"}
+
+    packet_path = state_mod.run_dir(repo_path, run_id) / "WORK_PACKET.md"
+    try:
+        packet, _ = packet_mod.parse_packet_file(packet_path)
+        current = state_mod.load_verified(repo_path, run_id)
+    except Exception as exc:
+        return {
+            "schema": SCHEMA, "ok": False,
+            "reason": "continuation_authority_unreadable",
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+    if str(packet.get("execution_mode") or "").lower() != "program":
+        return {"schema": SCHEMA, "ok": False, "reason": "packet_is_not_program_mode"}
+    if not isinstance(current, dict) or current.get("schema") != state_mod.PROGRAM_STATE_SCHEMA_VERSION:
+        return {"schema": SCHEMA, "ok": False, "reason": "program_state_required"}
+    program_state = current.get("program")
+    if not isinstance(program_state, dict):
+        return {"schema": SCHEMA, "ok": False, "reason": "program_state_missing"}
+    checkpoint_id = program_mod.select_next_checkpoint(packet, program_state)
+    if not checkpoint_id:
+        return {"schema": SCHEMA, "ok": False, "reason": "no_unfinished_checkpoint"}
+    if str(current.get("last_candidate_sha") or "") != expected_candidate_sha:
+        return {"schema": SCHEMA, "ok": False, "reason": "candidate_sha_mismatch"}
+    branch = str(job.get("candidate_branch") or "")
+    if not branch:
+        try:
+            branch = branch_resolver_mod.resolve_candidate_branch(repo_path, run_id, packet=packet)
+        except Exception as exc:
+            return {"schema": SCHEMA, "ok": False, "reason": "candidate_branch_unresolved", "error": str(exc)}
+    if git_checks.branch_head(repo_path, branch) != expected_candidate_sha:
+        return {"schema": SCHEMA, "ok": False, "reason": "candidate_branch_head_mismatch", "candidate_branch": branch}
+    builder_path = util.builder_worktree(repo_path, run_id)
+    if not builder_path.is_dir() or git_checks.current_head(builder_path) != expected_candidate_sha:
+        return {"schema": SCHEMA, "ok": False, "reason": "builder_worktree_candidate_mismatch"}
+    if git_checks.current_branch(builder_path) != branch:
+        return {"schema": SCHEMA, "ok": False, "reason": "builder_worktree_branch_mismatch"}
+
+    continuation_id = _continuation_id(run_id, checkpoint_id, expected_candidate_sha, reason)
+    receipt_path = _continuation_path(repo_path, run_id, continuation_id)
+    receipt = _continuation_read(receipt_path)
+    if _continuation_conflict(
+        repo_path,
+        run_id,
+        checkpoint_id=checkpoint_id,
+        candidate_sha=expected_candidate_sha,
+        continuation_id=continuation_id,
+    ):
+        return {"schema": SCHEMA, "ok": False, "reason": "continuation_receipt_conflict"}
+    if current.get("state") == _PROGRAM_READY_STATE and receipt is None:
+        return {"schema": SCHEMA, "ok": False, "reason": "continuation_receipt_missing"}
+    before = {
+        "build_pass_count": int(current.get("build_pass_count") or 0),
+        "review_pass_count": int(current.get("review_pass_count") or 0),
+        "repair_round": int(current.get("repair_round") or 0),
+        "total_cost_usd": float(job.get("total_cost_usd") or 0),
+        "total_input_tokens": int(job.get("total_input_tokens") or 0),
+        "total_output_tokens": int(job.get("total_output_tokens") or 0),
+        "total_cache_read_tokens": int(job.get("total_cache_read_tokens") or 0),
+        "execution_started_at": job.get("execution_started_at"),
+        "runtime_generation": str(job.get("runtime_generation") or ""),
+    }
+    receipt_before = receipt.get("before") if isinstance(receipt, dict) else None
+    if receipt_before is not None and not isinstance(receipt_before, dict):
+        return {"schema": SCHEMA, "ok": False, "reason": "continuation_receipt_conflict"}
+    immutable_before = receipt_before if isinstance(receipt_before, dict) else before
+    immutable = {
+        "schema": _CONTINUATION_SCHEMA,
+        "run_id": run_id,
+        "checkpoint_id": checkpoint_id,
+        "continuation_id": continuation_id,
+        "candidate_sha": expected_candidate_sha,
+        "candidate_branch": branch,
+        "reason": reason,
+        "before": immutable_before,
+    }
+    if receipt is None:
+        if receipt_path.exists():
+            return {"schema": SCHEMA, "ok": False, "reason": "continuation_receipt_invalid"}
+        receipt = dict(immutable)
+        receipt.update({"status": "PENDING", "created_at": util.utc_now_iso()})
+        _continuation_write(receipt_path, receipt)
+    else:
+        for key in immutable:
+            if receipt.get(key) != immutable[key]:
+                return {"schema": SCHEMA, "ok": False, "reason": "continuation_receipt_conflict"}
+        if receipt.get("status") not in {"PENDING", "FUNDED", "QUEUED"}:
+            return {"schema": SCHEMA, "ok": False, "reason": "continuation_receipt_status_invalid"}
+        if receipt.get("status") == "QUEUED" and str(job.get("status") or "") == "DONE":
+            return {"schema": SCHEMA, "ok": False, "reason": "continuation_ledger_receipt_conflict"}
+        before = immutable_before
+
+    if current.get("state") == "BLOCKED":
+        try:
+            state_result = state_mod.continue_blocked_program(
+                repo_path,
+                run_id,
+                packet=packet,
+                actor="ofloop-operator-continuation",
+                reason=reason,
+                commit_sha=expected_candidate_sha,
+                continuation_id=continuation_id,
+            )
+        except (program_mod.ProgramStateError, transitions.InvalidTransitionError, ValueError) as exc:
+            return {"schema": SCHEMA, "ok": False, "reason": "continuation_refused", "error": str(exc)}
+    elif current.get("state") == _PROGRAM_READY_STATE:
+        if receipt.get("status") not in {"PENDING", "FUNDED", "QUEUED"}:
+            return {"schema": SCHEMA, "ok": False, "reason": "continuation_state_receipt_conflict"}
+        state_result = {
+            "ok": True, "continued": False, "idempotent": True,
+            "state": _PROGRAM_READY_STATE, "checkpoint_id": checkpoint_id,
+            "repair_round": int(current.get("repair_round") or 0),
+            "cumulative_repair_round_count": int(
+                program_state["cumulative_counters"].get("repair_round_count", 0)
+            ),
+        }
+    else:
+        return {"schema": SCHEMA, "ok": False, "reason": "continuation_requires_blocked_program_state", "state": current.get("state")}
+
+    current_after = state_mod.load_verified(repo_path, run_id)
+    after = {
+        "build_pass_count": int(current_after.get("build_pass_count") or 0),
+        "review_pass_count": int(current_after.get("review_pass_count") or 0),
+        "repair_round": int(current_after.get("repair_round") or 0),
+        "cumulative_repair_round_count": int(
+            (current_after.get("program") or {}).get("cumulative_counters", {}).get("repair_round_count", 0)
+        ),
+    }
+    receipt.update({"status": "FUNDED", "funded_at": receipt.get("funded_at") or util.utc_now_iso(), "after": after})
+    _continuation_write(receipt_path, receipt)
+
+    with _managed_connect(db) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute("SELECT * FROM jobs WHERE id=?", (int(job["id"]),)).fetchone()
+        if row is None:
+            return {"schema": SCHEMA, "ok": False, "reason": "enrollment_disappeared"}
+        if str(row["status"] or "") == "DONE":
+            cur = conn.execute(
+                "UPDATE jobs SET status='QUEUED', next_attempt_at=0, updated_at=? WHERE id=? AND status='DONE'",
+                (time.time(), int(row["id"])),
+            )
+            if cur.rowcount != 1:
+                row = conn.execute("SELECT * FROM jobs WHERE id=?", (int(row["id"]),)).fetchone()
+                if row is None or str(row["status"] or "") != "QUEUED":
+                    return {"schema": SCHEMA, "ok": False, "reason": "continuation_ledger_race"}
+        elif str(row["status"] or "") != "QUEUED":
+            return {"schema": SCHEMA, "ok": False, "reason": "continuation_ledger_state_conflict", "status": row["status"]}
+        row = conn.execute("SELECT * FROM jobs WHERE id=?", (int(row["id"]),)).fetchone()
+    receipt.update({"status": "QUEUED", "queued_at": receipt.get("queued_at") or util.utc_now_iso()})
+    _continuation_write(receipt_path, receipt)
+    out = _job_dict(row, db)
+    out.update({
+        "continuation": {
+            "id": continuation_id,
+            "checkpoint_id": checkpoint_id,
+            "state": state_result,
+            "repair_round_before": before["repair_round"],
+            "repair_round_after": after["repair_round"],
+            "cumulative_repair_round_before": before["repair_round"],
+            "cumulative_repair_round_after": after["cumulative_repair_round_count"],
+            "receipt": str(receipt_path),
+        }
+    })
+    return out
 
 
 def _validate_max_concurrency(value: Any) -> int:
@@ -5427,6 +5694,7 @@ __all__ = [
     "supervisor_config_set",
     "fleet_status",
     "enqueue",
+    "continue_program",
     "register_runner",
     "resume",
     "run_one",

@@ -1941,6 +1941,17 @@ def _build_parser() -> argparse.ArgumentParser:
         )
         _emit(out, exit_code=0 if out.get("ok") else 2)
 
+    def cmd_supervisor_continue_program(args: argparse.Namespace) -> None:
+        repo = _repo_path(args.repo)
+        out = supervisor_mod.continue_program(
+            canonical_repo=repo,
+            run_id=args.run_id,
+            reason=args.reason,
+            expected_candidate_sha=args.expected_candidate_sha,
+            db_path=Path(args.db).expanduser() if args.db else None,
+        )
+        _emit(out, exit_code=0 if out.get("ok") else 2)
+
     def cmd_supervisor_retire(args: argparse.Namespace) -> None:
         repo = _repo_path(args.repo)
         out = supervisor_mod.retire(
@@ -2075,6 +2086,16 @@ def _build_parser() -> argparse.ArgumentParser:
         help="deprecated no-op: preserving the wall-clock origin is now the default",
     )
     s_res.set_defaults(func=cmd_supervisor_resume)
+    s_cont = sup_sub.add_parser(
+        "continue-program",
+        help="fund one bounded repair and requeue an unfinished blocked PROGRAM checkpoint",
+    )
+    s_cont.add_argument("repo")
+    s_cont.add_argument("run_id")
+    s_cont.add_argument("--reason", required=True)
+    s_cont.add_argument("--expected-candidate-sha", required=True)
+    s_cont.add_argument("--db", default=None)
+    s_cont.set_defaults(func=cmd_supervisor_continue_program)
     # v0.8.3: enrollments can be retired — a SUPERVISOR-LEDGER lifecycle
     # transition that preserves engineering evidence and excludes the row
     # from runtime-generation dependency checks at install/refresh time.
