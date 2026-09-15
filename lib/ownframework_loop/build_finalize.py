@@ -453,12 +453,13 @@ def finalize_build(
             + "; ".join(f"{f['path']}:{f['pattern_id']}" for f in hard_secret_blocks[:5])
         )
 
-    # Candidate-only protected drift is recoverable when the current
-    # candidate is otherwise a valid descendant of the durable checkpoint
-    # entry tree.  The recovery helper restores only the offending protected
-    # paths and creates a core-owned descendant commit; it never rewrites or
-    # deletes the model candidate.  Authority failures, hard secrets, mixed
-    # scope/protected drift, and exhausted repair entitlement remain terminal.
+    # Candidate-only protected drift is recoverable when the current candidate
+    # is otherwise a valid descendant of the durable checkpoint-entry tree.
+    # Recovery preserves the violating commit as history but makes the active
+    # core-owned descendant use the complete safe anchor tree; no model source
+    # from the tainted attempt is salvaged. Authority failures, hard secrets,
+    # mixed scope/protected drift, and exhausted repair entitlement remain
+    # terminal.
     protected_drift_recovery_error = ""
     if (
         protected_findings

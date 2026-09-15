@@ -177,6 +177,30 @@
                 },
                 "description": "Exact top-level acceptance-criterion IDs owned by this checkpoint. When present on one checkpoint it must be present on every checkpoint."
               },
+              "work_units": {
+                "type": "array",
+                "minItems": 1,
+                "description": "Optional explicit binding for this checkpoint. Exactly one work-unit identity is required by PROGRAM admission.",
+                "items": {
+                  "oneOf": [
+                    {
+                      "type": "string",
+                      "pattern": "^UNIT-[0-9]+$"
+                    },
+                    {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": ["id"],
+                      "properties": {
+                        "id": {
+                          "type": "string",
+                          "pattern": "^UNIT-[0-9]+$"
+                        }
+                      }
+                    }
+                  ]
+                }
+              },
               "required_validation": {
                 "type": "array",
                 "description": "Additional validations authoritative only while this checkpoint is being finalized or reviewed; top-level required_validation remains global.",

@@ -17,6 +17,7 @@ packet = {
             "risk_budget": {"max_build_passes": 2, "max_review_passes": 2, "max_repair_rounds": 1},
         }],
     },
+    "work_units": [{"id": "UNIT-1", "title": "one", "scope": "one"}],
 }
 ps = program.materialise_initial_program_state(packet, baseline_sha="a"*40, candidate_branch="factory/candidate/test")
 cp = ps["checkpoints"][0]
@@ -175,7 +176,8 @@ packet={
  "risk_budget":{"max_build_passes":2,"max_review_passes":2,"max_repair_rounds":1},
  "checkpoint_graph":{"execution_order":["CP-1"],"checkpoints":[{
    "id":"CP-1","title":"one","scope":"one","depends_on":[],
-   "risk_budget":{"max_build_passes":2,"max_review_passes":2,"max_repair_rounds":1}}]}}
+   "risk_budget":{"max_build_passes":2,"max_review_passes":2,"max_repair_rounds":1}}]},
+ "work_units":[{"id":"UNIT-1","title":"one","scope":"one"}]}
 state=state_mod.initial_state(rid)
 state["schema"]=state_mod.PROGRAM_STATE_SCHEMA_VERSION
 state["state"]="CHANGES_REQUESTED"

@@ -46,7 +46,8 @@ repo=mkrepo(); rid="run-v046-phase"; run=repo/".ownframework-loop"/rid; run.mkdi
 packet={"schema":"ownframework-work-packet/v3","execution_mode":"program",
  "risk_budget":{"max_build_passes":3,"max_review_passes":3,"max_repair_rounds":1},
  "checkpoint_graph":{"execution_order":["CP-1"],"checkpoints":[{"id":"CP-1","title":"one","scope":"one","depends_on":[],
- "risk_budget":{"max_build_passes":3,"max_review_passes":3,"max_repair_rounds":1}}]}}
+ "risk_budget":{"max_build_passes":3,"max_review_passes":3,"max_repair_rounds":1}}]},
+ "work_units":[{"id":"UNIT-1","title":"one","scope":"one"}]}
 ps=program.materialise_initial_program_state(packet,baseline_sha="a"*40,candidate_branch="factory/candidate/x")
 s=state_mod.initial_state(rid); s.update({"schema":state_mod.PROGRAM_STATE_SCHEMA_VERSION,"program":ps,"state":"READY_FOR_REVIEW"})
 seed_state(repo,rid,s)

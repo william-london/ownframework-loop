@@ -1481,6 +1481,7 @@ def continue_blocked_program(
     reason: str,
     commit_sha: str,
     continuation_id: str,
+    expected_previous_candidate_sha: str | None = None,
 ) -> dict[str, Any]:
     """Fund one explicit continuation of a blocked PROGRAM checkpoint.
 
@@ -1509,7 +1510,10 @@ def continue_blocked_program(
             raise FileNotFoundError(f"STATE.json missing for run {run_id}")
         if current.get("schema") != PROGRAM_STATE_SCHEMA_VERSION:
             raise ValueError("PROGRAM state required for continuation")
-        if str(current.get("last_candidate_sha") or "") != commit_sha:
+        expected_previous = expected_previous_candidate_sha or commit_sha
+        if not isinstance(expected_previous, str) or not re.fullmatch(r"[0-9a-f]{40}", expected_previous):
+            raise ValueError("continuation previous candidate SHA is invalid")
+        if str(current.get("last_candidate_sha") or "") != expected_previous:
             raise transitions.InvalidTransitionError(
                 "continuation candidate SHA does not match STATE.json bound candidate"
             )
@@ -1543,9 +1547,7 @@ def continue_blocked_program(
             )
 
         mirror = int(current.get("repair_round") or 0)
-        cumulative = int(
-            program_state["cumulative_counters"].get("repair_round_count", 0)
-        )
+        cumulative = int(program_state["cumulative_counters"].get("repair_round_count", 0))
         if mirror != cumulative:
             raise ValueError(
                 f"repair counter mirror drift: top={mirror}, cumulative={cumulative}"

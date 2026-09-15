@@ -12,7 +12,7 @@ import tempfile
 import sys
 from pathlib import Path
 
-from ownframework_loop import approval, program, protected_recovery, supervisor, util
+from ownframework_loop import approval, packet as packet_mod, program, protected_recovery, supervisor, util
 
 
 def run(repo: Path, *args: str, env=None):
@@ -32,12 +32,15 @@ with tempfile.TemporaryDirectory() as td:
     (repo / "src").mkdir()
     (repo / "docs").mkdir()
     (repo / "src" / "feature.py").write_text("base\n")
+    (repo / "src" / "other.py").write_text("base\n")
     (repo / "docs" / "protected.md").write_text("approved\n")
     out(repo, "add", ".")
     out(repo, "commit", "-qm", "baseline")
     baseline = out(repo, "rev-parse", "HEAD")
     out(repo, "checkout", "-qb", "candidate")
     (repo / "src" / "feature.py").write_text("candidate\n")
+    (repo / "src" / "other.py").write_text("another candidate\n")
+    (repo / "src" / "model-only.py").write_text("discard me\n")
     (repo / "docs" / "protected.md").write_text("model drift\n")
     out(repo, "add", ".")
     out(repo, "commit", "-qm", "candidate")
@@ -97,7 +100,14 @@ with tempfile.TemporaryDirectory() as td:
     rollback = recovered["candidate_sha"]
     assert rollback != candidate
     assert out(wt, "show", "HEAD:docs/protected.md") == "approved"
-    assert out(wt, "show", "HEAD:src/feature.py") == "candidate"
+    assert out(wt, "show", "HEAD:src/feature.py") == "base"
+    assert out(wt, "show", "HEAD:src/other.py") == "base"
+    assert out(wt, "ls-tree", "--name-only", "HEAD", "src/model-only.py") == ""
+    safe_tree = out(repo, "rev-parse", f"{baseline}^{{tree}}")
+    recovery_tree = out(repo, "rev-parse", f"{rollback}^{{tree}}")
+    assert recovery_tree == safe_tree
+    run(repo, "merge-base", "--is-ancestor", candidate, rollback)
+    assert out(repo, "rev-parse", "refs/heads/candidate") == rollback
     receipt = Path(recovered["receipt_path"])
     assert stat.S_IMODE(receipt.stat().st_mode) == 0o600
     assert json.loads(receipt.read_text())["status"] == "complete"
@@ -180,6 +190,29 @@ with tempfile.TemporaryDirectory() as td:
     assert program.current_checkpoint_work_unit_id(
         packet, {"current_checkpoints": ["CP-1"]}
     ) == "UNIT-7"
+    ambiguous = json.loads(json.dumps(packet))
+    ambiguous["work_units"] = [
+        {"id": "UNIT-A", "acceptance": ["AC-1"]},
+        {"id": "UNIT-B", "acceptance": ["AC-1"]},
+    ]
+    try:
+        program.current_checkpoint_work_unit_id(
+            ambiguous, {"current_checkpoints": ["CP-1"]}
+        )
+    except program.ProgramGraphError as exc:
+        assert "ambiguous" in str(exc)
+    else:
+        raise AssertionError("ambiguous work-unit binding was accepted")
+    unresolved = json.loads(json.dumps(packet))
+    unresolved["checkpoint_graph"]["checkpoints"][0]["acceptance_criterion_ids"] = ["AC-MISSING"]
+    try:
+        program.current_checkpoint_work_unit_id(
+            unresolved, {"current_checkpoints": ["CP-1"]}
+        )
+    except program.ProgramGraphError as exc:
+        assert "unresolved" in str(exc)
+    else:
+        raise AssertionError("unresolved work-unit binding was accepted")
 
     # Exact prompt/work-order provenance is private and contains no provider
     # environment or credential fields.
@@ -253,6 +286,18 @@ with tempfile.TemporaryDirectory() as td:
                          "max_repair_rounds": 2, "max_files_changed": 10,
                          "max_diff_lines": 500},
     }
+    preflight_ambiguous = json.loads(json.dumps(packet2))
+    preflight_ambiguous["work_units"] = [
+        {"id": "UNIT-1", "title": "one", "scope": "src/", "acceptance": ["AC-1"]},
+        {"id": "UNIT-2", "title": "two", "scope": "src/", "acceptance": ["AC-1"]},
+    ]
+    graph_errors = program.validate_checkpoint_graph(preflight_ambiguous)
+    assert any("CP-1: work unit binding ambiguous: UNIT-1,UNIT-2" in e for e in graph_errors), graph_errors
+    admission_errors = packet_mod.validate_packet_for_approval(preflight_ambiguous)
+    assert any("work unit binding ambiguous" in e for e in admission_errors), admission_errors
+    explicit_binding = json.loads(json.dumps(packet2))
+    explicit_binding["checkpoint_graph"]["checkpoints"][0]["work_units"] = ["UNIT-1"]
+    assert program.validate_checkpoint_graph(explicit_binding) == [], program.validate_checkpoint_graph(explicit_binding)
     packet2_path = finalizer_repo / ".ownframework-loop" / run_id / "WORK_PACKET.md"
     packet2_path.write_text("```json\n" + json.dumps(packet2, sort_keys=True) + "\n```\n")
     claim_result = subprocess.run(
@@ -290,6 +335,7 @@ with tempfile.TemporaryDirectory() as td:
     assert receipt["next_state"] == "CHANGES_REQUESTED"
 
 print("PROTECTED_DRIFT_RECOVERY=PASS")
+print("WHOLE_ATTEMPT_DISCARD_TEST=PASS")
 print("PROTECTED_DRIFT_RESTART_IDEMPOTENCE=PASS")
 print("PROTECTED_DRIFT_CRASH_BOUNDARIES=PASS")
 print("PROTECTED_DRIFT_COLLISION_FAILS_CLOSED=PASS")

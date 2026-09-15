@@ -284,14 +284,6 @@ def _resolve_current_work_unit_id(canonical_repo: Path, run_id: str) -> str:
                 if cp.get("id") != cp_id:
                     continue
                 checkpoint_found = True
-                cp_wus = cp.get("work_units") or []
-                if cp_wus:
-                    unit_id = cp_wus[0]
-                    if not isinstance(unit_id, str) or not unit_id:
-                        raise RuntimeError(
-                            f"checkpoint {cp_id} has invalid work-unit identity"
-                        )
-                    return unit_id
                 try:
                     return program_mod.current_checkpoint_work_unit_id(
                         meta, program, cp_id=cp_id

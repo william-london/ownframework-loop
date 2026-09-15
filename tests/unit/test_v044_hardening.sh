@@ -60,8 +60,9 @@ packet={
  "risk_budget":{"max_build_passes":24,"max_review_passes":24,"max_repair_rounds":8},
  "checkpoint_graph":{"execution_order":[f"CP-{i}" for i in range(1,12)],"checkpoints":[
    {"id":f"CP-{i}","title":f"t{i}","scope":"s","depends_on":[],
-    "risk_budget":{"max_build_passes":3,"max_review_passes":3,"max_repair_rounds":2}}
+   "risk_budget":{"max_build_passes":3,"max_review_passes":3,"max_repair_rounds":2}}
    for i in range(1,12)]}}
+packet["work_units"]=[{"id":"UNIT-1","title":"all checkpoints","scope":"s"}]
 state=materialise_initial_program_state(packet,baseline_sha="x"*40,candidate_branch="factory/candidate/test")
 c=state["cumulative_ceilings"]
 assert (c["max_build_passes"],c["max_review_passes"],c["max_repair_rounds"])==(24,24,8),c

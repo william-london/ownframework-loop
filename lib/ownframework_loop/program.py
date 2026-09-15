@@ -61,6 +61,49 @@ def _cp_id(s: Any) -> bool:
     return isinstance(s, str) and bool(_CP_RE.fullmatch(s))
 
 
+def _resolve_checkpoint_work_unit_id(
+    packet: dict[str, Any],
+    cp: dict[str, Any],
+) -> str:
+    """Resolve one checkpoint's work-unit owner without positional fallback."""
+    current = str(cp.get("id") or "")
+    if "work_units" in cp:
+        override = cp.get("work_units")
+        if not isinstance(override, list) or len(override) != 1:
+            raise ProgramGraphError(
+                f"{current}: work unit binding ambiguous: explicit binding must contain exactly one unit"
+            )
+        item = override[0]
+        unit_id = item.get("id") if isinstance(item, dict) else item
+        if not isinstance(unit_id, str) or not unit_id.strip():
+            raise ProgramGraphError(f"{current}: work unit binding unresolved")
+        return unit_id
+
+    work_units = packet.get("work_units") or []
+    valid_units = [
+        item for item in work_units
+        if isinstance(item, dict)
+        and isinstance(item.get("id"), str)
+        and item["id"].strip()
+    ]
+    if len(valid_units) == 1:
+        return str(valid_units[0]["id"])
+
+    cp_ids = set(cp.get("acceptance_criterion_ids") or [])
+    matches = [
+        str(item["id"])
+        for item in valid_units
+        if cp_ids and set(item.get("acceptance") or []).intersection(cp_ids)
+    ]
+    if len(matches) == 1:
+        return matches[0]
+    if not matches:
+        raise ProgramGraphError(f"{current}: work unit binding unresolved")
+    raise ProgramGraphError(
+        f"{current}: work unit binding ambiguous: {','.join(sorted(set(matches)))}"
+    )
+
+
 def resolve_execution_mode(meta: dict[str, Any]) -> str:
     v = meta.get("execution_mode")
     if v is None:
@@ -118,33 +161,19 @@ def current_checkpoint_work_unit_id(
 ) -> str:
     """Resolve the work unit owned by the current PROGRAM checkpoint.
 
-    Explicit checkpoint overrides win.  For older packets, match the
-    packet-level work unit whose declared acceptance IDs overlap the current
-    checkpoint; only an ambiguous packet falls back to its first unit.
+    An explicit checkpoint binding must contain exactly one work unit.  A
+    packet with one total work unit may inherit it.  For older packets with
+    multiple packet-level work units, acceptance-ID overlap is accepted only
+    when it resolves to exactly one unit.  Ambiguity and zero matches are
+    authority errors; list position, CP numbering, and title similarity are
+    never binding rules.
     """
     current = cp_id or select_next_checkpoint(packet, program_state)
     checkpoints = (packet.get("checkpoint_graph") or {}).get("checkpoints") or []
     cp = next((item for item in checkpoints if item.get("id") == current), None)
     if not isinstance(cp, dict):
         raise ProgramGraphError(f"current checkpoint {current!r} not found")
-    override = cp.get("work_units") or []
-    if override:
-        item = override[0]
-        return str(item.get("id") if isinstance(item, dict) else item)
-    cp_ids = set(cp.get("acceptance_criterion_ids") or [])
-    matches: list[str] = []
-    for item in packet.get("work_units") or []:
-        if not isinstance(item, dict) or not item.get("id"):
-            continue
-        declared = set(item.get("acceptance") or [])
-        if cp_ids and declared.intersection(cp_ids):
-            matches.append(str(item["id"]))
-    if len(matches) == 1:
-        return matches[0]
-    work_units = packet.get("work_units") or []
-    if work_units and isinstance(work_units[0], dict) and work_units[0].get("id"):
-        return str(work_units[0]["id"])
-    raise ProgramGraphError("packet has no resolvable work unit")
+    return _resolve_checkpoint_work_unit_id(packet, cp)
 
 
 def resolve_effective_required_validation(
@@ -339,6 +368,16 @@ def validate_checkpoint_graph(packet: dict[str, Any]) -> list[str]:
     missing = set(by_id) - seen
     if missing:
         errors.append(f"execution_order omits checkpoints: {sorted(missing)}")
+
+    # Work-unit ownership is part of PROGRAM admission, not a late dispatch
+    # concern.  Resolve every checkpoint now so an unattended run cannot reach
+    # a checkpoint whose semantic owner is ambiguous or absent.
+    if str(packet.get("execution_mode") or "").lower() == "program":
+        for cid, cp in by_id.items():
+            try:
+                _resolve_checkpoint_work_unit_id(packet, cp)
+            except ProgramGraphError as exc:
+                errors.append(str(exc))
 
     position = {cid: i for i, cid in enumerate(order)}
     for cid, idx in position.items():

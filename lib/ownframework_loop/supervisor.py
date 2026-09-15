@@ -30,7 +30,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import approval as approval_mod, branch_resolver as branch_resolver_mod, capabilities as capabilities_mod, capability_binding as capability_binding_mod, dispatch as dispatch_mod, dispatch_hold as dispatch_hold_mod, git_checks, packet as packet_mod, program as program_mod, runner_profiles as runner_profiles_mod, runtime_env, state as state_mod, transitions, util, runtime_identity
+from . import approval as approval_mod, branch_resolver as branch_resolver_mod, capabilities as capabilities_mod, capability_binding as capability_binding_mod, dispatch as dispatch_mod, dispatch_hold as dispatch_hold_mod, git_checks, packet as packet_mod, program as program_mod, protected_recovery, runner_profiles as runner_profiles_mod, runtime_env, state as state_mod, transitions, util, runtime_identity
 
 SCHEMA = "ownframework-loop-supervisor/v1"
 DISPATCH_HOLD_KIND = "PROGRAM_CHECKPOINT_BOUNDARY"
@@ -725,6 +725,52 @@ def _continuation_conflict(
     return False
 
 
+def _protected_terminal_recovery(
+    *,
+    canonical_repo: Path,
+    run_id: str,
+    packet: dict[str, Any],
+    current_state: dict[str, Any],
+    checkpoint_id: str,
+    builder_worktree: Path,
+    candidate_branch: str,
+    candidate_sha: str,
+) -> dict[str, Any] | None:
+    """Recover a terminal protected-only candidate before re-funding a PROGRAM.
+
+    This is the only continuation-specific source transition.  It is
+    activated solely by a durable BUILD receipt proving that the terminal
+    blocker was protected candidate drift without scope, secret, source-
+    ceiling, or validation corruption.  The recovery primitive discards the
+    entire candidate tree and returns a core-owned safe descendant.
+    """
+    path = state_mod.run_dir(canonical_repo, run_id) / "BUILD_RECEIPT.json"
+    receipt = util.read_json(path, default=None)
+    if not isinstance(receipt, dict):
+        return None
+    if str(receipt.get("next_state") or "") != "BLOCKED":
+        return None
+    protected = receipt.get("protected_path_check") or {}
+    offending = protected.get("offending_paths") or []
+    if str(protected.get("result") or "") != "fail" or not isinstance(offending, list) or not offending:
+        return None
+    for key in ("scope_check", "secret_scan_check", "program_source_check"):
+        value = receipt.get(key) or {}
+        if str(value.get("result") or "") == "fail":
+            return None
+    return protected_recovery.recover_candidate_only_protected_drift(
+        canonical_repo=canonical_repo,
+        run_id=run_id,
+        packet=packet,
+        current_state=current_state,
+        checkpoint_id=checkpoint_id,
+        builder_worktree=builder_worktree,
+        candidate_branch=candidate_branch,
+        candidate_sha=candidate_sha,
+        offending_paths=[str(item) for item in offending],
+    )
+
+
 def continue_program(
     *,
     canonical_repo: Path,
@@ -793,25 +839,54 @@ def continue_program(
     checkpoint_id = program_mod.select_next_checkpoint(packet, program_state)
     if not checkpoint_id:
         return {"schema": SCHEMA, "ok": False, "reason": "no_unfinished_checkpoint"}
-    if str(current.get("last_candidate_sha") or "") != expected_candidate_sha:
-        return {"schema": SCHEMA, "ok": False, "reason": "candidate_sha_mismatch"}
+    continuation_id = _continuation_id(run_id, checkpoint_id, expected_candidate_sha, reason)
+    receipt_path = _continuation_path(repo_path, run_id, continuation_id)
+    receipt = _continuation_read(receipt_path)
+    active_candidate_sha = expected_candidate_sha
+    if isinstance(receipt, dict):
+        recorded_active = str(receipt.get("active_candidate_sha") or "")
+        if recorded_active:
+            active_candidate_sha = recorded_active
+    current_candidate_sha = str(current.get("last_candidate_sha") or "")
+    if current_candidate_sha != expected_candidate_sha:
+        if not (
+            current.get("state") == _PROGRAM_READY_STATE
+            and isinstance(receipt, dict)
+            and receipt.get("candidate_sha") == expected_candidate_sha
+            and receipt.get("active_candidate_sha") == current_candidate_sha
+        ):
+            return {"schema": SCHEMA, "ok": False, "reason": "candidate_sha_mismatch"}
     branch = str(job.get("candidate_branch") or "")
     if not branch:
         try:
             branch = branch_resolver_mod.resolve_candidate_branch(repo_path, run_id, packet=packet)
         except Exception as exc:
             return {"schema": SCHEMA, "ok": False, "reason": "candidate_branch_unresolved", "error": str(exc)}
-    if git_checks.branch_head(repo_path, branch) != expected_candidate_sha:
-        return {"schema": SCHEMA, "ok": False, "reason": "candidate_branch_head_mismatch", "candidate_branch": branch}
     builder_path = util.builder_worktree(repo_path, run_id)
-    if not builder_path.is_dir() or git_checks.current_head(builder_path) != expected_candidate_sha:
+    if not builder_path.is_dir():
         return {"schema": SCHEMA, "ok": False, "reason": "builder_worktree_candidate_mismatch"}
     if git_checks.current_branch(builder_path) != branch:
         return {"schema": SCHEMA, "ok": False, "reason": "builder_worktree_branch_mismatch"}
-
-    continuation_id = _continuation_id(run_id, checkpoint_id, expected_candidate_sha, reason)
-    receipt_path = _continuation_path(repo_path, run_id, continuation_id)
-    receipt = _continuation_read(receipt_path)
+    if current.get("state") == "BLOCKED" and active_candidate_sha == expected_candidate_sha:
+        try:
+            recovery = _protected_terminal_recovery(
+                canonical_repo=repo_path,
+                run_id=run_id,
+                packet=packet,
+                current_state=current,
+                checkpoint_id=checkpoint_id,
+                builder_worktree=builder_path,
+                candidate_branch=branch,
+                candidate_sha=expected_candidate_sha,
+            )
+        except protected_recovery.ProtectedDriftRecoveryError as exc:
+            return {"schema": SCHEMA, "ok": False, "reason": "protected_drift_recovery_refused", "error": str(exc)}
+        if recovery is not None:
+            active_candidate_sha = str(recovery["candidate_sha"])
+    if git_checks.branch_head(repo_path, branch) != active_candidate_sha:
+        return {"schema": SCHEMA, "ok": False, "reason": "candidate_branch_head_mismatch", "candidate_branch": branch}
+    if git_checks.current_head(builder_path) != active_candidate_sha:
+        return {"schema": SCHEMA, "ok": False, "reason": "builder_worktree_candidate_mismatch"}
     if _continuation_conflict(
         repo_path,
         run_id,
@@ -843,10 +918,12 @@ def continue_program(
         "checkpoint_id": checkpoint_id,
         "continuation_id": continuation_id,
         "candidate_sha": expected_candidate_sha,
+        "active_candidate_sha": active_candidate_sha,
         "candidate_branch": branch,
         "reason": reason,
         "before": immutable_before,
     }
+    immutable["active_candidate_sha"] = active_candidate_sha
     if receipt is None:
         if receipt_path.exists():
             return {"schema": SCHEMA, "ok": False, "reason": "continuation_receipt_invalid"}
@@ -871,7 +948,11 @@ def continue_program(
                 packet=packet,
                 actor="ofloop-operator-continuation",
                 reason=reason,
-                commit_sha=expected_candidate_sha,
+                commit_sha=active_candidate_sha,
+                expected_previous_candidate_sha=(
+                    expected_candidate_sha
+                    if active_candidate_sha != expected_candidate_sha else None
+                ),
                 continuation_id=continuation_id,
             )
         except (program_mod.ProgramStateError, transitions.InvalidTransitionError, ValueError) as exc:

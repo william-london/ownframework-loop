@@ -231,6 +231,17 @@
           "type": "string",
           "pattern": "^[a-f0-9]{7,64}$"
         },
+        "checkpoint_entry_tree_sha": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{40}$"
+        },
+        "recovery_tree_sha": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{40}$"
+        },
+        "prior_attempt_rejected_whole": {
+          "type": "boolean"
+        },
         "offending_paths": {
           "type": "array",
           "items": {

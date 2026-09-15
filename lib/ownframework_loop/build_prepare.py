@@ -88,9 +88,6 @@ def _resolve_current_work_unit(canonical_repo: Path, run_id: str) -> str:
         cps = (meta.get("checkpoint_graph") or {}).get("checkpoints") or []
         for cp in cps:
             if cp.get("id") == cp_id:
-                cp_wus = cp.get("work_units") or []
-                if cp_wus:
-                    return cp_wus[0]
                 try:
                     return program_mod.current_checkpoint_work_unit_id(
                         meta, state.get("program") or {}, cp_id=cp_id

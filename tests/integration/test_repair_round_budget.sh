@@ -107,7 +107,8 @@ packet_md = ("""```json
         }
       }
     ]
-  }
+  },
+  "work_units": [{"id": "UNIT-1", "title": "single unit", "scope": "src/"}]
 }
 ```""").replace("REPO", str(repo)).replace("MAX_ROUNDS", str(max_rounds)).replace("PASS_CAP", str(max(3, max_rounds + 1)))
 

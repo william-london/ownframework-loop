@@ -712,6 +712,7 @@ def _repair_context_from_receipt(
     scope_check = receipt.get("scope_check") or {}
     protected_check = receipt.get("protected_path_check") or {}
     secret_check = receipt.get("secret_scan_check") or {}
+    recovery = receipt.get("protected_drift_recovery") or {}
 
     return {
         "schema": "ownframework-loop-repair-context/v1",
@@ -724,6 +725,19 @@ def _repair_context_from_receipt(
         "failed_validation_results": failed_validations,
         "scope_findings": scope_check.get("findings") or [],
         "protected_path_findings": protected_check.get("offending_paths") or [],
+        "prior_candidate_rejected_whole": bool(
+            recovery.get("prior_attempt_rejected_whole")
+        ),
+        "discarded_candidate_sha": recovery.get("previous_candidate_sha"),
+        "checkpoint_entry_candidate_sha": recovery.get("checkpoint_entry_candidate_sha"),
+        "checkpoint_entry_tree_sha": recovery.get("checkpoint_entry_tree_sha"),
+        "recovery_offending_paths": recovery.get("offending_paths") or [],
+        "repair_instruction": (
+            "The prior entire candidate attempt was rejected because it changed "
+            "protected authority. Reimplement this checkpoint from the safe "
+            "checkpoint-entry source; no source from that attempt was preserved."
+            if recovery.get("prior_attempt_rejected_whole") else None
+        ),
         "secret_findings": (secret_check.get("findings") or [])[:10],
         "blocker_reason": receipt.get("blocker_reason"),
         "escalation_recommended": bool(receipt.get("escalation_recommended")),

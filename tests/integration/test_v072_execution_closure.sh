@@ -273,6 +273,7 @@ packet = {
     },
     "risk_budget": {"max_build_passes": 2, "max_review_passes": 2,
                     "max_repair_rounds": 1},
+    "work_units": [{"id": "UNIT-1", "title": "source ceiling", "scope": "s"}],
 }
 ps = program.materialise_initial_program_state(
     packet, baseline_sha="0" * 40, candidate_branch="factory/candidate/x",

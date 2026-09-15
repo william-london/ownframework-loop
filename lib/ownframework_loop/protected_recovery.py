@@ -1,25 +1,17 @@
-"""Core-owned recovery for candidate-only protected-path drift.
-
-This module is intentionally narrow.  It never repairs an authority breach;
-it only removes protected-path changes from the current candidate when the
-same candidate is otherwise a descendant of a durable checkpoint-entry tree.
-The discarded candidate remains an ancestor of a core-owned restore commit and
-the private receipt makes the operation restart-safe and auditable.
-"""
+"""Core-owned whole-attempt recovery for protected-path drift."""
 
 from __future__ import annotations
 
 import hashlib
 import json
 import os
-import tempfile
 from pathlib import Path
 from typing import Any
 
 from . import approval, git_checks, packet as packet_mod, program, state, util
 
 
-SCHEMA = "ownframework-loop-protected-drift-recovery/v1"
+SCHEMA = "ownframework-loop-protected-drift-recovery/v2"
 
 
 class ProtectedDriftRecoveryError(RuntimeError):
@@ -44,15 +36,19 @@ def _events(repo: Path, run_id: str) -> list[dict[str, Any]]:
     return out
 
 
-def _anchor_sha(repo: Path, run_id: str, packet: dict[str, Any], current: dict[str, Any], cp_id: str) -> str:
+def _anchor_sha(
+    repo: Path,
+    run_id: str,
+    packet: dict[str, Any],
+    current: dict[str, Any],
+    cp_id: str,
+) -> str:
     ps = current.get("program") or {}
     candidate = program.checkpoint_entry_candidate_sha(
         packet=packet, program_state=ps, cp_id=cp_id, events=_events(repo, run_id)
     )
     if candidate:
         return candidate
-    # For legacy CP-0 state the sealed approval baseline is the only valid
-    # checkpoint-entry authority.
     order = (packet.get("checkpoint_graph") or {}).get("execution_order") or []
     if order and cp_id == order[0]:
         doc = approval.load_approval(repo, run_id)
@@ -64,19 +60,12 @@ def _anchor_sha(repo: Path, run_id: str, packet: dict[str, Any], current: dict[s
     )
 
 
-def _tree_entry(repo: Path, commit: str, path: str) -> tuple[str, str] | None:
-    result = _git(repo, "ls-tree", commit, "--", path)
-    if result.returncode != 0:
-        raise ProtectedDriftRecoveryError(
-            f"cannot inspect protected path {path!r} at {commit[:12]}"
-        )
-    line = result.stdout.strip()
-    if not line:
-        return None
-    fields = line.split(None, 3)
-    if len(fields) < 3:
-        raise ProtectedDriftRecoveryError(f"malformed tree entry for {path!r}")
-    return fields[0], fields[2]
+def _commit_tree(repo: Path, commit: str) -> str:
+    result = _git(repo, "rev-parse", f"{commit}^{{tree}}")
+    value = result.stdout.strip()
+    if result.returncode != 0 or not re_full_sha(value):
+        raise ProtectedDriftRecoveryError(f"cannot prove tree for commit {commit[:12]}")
+    return value
 
 
 def _write_receipt(path: Path, payload: dict[str, Any]) -> None:
@@ -90,9 +79,36 @@ def _write_receipt(path: Path, payload: dict[str, Any]) -> None:
 def _verify_receipt(receipt: dict[str, Any], expected: dict[str, Any]) -> None:
     for key, value in expected.items():
         if receipt.get(key) != value:
-            raise ProtectedDriftRecoveryError(
-                f"protected-drift receipt mismatch: {key}"
-            )
+            raise ProtectedDriftRecoveryError(f"protected-drift receipt mismatch: {key}")
+
+
+def _verify_recovery_commit(
+    repo: Path,
+    receipt: dict[str, Any],
+    *,
+    violating_candidate_sha: str,
+    checkpoint_entry_candidate_sha: str,
+    checkpoint_entry_tree_sha: str,
+) -> str:
+    recovery = str(receipt.get("recovery_commit_sha") or "")
+    if not re_full_sha(recovery) or not git_checks.commit_exists(repo, recovery):
+        raise ProtectedDriftRecoveryError("recovery commit is unavailable")
+    if str(receipt.get("recovery_tree_sha") or "") != checkpoint_entry_tree_sha:
+        raise ProtectedDriftRecoveryError("recovery receipt tree does not equal checkpoint-entry tree")
+    if str(receipt.get("checkpoint_entry_tree_sha") or "") != checkpoint_entry_tree_sha:
+        raise ProtectedDriftRecoveryError("checkpoint-entry tree binding changed")
+    if _commit_tree(repo, recovery) != checkpoint_entry_tree_sha:
+        raise ProtectedDriftRecoveryError("recovery commit tree differs from safe checkpoint-entry tree")
+    parents = _git(repo, "rev-list", "--parents", "-n", "1", recovery)
+    if parents.returncode != 0 or parents.stdout.strip().split()[1:] != [violating_candidate_sha]:
+        raise ProtectedDriftRecoveryError("recovery commit parent is not the violating candidate")
+    if _git(repo, "merge-base", "--is-ancestor", violating_candidate_sha, recovery).returncode != 0:
+        raise ProtectedDriftRecoveryError("violating candidate is not an ancestor of recovery commit")
+    if not git_checks.commit_exists(repo, checkpoint_entry_candidate_sha):
+        raise ProtectedDriftRecoveryError("checkpoint-entry candidate commit is unavailable")
+    if _commit_tree(repo, checkpoint_entry_candidate_sha) != checkpoint_entry_tree_sha:
+        raise ProtectedDriftRecoveryError("checkpoint-entry candidate tree binding is invalid")
+    return recovery
 
 
 def _recovery_result(
@@ -106,10 +122,13 @@ def _recovery_result(
         "recovered": True,
         "already_recovered": already_recovered,
         "receipt_path": str(receipt_path),
-        "previous_candidate_sha": str(receipt["previous_candidate_sha"]),
-        "candidate_sha": str(receipt["rollback_candidate_sha"]),
+        "previous_candidate_sha": str(receipt["violating_candidate_sha"]),
+        "candidate_sha": str(receipt["recovery_commit_sha"]),
         "checkpoint_entry_candidate_sha": str(receipt["checkpoint_entry_candidate_sha"]),
+        "checkpoint_entry_tree_sha": str(receipt["checkpoint_entry_tree_sha"]),
+        "recovery_tree_sha": str(receipt["recovery_tree_sha"]),
         "offending_paths": list(receipt["offending_paths"]),
+        "prior_attempt_rejected_whole": True,
     }
 
 
@@ -130,19 +149,13 @@ def pending_completed_recovery(
     builder_worktree: Path,
     candidate_branch: str,
 ) -> dict[str, Any] | None:
-    """Find a completed recovery whose state transition was interrupted.
-
-    The Git recovery and the FSM transition are separate durable operations.
-    If the process dies after the safe tree and receipt are committed but
-    before the finalizer funds the repair, the next finalization must replay
-    the same repair rather than treating the restored tree as a fresh success.
-    """
+    """Find a completed whole-tree recovery whose FSM transition was interrupted."""
     if current_state.get("state") != "BUILDING":
         return None
     root = state.run_dir(canonical_repo, run_id) / "protected-drift-recovery"
     if not root.is_dir():
         return None
-    matches: list[dict[str, Any]] = []
+    matches: list[tuple[Path, dict[str, Any]]] = []
     for path in sorted(root.glob("*.json")):
         receipt = util.read_private_json(path, default=None)
         if not isinstance(receipt, dict):
@@ -157,29 +170,71 @@ def pending_completed_recovery(
             continue
         if receipt.get("status") != "complete":
             continue
-        rollback = str(receipt.get("rollback_candidate_sha") or "")
-        if not rollback:
-            raise ProtectedDriftRecoveryError("completed protected-drift receipt has no rollback")
-        matches.append({"path": path, "receipt": receipt, "rollback": rollback})
+        matches.append((path, receipt))
     if not matches:
         return None
     branch_head = git_checks.branch_head(canonical_repo, candidate_branch)
-    wt = Path(builder_worktree).resolve(strict=False)
-    matching = [item for item in matches if item["rollback"] == branch_head]
+    matching = []
+    for path, receipt in matches:
+        _verify_recovery_commit(
+            canonical_repo,
+            receipt,
+            violating_candidate_sha=str(receipt.get("violating_candidate_sha") or ""),
+            checkpoint_entry_candidate_sha=str(receipt.get("checkpoint_entry_candidate_sha") or ""),
+            checkpoint_entry_tree_sha=str(receipt.get("checkpoint_entry_tree_sha") or ""),
+        )
+        if str(receipt.get("recovery_commit_sha") or "") == branch_head:
+            matching.append((path, receipt))
     if not matching:
         return None
     if len(matching) != 1:
         raise ProtectedDriftRecoveryError("multiple protected-drift recoveries match current branch")
-    item = matching[0]
+    path, receipt = matching[0]
+    wt = Path(builder_worktree).resolve(strict=False)
     if git_checks.current_head(wt) != branch_head or git_checks.dirty_status(wt) != "clean":
-        raise ProtectedDriftRecoveryError(
-            "completed protected-drift recovery has not restored a proven clean worktree"
-        )
-    return _recovery_result(item["path"], item["receipt"], already_recovered=True)
+        raise ProtectedDriftRecoveryError("completed protected-drift recovery has not restored a proven clean worktree")
+    if _commit_tree(canonical_repo, branch_head) != str(receipt["checkpoint_entry_tree_sha"]):
+        raise ProtectedDriftRecoveryError("completed recovery worktree tree proof failed")
+    return _recovery_result(path, receipt, already_recovered=True)
 
 
 def _receipt_path(repo: Path, run_id: str, recovery_id: str) -> Path:
     return state.run_dir(repo, run_id) / "protected-drift-recovery" / f"{recovery_id}.json"
+
+
+def _new_recovery_commit(
+    repo: Path,
+    *,
+    tree_sha: str,
+    violating_candidate_sha: str,
+    recovery_id: str,
+) -> str:
+    """Create a deterministic recovery commit so crash retry reuses its SHA."""
+    env = {
+        **dict(os.environ),
+        "GIT_AUTHOR_NAME": "OwnFramework Loop",
+        "GIT_AUTHOR_EMAIL": "ownframework-loop@localhost",
+        "GIT_COMMITTER_NAME": "OwnFramework Loop",
+        "GIT_COMMITTER_EMAIL": "ownframework-loop@localhost",
+        "GIT_AUTHOR_DATE": "2000-01-01T00:00:00Z",
+        "GIT_COMMITTER_DATE": "2000-01-01T00:00:00Z",
+    }
+    result = _git(
+        repo,
+        "commit-tree",
+        tree_sha,
+        "-p",
+        violating_candidate_sha,
+        "-m",
+        f"OwnFramework Loop whole-attempt recovery {recovery_id}",
+        env=env,
+    )
+    if result.returncode != 0:
+        raise ProtectedDriftRecoveryError(result.stderr.strip() or "cannot create recovery commit")
+    recovery = result.stdout.strip()
+    if not re_full_sha(recovery):
+        raise ProtectedDriftRecoveryError("recovery commit SHA is invalid")
+    return recovery
 
 
 def recover_candidate_only_protected_drift(
@@ -194,21 +249,16 @@ def recover_candidate_only_protected_drift(
     candidate_sha: str,
     offending_paths: list[str],
 ) -> dict[str, Any]:
-    """Restore only protected files from the durable checkpoint-entry tree.
-
-    The caller must invoke this only after all identity, baseline, source
-    ceiling, and hard-secret checks have passed.  This function independently
-    re-proves the Git lineage and refuses if the protected paths were not
-    changed by the current candidate itself.
-    """
+    """Discard the entire candidate and restore the exact safe anchor tree."""
     repo = Path(canonical_repo).resolve(strict=False)
     wt = Path(builder_worktree).resolve(strict=False)
     paths = sorted({str(p) for p in offending_paths if str(p)})
     if not paths:
         raise ProtectedDriftRecoveryError("no protected paths supplied")
     anchor = _anchor_sha(repo, run_id, packet, current_state, checkpoint_id)
+    recovery_tree = _commit_tree(repo, anchor)
     recovery_id = hashlib.sha256(
-        ("\0".join((run_id, checkpoint_id, candidate_sha, anchor, *paths))).encode()
+        ("\0".join((run_id, checkpoint_id, candidate_sha, anchor, recovery_tree, *paths))).encode()
     ).hexdigest()[:32]
     receipt_path = _receipt_path(repo, run_id, recovery_id)
     expected = {
@@ -216,59 +266,55 @@ def recover_candidate_only_protected_drift(
         "run_id": run_id,
         "checkpoint_id": checkpoint_id,
         "candidate_branch": candidate_branch,
-        "previous_candidate_sha": candidate_sha,
+        "violating_candidate_sha": candidate_sha,
         "checkpoint_entry_candidate_sha": anchor,
+        "checkpoint_entry_tree_sha": recovery_tree,
         "offending_paths": paths,
+        "recovery_identity": recovery_id,
     }
+
     existing = util.read_private_json(receipt_path, default=None)
     if existing is not None:
         if not isinstance(existing, dict):
             raise ProtectedDriftRecoveryError("protected-drift receipt is malformed")
         _verify_receipt(existing, expected)
-        rollback_existing = str(existing.get("rollback_candidate_sha") or "")
-        branch_head_existing = git_checks.branch_head(repo, candidate_branch)
-        if (
-            existing.get("status") in {"prepared", "complete"}
-            and rollback_existing
-            and branch_head_existing == rollback_existing
-        ):
-            # A process death after ref publication or during worktree reset
-            # is recoverable only when the worktree is still at the candidate
-            # or already at the exact recovery commit.  Unknown HEADs fail
-            # closed; we never overwrite contradictory evidence.
-            current_existing = git_checks.current_head(wt)
-            if current_existing == rollback_existing:
-                if git_checks.dirty_status(wt) != "clean":
-                    raise ProtectedDriftRecoveryError(
-                        "protected-drift recovery worktree is dirty after restore"
-                    )
-            elif current_existing == candidate_sha:
-                reset = _git(wt, "reset", "--hard", rollback_existing)
+        recovery = _verify_recovery_commit(
+            repo,
+            existing,
+            violating_candidate_sha=candidate_sha,
+            checkpoint_entry_candidate_sha=anchor,
+            checkpoint_entry_tree_sha=recovery_tree,
+        )
+        branch_head = git_checks.branch_head(repo, candidate_branch)
+        if existing.get("status") in {"prepared", "complete"} and branch_head == recovery:
+            current_head = git_checks.current_head(wt)
+            if current_head == candidate_sha:
+                reset = _git(wt, "reset", "--hard", recovery)
                 if reset.returncode != 0:
-                    raise ProtectedDriftRecoveryError(
-                        reset.stderr.strip() or "cannot resume protected-drift worktree restore"
-                    )
-            else:
-                raise ProtectedDriftRecoveryError(
-                    "protected-drift recovery worktree has contradictory HEAD"
-                )
-            if git_checks.current_head(wt) != rollback_existing or git_checks.dirty_status(wt) != "clean":
-                raise ProtectedDriftRecoveryError(
-                    "protected-drift recovery worktree proof failed during restart"
-                )
+                    raise ProtectedDriftRecoveryError(reset.stderr.strip() or "cannot restore builder worktree")
+            elif current_head != recovery:
+                raise ProtectedDriftRecoveryError("protected-drift recovery worktree has contradictory HEAD")
+            if git_checks.current_head(wt) != recovery or git_checks.dirty_status(wt) != "clean":
+                raise ProtectedDriftRecoveryError("recovery worktree proof failed during restart")
+            if _commit_tree(repo, recovery) != recovery_tree:
+                raise ProtectedDriftRecoveryError("recovery tree proof failed during restart")
             if existing.get("status") != "complete":
                 existing = _complete_receipt(receipt_path, existing)
-            return _recovery_result(
-                receipt_path,
-                existing,
-                already_recovered=True,
-            )
-    if git_checks.current_head(wt) != candidate_sha:
-        raise ProtectedDriftRecoveryError("builder HEAD changed before protected-drift recovery")
-    if git_checks.current_branch(wt) != candidate_branch:
-        raise ProtectedDriftRecoveryError("builder branch changed before protected-drift recovery")
-    if git_checks.dirty_status(wt) != "clean":
-        raise ProtectedDriftRecoveryError("candidate worktree is not clean")
+            return _recovery_result(receipt_path, existing, already_recovered=True)
+        if branch_head == candidate_sha:
+            if git_checks.current_head(wt) != candidate_sha or git_checks.dirty_status(wt) != "clean":
+                raise ProtectedDriftRecoveryError(
+                    "prepared protected-drift recovery has contradictory candidate worktree"
+                )
+        if branch_head not in {candidate_sha, recovery}:
+            raise ProtectedDriftRecoveryError("candidate branch changed unexpectedly during recovery")
+    else:
+        if git_checks.current_head(wt) != candidate_sha:
+            raise ProtectedDriftRecoveryError("builder HEAD changed before protected-drift recovery")
+        if git_checks.current_branch(wt) != candidate_branch:
+            raise ProtectedDriftRecoveryError("builder branch changed before protected-drift recovery")
+        if git_checks.dirty_status(wt) != "clean":
+            raise ProtectedDriftRecoveryError("candidate worktree is not clean")
 
     if not git_checks.commit_exists(repo, anchor) or not git_checks.commit_exists(repo, candidate_sha):
         raise ProtectedDriftRecoveryError("candidate or checkpoint anchor commit is unavailable")
@@ -282,113 +328,72 @@ def recover_candidate_only_protected_drift(
         raise ProtectedDriftRecoveryError("candidate does not descend from checkpoint anchor")
     if _git(repo, "merge-base", "--is-ancestor", candidate_sha, candidate_branch).returncode != 0:
         raise ProtectedDriftRecoveryError("candidate branch does not contain candidate")
-
     for path in paths:
         if not packet_mod.is_protected_path(packet, path):
             raise ProtectedDriftRecoveryError(f"path is not packet-protected: {path}")
         diff = _git(repo, "diff", "--quiet", anchor, candidate_sha, "--", path)
         if diff.returncode == 0:
-            raise ProtectedDriftRecoveryError(
-                f"protected path {path} was not changed by current candidate"
-            )
-        if diff.returncode not in (1,):
+            raise ProtectedDriftRecoveryError(f"protected path {path} was not changed by current candidate")
+        if diff.returncode != 1:
             raise ProtectedDriftRecoveryError(f"cannot compare protected path {path}")
 
-    if existing is not None:
-        if not isinstance(existing, dict):
-            raise ProtectedDriftRecoveryError("protected-drift receipt is malformed")
-        _verify_receipt(existing, expected)
-        rollback = str(existing.get("rollback_candidate_sha") or "")
-        if not rollback or not git_checks.commit_exists(repo, rollback):
-            raise ProtectedDriftRecoveryError("protected-drift rollback commit is unavailable")
-    else:
-        fd, index_name = tempfile.mkstemp(prefix="ofloop-protected-index-", dir=str(state.run_dir(repo, run_id)))
-        os.close(fd)
-        try:
-            env = dict(os.environ)
-            env["GIT_INDEX_FILE"] = index_name
-            for command in (("read-tree", candidate_sha),):
-                result = _git(repo, *command, env=env)
-                if result.returncode != 0:
-                    raise ProtectedDriftRecoveryError(result.stderr.strip() or "cannot seed recovery index")
-            for path in paths:
-                entry = _tree_entry(repo, anchor, path)
-                if entry is None:
-                    result = _git(repo, "update-index", "--remove", "--", path, env=env)
-                else:
-                    mode, blob = entry
-                    result = _git(
-                        repo,
-                        "update-index",
-                        "--add",
-                        "--cacheinfo",
-                        f"{mode},{blob},{path}",
-                        env=env,
-                    )
-                if result.returncode != 0:
-                    raise ProtectedDriftRecoveryError(result.stderr.strip() or f"cannot restore {path}")
-            tree = _git(repo, "write-tree", env=env)
-            if tree.returncode != 0:
-                raise ProtectedDriftRecoveryError(tree.stderr.strip() or "cannot write recovery tree")
-            tree_sha = tree.stdout.strip()
-        finally:
-            try:
-                Path(index_name).unlink()
-            except FileNotFoundError:
-                pass
-        commit = _git(
+    if existing is None:
+        recovery = _new_recovery_commit(
             repo,
-            "commit-tree",
-            tree_sha,
-            "-p",
-            candidate_sha,
-            env={
-                **dict(os.environ),
-                "GIT_AUTHOR_NAME": "OwnFramework Loop",
-                "GIT_AUTHOR_EMAIL": "ownframework-loop@localhost",
-                "GIT_COMMITTER_NAME": "OwnFramework Loop",
-                "GIT_COMMITTER_EMAIL": "ownframework-loop@localhost",
-            },
+            tree_sha=recovery_tree,
+            violating_candidate_sha=candidate_sha,
+            recovery_id=recovery_id,
         )
-        if commit.returncode != 0:
-            raise ProtectedDriftRecoveryError(commit.stderr.strip() or "cannot create recovery commit")
-        rollback = commit.stdout.strip()
-        if not re_full_sha(rollback):
-            raise ProtectedDriftRecoveryError("recovery commit SHA is invalid")
-        payload = {
+        provisional = {
             **expected,
-            "rollback_candidate_sha": rollback,
-            "tree_sha256": util.sha256_bytes(tree_sha.encode()),
+            "recovery_commit_sha": recovery,
+            "recovery_tree_sha": recovery_tree,
             "status": "prepared",
             "recorded_at": util.utc_now_iso(),
         }
-        _write_receipt(receipt_path, payload)
+        _verify_recovery_commit(
+            repo,
+            provisional,
+            violating_candidate_sha=candidate_sha,
+            checkpoint_entry_candidate_sha=anchor,
+            checkpoint_entry_tree_sha=recovery_tree,
+        )
+        _write_receipt(receipt_path, provisional)
+        existing = provisional
+    else:
+        recovery = _verify_recovery_commit(
+            repo,
+            existing,
+            violating_candidate_sha=candidate_sha,
+            checkpoint_entry_candidate_sha=anchor,
+            checkpoint_entry_tree_sha=recovery_tree,
+        )
 
     ref = f"refs/heads/{candidate_branch}"
     branch_head = git_checks.branch_head(repo, candidate_branch)
     if branch_head == candidate_sha:
-        updated = _git(repo, "update-ref", ref, rollback, candidate_sha)
+        updated = _git(repo, "update-ref", ref, recovery, candidate_sha)
         if updated.returncode != 0:
             raise ProtectedDriftRecoveryError(updated.stderr.strip() or "cannot publish recovery commit")
-    elif branch_head != rollback:
+    elif branch_head != recovery:
         raise ProtectedDriftRecoveryError("candidate branch changed unexpectedly during recovery")
 
-    if git_checks.current_head(wt) != rollback or git_checks.dirty_status(wt) != "clean":
-        reset = _git(wt, "reset", "--hard", rollback)
+    if git_checks.current_head(wt) != recovery or git_checks.dirty_status(wt) != "clean":
+        reset = _git(wt, "reset", "--hard", recovery)
         if reset.returncode != 0:
             raise ProtectedDriftRecoveryError(reset.stderr.strip() or "cannot restore builder worktree")
-    if git_checks.current_head(wt) != rollback or git_checks.dirty_status(wt) != "clean":
+    if git_checks.current_head(wt) != recovery or git_checks.dirty_status(wt) != "clean":
         raise ProtectedDriftRecoveryError("recovery worktree proof failed")
+    if _commit_tree(repo, recovery) != recovery_tree:
+        raise ProtectedDriftRecoveryError("recovery tree differs from safe anchor")
+    if _git(repo, "merge-base", "--is-ancestor", candidate_sha, recovery).returncode != 0:
+        raise ProtectedDriftRecoveryError("recovery no longer preserves violating candidate ancestry")
 
-    final = util.read_private_json(receipt_path, default={})
+    final = util.read_private_json(receipt_path, default=None)
     if not isinstance(final, dict):
         raise ProtectedDriftRecoveryError("protected-drift receipt disappeared")
     final = _complete_receipt(receipt_path, final)
-    return _recovery_result(
-        receipt_path,
-        final,
-        already_recovered=existing is not None and branch_head == rollback,
-    )
+    return _recovery_result(receipt_path, final, already_recovered=existing is not None)
 
 
 def re_full_sha(value: str) -> bool:
