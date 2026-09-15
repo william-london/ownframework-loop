@@ -295,30 +295,17 @@ def finalize_review(
 
     semantic_identity_errors: list[str] = []
     if assessment:
-        expected_approval_sha = approval.approval_artifact_sha256(approval_doc)
-        fixed_identity = {
-            "packet_sha256_recomputed": approval_doc["packet_sha256"],
-            "approval_sha256": expected_approval_sha,
-            "reviewer_worktree": str(util.reviewer_worktree(canonical_repo, run_id)),
-            "reviewer_identity": "of-reviewer",
-        }
-        for key, expected in fixed_identity.items():
-            if key in assessment and assessment.get(key) != expected:
+        # Compare the complete core-owned envelope to a fresh deterministic
+        # skeleton.  These values are transport identity, not reviewer
+        # findings; a syntactically valid replacement must never reach the
+        # authoritative finalizer.
+        expected_assessment = assessment_mod.build_skeleton(canonical_repo, run_id)
+        for key in sorted(assessment_mod.FIXED_KEYS):
+            expected = expected_assessment.get(key)
+            if key not in assessment or assessment.get(key) != expected:
                 semantic_identity_errors.append(
                     f"{key} mismatch: {assessment.get(key)!r} != {expected!r}"
                 )
-        if assessment.get("build_receipt_sha256") not in (None, receipt_sha_before):
-            semantic_identity_errors.append("BUILD_RECEIPT bytes changed since assessment skeleton")
-        if state_mod.is_program_state(active_state):
-            required_fixed = (
-                "packet_sha256_recomputed", "approval_sha256",
-                "build_receipt_sha256", "reviewer_worktree", "reviewer_identity",
-            )
-            for key in required_fixed:
-                if key not in assessment:
-                    semantic_identity_errors.append(
-                        f"missing PROGRAM semantic identity field: {key}"
-                    )
         if semantic_identity_errors:
             raise RuntimeError(
                 "review assessment fixed identity invalid: "

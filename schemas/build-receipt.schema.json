@@ -192,6 +192,53 @@
         }
       }
     },
+    "protected_drift_recovery": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "result"
+      ],
+      "properties": {
+        "result": {
+          "type": "string",
+          "enum": [
+            "not_applicable",
+            "refused",
+            "recovered"
+          ]
+        },
+        "reason": {
+          "type": "string"
+        },
+        "recovered": {
+          "type": "boolean"
+        },
+        "already_recovered": {
+          "type": "boolean"
+        },
+        "receipt_path": {
+          "type": "string"
+        },
+        "previous_candidate_sha": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{7,64}$"
+        },
+        "candidate_sha": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{7,64}$"
+        },
+        "checkpoint_entry_candidate_sha": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{7,64}$"
+        },
+        "offending_paths": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
     "secret_scan_check": {
       "type": "object",
       "additionalProperties": false,

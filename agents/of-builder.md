@@ -109,8 +109,13 @@ print-mode role prompt and controls the pass through its wall-clock budget.
    expand the change set coherently rather than fragmenting across many
    tiny passes that each race the budget ceiling.)
 6. Run required validation.
-7. Inspect the baseline-to-candidate diff and ensure no protected/out-of-scope
-   path is present.
+7. Inspect the exact baseline-to-candidate changed-path set against the
+   work order's `allowed_paths`, `protected_paths`, and elevated/sensitive
+   rules. Protected paths are immutable even when a broad parent appears in
+   `allowed_paths`; do not edit or retain a protected path in the candidate.
+   If accidental ordinary drift can safely be removed, remove it before
+   declaring `candidate_ready`. This is a semantic self-check only; the
+   deterministic finalizer remains authoritative.
 8. Commit the coherent candidate on the supplied candidate branch with the
    current run/work-unit identity in the message.
 9. Read the existing `agent_result_path` skeleton. Because the pass-scoped

@@ -382,7 +382,12 @@ def _fixed_identity_mismatch(
         else assessment_mod.FIXED_KEYS
     )
     for field in sorted(fixed_keys):
-        if field in data and data.get(field) != expected.get(field):
+        # A real dispatched artifact is always scaffolded by the core.  The
+        # complete fixed envelope is therefore required, not merely
+        # type-checked when the model happens to echo a field.  Tiny
+        # non-repository contract fixtures retain their historical shape-only
+        # compatibility through the early return above.
+        if field not in data or data.get(field) != expected.get(field):
             prefix = "builder" if decision == "BUILD" else "review"
             return f"{prefix}_fixed_identity_mismatch"
     return None
@@ -806,6 +811,53 @@ def _repair_context_for_build(
     )
 
 
+def _checkpoint_authority_context(
+    packet: dict[str, Any],
+    state_doc: dict[str, Any],
+    *,
+    checkpoint_id: str,
+    work_unit_id: str,
+) -> dict[str, Any]:
+    """Return explicit sealed scope authority for semantic workers.
+
+    This is transport context only; deterministic finalizers remain the
+    authority.  Keeping the exact packet lists in the work order prevents a
+    builder from having to infer that a specific protected child overrides a
+    broad allowed parent.
+    """
+    cp = next(
+        (item for item in (packet.get("checkpoint_graph") or {}).get("checkpoints", [])
+         if isinstance(item, dict) and item.get("id") == checkpoint_id),
+        None,
+    )
+    ac_by_id = {
+        str(item.get("id")): str(item.get("text") or "")
+        for item in packet.get("acceptance_criteria") or []
+        if isinstance(item, dict) and item.get("id")
+    }
+    ac_ids = list((cp or {}).get("acceptance_criterion_ids") or [])
+    if not ac_ids:
+        ac_ids = program_mod.packet_acceptance_criterion_ids(packet)
+    return {
+        "checkpoint_id": checkpoint_id,
+        "work_unit_id": work_unit_id,
+        "checkpoint_scope": str((cp or {}).get("scope") or packet.get("scope") or ""),
+        "acceptance_criterion_ids": ac_ids,
+        "acceptance_criteria": [
+            {"id": item, "text": ac_by_id.get(str(item), "")}
+            for item in ac_ids
+        ],
+        "allowed_paths": list(packet.get("allowed_paths") or []),
+        "elevated_allowed_paths": list(packet.get("elevated_allowed_paths") or []),
+        "protected_paths": list(packet.get("protected_paths") or []),
+        "protected_path_rule": (
+            "Protected paths are immutable. A broad allowed parent never overrides "
+            "a more-specific protected child; do not edit protected files unless "
+            "the deterministic core performs a supported recovery."
+        ),
+    }
+
+
 def _claim_or_terminal(
     args: list[str], *, repo: Path, run_id: str
 ) -> dict[str, Any]:
@@ -908,6 +960,8 @@ def claim_next(*, canonical_repo: Path, run_id: str) -> dict[str, Any]:
                 )
                 if not semantic_path:
                     raise DispatchError("build preparation returned no semantic path")
+                work_unit_id = str(prep.get("work_unit_id") or "")
+                checkpoint_id = str(prep.get("cp_id") or "")
                 return {
                     "schema": SCHEMA,
                     "decision": "BUILD",
@@ -918,9 +972,16 @@ def claim_next(*, canonical_repo: Path, run_id: str) -> dict[str, Any]:
                     "canonical_repo": str(repo),
                     "worktree": prep.get("builder_worktree"),
                     "semantic_path": semantic_path,
-                    "checkpoint_id": prep.get("cp_id"),
-                    "work_unit_id": prep.get("work_unit_id"),
+                    "candidate_branch": prep.get("candidate_branch"),
+                    "baseline_sha": prep.get("baseline_sha"),
+                    "packet_sha256": prep.get("packet_sha256"),
+                    "approval_sha256": prep.get("approval_sha256"),
+                    "checkpoint_id": checkpoint_id,
+                    "work_unit_id": work_unit_id,
                     "acceptance_criterion_ids": prep.get("acceptance_criterion_ids"),
+                    "checkpoint_authority": _checkpoint_authority_context(
+                        pmeta, cur, checkpoint_id=checkpoint_id, work_unit_id=work_unit_id
+                    ),
                     "repair_context": repair_context,
                     "network_read_allowlist": list(pmeta.get("network_read_allowlist") or []),
                     "capabilities": list(pmeta.get("capabilities") or []),
@@ -945,6 +1006,7 @@ def claim_next(*, canonical_repo: Path, run_id: str) -> dict[str, Any]:
                 )
                 if not semantic_path:
                     raise DispatchError("review preparation returned no semantic path")
+                checkpoint_id = str(prep.get("checkpoint_id") or "")
                 return {
                     "schema": SCHEMA,
                     "decision": "REVIEW",
@@ -955,9 +1017,18 @@ def claim_next(*, canonical_repo: Path, run_id: str) -> dict[str, Any]:
                     "canonical_repo": str(repo),
                     "worktree": prep.get("reviewer_worktree"),
                     "semantic_path": semantic_path,
+                    "candidate_branch": prep.get("candidate_branch"),
+                    "baseline_sha": prep.get("baseline_sha"),
+                    "packet_sha256": prep.get("packet_sha256"),
+                    "approval_sha256": prep.get("approval_sha256"),
+                    "build_receipt_sha256": prep.get("build_receipt_sha256"),
                     "candidate_sha": prep.get("candidate_sha"),
-                    "checkpoint_id": prep.get("checkpoint_id"),
+                    "checkpoint_id": checkpoint_id,
                     "acceptance_criterion_ids": prep.get("acceptance_criterion_ids"),
+                    "checkpoint_authority": _checkpoint_authority_context(
+                        pmeta, cur, checkpoint_id=checkpoint_id,
+                        work_unit_id=str(prep.get("work_unit_id") or ""),
+                    ),
                     "non_goal_ids": [
                         str(item.get("id"))
                         for item in (pmeta.get("non_goals") or [])

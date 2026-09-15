@@ -198,6 +198,7 @@ def run_subprocess(
     cwd: Path | None = None,
     timeout: float | None = None,
     check: bool = False,
+    env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess:
     """Run a subprocess with explicit args, no shell."""
     result = subprocess.run(
@@ -207,6 +208,7 @@ def run_subprocess(
         text=True,
         timeout=timeout,
         check=False,
+        env=env,
     )
     if check and result.returncode != 0:
         raise RuntimeError(
@@ -313,4 +315,3 @@ def budget_within_ceiling(budget: dict[str, int]) -> tuple[bool, list[str]]:
         if not isinstance(budget.get(required), int) or int(budget.get(required)) < 1:
             violations.append(f"{required} must be a positive integer")
     return (not violations), violations
-

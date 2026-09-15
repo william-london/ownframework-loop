@@ -48,7 +48,7 @@ from pathlib import Path
 from typing import Any
 
 from . import approval as approval_mod
-from . import git_checks, state as state_mod, util
+from . import git_checks, program as program_mod, state as state_mod, util
 
 
 SCHEMA_AGENT_RESULT = "ownframework-loop-build-agent-result/v1"
@@ -292,6 +292,12 @@ def _resolve_current_work_unit_id(canonical_repo: Path, run_id: str) -> str:
                             f"checkpoint {cp_id} has invalid work-unit identity"
                         )
                     return unit_id
+                try:
+                    return program_mod.current_checkpoint_work_unit_id(
+                        meta, program, cp_id=cp_id
+                    )
+                except program_mod.ProgramGraphError as exc:
+                    raise RuntimeError(str(exc)) from exc
                 # A checkpoint without an explicit work_units override inherits
                 # the packet-level work unit, matching build_prepare authority.
                 break

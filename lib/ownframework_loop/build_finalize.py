@@ -54,6 +54,7 @@ from . import (
     validation_executor,
     state as state_mod, transitions, util, worktrees,
     build_agent as build_agent_mod,
+    protected_recovery,
 )
 
 
@@ -237,6 +238,11 @@ def finalize_build(
 
     if agent_result:
         expected_identity = {
+            "schema": SCHEMA_AGENT_RESULT,
+            "run_id": run_id,
+            "work_unit_id": build_agent_mod._resolve_current_work_unit_id(
+                canonical_repo, run_id
+            ),
             "packet_sha256": approval_doc["packet_sha256"],
             "approval_sha256": approval.approval_artifact_sha256(approval_doc),
             "baseline_sha": baseline_sha,
@@ -244,7 +250,7 @@ def finalize_build(
             "builder_identity": "of-builder",
         }
         for key, expected in expected_identity.items():
-            if key in agent_result and expected is not None and agent_result.get(key) != expected:
+            if key not in agent_result or expected is not None and agent_result.get(key) != expected:
                 raise RuntimeError(
                     f"agent result fixed identity {key}={agent_result.get(key)!r} "
                     f"!= expected {expected!r}"
@@ -416,6 +422,80 @@ def finalize_build(
             + "; ".join(f"{f['path']}:{f['pattern_id']}" for f in hard_secret_blocks[:5])
         )
 
+    # Candidate-only protected drift is recoverable when the current
+    # candidate is otherwise a valid descendant of the durable checkpoint
+    # entry tree.  The recovery helper restores only the offending protected
+    # paths and creates a core-owned descendant commit; it never rewrites or
+    # deletes the model candidate.  Authority failures, hard secrets, mixed
+    # scope/protected drift, and exhausted repair entitlement remain terminal.
+    protected_drift_recovery: dict[str, Any] | None = None
+    protected_drift_recovery_error = ""
+    original_candidate_sha = candidate_sha
+    if (
+        protected_findings
+        and not scope_findings
+        and program_source_check is not None
+        and program_source_check.get("result") == "pass"
+        and state_mod.is_program_state(state)
+    ):
+        repair_cap = limits_mod.effective_cap("repair_round", meta)
+        repair_used = int(state.get("repair_round") or 0)
+        cp_id = str(((state.get("program") or {}).get("current_checkpoints") or [""])[0])
+        cp_meta = next(
+            (cp for cp in (meta.get("checkpoint_graph") or {}).get("checkpoints", [])
+             if isinstance(cp, dict) and cp.get("id") == cp_id),
+            None,
+        )
+        if cp_meta is not None:
+            repair_cap = min(
+                int(repair_cap) if repair_cap is not None else int(cp_meta["risk_budget"]["max_repair_rounds"]),
+                int(cp_meta["risk_budget"]["max_repair_rounds"]),
+            )
+        if repair_cap is None or repair_used < int(repair_cap):
+            try:
+                protected_drift_recovery = protected_recovery.recover_candidate_only_protected_drift(
+                    canonical_repo=canonical_repo,
+                    run_id=run_id,
+                    packet=meta,
+                    current_state=state,
+                    checkpoint_id=cp_id,
+                    builder_worktree=builder_wt,
+                    candidate_branch=candidate_branch,
+                    candidate_sha=candidate_sha,
+                    offending_paths=[str(item["path"]) for item in protected_findings],
+                )
+                candidate_sha = str(protected_drift_recovery["candidate_sha"])
+                changed_paths = _changed_paths_between(builder_wt, baseline_sha, candidate_sha)
+                stats = _diff_stats(builder_wt, baseline_sha, candidate_sha)
+                # The source ceiling is authoritative over the repaired tree,
+                # not over the discarded candidate.
+                if state_mod.is_program_state(state):
+                    prog = state.get("program") or {}
+                    ceilings = prog.get("cumulative_ceilings") or {}
+                    try:
+                        program_mod.record_source_accounting(
+                            prog,
+                            files_changed_unique=int(stats["files_changed"]),
+                            diff_lines_total=int(stats["added_lines"]) + int(stats["removed_lines"]),
+                        )
+                        breach = ""
+                    except program_mod.ProgramStateError as exc:
+                        breach = str(exc)
+                    program_source_check = {
+                        "result": "fail" if breach else "pass",
+                        "accounting": "absolute_baseline_to_candidate",
+                        "files_changed_unique": int(stats["files_changed"]),
+                        "diff_lines_total": int(stats["added_lines"]) + int(stats["removed_lines"]),
+                        "max_unique_changed_files": int(ceilings.get("max_unique_changed_files") or 0),
+                        "max_baseline_to_final_diff_lines": int(ceilings.get("max_baseline_to_final_diff_lines") or 0),
+                        "breach": breach,
+                    }
+            except protected_recovery.ProtectedDriftRecoveryError as exc:
+                # The original protected finding remains authoritative.  A
+                # refusal here is recorded and follows the existing terminal
+                # protected-path policy; no repair is silently granted.
+                protected_drift_recovery_error = str(exc)
+
     # 15. Execute required validation commands.
     validations: list[dict[str, Any]] = []
     for v in program_mod.resolve_effective_required_validation(meta, state):
@@ -511,6 +591,8 @@ def finalize_build(
         repair_causes.append("scope_drift")
     if not validation_pass:
         repair_causes.append("validation_failed")
+    if protected_drift_recovery is not None:
+        repair_causes.append("protected_candidate_drift")
 
     # 19. Derive next_state. (Approval binding was proven at step 1; there is
     # no path back to AWAITING_APPROVAL from BUILDING.)
@@ -526,8 +608,10 @@ def finalize_build(
         next_state = "BLOCKED"
     elif hard_secret_blocks:
         next_state = "BLOCKED"
-    elif protected_findings:
+    elif protected_findings and protected_drift_recovery is None:
         next_state = "BLOCKED"
+    elif protected_findings and protected_drift_recovery is not None:
+        next_state = "CHANGES_REQUESTED"
     elif scope_findings:
         # Ordinary scope drift is repairable: the fresh builder receives the
         # authoritative receipt findings through dispatch and must remove the
@@ -609,6 +693,12 @@ def finalize_build(
             "result": "fail" if protected_findings else "pass",
             "offending_paths": [p["path"] for p in protected_findings],
         },
+        "protected_drift_recovery": (
+            protected_drift_recovery
+            if protected_drift_recovery is not None
+            else ({"result": "refused", "reason": protected_drift_recovery_error}
+                  if protected_drift_recovery_error else {"result": "not_applicable"})
+        ),
         "secret_scan_check": {
             "result": "fail" if hard_secret_blocks else "pass",
             "findings": secret_findings[:20],  # bounded
@@ -727,6 +817,8 @@ def finalize_build(
             "validation_pass": validation_pass,
             "hard_secret_blocks": len(hard_secret_blocks),
             "protected_findings": len(protected_findings),
+            "protected_drift_recovered": protected_drift_recovery is not None,
+            "original_candidate_sha": original_candidate_sha,
             "scope_findings": len(scope_findings),
         },
     )

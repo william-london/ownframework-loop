@@ -345,6 +345,10 @@
                 ],
                 "pattern": "^[a-f0-9]{7,64}$"
               },
+              "checkpoint_entry_candidate_sha": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{7,64}$"
+              },
               "build_receipt_sha256": {
                 "type": [
                   "string",

@@ -32,6 +32,24 @@ PY
   "$OFLOOP_BIN" build finalize "$repo" "$rid" "$semantic"
 }
 
+# Core-owned envelope fields are authoritative transport, not model claims.
+# Keep synthetic fixtures focused on the field under test while sourcing the
+# remaining fixed values from the same sealed skeleton as production.
+populate_builder_fixed() {
+  local repo="$1" rid="$2" semantic="$3"
+  python3 - "$repo" "$rid" "$semantic" <<'PY'
+import json, sys
+from pathlib import Path
+from ownframework_loop import build_agent
+repo = Path(sys.argv[1]); rid = sys.argv[2]; semantic = Path(sys.argv[3])
+doc = json.loads(semantic.read_text())
+authority = build_agent.build_skeleton(repo, rid)
+for key in build_agent.FIXED_KEYS:
+    doc.setdefault(key, authority[key])
+semantic.write_text(json.dumps(doc, indent=2, sort_keys=True) + "\n")
+PY
+}
+
 # ---------- BUILD PROOF TESTS 12-25 ----------
 
 # 12. candidate SHA is the worktree HEAD (model cannot fabricate it)
@@ -52,6 +70,7 @@ cat > "$FAKE" <<JSON
   "candidate_sha_claimed": "0000000000000000000000000000000000000000"
 }
 JSON
+populate_builder_fixed "$T" "$RID" "$FAKE"
 "$OFLOOP_BIN" build finalize "$T" "$RID" "$FAKE" >/dev/null 2>&1
 REAL_SHA="$(python3 -c "import json; print(json.load(open('$T/.ownframework-loop/$RID/BUILD_RECEIPT.json'))['candidate_sha'])")"
 git -C "$T" cat-file -e "$REAL_SHA" && pass "fabricated candidate SHA is rejected (real worktree SHA used)" || fail "candidate SHA does not exist"
@@ -129,6 +148,7 @@ cat > "$FAKE16" <<JSON
   "removed_lines": 99999
 }
 JSON
+populate_builder_fixed "$T2" "$RID2" "$FAKE16"
 "$OFLOOP_BIN" build finalize "$T2" "$RID2" "$FAKE16" >/dev/null 2>&1
 REAL_FC="$(python3 -c "import json; print(json.load(open('$T2/.ownframework-loop/$RID2/BUILD_RECEIPT.json'))['files_changed'])")"
 assert_eq "$REAL_FC" "1" "fabricated diff counts are ignored (real diff counts are code-computed)"
@@ -639,6 +659,7 @@ cat > "$FAKE16" <<JSON
   "candidate_sha_claimed": "$BR16"
 }
 JSON
+populate_builder_fixed "$T16" "$RID16" "$FAKE16"
 "$OFLOOP_BIN" build finalize "$T16" "$RID16" "$FAKE16" >/dev/null 2>&1 || true
 "$OFLOOP_BIN" review claim "$T16" "$RID16" >/dev/null 2>&1
 A16="$(mktemp)"

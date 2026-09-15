@@ -123,6 +123,17 @@ cat > "$FAKE" <<JSON
   "candidate_sha_claimed": "$REAL_SHA"
 }
 JSON
+PYTHONPATH="$LIB_DIR" python3 - "$T" "$RID" "$FAKE" <<'PY'
+import json, sys
+from pathlib import Path
+from ownframework_loop import build_agent
+repo = Path(sys.argv[1]); rid = sys.argv[2]; path = Path(sys.argv[3])
+doc = json.loads(path.read_text())
+authority = build_agent.build_skeleton(repo, rid)
+for key in build_agent.FIXED_KEYS:
+    doc.setdefault(key, authority[key])
+path.write_text(json.dumps(doc, indent=2, sort_keys=True) + "\n")
+PY
 
 if "$OFLOOP_BIN" build finalize "$T" "$RID" "$FAKE" >/dev/null 2>&1; then
   do_pass "lifecycle: build finalize succeeded"
@@ -161,6 +172,17 @@ cat > "$ASSESSMENT" <<JSON
   "recommended_verdict": "APPROVED"
 }
 JSON
+PYTHONPATH="$LIB_DIR" python3 - "$T" "$RID" "$ASSESSMENT" <<'PY'
+import json, sys
+from pathlib import Path
+from ownframework_loop import assessment
+repo = Path(sys.argv[1]); rid = sys.argv[2]; path = Path(sys.argv[3])
+doc = json.loads(path.read_text())
+authority = assessment.build_skeleton(repo, rid)
+for key in assessment.FIXED_KEYS:
+    doc.setdefault(key, authority[key])
+path.write_text(json.dumps(doc, indent=2, sort_keys=True) + "\n")
+PY
 if "$OFLOOP_BIN" review finalize "$T" "$RID" "$ASSESSMENT" >/dev/null 2>&1; then
   do_pass "lifecycle: review finalize succeeded"
 else

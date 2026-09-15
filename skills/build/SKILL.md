@@ -54,9 +54,11 @@ sealing command. No ofloop loop run.
    pass-scoped semantic result.
    Before declaring `candidate_ready`, inspect the exact baseline-to-candidate
    changed-path set and compare it with the frozen packet's `allowed_paths`,
-   `protected_paths`, and elevated/sensitive rules. Remove accidental ordinary
-   out-of-scope changes when that is safe within the mission; never knowingly
-   declare a candidate that retains them. This is a semantic self-check only:
+   `protected_paths`, and elevated/sensitive rules. Protected paths are
+   immutable even when a broad allowed parent appears. Remove accidental
+   ordinary out-of-scope changes when that is safe within the mission; never knowingly
+   declare a candidate that retains them. This is a semantic
+   self-check only:
    the deterministic finalizer remains authoritative and protected paths,
    hard secrets, source ceilings, and identity breaches remain terminal.
 7. Call ofloop build finalize <repo> <run-id> <agent_result_path>.

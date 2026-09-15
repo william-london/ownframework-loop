@@ -91,6 +91,12 @@ def _resolve_current_work_unit(canonical_repo: Path, run_id: str) -> str:
                 cp_wus = cp.get("work_units") or []
                 if cp_wus:
                     return cp_wus[0]
+                try:
+                    return program_mod.current_checkpoint_work_unit_id(
+                        meta, state.get("program") or {}, cp_id=cp_id
+                    )
+                except program_mod.ProgramGraphError as exc:
+                    raise PrepareRefused(str(exc)) from exc
     return work_units[0].get("id") or ""
 
 

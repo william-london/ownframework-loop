@@ -133,6 +133,7 @@ JSON
   python3 - "$BSEM" "$rid" <<'PY'
 import json, sys
 from pathlib import Path
+from ownframework_loop import build_agent
 p = Path(sys.argv[1]); rid = sys.argv[2]
 d = {
   "schema": "ownframework-loop-build-agent-result/v1",
@@ -147,8 +148,17 @@ d = {
   "escalation_recommended": False,
   "escalation_reason": "",
   "notes": "",
-  "timestamp": "2026-08-28T00:00:00Z",
+    "timestamp": "2026-08-28T00:00:00Z",
 }
+# Real dispatched artifacts carry the complete core-owned envelope.  Populate
+# it from the same sealed authority used by the finalizer so this synthetic
+# fixture exercises replay rather than the fixed-identity rejection path.
+repo = p
+for _ in range(6):
+    repo = repo.parent
+authority = build_agent.build_skeleton(repo, rid)
+for key in build_agent.FIXED_KEYS:
+    d[key] = authority[key]
 p.write_text(json.dumps(d, indent=2, sort_keys=True) + "\n")
 PY
   printf '%s|%s|%s\n' "$repo" "$rid" "$wt"

@@ -110,6 +110,43 @@ def current_checkpoint_acceptance_criterion_ids(
     raise ProgramStateError(f"current checkpoint {cp_id!r} missing from packet graph")
 
 
+def current_checkpoint_work_unit_id(
+    packet: dict[str, Any],
+    program_state: dict[str, Any],
+    *,
+    cp_id: str | None = None,
+) -> str:
+    """Resolve the work unit owned by the current PROGRAM checkpoint.
+
+    Explicit checkpoint overrides win.  For older packets, match the
+    packet-level work unit whose declared acceptance IDs overlap the current
+    checkpoint; only an ambiguous packet falls back to its first unit.
+    """
+    current = cp_id or select_next_checkpoint(packet, program_state)
+    checkpoints = (packet.get("checkpoint_graph") or {}).get("checkpoints") or []
+    cp = next((item for item in checkpoints if item.get("id") == current), None)
+    if not isinstance(cp, dict):
+        raise ProgramGraphError(f"current checkpoint {current!r} not found")
+    override = cp.get("work_units") or []
+    if override:
+        item = override[0]
+        return str(item.get("id") if isinstance(item, dict) else item)
+    cp_ids = set(cp.get("acceptance_criterion_ids") or [])
+    matches: list[str] = []
+    for item in packet.get("work_units") or []:
+        if not isinstance(item, dict) or not item.get("id"):
+            continue
+        declared = set(item.get("acceptance") or [])
+        if cp_ids and declared.intersection(cp_ids):
+            matches.append(str(item["id"]))
+    if len(matches) == 1:
+        return matches[0]
+    work_units = packet.get("work_units") or []
+    if work_units and isinstance(work_units[0], dict) and work_units[0].get("id"):
+        return str(work_units[0]["id"])
+    raise ProgramGraphError("packet has no resolvable work unit")
+
+
 def resolve_effective_required_validation(
     packet: dict[str, Any],
     state: dict[str, Any],
@@ -397,6 +434,10 @@ def materialise_initial_program_state(
             "build_receipt_sha256": None,
             "verdict_sha256": None,
             "terminal": "",
+            # The exact tree from which this checkpoint began.  This is the
+            # only safe source tree for candidate-only protected-drift
+            # recovery; it is never inferred from a branch tip or reflog.
+            "checkpoint_entry_candidate_sha": baseline_sha,
         })
 
     global_rb = packet.get("risk_budget") or {}
@@ -479,6 +520,38 @@ def materialise_initial_program_state(
 def select_next_checkpoint(packet: dict[str, Any], program_state: dict[str, Any]) -> str | None:
     cur = program_state.get("current_checkpoints") or []
     return cur[0] if cur else None
+
+
+def checkpoint_entry_candidate_sha(
+    *,
+    packet: dict[str, Any],
+    program_state: dict[str, Any],
+    cp_id: str,
+    events: list[dict[str, Any]] | None = None,
+) -> str | None:
+    """Return the durable tree anchor for one checkpoint.
+
+    New PROGRAM state stores the anchor on the checkpoint itself.  Older
+    sealed runs predate that field, so a completed ``program_advanced`` event
+    is accepted as the backward-compatible durable authority.  Branch tips,
+    reflogs, and working-tree guesses are deliberately never used.
+    """
+    cp = _find_cp(program_state, cp_id)
+    direct = str(cp.get("checkpoint_entry_candidate_sha") or "")
+    if direct:
+        return direct
+    for event in reversed(events or []):
+        if not isinstance(event, dict) or event.get("event_type") != "program_advanced":
+            continue
+        extras = event.get("extras") or {}
+        if cp_id in (extras.get("next_checkpoints") or []):
+            candidate = str(event.get("commit_sha") or "")
+            if candidate:
+                return candidate
+    # CP-0 of an old state began at the sealed baseline.
+    if cp_id == (packet.get("checkpoint_graph") or {}).get("execution_order", [None])[0]:
+        return None
+    return None
 
 
 def ready_to_claim(cp_state: dict[str, Any], packet_cp: dict[str, Any]) -> tuple[bool, str]:
@@ -599,6 +672,12 @@ def advance_after_review_approval(
     )
     new_program = advance_to_next(new_program, packet)
     new_cps = list(new_program.get("current_checkpoints") or [])
+    # Bind the next checkpoint to the candidate that just passed review.  The
+    # binding is carried in the same STATE transaction as the advancement, so
+    # a future protected-drift recovery has a durable, exact anchor.
+    if new_cps:
+        next_cp = _find_cp(new_program, new_cps[0])
+        next_cp["checkpoint_entry_candidate_sha"] = candidate_sha
     next_top_state = "READY_TO_BUILD" if new_cps else "APPROVED"
 
     # v0.4.6: PROGRAM advancement uses the atomic FSM-owned transition path.
