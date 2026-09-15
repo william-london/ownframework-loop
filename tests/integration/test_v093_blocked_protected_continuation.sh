@@ -72,7 +72,7 @@ for cp in prog["checkpoints"]:
     if cp["id"] == "CP-5":
         cp["terminal"] = "APPROVED"; cp["candidate_sha"] = safe
     if cp["id"] == "CP-6":
-        cp["checkpoint_entry_candidate_sha"] = safe
+        cp.pop("checkpoint_entry_candidate_sha", None)
 current["state"] = "BLOCKED"
 current["last_candidate_sha"] = bad
 current["terminal_reason"] = "protected candidate drift"
@@ -86,6 +86,11 @@ run_dir.joinpath("BUILD_RECEIPT.json").write_text(json.dumps({
     "program_source_check": {"result": "pass"},
     "protected_path_check": {"result": "fail", "offending_paths": ["docs/protected.md"]}}, indent=2) + "\n")
 seed_state(repo, run, current, reason="synthetic blocked CP-6 protected drift")
+state.append_event(
+    repo, run, event_type="program_advanced", old_state="REVIEWING",
+    new_state="READY_TO_BUILD", actor="of-reviewer", commit_sha=safe,
+    extras={"cp_id_finalized": "CP-5", "cp_terminal": "APPROVED", "next_checkpoints": ["CP-6"]},
+)
 PY
 
 ENQ="$($OFLOOP_BIN supervisor enqueue "$REPO" "$RUN" --runner claude-code --db "$DB")"

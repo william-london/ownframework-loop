@@ -561,6 +561,31 @@ def select_next_checkpoint(packet: dict[str, Any], program_state: dict[str, Any]
     return cur[0] if cur else None
 
 
+def event_extra(event: dict[str, Any], key: str) -> Any:
+    """Read diagnostic event metadata across the supported wire shapes.
+
+    The durable event writer currently flattens caller-supplied extras into
+    the event record.  A short-lived historical reader expected a nested
+    ``extras`` object, so legacy recovery must understand both forms.  If a
+    record carries both forms, they must agree; silently choosing one would
+    turn contradictory durable evidence into an authority guess.
+    """
+    top_present = key in event
+    top_value = event.get(key)
+    nested = event.get("extras")
+    nested_present = isinstance(nested, dict) and key in nested
+    nested_value = nested.get(key) if nested_present else None
+    if top_present and nested_present and top_value != nested_value:
+        raise ProgramStateError(
+            f"event extra {key!r} has contradictory flattened and nested values"
+        )
+    if top_present:
+        return top_value
+    if nested_present:
+        return nested_value
+    return None
+
+
 def checkpoint_entry_candidate_sha(
     *,
     packet: dict[str, Any],
@@ -582,11 +607,14 @@ def checkpoint_entry_candidate_sha(
     for event in reversed(events or []):
         if not isinstance(event, dict) or event.get("event_type") != "program_advanced":
             continue
-        extras = event.get("extras") or {}
-        if cp_id in (extras.get("next_checkpoints") or []):
-            candidate = str(event.get("commit_sha") or "")
-            if candidate:
-                return candidate
+        next_checkpoints = event_extra(event, "next_checkpoints") or []
+        if cp_id in next_checkpoints:
+            candidate = event.get("commit_sha")
+            if not isinstance(candidate, str) or not re.fullmatch(r"[0-9a-f]{40}", candidate):
+                raise ProgramStateError(
+                    f"program_advanced event for {cp_id} has malformed commit_sha"
+                )
+            return candidate
     # CP-0 of an old state began at the sealed baseline.
     if cp_id == (packet.get("checkpoint_graph") or {}).get("execution_order", [None])[0]:
         return None
