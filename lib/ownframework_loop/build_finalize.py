@@ -394,6 +394,37 @@ def finalize_build(
             sensitive_findings.append({"path": path, "kind": "sensitive"})
         # 'allowed' and 'elevated' are fine.
 
+    # Recovery publishes a safe descendant before the normal FSM transition.
+    # If the process dies in that narrow interval, replay the same funded
+    # repair instead of treating the restored tree as a fresh candidate.
+    pending_protected_recovery: dict[str, Any] | None = None
+    protected_drift_recovery: dict[str, Any] | None = None
+    original_candidate_sha = candidate_sha
+    if state_mod.is_program_state(state):
+        pending_cp_id = str(((state.get("program") or {}).get("current_checkpoints") or [""])[0])
+        if pending_cp_id:
+            pending_protected_recovery = protected_recovery.pending_completed_recovery(
+                canonical_repo=canonical_repo,
+                run_id=run_id,
+                current_state=state,
+                checkpoint_id=pending_cp_id,
+                builder_worktree=builder_wt,
+                candidate_branch=candidate_branch,
+            )
+            if pending_protected_recovery is not None:
+                protected_drift_recovery = pending_protected_recovery
+                original_candidate_sha = str(
+                    pending_protected_recovery["previous_candidate_sha"]
+                )
+                protected_findings.extend(
+                    {
+                        "path": path,
+                        "kind": "protected",
+                        "recovered_candidate_drift": True,
+                    }
+                    for path in pending_protected_recovery["offending_paths"]
+                )
+
     # 14. Secret scan on changed files and diff.
     secret_findings: list[dict[str, Any]] = []
     for path in changed_paths:
@@ -428,11 +459,10 @@ def finalize_build(
     # paths and creates a core-owned descendant commit; it never rewrites or
     # deletes the model candidate.  Authority failures, hard secrets, mixed
     # scope/protected drift, and exhausted repair entitlement remain terminal.
-    protected_drift_recovery: dict[str, Any] | None = None
     protected_drift_recovery_error = ""
-    original_candidate_sha = candidate_sha
     if (
         protected_findings
+        and pending_protected_recovery is None
         and not scope_findings
         and program_source_check is not None
         and program_source_check.get("result") == "pass"

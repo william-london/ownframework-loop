@@ -95,6 +95,89 @@ def _verify_receipt(receipt: dict[str, Any], expected: dict[str, Any]) -> None:
             )
 
 
+def _recovery_result(
+    receipt_path: Path,
+    receipt: dict[str, Any],
+    *,
+    already_recovered: bool,
+) -> dict[str, Any]:
+    return {
+        "result": "recovered",
+        "recovered": True,
+        "already_recovered": already_recovered,
+        "receipt_path": str(receipt_path),
+        "previous_candidate_sha": str(receipt["previous_candidate_sha"]),
+        "candidate_sha": str(receipt["rollback_candidate_sha"]),
+        "checkpoint_entry_candidate_sha": str(receipt["checkpoint_entry_candidate_sha"]),
+        "offending_paths": list(receipt["offending_paths"]),
+    }
+
+
+def _complete_receipt(receipt_path: Path, receipt: dict[str, Any]) -> dict[str, Any]:
+    completed = dict(receipt)
+    completed["status"] = "complete"
+    completed["completed_at"] = util.utc_now_iso()
+    _write_receipt(receipt_path, completed)
+    return completed
+
+
+def pending_completed_recovery(
+    *,
+    canonical_repo: Path,
+    run_id: str,
+    current_state: dict[str, Any],
+    checkpoint_id: str,
+    builder_worktree: Path,
+    candidate_branch: str,
+) -> dict[str, Any] | None:
+    """Find a completed recovery whose state transition was interrupted.
+
+    The Git recovery and the FSM transition are separate durable operations.
+    If the process dies after the safe tree and receipt are committed but
+    before the finalizer funds the repair, the next finalization must replay
+    the same repair rather than treating the restored tree as a fresh success.
+    """
+    if current_state.get("state") != "BUILDING":
+        return None
+    root = state.run_dir(canonical_repo, run_id) / "protected-drift-recovery"
+    if not root.is_dir():
+        return None
+    matches: list[dict[str, Any]] = []
+    for path in sorted(root.glob("*.json")):
+        receipt = util.read_private_json(path, default=None)
+        if not isinstance(receipt, dict):
+            raise ProtectedDriftRecoveryError("protected-drift receipt is malformed")
+        if receipt.get("schema") != SCHEMA:
+            raise ProtectedDriftRecoveryError("protected-drift receipt schema mismatch")
+        if receipt.get("run_id") != run_id:
+            raise ProtectedDriftRecoveryError("protected-drift receipt run mismatch")
+        if receipt.get("checkpoint_id") != checkpoint_id:
+            continue
+        if receipt.get("candidate_branch") != candidate_branch:
+            continue
+        if receipt.get("status") != "complete":
+            continue
+        rollback = str(receipt.get("rollback_candidate_sha") or "")
+        if not rollback:
+            raise ProtectedDriftRecoveryError("completed protected-drift receipt has no rollback")
+        matches.append({"path": path, "receipt": receipt, "rollback": rollback})
+    if not matches:
+        return None
+    branch_head = git_checks.branch_head(canonical_repo, candidate_branch)
+    wt = Path(builder_worktree).resolve(strict=False)
+    matching = [item for item in matches if item["rollback"] == branch_head]
+    if not matching:
+        return None
+    if len(matching) != 1:
+        raise ProtectedDriftRecoveryError("multiple protected-drift recoveries match current branch")
+    item = matching[0]
+    if git_checks.current_head(wt) != branch_head or git_checks.dirty_status(wt) != "clean":
+        raise ProtectedDriftRecoveryError(
+            "completed protected-drift recovery has not restored a proven clean worktree"
+        )
+    return _recovery_result(item["path"], item["receipt"], already_recovered=True)
+
+
 def _receipt_path(repo: Path, run_id: str, recovery_id: str) -> Path:
     return state.run_dir(repo, run_id) / "protected-drift-recovery" / f"{recovery_id}.json"
 
@@ -143,23 +226,43 @@ def recover_candidate_only_protected_drift(
             raise ProtectedDriftRecoveryError("protected-drift receipt is malformed")
         _verify_receipt(existing, expected)
         rollback_existing = str(existing.get("rollback_candidate_sha") or "")
+        branch_head_existing = git_checks.branch_head(repo, candidate_branch)
         if (
-            existing.get("status") == "complete"
+            existing.get("status") in {"prepared", "complete"}
             and rollback_existing
-            and git_checks.branch_head(repo, candidate_branch) == rollback_existing
-            and git_checks.current_head(wt) == rollback_existing
-            and git_checks.dirty_status(wt) == "clean"
+            and branch_head_existing == rollback_existing
         ):
-            return {
-                "result": "recovered",
-                "recovered": True,
-                "already_recovered": True,
-                "receipt_path": str(receipt_path),
-                "previous_candidate_sha": candidate_sha,
-                "candidate_sha": rollback_existing,
-                "checkpoint_entry_candidate_sha": anchor,
-                "offending_paths": paths,
-            }
+            # A process death after ref publication or during worktree reset
+            # is recoverable only when the worktree is still at the candidate
+            # or already at the exact recovery commit.  Unknown HEADs fail
+            # closed; we never overwrite contradictory evidence.
+            current_existing = git_checks.current_head(wt)
+            if current_existing == rollback_existing:
+                if git_checks.dirty_status(wt) != "clean":
+                    raise ProtectedDriftRecoveryError(
+                        "protected-drift recovery worktree is dirty after restore"
+                    )
+            elif current_existing == candidate_sha:
+                reset = _git(wt, "reset", "--hard", rollback_existing)
+                if reset.returncode != 0:
+                    raise ProtectedDriftRecoveryError(
+                        reset.stderr.strip() or "cannot resume protected-drift worktree restore"
+                    )
+            else:
+                raise ProtectedDriftRecoveryError(
+                    "protected-drift recovery worktree has contradictory HEAD"
+                )
+            if git_checks.current_head(wt) != rollback_existing or git_checks.dirty_status(wt) != "clean":
+                raise ProtectedDriftRecoveryError(
+                    "protected-drift recovery worktree proof failed during restart"
+                )
+            if existing.get("status") != "complete":
+                existing = _complete_receipt(receipt_path, existing)
+            return _recovery_result(
+                receipt_path,
+                existing,
+                already_recovered=True,
+            )
     if git_checks.current_head(wt) != candidate_sha:
         raise ProtectedDriftRecoveryError("builder HEAD changed before protected-drift recovery")
     if git_checks.current_branch(wt) != candidate_branch:
@@ -280,19 +383,12 @@ def recover_candidate_only_protected_drift(
     final = util.read_private_json(receipt_path, default={})
     if not isinstance(final, dict):
         raise ProtectedDriftRecoveryError("protected-drift receipt disappeared")
-    final["status"] = "complete"
-    final["completed_at"] = util.utc_now_iso()
-    _write_receipt(receipt_path, final)
-    return {
-        "result": "recovered",
-        "recovered": True,
-        "already_recovered": existing is not None and branch_head == rollback,
-        "receipt_path": str(receipt_path),
-        "previous_candidate_sha": candidate_sha,
-        "candidate_sha": rollback,
-        "checkpoint_entry_candidate_sha": anchor,
-        "offending_paths": paths,
-    }
+    final = _complete_receipt(receipt_path, final)
+    return _recovery_result(
+        receipt_path,
+        final,
+        already_recovered=existing is not None and branch_head == rollback,
+    )
 
 
 def re_full_sha(value: str) -> bool:

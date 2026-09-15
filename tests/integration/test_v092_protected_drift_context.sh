@@ -115,6 +115,43 @@ with tempfile.TemporaryDirectory() as td:
     )
     assert again["already_recovered"] is True
 
+    # Simulate process death after the ref/worktree restore but before the
+    # receipt is marked complete.  Restart must finish the same receipt and
+    # never create a second rollback commit.
+    prepared = json.loads(receipt.read_text())
+    prepared["status"] = "prepared"
+    prepared.pop("completed_at", None)
+    util.atomic_write_json(receipt, prepared, mode=0o600)
+    out(wt, "checkout", "--detach", "-q", candidate)
+    resumed = protected_recovery.recover_candidate_only_protected_drift(
+        canonical_repo=repo,
+        run_id="run-test",
+        packet=packet,
+        current_state=current,
+        checkpoint_id="CP-1",
+        builder_worktree=wt,
+        candidate_branch="candidate",
+        candidate_sha=candidate,
+        offending_paths=["docs/protected.md"],
+    )
+    assert resumed["already_recovered"] is True
+    assert json.loads(receipt.read_text())["status"] == "complete"
+    assert out(wt, "rev-parse", "HEAD") == rollback
+
+    # If the process dies after the complete recovery receipt but before the
+    # FSM transition, finalization must replay the same repair rather than
+    # silently treating the safe tree as an approval.
+    pending = protected_recovery.pending_completed_recovery(
+        canonical_repo=repo,
+        run_id="run-test",
+        current_state={"state": "BUILDING"},
+        checkpoint_id="CP-1",
+        builder_worktree=wt,
+        candidate_branch="candidate",
+    )
+    assert pending is not None
+    assert pending["candidate_sha"] == rollback
+
     # A different protected payload under the same candidate identity cannot
     # be silently replaced after the completed operation.
     try:
@@ -254,6 +291,7 @@ with tempfile.TemporaryDirectory() as td:
 
 print("PROTECTED_DRIFT_RECOVERY=PASS")
 print("PROTECTED_DRIFT_RESTART_IDEMPOTENCE=PASS")
+print("PROTECTED_DRIFT_CRASH_BOUNDARIES=PASS")
 print("PROTECTED_DRIFT_COLLISION_FAILS_CLOSED=PASS")
 print("PROGRAM_WORK_UNIT_BINDING=PASS")
 print("SEMANTIC_PROMPT_PROVENANCE=PASS")
