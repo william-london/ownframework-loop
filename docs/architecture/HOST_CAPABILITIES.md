@@ -158,7 +158,16 @@ candidate identity, pass or repair counters, or cost/token accounting. Accepted
 semantic artifacts retain their original capability receipt provenance and may
 be replayed only after their existing identity gates pass. Ordinary `resume`
 without the explicit flag remains strict and never silently rebinds capability
-authority. Runtime-generation migration remains a separate supervisor concern.
+authority. The supported operator lifecycle is serialized per run while this
+operation is in flight: ordinary resume, explicit capability rebind, retirement,
+enqueue, and PROGRAM continuation cannot race a stale QUARANTINED eligibility
+snapshot. Runtime-generation migration remains a separate supervisor concern.
+
+Migration history is crash-recoverable from the directory/snapshot publication
+prefix through the PREPARED and COMPLETE record states. A retry validates every
+existing artifact and continues only when its sequence, old binding, new
+binding, and chain digest are exact; contradictory files, symlinks, or an
+unexplained active binding fail closed.
 
 ## Reviewer cache isolation
 

@@ -401,7 +401,9 @@ assert int(a8b_after["cost_known"]) == 1 and int(a8b_after["cost_accounted"]) ==
 print("A08_POST_PUBLICATION_PRE_RELEASE_TERMINAL=yes")
 
 # ------------------------------------------------------------------
-# A-04: stale resume snapshot loses to retire and cannot resurrect.
+# A-04: resume and retire serialize; neither can cross a stale eligibility
+# snapshot. The operation that holds the lifecycle lock wins, and the other
+# re-evaluates the resulting status.
 # ------------------------------------------------------------------
 db4 = tmp / "resume-retire.sqlite3"
 repo4 = new_repo("resume-retire")
@@ -415,37 +417,30 @@ with supervisor._connect(db4) as conn:
     )
     conn.commit()
 
-entered = threading.Event()
-release = threading.Event()
-resume_result = {}
-real_pid_alive = supervisor._pid_alive
-def gated_pid_alive(pid, started):
-    if threading.current_thread().name == "resume-thread":
-        entered.set()
-        assert release.wait(10)
-        return False
-    return False
-supervisor._pid_alive = gated_pid_alive
-def do_resume():
-    resume_result.update(
-        supervisor.resume(canonical_repo=repo4, run_id="run-race", db_path=db4)
+retire_code = (
+    "import json,sys; from pathlib import Path; "
+    "from ownframework_loop import supervisor; "
+    "o=supervisor.retire(canonical_repo=Path(sys.argv[1]), run_id=sys.argv[2], "
+    "db_path=Path(sys.argv[3])); print(json.dumps(o, sort_keys=True))"
+)
+with supervisor.flock_exclusive(
+    supervisor._supervisor_lifecycle_lock_path(repo4, "run-race")
+):
+    retire_process = subprocess.Popen(
+        [sys.executable, "-c", retire_code, str(repo4), "run-race", str(db4)],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        env={**os.environ, "PYTHONPATH": str(root / "lib")},
     )
-t = threading.Thread(target=do_resume, name="resume-thread")
-t.start()
-assert entered.wait(10)
-retire_out = supervisor.retire(canonical_repo=repo4, run_id="run-race", db_path=db4)
-assert retire_out["retired"] is True, retire_out
-release.set()
-t.join(10)
-supervisor._pid_alive = real_pid_alive
-assert not t.is_alive()
-assert resume_result["resumed"] is False, resume_result
-assert resume_result["reason"] == "resume_lost_quarantine_race", resume_result
+    time.sleep(0.25)
+    assert retire_process.poll() is None
+retire_stdout, retire_stderr = retire_process.communicate(timeout=10)
+retire_result = json.loads(retire_stdout)
+assert retire_result["retired"] is True, retire_result
 with supervisor._connect_readonly(db4) as conn:
     final4 = conn.execute("SELECT * FROM jobs WHERE run_id='run-race'").fetchone()
 assert final4["status"] == "RETIRED", dict(final4)
 assert final4["runtime_generation"] == "ofloop-old@test", dict(final4)
-print("A04_RETIRED_RESURRECTION_CLOSED=yes")
+print("A04_LIFECYCLE_SERIALIZATION_CLOSED=yes")
 
 # ------------------------------------------------------------------
 # A-05: enqueue authorization is serialized with claim mutation.

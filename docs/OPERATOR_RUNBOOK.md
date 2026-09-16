@@ -220,6 +220,13 @@ executions use the migrated binding. Runtime-generation migration is separate
 and remains governed by the existing `resume` behavior. Omitting
 `--rebind-capabilities` preserves the normal fail-closed drift behavior.
 
+The migration and the supervisor lifecycle transition share a private per-run
+lock. This prevents ordinary resume, retirement, re-enqueue, or PROGRAM
+continuation from changing the enrollment while capability eligibility is being
+resolved. If the process dies before the migration record is published, the
+next identical supported retry validates and completes the durable directory
+prefix; operators must not delete partial evidence manually.
+
 ## 11. Foreground/debug operation
 
 ```bash

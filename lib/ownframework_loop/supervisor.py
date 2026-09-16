@@ -27,10 +27,12 @@ import time
 import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass
+from functools import wraps
 from pathlib import Path
 from typing import Any
 
 from . import approval as approval_mod, branch_resolver as branch_resolver_mod, capabilities as capabilities_mod, capability_binding as capability_binding_mod, dispatch as dispatch_mod, dispatch_hold as dispatch_hold_mod, git_checks, packet as packet_mod, program as program_mod, protected_recovery, runner_profiles as runner_profiles_mod, runtime_env, state as state_mod, transitions, util, runtime_identity
+from .locking import flock_exclusive
 
 SCHEMA = "ownframework-loop-supervisor/v1"
 DISPATCH_HOLD_KIND = "PROGRAM_CHECKPOINT_BOUNDARY"
@@ -59,6 +61,35 @@ CLAUDE_REVIEWER_TOOLS = "Read,Bash,Glob,Grep"
 _LOCAL_EXECUTION_LOCK = threading.Lock()
 _LOCAL_EXECUTION_JOBS: dict[int, set[int]] = {}
 _LOCAL_CONNECTION_DEPTH: dict[int, int] = {}
+_SUPERVISOR_LIFECYCLE_LOCK_NAME = "SUPERVISOR_LIFECYCLE.lock"
+
+
+def _supervisor_lifecycle_lock_path(canonical_repo: Path, run_id: str) -> Path:
+    state_mod.validate_run_id(run_id)
+    return state_mod.run_dir(canonical_repo, run_id) / _SUPERVISOR_LIFECYCLE_LOCK_NAME
+
+
+def _serialize_run_lifecycle(func):
+    """Serialize supported operator transitions for one logical run.
+
+    Capability resolution is intentionally performed while this narrow
+    per-run lock is held.  The SQLite transaction remains short, while resume,
+    retire, enqueue, and PROGRAM continuation cannot invalidate the
+    QUARANTINED eligibility snapshot mid-migration.
+    """
+    @wraps(func)
+    def guarded(*args, **kwargs):
+        canonical_repo = kwargs.get("canonical_repo")
+        run_id = kwargs.get("run_id")
+        if canonical_repo is None or run_id is None:
+            raise TypeError("lifecycle operation requires canonical_repo and run_id")
+        with flock_exclusive(
+            _supervisor_lifecycle_lock_path(Path(canonical_repo), str(run_id)),
+            blocking=True,
+            timeout_seconds=30,
+        ):
+            return func(*args, **kwargs)
+    return guarded
 
 
 def _register_local_execution(job_id: int) -> None:
@@ -771,6 +802,7 @@ def _protected_terminal_recovery(
     )
 
 
+@_serialize_run_lifecycle
 def continue_program(
     *,
     canonical_repo: Path,
@@ -2532,6 +2564,7 @@ def _hold_matches_before_claim(
     return hold, "MATCH" if matches else reason
 
 
+@_serialize_run_lifecycle
 def enqueue(
     *,
     canonical_repo: Path,
@@ -5947,6 +5980,7 @@ __all__ = [
 ]
 
 
+@_serialize_run_lifecycle
 def resume(
     *,
     canonical_repo: Path,
@@ -6138,6 +6172,12 @@ def resume(
                 "resumed": False,
                 "reason": "resume_lost_quarantine_race",
             })
+            if migration is not None:
+                result.update({
+                    "capability_migration_completed": True,
+                    "capability_migration": migration,
+                    "safe_retry": "supervisor resume --rebind-capabilities",
+                })
             return result
     if row is None:
         return {
@@ -6156,6 +6196,7 @@ def resume(
     return result
 
 
+@_serialize_run_lifecycle
 def retire(
     *,
     canonical_repo: Path,
