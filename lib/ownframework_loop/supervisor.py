@@ -5397,17 +5397,17 @@ def run_one(*, db_path: Path | None = None, timeout_seconds: int = 0) -> dict[st
                     # provenance gate below recognizes the zero-cost
                     # replay as the durable accepted artifact.
                     semantic_ready, semantic_reason = dispatch_mod.semantic_result_ready(work_order)
-                elif semantic_ready:
-                    # The artifact is already valid but the latest attempt
-                    # was not accepted (e.g. an earlier worker exited
-                    # without publishing, or completion already ran in a
-                    # prior tick but the publish was bypassed). Publish
-                    # acceptance now so the gate below recognizes the
-                    # zero-cost replay as the durable accepted artifact.
-                    _publish_acceptance_for_ready_artifact(
-                        conn=conn, work_order=work_order, job_id=int(job["id"]),
-                    )
             if semantic_ready:
+                # v0.9.9-h: when the artifact is already valid (either
+                # because completion filled it, or because a prior tick
+                # already completed it but acceptance was not yet
+                # published), make sure the latest attempt's
+                # `semantic_accepted` flag is recorded before the gate
+                # inspects it. Best-effort: any publish failure is
+                # surfaced by the gate's structured replay rejection.
+                _publish_acceptance_for_ready_artifact(
+                    conn=conn, work_order=work_order, job_id=int(job["id"]),
+                )
                 replay_attempt_id = str(job["latest_attempt_id"] or "")
                 replay_ok, replay_reason, _receipt = _attempt_provenance_gate(
                     conn,
