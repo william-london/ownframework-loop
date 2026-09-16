@@ -307,19 +307,58 @@ def _migration_records(canonical_repo: Path, run_id: str) -> list[dict[str, Any]
 def _validate_migration_chain(records: list[dict[str, Any]], active: dict[str, Any]) -> None:
     complete = [r for r in records if r.get("status") == "COMPLETE"]
     complete.sort(key=lambda item: int(item.get("migration_sequence") or 0))
+    prepared = [r for r in records if r.get("status") == "PREPARED"]
+    if len(prepared) > 1:
+        raise CapabilityBindingError("multiple prepared capability migrations")
+
     prior_record_sha: str | None = None
     prior_binding_sha: str | None = None
     for expected_sequence, record in enumerate(complete, start=1):
         sequence = int(record.get("migration_sequence") or 0)
         if sequence != expected_sequence:
             raise CapabilityBindingError("capability migration sequence continuity failure")
+        previous = record.get("previous_binding")
+        new_binding = record.get("new_binding")
+        if not isinstance(previous, dict) or not isinstance(new_binding, dict):
+            raise CapabilityBindingError("capability migration binding document missing")
+        if record.get("previous_binding_sha256") != previous.get("binding_sha256"):
+            raise CapabilityBindingError("capability migration previous binding digest mismatch")
+        if record.get("new_binding_sha256") != new_binding.get("binding_sha256"):
+            raise CapabilityBindingError("capability migration new binding digest mismatch")
         if record.get("prior_migration_record_sha256") != prior_record_sha:
             raise CapabilityBindingError("capability migration record chain continuity failure")
         if prior_binding_sha is not None and record.get("previous_binding_sha256") != prior_binding_sha:
             raise CapabilityBindingError("capability migration binding chain continuity failure")
         prior_record_sha = str(record.get("migration_record_sha256") or "")
         prior_binding_sha = str(record.get("new_binding_sha256") or "")
-    if prior_binding_sha is not None and active.get("binding_sha256") != prior_binding_sha:
+
+    if prepared:
+        pending = prepared[0]
+        pending_sequence = int(pending.get("migration_sequence") or 0)
+        if pending_sequence != len(complete) + 1:
+            raise CapabilityBindingError("prepared capability migration is not the next frontier")
+        pending_previous = pending.get("previous_binding")
+        pending_new = pending.get("new_binding")
+        if not isinstance(pending_previous, dict) or not isinstance(pending_new, dict):
+            raise CapabilityBindingError("prepared capability migration binding document missing")
+        if pending.get("previous_binding_sha256") != pending_previous.get("binding_sha256"):
+            raise CapabilityBindingError("prepared capability migration previous binding digest mismatch")
+        if pending.get("new_binding_sha256") != pending_new.get("binding_sha256"):
+            raise CapabilityBindingError("prepared capability migration new binding digest mismatch")
+        if pending.get("prior_migration_record_sha256") != prior_record_sha:
+            raise CapabilityBindingError("prepared capability migration record chain continuity failure")
+        if prior_binding_sha is not None:
+            if pending.get("previous_binding_sha256") != prior_binding_sha:
+                raise CapabilityBindingError("prepared capability migration binding chain continuity failure")
+        elif pending.get("previous_binding_sha256") != pending_previous.get("binding_sha256"):
+            raise CapabilityBindingError("prepared first migration binding continuity failure")
+        active_sha = active.get("binding_sha256")
+        if active_sha not in {
+            pending.get("previous_binding_sha256"),
+            pending.get("new_binding_sha256"),
+        }:
+            raise CapabilityBindingError("active capability binding is outside the prepared migration frontier")
+    elif prior_binding_sha is not None and active.get("binding_sha256") != prior_binding_sha:
         raise CapabilityBindingError("active capability binding is not the completed migration frontier")
 
 
