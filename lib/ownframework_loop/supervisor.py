@@ -5086,6 +5086,11 @@ def _maybe_complete_semantic_artifact(
     unchanged; this function only short-circuits a subset of retryable
     failures that turn out to be a missing typed-artifact, not a missing
     engineering pass.
+
+    On success, this function also publishes the latest attempt's
+    `semantic_accepted` flag with the completed artifact's digest and the
+    candidate SHA so the downstream `_attempt_provenance_gate` recognizes
+    the zero-cost replay as the durable accepted artifact.
     """
     if not isinstance(work_order, dict):
         return False
@@ -5154,6 +5159,32 @@ def _maybe_complete_semantic_artifact(
     )
     if completed is None:
         return False
+
+    # Publish the completion's accepted identity so the downstream
+    # `_attempt_provenance_gate` recognizes the zero-cost replay as the
+    # durable accepted artifact rather than failing on the prior
+    # worker's unaccepted envelope.
+    completion_attempt_id = str(
+        conn.execute(
+            "SELECT latest_attempt_id FROM jobs WHERE id=?", (int(job_id),)
+        ).fetchone()["latest_attempt_id"] or ""
+    )
+    semantic_path = str(work_order.get("semantic_path") or "")
+    if completion_attempt_id and semantic_path and candidate_sha:
+        try:
+            _publish_semantic_acceptance(
+                conn,
+                job_id=int(job_id),
+                attempt_id=completion_attempt_id,
+                semantic_path=semantic_path,
+                candidate_sha=candidate_sha,
+            )
+        except Exception:
+            # Publication is best-effort here: the gate below will surface
+            # any persistent provenance mismatch as a structured replay
+            # rejection, leaving the run retryable rather than silently
+            # consuming the attempt.
+            pass
     return True
 
 
@@ -5307,6 +5338,11 @@ def run_one(*, db_path: Path | None = None, timeout_seconds: int = 0) -> dict[st
                     job_id=int(job["id"]),
                 )
                 if completed:
+                    # v0.9.9-h: completion also publishes the latest
+                    # attempt's `semantic_accepted` flag inside
+                    # `_maybe_complete_semantic_artifact` so the
+                    # provenance gate below recognizes the zero-cost
+                    # replay as the durable accepted artifact.
                     semantic_ready, semantic_reason = dispatch_mod.semantic_result_ready(work_order)
             if semantic_ready:
                 replay_attempt_id = str(job["latest_attempt_id"] or "")
