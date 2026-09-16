@@ -588,65 +588,72 @@ def migrate_run_binding(
             records.append(record)
             incomplete = []
 
-        if previous_sha == new_sha and previous.get("projection") == new_binding.get("projection"):
-            matching = next(
-                (
-                    r for r in records
-                    if r.get("status") in {"PREPARED", "COMPLETE"}
-                    and r.get("new_binding_sha256") == new_sha
-                ),
-                None,
+        prepared_records = [r for r in records if r.get("status") == "PREPARED"]
+        complete_records = [r for r in records if r.get("status") == "COMPLETE"]
+
+        if len(prepared_records) > 1:
+            raise CapabilityBindingError("multiple prepared capability migrations")
+
+        if len(prepared_records) == 1:
+            pending = prepared_records[0]
+            pending_previous_sha = str(pending.get("previous_binding_sha256") or "")
+            pending_new_sha = str(pending.get("new_binding_sha256") or "")
+            pending_new_doc = pending.get("new_binding")
+            # The pending frontier is the single recovery target. The operator
+            # request must land on the pending migration's new identity — the
+            # crash-after-switch retry case naturally reads active as the
+            # pending new, so the strict-previous edge equality would refuse a
+            # legitimate idempotent recovery. Match on the pending new only.
+            if not (
+                new_sha == pending_new_sha
+                or (
+                    previous_sha == pending_previous_sha
+                    and new_sha == pending_new_sha
+                )
+            ):
+                raise CapabilityBindingError(
+                    "prepared capability migration does not match requested authority edge"
+                )
+            record_path = (
+                history
+                / str(pending.get("migration_directory") or "")
+                / "RECORD.json"
             )
-            if matching is not None:
-                if matching.get("status") == "PREPARED":
-                    record_path = (
-                        history
-                        / str(matching.get("migration_directory") or "")
-                        / "RECORD.json"
-                    )
-                    matching = dict(matching)
-                    matching["status"] = "COMPLETE"
-                    matching["completed_at"] = utc_now_iso()
-                    matching.pop("migration_record_sha256", None)
-                    matching["migration_record_sha256"] = hashlib.sha256(
-                        _canonical(matching)
-                    ).hexdigest()
-                    _atomic_replace_json(record_path, matching)
-                return dict(matching, idempotent=True)
+            current = _read(active_path)
+            current_sha = str(current.get("binding_sha256") or "")
+            if current_sha == pending_previous_sha:
+                if not isinstance(pending_new_doc, dict):
+                    raise CapabilityBindingError("prepared capability migration new binding document missing")
+                _atomic_replace_json(active_path, pending_new_doc)
+            elif current_sha != pending_new_sha:
+                raise CapabilityBindingError(
+                    "pending capability migration found contradictory active binding"
+                )
+            body = dict(pending)
+            body["status"] = "COMPLETE"
+            body["completed_at"] = utc_now_iso()
+            body.pop("migration_record_sha256", None)
+            body["migration_record_sha256"] = hashlib.sha256(_canonical(body)).hexdigest()
+            _atomic_replace_json(record_path, body)
+            return dict(body, idempotent=True)
+
+        if previous_sha == new_sha and previous.get("projection") == new_binding.get("projection"):
+            latest_completed = _latest_complete_record(complete_records)
+            if (
+                latest_completed is not None
+                and str(latest_completed.get("new_binding_sha256") or "") == new_sha
+            ):
+                return dict(latest_completed, idempotent=True)
             raise CapabilityBindingError(
                 "active capability binding already has requested identity without migration evidence"
             )
 
-        for record in records:
-            if (
-                record.get("previous_binding_sha256") == previous_sha
-                and record.get("new_binding_sha256") == new_sha
-            ):
-                record_dir = history / str(record.get("migration_directory") or "")
-                record_path = record_dir / "RECORD.json"
-                current = _read(active_path)
-                if record.get("status") == "PREPARED":
-                    if current["binding_sha256"] == previous_sha:
-                        _atomic_replace_json(active_path, new_binding)
-                    elif current["binding_sha256"] != new_sha:
-                        raise CapabilityBindingError(
-                            "pending capability migration found contradictory active binding"
-                        )
-                    body = dict(record)
-                    body["status"] = "COMPLETE"
-                    body["completed_at"] = utc_now_iso()
-                    body.pop("migration_record_sha256", None)
-                    body["migration_record_sha256"] = hashlib.sha256(_canonical(body)).hexdigest()
-                    _atomic_replace_json(record_path, body)
-                    record = body
-                elif current["binding_sha256"] != new_sha:
-                    raise CapabilityBindingError(
-                        "completed capability migration is not the active binding"
-                    )
-                return dict(record, idempotent=True)
-
-        if any(r.get("status") == "PREPARED" for r in records):
-            raise CapabilityBindingError("another capability migration is pending recovery")
+        # Historical edge-match recovery is intentionally not consulted here:
+        # even if some older COMPLETE record carries the same previous->new
+        # edge, the current migration frontier requires a fresh sequence from
+        # the latest completed record. Arbitrary historical records are
+        # immutable evidence of prior transitions and must never block a
+        # legitimate repeated transition.
 
         latest = _latest_complete_record(records)
         sequence = max([int(r.get("migration_sequence") or 0) for r in records] or [0]) + 1

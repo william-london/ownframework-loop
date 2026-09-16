@@ -212,5 +212,208 @@ with tempfile.TemporaryDirectory(prefix="ofloop-v099-migration-") as td:
     )
     print("MULTIPLE_PREPARED=PASS")
 
+    # Historical migration records must not be mistaken for the current
+    # idempotent migration frontier merely because the same previous->new
+    # binding identities occur again later in the chain. The fix lives in
+    # CURRENT-frontier selection/recovery logic, not in the chain validator.
+    # Required regression: A -> B (seq 1), B -> A (seq 2), A -> B (seq 3).
+    # Sequence 3 must NOT reuse sequence 1's evidence, and must report
+    # idempotent=False.
+    cycle_repo = root / "cycle"
+    cycle_run_id = "run-cycle-regression"
+    (cycle_repo / ".ownframework-loop" / cycle_run_id).mkdir(parents=True)
+    cycle_a = capability_binding.ensure_run_binding(
+        cycle_repo, cycle_run_id, resolution("A"), PROFILE, allow_create=True
+    )
+    cycle_b = capability_binding.migrate_run_binding(
+        cycle_repo, cycle_run_id, resolution("B"), PROFILE,
+        reason="cycle-first", actor="test",
+    )
+    assert cycle_b["migration_sequence"] == 1 and cycle_b["idempotent"] is False, cycle_b
+    cycle_a2 = capability_binding.migrate_run_binding(
+        cycle_repo, cycle_run_id, resolution("A"), PROFILE,
+        reason="cycle-second", actor="test",
+    )
+    assert cycle_a2["migration_sequence"] == 2 and cycle_a2["idempotent"] is False, cycle_a2
+    cycle_b2 = capability_binding.migrate_run_binding(
+        cycle_repo, cycle_run_id, resolution("B"), PROFILE,
+        reason="cycle-third", actor="test",
+    )
+    assert cycle_b2["migration_sequence"] == 3, cycle_b2
+    assert cycle_b2["status"] == "COMPLETE", cycle_b2
+    assert cycle_b2["idempotent"] is False, cycle_b2
+    cycle_history = capability_binding.migration_root(cycle_repo, cycle_run_id)
+    cycle_dirs = sorted(cycle_history.glob("*/RECORD.json"))
+    assert len(cycle_dirs) == 3, [d.parent.name for d in cycle_dirs]
+    cycle_records = capability_binding._migration_records(cycle_repo, cycle_run_id)
+    assert [r["migration_sequence"] for r in cycle_records] == [1, 2, 3], [r["migration_sequence"] for r in cycle_records]
+    assert [r["previous_binding_sha256"] for r in cycle_records] == [
+        cycle_a["binding_sha256"],
+        cycle_b["new_binding_sha256"],
+        cycle_a2["new_binding_sha256"],
+    ]
+    assert [r["new_binding_sha256"] for r in cycle_records] == [
+        cycle_b["new_binding_sha256"],
+        cycle_a2["new_binding_sha256"],
+        cycle_b2["new_binding_sha256"],
+    ]
+    assert [r["prior_migration_record_sha256"] for r in cycle_records] == [
+        None,
+        cycle_b["migration_record_sha256"],
+        cycle_a2["migration_record_sha256"],
+    ]
+    assert (
+        capability_binding._read(capability_binding.binding_path(cycle_repo, cycle_run_id))["binding_sha256"]
+        == cycle_b2["new_binding_sha256"]
+    )
+    print("CYCLE_TEST=PASS")
+
+    # After migration 3 (A -> B COMPLETE), an idempotent re-request of the
+    # same migration must NOT create sequence 4, must NOT create a new
+    # directory, and must identify the CURRENT latest completed frontier
+    # (sequence 3), not historical sequence 1.
+    cycle_retry = capability_binding.migrate_run_binding(
+        cycle_repo, cycle_run_id, resolution("B"), PROFILE,
+        reason="cycle-third-retry", actor="test",
+    )
+    assert cycle_retry["idempotent"] is True, cycle_retry
+    assert cycle_retry["migration_sequence"] == 3, cycle_retry
+    cycle_records = capability_binding._migration_records(cycle_repo, cycle_run_id)
+    assert len(cycle_records) == 3, len(cycle_records)
+    print("LATEST_IDEMPOTENCE_TEST=PASS")
+
+    # Continue cycling so the regression proves a one-off patch that only
+    # permits a single repeated edge would have failed.
+    cycle_a3 = capability_binding.migrate_run_binding(
+        cycle_repo, cycle_run_id, resolution("A"), PROFILE,
+        reason="cycle-fourth", actor="test",
+    )
+    assert cycle_a3["migration_sequence"] == 4 and cycle_a3["idempotent"] is False, cycle_a3
+    cycle_b3 = capability_binding.migrate_run_binding(
+        cycle_repo, cycle_run_id, resolution("B"), PROFILE,
+        reason="cycle-fifth", actor="test",
+    )
+    assert cycle_b3["migration_sequence"] == 5 and cycle_b3["idempotent"] is False, cycle_b3
+    cycle_records = capability_binding._migration_records(cycle_repo, cycle_run_id)
+    assert len(cycle_records) == 5
+    assert [r["migration_sequence"] for r in cycle_records] == [1, 2, 3, 4, 5]
+    print("REPEATED_CYCLE_TEST=PASS")
+
+    # PREPARED recovery still wins when a historical edge repeats: build
+    # A -> B (seq 1 COMPLETE), B -> A (seq 2 COMPLETE), then arrange a
+    # PREPARED A -> B that crashes after the active switch. Retry recovers
+    # the pending frontier as sequence 3, never historical sequence 1.
+    pre_repo = root / "prepared-pre"
+    pre_run_id = "run-prepared-pre"
+    (pre_repo / ".ownframework-loop" / pre_run_id).mkdir(parents=True)
+    pre_a = capability_binding.ensure_run_binding(
+        pre_repo, pre_run_id, resolution("A"), PROFILE, allow_create=True
+    )
+    pre_b = capability_binding.migrate_run_binding(
+        pre_repo, pre_run_id, resolution("B"), PROFILE, reason="pre-first", actor="test"
+    )
+    pre_a_back = capability_binding.migrate_run_binding(
+        pre_repo, pre_run_id, resolution("A"), PROFILE, reason="pre-second", actor="test"
+    )
+    assert pre_a_back["migration_sequence"] == 2 and pre_a_back["idempotent"] is False, pre_a_back
+    real_replace = capability_binding._atomic_replace_json
+
+    def crash_after_pre_switch(path: Path, payload: dict) -> None:
+        if (
+            path.name == "RECORD.json"
+            and payload.get("status") == "COMPLETE"
+            and int(payload.get("migration_sequence") or 0) == 3
+        ):
+            raise RuntimeError("synthetic crash after third migration switch")
+        real_replace(path, payload)
+
+    capability_binding._atomic_replace_json = crash_after_pre_switch
+    try:
+        try:
+            capability_binding.migrate_run_binding(
+                pre_repo, pre_run_id, resolution("B"), PROFILE,
+                reason="pre-third", actor="test",
+            )
+        except RuntimeError as exc:
+            assert str(exc) == "synthetic crash after third migration switch"
+        else:
+            raise AssertionError("third post-switch crash was not injected")
+    finally:
+        capability_binding._atomic_replace_json = real_replace
+
+    pre_records = capability_binding._migration_records(pre_repo, pre_run_id)
+    assert [r["status"] for r in pre_records] == ["COMPLETE", "COMPLETE", "PREPARED"], pre_records
+    pre_recovered = capability_binding.migrate_run_binding(
+        pre_repo, pre_run_id, resolution("B"), PROFILE,
+        reason="pre-third-retry", actor="test",
+    )
+    assert pre_recovered["status"] == "COMPLETE", pre_recovered
+    assert pre_recovered["migration_sequence"] == 3, pre_recovered
+    assert pre_recovered["idempotent"] is True, pre_recovered
+    pre_records = capability_binding._migration_records(pre_repo, pre_run_id)
+    assert len(pre_records) == 3, len(pre_records)
+    assert all(r["status"] == "COMPLETE" for r in pre_records), pre_records
+    print("PREPARED_REPEATED_EDGE_PRE_SWITCH=PASS")
+
+    # Same fixture but the crash occurs after the active switch has already
+    # moved to B; retry recovers the pending frontier as sequence 3.
+    post_repo = root / "prepared-post"
+    post_run_id = "run-prepared-post"
+    (post_repo / ".ownframework-loop" / post_run_id).mkdir(parents=True)
+    post_a = capability_binding.ensure_run_binding(
+        post_repo, post_run_id, resolution("A"), PROFILE, allow_create=True
+    )
+    post_b = capability_binding.migrate_run_binding(
+        post_repo, post_run_id, resolution("B"), PROFILE, reason="post-first", actor="test"
+    )
+    post_a_back = capability_binding.migrate_run_binding(
+        post_repo, post_run_id, resolution("A"), PROFILE, reason="post-second", actor="test"
+    )
+    assert post_a_back["migration_sequence"] == 2 and post_a_back["idempotent"] is False, post_a_back
+    real_replace = capability_binding._atomic_replace_json
+
+    def crash_after_post_switch(path: Path, payload: dict) -> None:
+        if (
+            path.name == "RECORD.json"
+            and payload.get("status") == "COMPLETE"
+            and int(payload.get("migration_sequence") or 0) == 3
+        ):
+            raise RuntimeError("synthetic crash after third post migration switch")
+        real_replace(path, payload)
+
+    capability_binding._atomic_replace_json = crash_after_post_switch
+    try:
+        try:
+            capability_binding.migrate_run_binding(
+                post_repo, post_run_id, resolution("B"), PROFILE,
+                reason="post-third", actor="test",
+            )
+        except RuntimeError as exc:
+            assert str(exc) == "synthetic crash after third post migration switch"
+        else:
+            raise AssertionError("third post-switch crash was not injected")
+    finally:
+        capability_binding._atomic_replace_json = real_replace
+
+    post_active = capability_binding._read(capability_binding.binding_path(post_repo, post_run_id))
+    # Crash-after-switch: active is already the new binding B even though
+    # the RECORD.json COMPLETE marker was never written.
+    post_expected_binding = capability_binding._binding_document(
+        post_run_id,
+        capability_binding.stable_projection(resolution("B"), PROFILE),
+    )
+    assert post_active["binding_sha256"] == post_expected_binding["binding_sha256"]
+    post_recovered = capability_binding.migrate_run_binding(
+        post_repo, post_run_id, resolution("B"), PROFILE,
+        reason="post-third-retry", actor="test",
+    )
+    assert post_recovered["status"] == "COMPLETE", post_recovered
+    assert post_recovered["migration_sequence"] == 3, post_recovered
+    assert post_recovered["idempotent"] is True, post_recovered
+    post_records = capability_binding._migration_records(post_repo, post_run_id)
+    assert len(post_records) == 3, len(post_records)
+    assert all(r["status"] == "COMPLETE" for r in post_records), post_records
+    print("PREPARED_REPEATED_EDGE_POST_SWITCH=PASS")
+
 print("OF_LOOP_V099_CAPABILITY_BINDING_MULTI_MIGRATION=PASS")
 PY
