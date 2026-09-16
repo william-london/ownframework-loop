@@ -109,6 +109,18 @@ def _candidate_branch_contains(canonical_repo: Path, candidate_branch: str, cand
     return r.returncode == 0
 
 
+def _strict_ceiling(top: int, program_ceiling: int) -> int:
+    """Return the stricter of two ceilings; 0 means 'not declared'.
+
+    When both are declared the effective envelope is min(top, program_ceiling)
+    so neither approved limit can silently widen the source envelope. When
+    only one side is declared, that declared value is the strict envelope.
+    """
+    if top and program_ceiling:
+        return min(int(top), int(program_ceiling))
+    return int(top or program_ceiling or 0)
+
+
 def _ancestor_of(canonical_repo: Path, candidate_sha: str, baseline_sha: str) -> bool:
     """Return True iff candidate_sha is a descendant of baseline_sha."""
     r = util.run_subprocess(
@@ -323,27 +335,56 @@ def finalize_build(
     changed_paths = _changed_paths_between(builder_wt, baseline_sha, candidate_sha)
     stats = _diff_stats(builder_wt, baseline_sha, candidate_sha)
 
-    # 11. Budget check.
+    # 11. Top-level risk-budget source-size envelope.
+    #
+    # In SINGLE mode this is the only authoritative source envelope and an
+    # over-budget candidate must fail-closed here as the historical contract
+    # requires.
+    #
+    # In PROGRAM mode the absolute PROGRAM source-accounting path (block 11b)
+    # is the authoritative owner of source-size adjudication. The frozen
+    # effective envelope is the stricter of this top-level limit and the
+    # packet's `global_source_ceilings` — neither approved limit may silently
+    # widen the envelope. A PROGRAM-mode over-budget candidate therefore
+    # falls through to the structured `program_source_check` and gets the
+    # deterministic BLOCKED evidence path instead of escaping as an opaque
+    # RuntimeError that the supervisor auto-quarantines.
     budget = (meta.get("risk_budget") or {})
-    max_files = int(budget.get("max_files_changed") or 0)
-    max_lines = int(budget.get("max_diff_lines") or 0)
-    if max_files and stats["files_changed"] > max_files:
-        raise RuntimeError(
-            f"files_changed={stats['files_changed']} exceeds budget max_files_changed={max_files}"
+    max_files_top = int(budget.get("max_files_changed") or 0)
+    max_lines_top = int(budget.get("max_diff_lines") or 0)
+    program_mode = state_mod.is_program_state(state)
+    top_level_breach: str | None = None
+    if max_files_top and stats["files_changed"] > max_files_top:
+        msg = (
+            f"files_changed={stats['files_changed']} exceeds top-level "
+            f"risk_budget max_files_changed={max_files_top}"
         )
-    if max_lines and (stats["added_lines"] + stats["removed_lines"]) > max_lines:
-        raise RuntimeError(
-            f"diff_lines={stats['added_lines'] + stats['removed_lines']} exceeds budget max_diff_lines={max_lines}"
+        if program_mode:
+            top_level_breach = top_level_breach or msg
+        else:
+            raise RuntimeError(msg)
+    if max_lines_top and (stats["added_lines"] + stats["removed_lines"]) > max_lines_top:
+        msg = (
+            f"diff_lines={stats['added_lines'] + stats['removed_lines']} "
+            f"exceeds top-level risk_budget max_diff_lines={max_lines_top}"
         )
-    budget_ok, budget_violations = util.budget_within_ceiling({
-        "max_files_changed": max_files,
-        "max_diff_lines": max_lines,
-        "max_repair_rounds": int(budget.get("max_repair_rounds") or 0),
-    })
-    if not budget_ok:
-        raise RuntimeError("budget over absolute ceiling: " + "; ".join(budget_violations))
+        if program_mode:
+            top_level_breach = top_level_breach or msg
+        else:
+            raise RuntimeError(msg)
 
-    # 11b. PROGRAM global source ceilings.
+    if not program_mode:
+        budget_ok, budget_violations = util.budget_within_ceiling({
+            "max_files_changed": max_files_top,
+            "max_diff_lines": max_lines_top,
+            "max_repair_rounds": int(budget.get("max_repair_rounds") or 0),
+        })
+        if not budget_ok:
+            raise RuntimeError("budget over absolute ceiling: " + "; ".join(budget_violations))
+
+    # 11b. PROGRAM global source ceilings — also owns top-level source-size
+    # adjudication in PROGRAM mode so a frozen source-budget breach produces
+    # deterministic BLOCKED evidence rather than an opaque RuntimeError.
     #
     # The packet-bound ceilings (max_unique_changed_files /
     # max_baseline_to_final_diff_lines) are declared in unique-file,
@@ -358,6 +399,15 @@ def finalize_build(
     if state_mod.is_program_state(state):
         prog = state.get("program") or {}
         ceilings = prog.get("cumulative_ceilings") or {}
+        program_max_files = int(ceilings.get("max_unique_changed_files") or 0)
+        program_max_lines = int(ceilings.get("max_baseline_to_final_diff_lines") or 0)
+
+        # Strict envelope = whichever of the two approved limits is smaller;
+        # a 0 means 'not declared' on that side, in which case the declared
+        # value stands alone and the effective value mirrors it.
+        effective_max_files = _strict_ceiling(max_files_top, program_max_files)
+        effective_max_lines = _strict_ceiling(max_lines_top, program_max_lines)
+
         unique_files = int(stats["files_changed"])
         diff_line_total = int(stats["added_lines"]) + int(stats["removed_lines"])
         try:
@@ -366,17 +416,36 @@ def finalize_build(
                 files_changed_unique=unique_files,
                 diff_lines_total=diff_line_total,
             )
-            program_source_breach = ""
+            program_ceiling_breach = ""
         except program_mod.ProgramStateError as exc:
-            program_source_breach = str(exc)
+            program_ceiling_breach = str(exc)
+
+        breach_messages: list[str] = []
+        if program_ceiling_breach:
+            breach_messages.append(program_ceiling_breach)
+        if top_level_breach:
+            breach_messages.append(top_level_breach)
+        if effective_max_files and unique_files > effective_max_files:
+            breach_messages.append(
+                f"effective file cap exceeded: {unique_files}/{effective_max_files}"
+            )
+        if effective_max_lines and diff_line_total > effective_max_lines:
+            breach_messages.append(
+                f"effective diff-lines cap exceeded: {diff_line_total}/{effective_max_lines}"
+            )
+
         program_source_check = {
-            "result": "fail" if program_source_breach else "pass",
+            "result": "fail" if breach_messages else "pass",
             "accounting": "absolute_baseline_to_candidate",
             "files_changed_unique": unique_files,
             "diff_lines_total": diff_line_total,
-            "max_unique_changed_files": int(ceilings.get("max_unique_changed_files") or 0),
-            "max_baseline_to_final_diff_lines": int(ceilings.get("max_baseline_to_final_diff_lines") or 0),
-            "breach": program_source_breach,
+            "top_level_risk_max_files_changed": max_files_top,
+            "top_level_risk_max_diff_lines": max_lines_top,
+            "program_max_unique_changed_files": program_max_files,
+            "program_max_baseline_to_final_diff_lines": program_max_lines,
+            "effective_max_files_changed": effective_max_files,
+            "effective_max_diff_lines": effective_max_lines,
+            "breach": "; ".join(breach_messages),
         }
 
     # 12. Scope & 13. protected/elevated path checks.
@@ -503,23 +572,46 @@ def finalize_build(
                 if state_mod.is_program_state(state):
                     prog = state.get("program") or {}
                     ceilings = prog.get("cumulative_ceilings") or {}
+                    program_max_files = int(ceilings.get("max_unique_changed_files") or 0)
+                    program_max_lines = int(ceilings.get("max_baseline_to_final_diff_lines") or 0)
+                    effective_max_files = _strict_ceiling(max_files_top, program_max_files)
+                    effective_max_lines = _strict_ceiling(max_lines_top, program_max_lines)
+                    unique_files = int(stats["files_changed"])
+                    diff_line_total = int(stats["added_lines"]) + int(stats["removed_lines"])
                     try:
                         program_mod.record_source_accounting(
                             prog,
-                            files_changed_unique=int(stats["files_changed"]),
-                            diff_lines_total=int(stats["added_lines"]) + int(stats["removed_lines"]),
+                            files_changed_unique=unique_files,
+                            diff_lines_total=diff_line_total,
                         )
                         breach = ""
                     except program_mod.ProgramStateError as exc:
                         breach = str(exc)
+                    breach_messages: list[str] = []
+                    if breach:
+                        breach_messages.append(breach)
+                    if top_level_breach:
+                        breach_messages.append(top_level_breach)
+                    if effective_max_files and unique_files > effective_max_files:
+                        breach_messages.append(
+                            f"effective file cap exceeded: {unique_files}/{effective_max_files}"
+                        )
+                    if effective_max_lines and diff_line_total > effective_max_lines:
+                        breach_messages.append(
+                            f"effective diff-lines cap exceeded: {diff_line_total}/{effective_max_lines}"
+                        )
                     program_source_check = {
-                        "result": "fail" if breach else "pass",
+                        "result": "fail" if breach_messages else "pass",
                         "accounting": "absolute_baseline_to_candidate",
-                        "files_changed_unique": int(stats["files_changed"]),
-                        "diff_lines_total": int(stats["added_lines"]) + int(stats["removed_lines"]),
-                        "max_unique_changed_files": int(ceilings.get("max_unique_changed_files") or 0),
-                        "max_baseline_to_final_diff_lines": int(ceilings.get("max_baseline_to_final_diff_lines") or 0),
-                        "breach": breach,
+                        "files_changed_unique": unique_files,
+                        "diff_lines_total": diff_line_total,
+                        "top_level_risk_max_files_changed": max_files_top,
+                        "top_level_risk_max_diff_lines": max_lines_top,
+                        "program_max_unique_changed_files": program_max_files,
+                        "program_max_baseline_to_final_diff_lines": program_max_lines,
+                        "effective_max_files_changed": effective_max_files,
+                        "effective_max_diff_lines": effective_max_lines,
+                        "breach": "; ".join(breach_messages),
                     }
             except protected_recovery.ProtectedDriftRecoveryError as exc:
                 # The original protected finding remains authoritative.  A

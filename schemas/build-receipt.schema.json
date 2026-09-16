@@ -435,6 +435,30 @@
           "type": "integer",
           "minimum": 0
         },
+        "top_level_risk_max_files_changed": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "top_level_risk_max_diff_lines": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "program_max_unique_changed_files": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "program_max_baseline_to_final_diff_lines": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "effective_max_files_changed": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "effective_max_diff_lines": {
+          "type": "integer",
+          "minimum": 0
+        },
         "breach": {
           "type": "string"
         }
