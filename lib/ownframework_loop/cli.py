@@ -1933,6 +1933,11 @@ def _build_parser() -> argparse.ArgumentParser:
         kwargs["reset_execution_started_at"] = bool(
             getattr(args, "reset_execution_clock", False)
         )
+        kwargs["rebind_capabilities"] = bool(
+            getattr(args, "rebind_capabilities", False)
+        )
+        if getattr(args, "capability_migration_reason", None):
+            kwargs["capability_migration_reason"] = args.capability_migration_reason
         out = supervisor_mod.resume(
             canonical_repo=repo,
             run_id=args.run_id,
@@ -2084,6 +2089,14 @@ def _build_parser() -> argparse.ArgumentParser:
     s_res.add_argument(
         "--keep-execution-clock", action="store_true",
         help="deprecated no-op: preserving the wall-clock origin is now the default",
+    )
+    s_res.add_argument(
+        "--rebind-capabilities", action="store_true",
+        help="explicitly migrate sealed capability authority before resuming a quarantined run",
+    )
+    s_res.add_argument(
+        "--capability-migration-reason", default=None,
+        help="operator reason recorded in capability migration evidence",
     )
     s_res.set_defaults(func=cmd_supervisor_resume)
     s_cont = sup_sub.add_parser(

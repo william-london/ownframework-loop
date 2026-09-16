@@ -147,6 +147,19 @@ are intentionally excluded. Tool/manifest/profile/network/privileged evidence
 drift fails operationally before a model call and never silently rebinds an
 existing run.
 
+For an unfinished run that is deliberately quarantined because the trusted host
+capability identity changed, the only supported recovery is the explicit
+operator action `ofloop supervisor resume <repo> <run-id>
+--rebind-capabilities`. It requires a dead, unambiguous worker, a valid packet
+and approval, and a newly runtime-proven capability resolution. The migration
+publishes immutable old/new binding snapshots and an auditable migration record
+before replacing the active binding. It does not change engineering state,
+candidate identity, pass or repair counters, or cost/token accounting. Accepted
+semantic artifacts retain their original capability receipt provenance and may
+be replayed only after their existing identity gates pass. Ordinary `resume`
+without the explicit flag remains strict and never silently rebinds capability
+authority. Runtime-generation migration remains a separate supervisor concern.
+
 ## Reviewer cache isolation
 
 Builder package caches are durable but repository-scoped. Reviewers use

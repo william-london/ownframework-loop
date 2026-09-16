@@ -1881,6 +1881,7 @@ def _attempt_provenance_gate(
             str(job["run_id"]),
             role,
             attempt_id,
+            allow_historical_binding=True,
         )
     except capabilities_mod.CapabilityResolutionError:
         return False, "semantic_replay_capability_receipt_invalid", None
@@ -5827,6 +5828,100 @@ def serve(
                 time.sleep(max(0.1, min(float(poll_seconds), 1.0)))
 
 
+def _migrate_quarantined_run_capabilities(
+    *,
+    canonical_repo: Path,
+    run_id: str,
+    existing: sqlite3.Row,
+    reason: str,
+    actor: str,
+) -> dict[str, Any]:
+    """Resolve and explicitly migrate one quarantined run's capabilities."""
+    if str(existing["status"] or "") != "QUARANTINED":
+        raise RuntimeError("capability migration requires QUARANTINED enrollment")
+    if existing["worker_pid"]:
+        if _pid_alive(
+            int(existing["worker_pid"]),
+            float(existing["worker_started_at"])
+            if existing["worker_started_at"] is not None else None,
+        ):
+            raise RuntimeError("capability migration refused while semantic worker is live")
+        if not existing["worker_start_identity"] or existing["worker_started_at"] is None:
+            raise RuntimeError("capability migration refused for ambiguous worker identity")
+
+    repo_path = canonical_repo.resolve(strict=False)
+    current_state = state_mod.load_verified(repo_path, run_id)
+    if transitions.is_terminal(str(current_state.get("state") or "")):
+        raise RuntimeError("capability migration refused for terminal engineering state")
+
+    packet_path = state_mod.run_dir(repo_path, run_id) / "WORK_PACKET.md"
+    packet_meta, _ = packet_mod.parse_packet_file(packet_path)
+    packet_errors = packet_mod.validate_packet_for_approval(packet_meta)
+    if packet_errors:
+        raise RuntimeError("packet authority invalid: " + "; ".join(packet_errors))
+    approval_doc = approval_mod.load_approval(repo_path, run_id)
+    approval_ok, approval_reason = approval_mod.validate_approval_binding(
+        canonical_repo=repo_path,
+        run_id=run_id,
+        approval=approval_doc,
+        packet=packet_meta,
+        packet_path=packet_path,
+    )
+    if not approval_ok:
+        raise RuntimeError("approval authority invalid: " + approval_reason)
+
+    requested = packet_meta.get("capabilities")
+    if not isinstance(requested, list) or not all(isinstance(item, str) for item in requested):
+        raise RuntimeError("packet capability authority is malformed")
+    runner_name = str(existing["runner"] or "")
+    runner_impl = _runner(runner_name)
+    provider = str(getattr(runner_impl, "runner_id", runner_name))
+    profile = runner_profiles_mod.resolve_profile(
+        str(packet_meta.get("runner_profile") or "default"),
+        provider=provider,
+    )
+    runner_profiles_mod.verify_profile_integrity(profile)
+    attestation = runner_profiles_mod.verify_effort_attestation(profile)
+    if attestation is not None:
+        profile = dict(profile)
+        profile["effort_attestation"] = attestation
+
+    resolution = capabilities_mod.resolve_capabilities(
+        [str(item) for item in requested],
+        canonical_repo=repo_path,
+        role="reviewer",
+        repo_cache_root=runtime_env.repo_tool_cache_dir(repo_path),
+        ephemeral_cache_root=(
+            runtime_env.runtime_cache_dir(repo_path, run_id, "validation")
+            / "capability-cache"
+        ),
+        packet_network_allowlist=[
+            str(item) for item in (packet_meta.get("network_read_allowlist") or [])
+        ],
+    )
+    capability_binding_mod._assert_runtime_ready_resolution(resolution, requested)
+    program = current_state.get("program") or {}
+    checkpoints = program.get("current_checkpoints") or []
+    context = {
+        "runtime_generation": str(existing["runtime_generation"] or ""),
+        "engineering_state": str(current_state.get("state") or ""),
+        "checkpoint": str(checkpoints[0]) if checkpoints else "",
+        "supervisor_job_id": int(existing["id"]),
+        "packet_sha256": util.sha256_text(packet_path.read_text(encoding="utf-8")),
+        "approval_sha256": approval_mod.approval_artifact_sha256(approval_doc or {}),
+    }
+    return capability_binding_mod.migrate_run_binding(
+        repo_path,
+        run_id,
+        resolution,
+        profile,
+        reason=reason,
+        actor=actor,
+        context=context,
+        requested_capabilities=requested,
+    )
+
+
 __all__ = [
     "SCHEMA",
     "ClaudeCodeRunner",
@@ -5864,6 +5959,9 @@ def resume(
     max_total_tokens: int | None = None,
     max_wall_seconds: int | None = None,
     reset_execution_started_at: bool = False,
+    rebind_capabilities: bool = False,
+    capability_migration_reason: str = "explicit operator recovery from trusted capability drift",
+    capability_migration_actor: str = "operator",
 ) -> dict[str, Any]:
     """Clear operational quarantine and reset operational counters only.
 
@@ -5885,6 +5983,11 @@ def resume(
     run was quarantined on the generation mismatch, the operator inspects
     and resumes, and the run continues under the new generation with the
     rebinding recorded. The previous binding is reported in the result.
+
+    Capability migration is separate and opt-in through
+    ``rebind_capabilities=True``. It validates and records the new trusted
+    capability authority before this operational resume transaction; ordinary
+    resume never silently changes capability binding.
 
     Returns the updated job dict (or NOT_ENQUEUED).
     """
@@ -5940,6 +6043,26 @@ def resume(
             "reason": "quarantined_worker_still_alive",
         })
         return result
+
+    migration = None
+    if rebind_capabilities:
+        try:
+            migration = _migrate_quarantined_run_capabilities(
+                canonical_repo=canonical_repo,
+                run_id=run_id,
+                existing=existing,
+                reason=capability_migration_reason,
+                actor=capability_migration_actor,
+            )
+        except Exception as exc:  # deterministic refusal; no supervisor write yet
+            result = _job_dict(existing, db)
+            result.update({
+                "ok": False,
+                "resumed": False,
+                "reason": "capability_rebind_refused",
+                "error": str(exc),
+            })
+            return result
 
     sets = [
         "status='QUEUED'",
@@ -6028,6 +6151,8 @@ def resume(
     result = _job_dict(row, db)
     result["resumed"] = True
     result["runtime_generation_previous"] = previous_generation
+    if migration is not None:
+        result["capability_migration"] = migration
     return result
 
 

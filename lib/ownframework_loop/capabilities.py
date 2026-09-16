@@ -1290,6 +1290,8 @@ def read_resolution_receipt(
     run_id: str,
     role: str,
     attempt_id: str,
+    *,
+    allow_historical_binding: bool = False,
 ) -> dict[str, Any]:
     """Read one immutable launch receipt and prove it matches the run binding."""
     path = resolution_receipt_path(canonical_repo, run_id, role, attempt_id)
@@ -1326,8 +1328,18 @@ def read_resolution_receipt(
         raise CapabilityResolutionError(
             f"capability receipt cannot verify run binding: {exc}"
         ) from exc
-    if payload.get("run_binding_sha256") != binding.get("binding_sha256"):
-        raise CapabilityResolutionError("capability receipt run-binding digest mismatch")
+    receipt_binding_sha = str(payload.get("run_binding_sha256") or "")
+    if receipt_binding_sha != binding.get("binding_sha256"):
+        if not allow_historical_binding:
+            raise CapabilityResolutionError("capability receipt run-binding digest mismatch")
+        try:
+            binding = _binding_mod.historical_binding(
+                canonical_repo, run_id, receipt_binding_sha
+            )
+        except _binding_mod.CapabilityBindingError as exc:
+            raise CapabilityResolutionError(
+                "capability receipt historical run-binding digest is not preserved"
+            ) from exc
     projection = _binding_mod.stable_projection(payload, requested_profile)
     if projection != binding.get("projection"):
         raise CapabilityResolutionError(

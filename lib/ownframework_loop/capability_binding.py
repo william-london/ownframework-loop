@@ -8,8 +8,13 @@ import stat
 import uuid
 from typing import Any
 
+from .locking import flock_exclusive
+from .util import fsync_dir, utc_now_iso
+
 SCHEMA = "ownframework-loop-capability-binding/v1"
 PROJECTION_REVISION = "capability-binding-projection/v3"
+MIGRATION_SCHEMA = "ownframework-loop-capability-binding-migration/v1"
+MIGRATION_DIRNAME = "CAPABILITY_BINDING_MIGRATIONS"
 
 
 class CapabilityBindingError(RuntimeError):
@@ -27,6 +32,17 @@ def binding_path(canonical_repo: Path, run_id: str) -> Path:
     from . import state as _state_mod
     _state_mod.validate_run_id(run_id)
     return canonical_repo.resolve(strict=False) / ".ownframework-loop" / run_id / "CAPABILITY_BINDING.json"
+
+
+def migration_root(canonical_repo: Path, run_id: str) -> Path:
+    from . import state as _state_mod
+    _state_mod.validate_run_id(run_id)
+    return (
+        canonical_repo.resolve(strict=False)
+        / ".ownframework-loop"
+        / run_id
+        / MIGRATION_DIRNAME
+    )
 
 
 def stable_projection(resolution: dict[str, Any], runner_profile: dict[str, Any]) -> dict[str, Any]:
@@ -65,6 +81,19 @@ def stable_projection(resolution: dict[str, Any], runner_profile: dict[str, Any]
     }
 
 
+def _validate_document(doc: Any, *, run_id: str | None = None) -> dict[str, Any]:
+    if not isinstance(doc, dict):
+        raise CapabilityBindingError("capability binding must be an object")
+    projection = doc.get("projection")
+    if doc.get("schema") != SCHEMA or not isinstance(projection, dict):
+        raise CapabilityBindingError("capability binding schema/projection mismatch")
+    if run_id is not None and doc.get("run_id") != run_id:
+        raise CapabilityBindingError("capability binding run_id mismatch")
+    if doc.get("binding_sha256") != hashlib.sha256(_canonical(projection)).hexdigest():
+        raise CapabilityBindingError("capability binding digest mismatch")
+    return doc
+
+
 def _read(path: Path) -> dict[str, Any]:
     if path.is_symlink():
         raise CapabilityBindingError("capability binding must not be a symlink")
@@ -88,12 +117,7 @@ def _read(path: Path) -> dict[str, Any]:
         doc = json.loads(path.read_text())
     except (OSError, json.JSONDecodeError) as exc:
         raise CapabilityBindingError(f"capability binding corrupt: {exc}") from exc
-    projection = doc.get("projection") if isinstance(doc, dict) else None
-    if doc.get("schema") != SCHEMA or not isinstance(projection, dict):
-        raise CapabilityBindingError("capability binding schema/projection mismatch")
-    if doc.get("binding_sha256") != hashlib.sha256(_canonical(projection)).hexdigest():
-        raise CapabilityBindingError("capability binding digest mismatch")
-    return doc
+    return _validate_document(doc)
 
 
 def _publish_complete_no_replace(path: Path, encoded: str) -> bool:
@@ -123,6 +147,119 @@ def _publish_complete_no_replace(path: Path, encoded: str) -> bool:
             tmp.unlink()
         except FileNotFoundError:
             pass
+
+
+def _atomic_replace_json(path: Path, payload: dict[str, Any]) -> None:
+    """Atomically replace one private JSON authority file."""
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    try:
+        os.chmod(path.parent, 0o700)
+    except OSError:
+        pass
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+    fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        encoded = json.dumps(payload, indent=2, sort_keys=True) + "\n"
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(encoded)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
+        fsync_dir(path.parent)
+    finally:
+        try:
+            tmp.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def _publish_json_no_replace(path: Path, payload: dict[str, Any]) -> bool:
+    encoded = json.dumps(payload, indent=2, sort_keys=True) + "\n"
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    try:
+        os.chmod(path.parent, 0o700)
+    except OSError:
+        pass
+    return _publish_complete_no_replace(path, encoded)
+
+
+def _binding_document(run_id: str, projection: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "schema": SCHEMA,
+        "run_id": run_id,
+        "projection": projection,
+        "binding_sha256": hashlib.sha256(_canonical(projection)).hexdigest(),
+    }
+
+
+def _read_migration_record(path: Path, *, run_id: str) -> dict[str, Any]:
+    if path.is_symlink() or not path.is_file():
+        raise CapabilityBindingError("capability migration record missing or symlinked")
+    try:
+        doc = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise CapabilityBindingError("capability migration record unreadable") from exc
+    if not isinstance(doc, dict) or doc.get("schema") != MIGRATION_SCHEMA:
+        raise CapabilityBindingError("capability migration record schema mismatch")
+    if doc.get("run_id") != run_id:
+        raise CapabilityBindingError("capability migration record run_id mismatch")
+    record_digest = str(doc.get("migration_record_sha256") or "")
+    body = dict(doc)
+    body.pop("migration_record_sha256", None)
+    if record_digest != hashlib.sha256(_canonical(body)).hexdigest():
+        raise CapabilityBindingError("capability migration record digest mismatch")
+    _validate_document(doc.get("previous_binding"), run_id=run_id)
+    _validate_document(doc.get("new_binding"), run_id=run_id)
+    if doc.get("status") not in {"PREPARED", "COMPLETE"}:
+        raise CapabilityBindingError("capability migration record status invalid")
+    return doc
+
+
+def _migration_records(canonical_repo: Path, run_id: str) -> list[dict[str, Any]]:
+    root = migration_root(canonical_repo, run_id)
+    if not root.exists():
+        return []
+    records: list[dict[str, Any]] = []
+    for child in sorted(root.iterdir()):
+        if not child.is_dir():
+            continue
+        record_path = child / "RECORD.json"
+        if record_path.exists():
+            records.append(_read_migration_record(record_path, run_id=run_id))
+    return records
+
+
+def _latest_complete_record(records: list[dict[str, Any]]) -> dict[str, Any] | None:
+    complete = [r for r in records if r.get("status") == "COMPLETE"]
+    if not complete:
+        return None
+    return max(complete, key=lambda r: int(r.get("migration_sequence") or 0))
+
+
+def _assert_runtime_ready_resolution(
+    resolution: dict[str, Any],
+    requested_capabilities: list[str] | None = None,
+) -> None:
+    requested = list(resolution.get("requested") or [])
+    if requested_capabilities is not None and requested != list(requested_capabilities):
+        raise CapabilityBindingError("current capability set differs from sealed packet authority")
+    resolved = resolution.get("resolved") or []
+    names = [str(item.get("name") or "") for item in resolved if isinstance(item, dict)]
+    if names != requested:
+        raise CapabilityBindingError("current capability resolution is incomplete or reordered")
+    for item in resolved:
+        if not isinstance(item, dict):
+            raise CapabilityBindingError("current capability resolution contains a malformed item")
+        if item.get("privileged") and not item.get("commissioning_evidence_sha256"):
+            raise CapabilityBindingError("privileged capability lacks commissioned evidence")
+        if item.get("kind") == "browser":
+            browser = item.get("browser") or {}
+            if browser.get("runtime_proven") is not True:
+                raise CapabilityBindingError("new browser capability is not runtime-proven")
 
 
 def ensure_run_binding(
@@ -163,6 +300,194 @@ def ensure_run_binding(
     return existing
 
 
+def migrate_run_binding(
+    canonical_repo: Path,
+    run_id: str,
+    resolution: dict[str, Any],
+    runner_profile: dict[str, Any],
+    *,
+    reason: str,
+    actor: str,
+    context: dict[str, Any] | None = None,
+    requested_capabilities: list[str] | None = None,
+) -> dict[str, Any]:
+    """Explicitly migrate a run's trusted capability authority.
+
+    A prepared migration record and complete old/new snapshots are durable
+    before the active binding is replaced. Retrying recovers a prepared
+    switch or returns the completed record without creating a duplicate.
+    Engineering state and accounting are intentionally outside this module.
+    """
+    from . import state as _state_mod
+    _state_mod.validate_run_id(run_id)
+    _assert_runtime_ready_resolution(resolution, requested_capabilities)
+    if not isinstance(reason, str) or not reason.strip():
+        raise CapabilityBindingError("capability migration requires a reason")
+    if not isinstance(actor, str) or not actor.strip():
+        raise CapabilityBindingError("capability migration requires an actor")
+
+    repo = canonical_repo.resolve(strict=False)
+    active_path = binding_path(repo, run_id)
+    history = migration_root(repo, run_id)
+    history.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    history.mkdir(parents=True, exist_ok=True, mode=0o700)
+    try:
+        os.chmod(history.parent, 0o700)
+        os.chmod(history, 0o700)
+    except OSError:
+        pass
+
+    with flock_exclusive(history.parent / "CAPABILITY_BINDING_MIGRATION.lock"):
+        previous = _read(active_path)
+        new_binding = _binding_document(run_id, stable_projection(resolution, runner_profile))
+        previous_sha = str(previous["binding_sha256"])
+        new_sha = str(new_binding["binding_sha256"])
+        records = _migration_records(repo, run_id)
+
+        if previous_sha == new_sha and previous.get("projection") == new_binding.get("projection"):
+            matching = next(
+                (
+                    r for r in records
+                    if r.get("status") in {"PREPARED", "COMPLETE"}
+                    and r.get("new_binding_sha256") == new_sha
+                ),
+                None,
+            )
+            if matching is not None:
+                if matching.get("status") == "PREPARED":
+                    record_path = (
+                        history
+                        / str(matching.get("migration_directory") or "")
+                        / "RECORD.json"
+                    )
+                    matching = dict(matching)
+                    matching["status"] = "COMPLETE"
+                    matching["completed_at"] = utc_now_iso()
+                    matching.pop("migration_record_sha256", None)
+                    matching["migration_record_sha256"] = hashlib.sha256(
+                        _canonical(matching)
+                    ).hexdigest()
+                    _atomic_replace_json(record_path, matching)
+                return dict(matching, idempotent=True)
+            raise CapabilityBindingError(
+                "active capability binding already has requested identity without migration evidence"
+            )
+
+        for record in records:
+            if (
+                record.get("previous_binding_sha256") == previous_sha
+                and record.get("new_binding_sha256") == new_sha
+            ):
+                record_dir = history / str(record.get("migration_directory") or "")
+                record_path = record_dir / "RECORD.json"
+                current = _read(active_path)
+                if record.get("status") == "PREPARED":
+                    if current["binding_sha256"] == previous_sha:
+                        _atomic_replace_json(active_path, new_binding)
+                    elif current["binding_sha256"] != new_sha:
+                        raise CapabilityBindingError(
+                            "pending capability migration found contradictory active binding"
+                        )
+                    body = dict(record)
+                    body["status"] = "COMPLETE"
+                    body["completed_at"] = utc_now_iso()
+                    body.pop("migration_record_sha256", None)
+                    body["migration_record_sha256"] = hashlib.sha256(_canonical(body)).hexdigest()
+                    _atomic_replace_json(record_path, body)
+                    record = body
+                elif current["binding_sha256"] != new_sha:
+                    raise CapabilityBindingError(
+                        "completed capability migration is not the active binding"
+                    )
+                return dict(record, idempotent=True)
+
+        if any(r.get("status") == "PREPARED" for r in records):
+            raise CapabilityBindingError("another capability migration is pending recovery")
+
+        latest = _latest_complete_record(records)
+        sequence = max([int(r.get("migration_sequence") or 0) for r in records] or [0]) + 1
+        migration_directory = f"{sequence:06d}-{new_sha[:16]}"
+        directory = history / migration_directory
+        try:
+            directory.mkdir(mode=0o700)
+        except FileExistsError as exc:
+            raise CapabilityBindingError("capability migration directory collision") from exc
+
+        if not _publish_json_no_replace(directory / "PREVIOUS_BINDING.json", previous):
+            raise CapabilityBindingError("previous capability binding snapshot collision")
+        if not _publish_json_no_replace(directory / "NEW_BINDING.json", new_binding):
+            raise CapabilityBindingError("new capability binding snapshot collision")
+
+        ctx = dict(context or {})
+        record: dict[str, Any] = {
+            "schema": MIGRATION_SCHEMA,
+            "run_id": run_id,
+            "canonical_repo": str(repo),
+            "migration_id": f"{run_id}:{sequence}:{new_sha}",
+            "migration_sequence": sequence,
+            "migration_directory": migration_directory,
+            "status": "PREPARED",
+            "previous_binding_sha256": previous_sha,
+            "previous_binding": previous,
+            "new_binding_sha256": new_sha,
+            "new_binding": new_binding,
+            "previous_projection_revision": (previous.get("projection") or {}).get("projection_revision"),
+            "new_projection_revision": (new_binding.get("projection") or {}).get("projection_revision"),
+            "reason": reason,
+            "actor": actor,
+            "created_at": utc_now_iso(),
+            "runtime_generation": ctx.get("runtime_generation"),
+            "engineering_state": ctx.get("engineering_state"),
+            "checkpoint": ctx.get("checkpoint"),
+            "supervisor_job_id": ctx.get("supervisor_job_id"),
+            "packet_sha256": ctx.get("packet_sha256"),
+            "approval_sha256": ctx.get("approval_sha256"),
+            "prior_migration_record_sha256": (
+                latest.get("migration_record_sha256") if latest else None
+            ),
+        }
+        record["migration_record_sha256"] = hashlib.sha256(_canonical(record)).hexdigest()
+        record_path = directory / "RECORD.json"
+        if not _publish_json_no_replace(record_path, record):
+            raise CapabilityBindingError("capability migration record collision")
+        fsync_dir(history)
+
+        current = _read(active_path)
+        if current["binding_sha256"] == new_sha:
+            # Crash after the switch but before completion marker.
+            record["status"] = "COMPLETE"
+        elif current["binding_sha256"] == previous_sha:
+            _atomic_replace_json(active_path, new_binding)
+            record["status"] = "COMPLETE"
+        else:
+            raise CapabilityBindingError("active capability binding changed unexpectedly")
+
+        record["completed_at"] = utc_now_iso()
+        record.pop("migration_record_sha256", None)
+        record["migration_record_sha256"] = hashlib.sha256(_canonical(record)).hexdigest()
+        _atomic_replace_json(record_path, record)
+        return dict(record, idempotent=False)
+
+
+def historical_binding(
+    canonical_repo: Path,
+    run_id: str,
+    binding_sha256: str,
+) -> dict[str, Any]:
+    """Read an immutable binding snapshot preserved by a completed migration."""
+    active = _read(binding_path(canonical_repo, run_id))
+    if active.get("binding_sha256") == binding_sha256:
+        return active
+    for record in _migration_records(canonical_repo, run_id):
+        if record.get("status") != "COMPLETE":
+            continue
+        for key in ("previous_binding", "new_binding"):
+            candidate = record.get(key)
+            if isinstance(candidate, dict) and candidate.get("binding_sha256") == binding_sha256:
+                return _validate_document(candidate, run_id=run_id)
+    raise CapabilityBindingError("requested historical capability binding is not preserved")
+
+
 def verify_run_binding(
     canonical_repo: Path, run_id: str, resolution: dict[str, Any], runner_profile: dict[str, Any]
 ) -> dict[str, Any]:
@@ -172,6 +497,7 @@ def verify_run_binding(
 
 
 __all__ = [
-    "CapabilityBindingError", "PROJECTION_REVISION", "SCHEMA", "binding_path",
+    "CapabilityBindingError", "MIGRATION_SCHEMA", "PROJECTION_REVISION", "SCHEMA",
+    "binding_path", "historical_binding", "migration_root", "migrate_run_binding",
     "ensure_run_binding", "stable_projection", "verify_run_binding",
 ]

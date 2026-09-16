@@ -196,7 +196,31 @@ repository/run artifacts remain unchanged.
 
 RETIRED enrollment is not schedulable and ordinary resume refuses it.
 
-## 10. Foreground/debug operation
+## 10. Trusted capability-binding recovery
+
+Normal capability drift fails closed. For a quarantined unfinished enrollment,
+an operator may explicitly migrate trusted capability authority and resume in
+one audited operation:
+
+```bash
+ofloop supervisor resume /path/to/repo <run-id> --rebind-capabilities
+```
+
+The operation refuses queued, running, terminal, retired, or ambiguous-worker
+enrollments. It requires the current packet and approval authority to remain
+valid and requires the newly resolved capability set—including browser and
+privileged commissioning evidence, when requested—to be execution-ready. The
+old binding remains preserved in `CAPABILITY_BINDING_MIGRATIONS/`; the active
+binding is replaced only after durable old-to-new evidence is published.
+
+This migration consumes no build, review, repair, cost, or token entitlement
+and does not alter candidate or engineering truth. Historical semantic attempt
+receipts continue to identify the binding under which they ran; future provider
+executions use the migrated binding. Runtime-generation migration is separate
+and remains governed by the existing `resume` behavior. Omitting
+`--rebind-capabilities` preserves the normal fail-closed drift behavior.
+
+## 11. Foreground/debug operation
 
 ```bash
 ofloop supervisor serve
@@ -208,14 +232,14 @@ Claude adapter users may also invoke `/of-loop:build` and
 `/of-loop:review` for focused foreground debugging. Those commands are
 adapter UX, not canonical scheduling.
 
-## 11. Promotion
+## 12. Promotion
 
 Terminal APPROVED means eligible for human inspection/merge.
 
 Loop does not push, merge, deploy, publish, pay, send messages, or mutate
 unrelated remote systems.
 
-## 12. Uninstall
+## 13. Uninstall
 
 Adapter only:
 

@@ -106,6 +106,7 @@ tests/integration/test_v091_final_frontier_seams.sh
 tests/integration/test_v093_semantic_retry_reseed.sh
 tests/integration/test_v094_semantic_retry_atomic_envelope.sh
 tests/integration/test_v095_semantic_fixed_envelope.sh
+tests/integration/test_v096_capability_binding_migration.sh
 tests/integration/test_program_blocked_continuation.sh
 tests/integration/test_v093_blocked_protected_continuation.sh
 tests/unit/test_v096_legacy_anchor_event_contract.sh
