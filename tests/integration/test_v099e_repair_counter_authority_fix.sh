@@ -176,10 +176,10 @@ pass "TEST E: program.repair_entitlement is non-mutating (mirrors _bump_counter_
 # validation-failure preflight. The preflight integration is the simplest
 # observable signal that the original cumulative-vs-cp-local bug is gone.
 # ---------------------------------------------------------------------------
-F_OUT="$(python3 - <<'PY'
+F_OUT="$(PYTHONPATH="$ROOT_DIR/lib" python3 - <<PY
 import ast, re, json
 from pathlib import Path
-src = Path("/Users/mr.mrs.london/projects/ownframework-loop/lib/ownframework_loop/build_finalize.py").read_text()
+src = Path("$ROOT_DIR/lib/ownframework_loop/build_finalize.py").read_text()
 tree = ast.parse(src)
 calls = []
 for node in ast.walk(tree):

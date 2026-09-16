@@ -800,6 +800,60 @@ def _blocked_evidence_is_repairable(receipt: dict[str, Any]) -> dict[str, Any] |
     return ps
 
 
+def _validation_evidence_is_repairable(
+    receipt: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Return a typed validation-failure evidence iff the BLOCKED state
+    actually originated from a deterministic validation-gate failure on a
+    source-envelope-clean candidate.
+
+    Round-13 R3 evidence: candidate eaf34dfe… had
+    program_source_ceiling_check.result=pass (29944 / 30000) but
+    validation_pass=false because `just validate`'s pnpm format:check
+    reported six front-end files. Before this helper the dispatcher's
+    BLOCKED-receipt transport would refuse the receipt outright
+    (validation_pass=False ⇒ not repairable), forcing a manual continuation
+    that may repeat the R3 cycle's mistake (source-ceiling focus) rather
+    than authorize a coherent bounded formatting repair.
+
+    Scope is deliberately narrow:
+
+      * ``validation_pass`` MUST be False (the gateway was actually
+        tripped; receipt records it);
+      * ``program_source_ceiling_check.result`` MUST be ``pass`` (the
+        source envelope was honored — source-budget is not the trip);
+      * scope/protected/secret MUST NOT co-fail (those remain terminal);
+      * at least one entry in ``receipt.validation`` must have
+        ``passed=False``.
+    """
+    if not isinstance(receipt, dict):
+        return None
+    if bool(receipt.get("validation_pass", True)):
+        return None
+    ps = receipt.get("program_source_ceiling_check")
+    if not isinstance(ps, dict) or str(ps.get("result") or "") != "pass":
+        return None
+    for key in ("scope_check", "protected_path_check", "secret_scan_check"):
+        chk = receipt.get(key)
+        if isinstance(chk, dict) and str(chk.get("result") or "") == "fail":
+            return None
+    validations = receipt.get("validation") or []
+    if not isinstance(validations, list):
+        return None
+    failed = [
+        v
+        for v in validations
+        if isinstance(v, dict) and not bool(v.get("passed"))
+    ]
+    if not failed:
+        return None
+    return {
+        "kind": "validation_formatting",
+        "ps": ps,
+        "failed_validations": failed,
+    }
+
+
 def _format_repair_instruction(
     *,
     measured_diff_lines: int,
@@ -826,8 +880,43 @@ def _format_repair_instruction(
         f"({effective_max_diff_lines} diff_lines, {effective_max_files} "
         f"files) by {over_lines} diff_lines. Preserve the current "
         f"checkpoint's acceptance criteria while reducing the candidate "
-        f"inside the recorded effective source ceiling. Do not widen or "
+        f"inside the recorded effective source envelope. Do not widen or "
         f"modify the packet. The recorded breach is: {breach_text}"
+    )
+
+
+def _format_validation_repair_instruction(
+    *,
+    checkpoint_id: str,
+    candidate_sha: str,
+    measured_diff_lines: int,
+    effective_max_diff_lines: int,
+    measured_files: int,
+    effective_max_files: int,
+    failed_paths: list[str],
+    failed_command: str,
+) -> str:
+    """Bounded-validation-repair instruction.
+
+    The model must NOT widen the packet or weaken acceptance: keep the
+    absolute candidate inside the frozen 30,000-line / 500-file envelope,
+    preserve checkpoint acceptance, repair only the named formatting
+    failures referenced in the receipts.
+    """
+    paths_text = ", ".join(failed_paths) if failed_paths else "(none recorded)"
+    return (
+        f"The exact prior candidate {candidate_sha} for {checkpoint_id} was "
+        f"deterministically BLOCKED with program_source_ceiling_check=pass "
+        f"({measured_diff_lines}/{effective_max_diff_lines} diff lines and "
+        f"{measured_files}/{effective_max_files} files) because the "
+        f"`{failed_command}` validation failed. The recorded failing "
+        f"paths are: {paths_text}. Repair ONLY the recorded formatting "
+        f"validation failures while preserving the current checkpoint's "
+        f"acceptance criteria and keeping the absolute baseline-to-candidate "
+        f"size within the frozen effective envelope "
+        f"({effective_max_diff_lines} diff lines, {effective_max_files} "
+        f"files). Do not widen or modify the packet; do not relax or "
+        f"delete any acceptance test."
     )
 
 
@@ -838,12 +927,21 @@ def _repair_context_from_blocked_receipt(
     state_doc: dict[str, Any],
     receipt: dict[str, Any],
 ) -> dict[str, Any] | None:
-    """Return a typed BLOCKED source-budget repair context.
+    """Return a typed BLOCKED repair context.
+
+    Supports two narrowly-scoped kinds:
+
+      * source-budget repair: the receipt's
+        ``program_source_ceiling_check.result == fail`` with no co-failing
+        scope/protected/secret/validation check;
+      * bounded-validation repair: the receipt's
+        ``validation_pass == False`` while
+        ``program_source_ceiling_check.result == pass`` with no
+        co-failing scope/protected/secret check.
 
     Authority is established only by the convergence of:
 
-      * BLOCKED BUILD_RECEIPT with ``program_source_ceiling_check=fail``
-        and no co-failing scope/protected/secret/validation check;
+      * a clean BLOCKED BUILD_RECEIPT of one of the two kinds above;
       * a matching funded PROGRAM continuation receipt at the same
         checkpoint, candidate, and funded repair round.
 
@@ -851,8 +949,36 @@ def _repair_context_from_blocked_receipt(
     fails closed when either side is missing or disagrees.
     """
     ps = _blocked_evidence_is_repairable(receipt)
+    repair_kind = "source_ceiling"
+    failed_validations: list[dict[str, Any]] = []
+    failed_paths_for_instruction: list[str] = []
+    failed_command_name = ""
     if ps is None:
-        return None
+        val_evidence = _validation_evidence_is_repairable(receipt)
+        if val_evidence is None:
+            return None
+        repair_kind = "validation_formatting"
+        ps = val_evidence["ps"]
+        failed_validations = val_evidence["failed_validations"]
+        # Extract named failing paths from the recorded stderr excerpt so the
+        # builder does not need to rediscover them. Index candidate paths
+        # against the receipt's documented changed_paths so format-check paths
+        # (which may be top-level like CHANGELOG.md or nested) both surface.
+        changed_paths = list(receipt.get("changed_paths") or [])
+        for v in failed_validations:
+            if not failed_command_name:
+                failed_command_name = str(v.get("name") or v.get("command") or "")
+            for key in ("stderr_excerpt_redacted", "stdout_excerpt_redacted"):
+                excerpt = str(v.get(key) or "")
+                if not excerpt:
+                    continue
+                for candidate_path in changed_paths:
+                    if (
+                        candidate_path
+                        and candidate_path not in failed_paths_for_instruction
+                        and candidate_path in excerpt
+                    ):
+                        failed_paths_for_instruction.append(candidate_path)
 
     continuation = continuation_authority_mod.find_supported_for_blocked_repair(
         canonical_repo=canonical_repo,
@@ -874,6 +1000,28 @@ def _repair_context_from_blocked_receipt(
 
     candidate_sha = str(receipt.get("candidate_sha") or "")
 
+    if repair_kind == "source_ceiling":
+        repair_instruction = _format_repair_instruction(
+            measured_diff_lines=measured_diff_lines,
+            effective_max_diff_lines=effective_max_diff_lines,
+            measured_files=measured_files,
+            effective_max_files=effective_max_files,
+            breach_text=breach_text,
+            checkpoint_id=checkpoint_id,
+            candidate_sha=candidate_sha,
+        )
+    else:
+        repair_instruction = _format_validation_repair_instruction(
+            checkpoint_id=checkpoint_id,
+            candidate_sha=candidate_sha,
+            measured_diff_lines=measured_diff_lines,
+            effective_max_diff_lines=effective_max_diff_lines,
+            measured_files=measured_files,
+            effective_max_files=effective_max_files,
+            failed_paths=failed_paths_for_instruction,
+            failed_command=failed_command_name or "validate",
+        )
+
     return {
         "schema": "ownframework-loop-blocked-repair-context/v1",
         "source": str(
@@ -881,7 +1029,11 @@ def _repair_context_from_blocked_receipt(
         ),
         "source_kind": "blocked_build_receipt",
         "verification_chain": {
-            "block_kind": "frozen_source_budget_breach",
+            "block_kind": (
+                "frozen_source_budget_breach"
+                if repair_kind == "source_ceiling"
+                else "validation_failed_with_clean_source_envelope"
+            ),
             "blocked_receipt_run_id": run_id,
             "blocked_receipt_candidate_sha": candidate_sha,
             "continuation_id": str(continuation.get("continuation_id") or ""),
@@ -901,6 +1053,7 @@ def _repair_context_from_blocked_receipt(
         "repair_round": int(state_doc.get("repair_round") or 0),
         "continuation_id": str(continuation.get("continuation_id") or ""),
         "continuation_reason": str(continuation.get("reason") or ""),
+        "repair_kind": repair_kind,
         "measured_files_changed": measured_files,
         "measured_diff_lines": measured_diff_lines,
         "effective_max_files_changed": effective_max_files,
@@ -919,15 +1072,9 @@ def _repair_context_from_blocked_receipt(
         ),
         "program_source_ceiling_result": str(ps.get("result") or ""),
         "breach_text": breach_text,
-        "repair_instruction": _format_repair_instruction(
-            measured_diff_lines=measured_diff_lines,
-            effective_max_diff_lines=effective_max_diff_lines,
-            measured_files=measured_files,
-            effective_max_files=effective_max_files,
-            breach_text=breach_text,
-            checkpoint_id=checkpoint_id,
-            candidate_sha=candidate_sha,
-        ),
+        "failed_validations": failed_validations,
+        "failed_formatting_paths": failed_paths_for_instruction,
+        "repair_instruction": repair_instruction,
     }
 
 
