@@ -5187,6 +5187,60 @@ def _maybe_complete_semantic_artifact(
     return True
 
 
+def _publish_acceptance_for_ready_artifact(
+    *,
+    conn: sqlite3.Connection,
+    work_order: dict[str, Any],
+    job_id: int,
+) -> None:
+    """Publish the latest attempt's acceptance for an already-valid artifact.
+
+    This is a focused recovery path for the v0.9.9-h scenario where the
+    worker's typed contract completion happened in a prior tick but the
+    publish step was bypassed. The dispatch site invokes this whenever
+    `semantic_result_ready` returns True for a job whose latest attempt
+    is still unaccepted, so the downstream provenance gate recognizes
+    the zero-cost replay as the durable accepted artifact.
+    """
+    semantic_path = str(work_order.get("semantic_path") or "")
+    if not semantic_path:
+        return
+    try:
+        repo_path = Path(str(work_order.get("canonical_repo") or "")).resolve(strict=False)
+        branch = str(work_order.get("candidate_branch") or "")
+        if not repo_path.is_dir() or not branch:
+            return
+        current = util.run_subprocess(
+            ["git", "-C", str(repo_path), "rev-parse", "--verify", f"{branch}^{{commit}}"],
+        )
+    except Exception:
+        return
+    candidate_sha = (current.stdout or "").strip() if hasattr(current, "stdout") else ""
+    if not candidate_sha:
+        return
+    try:
+        row = conn.execute(
+            "SELECT latest_attempt_id FROM jobs WHERE id=?", (int(job_id),)
+        ).fetchone()
+    except Exception:
+        return
+    if row is None:
+        return
+    completion_attempt_id = str(row["latest_attempt_id"] or "")
+    if not completion_attempt_id:
+        return
+    try:
+        _publish_semantic_acceptance(
+            conn,
+            job_id=int(job_id),
+            attempt_id=completion_attempt_id,
+            semantic_path=semantic_path,
+            candidate_sha=candidate_sha,
+        )
+    except Exception:
+        pass
+
+
 def run_one(*, db_path: Path | None = None, timeout_seconds: int = 0) -> dict[str, Any]:
     """Execute at most one semantic BUILD/REVIEW action."""
     db = db_path or default_db_path()
@@ -5343,6 +5397,16 @@ def run_one(*, db_path: Path | None = None, timeout_seconds: int = 0) -> dict[st
                     # provenance gate below recognizes the zero-cost
                     # replay as the durable accepted artifact.
                     semantic_ready, semantic_reason = dispatch_mod.semantic_result_ready(work_order)
+                elif semantic_ready:
+                    # The artifact is already valid but the latest attempt
+                    # was not accepted (e.g. an earlier worker exited
+                    # without publishing, or completion already ran in a
+                    # prior tick but the publish was bypassed). Publish
+                    # acceptance now so the gate below recognizes the
+                    # zero-cost replay as the durable accepted artifact.
+                    _publish_acceptance_for_ready_artifact(
+                        conn=conn, work_order=work_order, job_id=int(job["id"]),
+                    )
             if semantic_ready:
                 replay_attempt_id = str(job["latest_attempt_id"] or "")
                 replay_ok, replay_reason, _receipt = _attempt_provenance_gate(
