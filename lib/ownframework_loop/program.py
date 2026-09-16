@@ -860,6 +860,77 @@ def _bump_counter_one(
     return new
 
 
+def repair_entitlement(
+    program_state: dict[str, Any],
+    *,
+    cp_id: str,
+    packet_cp: dict[str, Any],
+) -> dict[str, Any]:
+    """Decide whether the current checkpoint holds one repair entitlement.
+
+    Read-only. Mirrors the per-checkpoint + cumulative cap semantics enforced
+    atomically by ``_bump_counter_one`` so the finalizer's preflight cannot
+    disagree with the actual funding mutation. A previously buggy finalizer
+    compared the *cumulative* top-level mirror (``state.repair_round``)
+    against the *checkpoint-local* cap (``packet_cp.risk_budget.max_repair_rounds``),
+    which let a late checkpoint get terminalized BLOCKED purely because
+    earlier checkpoints had consumed repairs; a checkpoint with unused local
+    entitlement must remain eligible.
+
+    ``program_state`` is not mutated. The caller must pass the same
+    ``cp_id`` and ``packet_cp`` it intends to use at funding time.
+
+    Returns a typed evidence dict::
+
+        {
+          "eligible":           bool,
+          "cp_id":              str,
+          "checkpoint_used":    int,
+          "checkpoint_cap":     int,
+          "cumulative_used":    int,
+          "cumulative_cap":     int,
+          "reason":             str,  # empty if eligible, else a non-empty,
+                                      # deterministic, terminal explanation
+        }
+    """
+    counter = "repair_round_count"
+    cap_key = "max_repair_rounds"
+    cumulative_used = int(
+        (program_state.get("cumulative_counters") or {}).get(counter, 0) or 0
+    )
+    cumulative_cap = int(
+        (program_state.get("cumulative_ceilings") or {}).get(cap_key, 0) or 0
+    )
+    cp_cap = int(packet_cp["risk_budget"][cap_key])
+    cp_match = _find_cp(program_state, cp_id) or {}
+    checkpoint_used = int(cp_match.get(counter, 0) or 0)
+
+    eligible = True
+    reason = ""
+    if checkpoint_used >= cp_cap:
+        eligible = False
+        reason = (
+            f"per-checkpoint repair cap reached on {cp_id}: "
+            f"{checkpoint_used}/{cp_cap}"
+        )
+    elif cumulative_used >= cumulative_cap:
+        eligible = False
+        reason = (
+            f"cumulative repair cap reached: "
+            f"{cumulative_used}/{cumulative_cap}"
+        )
+
+    return {
+        "eligible": eligible,
+        "cp_id": cp_id,
+        "checkpoint_used": checkpoint_used,
+        "checkpoint_cap": cp_cap,
+        "cumulative_used": cumulative_used,
+        "cumulative_cap": cumulative_cap,
+        "reason": reason,
+    }
+
+
 class ClaimRefused(ProgramStateError):
     """A deterministic PROGRAM pass claim was refused."""
 

@@ -538,20 +538,26 @@ def finalize_build(
         and program_source_check.get("result") == "pass"
         and state_mod.is_program_state(state)
     ):
-        repair_cap = limits_mod.effective_cap("repair_round", meta)
-        repair_used = int(state.get("repair_round") or 0)
         cp_id = str(((state.get("program") or {}).get("current_checkpoints") or [""])[0])
         cp_meta = next(
             (cp for cp in (meta.get("checkpoint_graph") or {}).get("checkpoints", [])
              if isinstance(cp, dict) and cp.get("id") == cp_id),
             None,
         )
-        if cp_meta is not None:
-            repair_cap = min(
-                int(repair_cap) if repair_cap is not None else int(cp_meta["risk_budget"]["max_repair_rounds"]),
-                int(cp_meta["risk_budget"]["max_repair_rounds"]),
-            )
-        if repair_cap is None or repair_used < int(repair_cap):
+        if cp_meta is None:
+            raise RuntimeError(f"current checkpoint {cp_id!r} missing from packet")
+        # Repair-entitlement decision MUST use the canonical program-level
+        # helper (cp-local + cumulative caps), not the cumulative mirror
+        # against the checkpoint-local cap (the historical bug). The atomic
+        # owner in state.transition_funded_repair -> program._bump_counter_one
+        # uses the same authority; consistency here guarantees the protected-
+        # drift recovery path agrees with later repair funding.
+        entitlement = program_mod.repair_entitlement(
+            state.get("program") or {},
+            cp_id=cp_id,
+            packet_cp=cp_meta,
+        )
+        if entitlement["eligible"]:
             try:
                 protected_drift_recovery = protected_recovery.recover_candidate_only_protected_drift(
                     canonical_repo=canonical_repo,
@@ -742,10 +748,8 @@ def finalize_build(
         # remain terminal BLOCKED.
         next_state = "CHANGES_REQUESTED"
         # A scope repair is a funded repair round, just like a rejected
-        # review.  Preflight the packet-bound entitlement so exhaustion is
+        # review. Preflight the packet-bound entitlement so exhaustion is
         # terminal rather than exposing an unfunded CHANGES_REQUESTED state.
-        repair_cap = limits_mod.effective_cap("repair_round", meta)
-        repair_used = int(state.get("repair_round") or 0)
         if state_mod.is_program_state(state):
             program_state = state.get("program") or {}
             cp_id = (program_state.get("current_checkpoints") or [None])[0]
@@ -756,19 +760,25 @@ def finalize_build(
             )
             if cp_meta is None:
                 raise RuntimeError(f"current checkpoint {cp_id!r} missing from packet")
-            repair_cap = min(
-                int(repair_cap) if repair_cap is not None else int(cp_meta["risk_budget"]["max_repair_rounds"]),
-                int(cp_meta["risk_budget"]["max_repair_rounds"]),
+            entitlement = program_mod.repair_entitlement(
+                program_state,
+                cp_id=cp_id,
+                packet_cp=cp_meta,
             )
-        if repair_cap is not None and repair_used >= int(repair_cap):
-            next_state = "BLOCKED"
+            if not entitlement["eligible"]:
+                next_state = "BLOCKED"
+        else:
+            # SINGLE-mode path: cap is the single effective cap, no
+            # program-level cumulative mirror.
+            current_round = int(state.get("repair_round", 0) or 0)
+            cap = limits_mod.effective_cap("repair_round", meta)
+            if cap is not None and current_round >= cap:
+                next_state = "BLOCKED"
     elif not validation_pass:
         # Mandatory validation failed; transition to CHANGES_REQUESTED
         # so the builder can repair. Only BLOCK if the failure is hard or the
         # funded repair envelope is exhausted.
         next_state = "CHANGES_REQUESTED"
-        repair_cap = limits_mod.effective_cap("repair_round", meta)
-        repair_used = int(state.get("repair_round") or 0)
         if state_mod.is_program_state(state):
             program_state = state.get("program") or {}
             cp_id = (program_state.get("current_checkpoints") or [None])[0]
@@ -779,12 +789,19 @@ def finalize_build(
             )
             if cp_meta is None:
                 raise RuntimeError(f"current checkpoint {cp_id!r} missing from packet")
-            repair_cap = min(
-                int(repair_cap) if repair_cap is not None else int(cp_meta["risk_budget"]["max_repair_rounds"]),
-                int(cp_meta["risk_budget"]["max_repair_rounds"]),
+            entitlement = program_mod.repair_entitlement(
+                program_state,
+                cp_id=cp_id,
+                packet_cp=cp_meta,
             )
-        if repair_cap is not None and repair_used >= int(repair_cap):
-            next_state = "BLOCKED"
+            if not entitlement["eligible"]:
+                next_state = "BLOCKED"
+        else:
+            # SINGLE-mode path: cap is the single effective cap.
+            current_round = int(state.get("repair_round", 0) or 0)
+            cap = limits_mod.effective_cap("repair_round", meta)
+            if cap is not None and current_round >= cap:
+                next_state = "BLOCKED"
     elif outcome_requested == "blocked":
         next_state = "BLOCKED"
     elif outcome_requested == "stopped":

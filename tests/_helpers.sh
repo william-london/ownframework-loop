@@ -170,6 +170,84 @@ PY
   echo "$rid"
 }
 
+# Make a valid PROGRAM-mode run with a single current checkpoint whose
+# cp-local max_repair_rounds is the given cap. Args: repo max_repair=6.
+make_approved_run_program() {
+  local repo="$1"
+  local max_repair="${2:-6}"
+  local wc="${3:-BUG}"
+  local risk="${4:-low}"
+  local title="${5:-test-program}"
+  local branch="${6:-master}"
+  "$OFLOOP_BIN" spec new "$repo" "$title" >/dev/null
+  local rid
+  rid="$(ls -1t "$repo/.ownframework-loop" | head -n1)"
+  local pp="$repo/.ownframework-loop/$rid/WORK_PACKET.md"
+  cat > "$pp" <<EOF
+\`\`\`json
+{
+  "schema": "ownframework-work-packet/v3",
+  "packet_id": "p-program",
+  "created_at": "2026-07-23T00:00:00Z",
+  "work_class": "$wc",
+  "risk_class": "$risk",
+  "title": "$title",
+  "target": {"repo": "$repo", "branch": "$branch", "classification": "local_only"},
+  "execution_mode": "program",
+  "checkpoint_graph": {
+    "execution_order": ["CP-9"],
+    "global_source_ceilings": {
+      "max_unique_changed_files": 25,
+      "max_baseline_to_final_diff_lines": 5000
+    },
+    "checkpoints": [{
+      "id": "CP-9",
+      "title": "test",
+      "scope": "src/",
+      "depends_on": [],
+      "risk_budget": {
+        "max_build_passes": 5,
+        "max_review_passes": 5,
+        "max_repair_rounds": $max_repair
+      }
+    }]
+  },
+  "promotion_policy": "human_gate",
+  "acceptance_criteria": [{"id": "AC-1", "text": "ok"}],
+  "non_goals": [],
+  "allowed_paths": ["src/"],
+  "protected_paths": [".ownframework-loop/"],
+  "work_units": [{"id": "UNIT-1", "title": "u", "scope": "src/"}],
+  "merge_authority": "human_only",
+  "deploy_authority": "human_only",
+  "push_authority": "human_only",
+  "external_action_authority": "none",
+  "risk_budget": {
+    "max_files_changed": 25,
+    "max_diff_lines": 1000,
+    "max_repair_rounds": $max_repair
+  },
+  "required_validations": [{"name": "synthetic_pass", "command": ["true"], "expected_exit_code": 0}]
+}
+\`\`\`
+body
+EOF
+  python3 - "$repo" "$rid" <<'PY'
+import sys
+from pathlib import Path
+import os as _os_for_path
+sys.path.insert(0, _os_for_path.environ.get("OFLOOP_LIB", "/path/to/ownframework-loop/lib"))
+from ownframework_loop import execution_start
+execution_start.ensure_executable(
+    canonical_repo=Path(sys.argv[1]),
+    run_id=sys.argv[2],
+    actor="test",
+    binding_method="build_start",
+)
+PY
+  echo "$rid"
+}
+
 # Explicit synthetic historical TTY fixture. Use ONLY in tests whose purpose is
 # compatibility with legacy pre-seal input. Normal tests use make_approved_run()
 # or make_approved_run_unapproved().
