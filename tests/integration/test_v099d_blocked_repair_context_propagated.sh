@@ -621,11 +621,17 @@ write_supported_continuation "$REPO_K" "$RID_K" "TEST K round-1 reason"
 # With state.repair_round=1, the single round-1 continuation matches.
 MUT_K1="$(python3 -c '
 import json, base64
-print(base64.b64encode(json.dumps({"repair_round": 1}).encode()).decode())
+print(base64.b64encode(json.dumps({
+    "repair_round": 1,
+    "program.cumulative_counters.repair_round_count": 1,
+}).encode()).decode())
 ')"
 MUT_K2="$(python3 -c '
 import json, base64
-print(base64.b64encode(json.dumps({"repair_round": 2}).encode()).decode())
+print(base64.b64encode(json.dumps({
+    "repair_round": 2,
+    "program.cumulative_counters.repair_round_count": 2,
+}).encode()).decode())
 ')"
 HIT_K1="$(run_helper_with_mutations "$REPO_K" "$RID_K" "$MUT_K1")"
 HIT_K1_OK="$(python3 -c "
@@ -633,13 +639,13 @@ import json
 ctx = json.loads('''$HIT_K1'''.strip().splitlines()[0] if False else '''$HIT_K1''')
 print('yes' if ctx else 'no')
 ")"
-assert_eq "$HIT_K1_OK" "yes" "TEST K: round-1 continuation matches state.repair_round=1"
-# Bumping state to 2 must not match the round-1 continuation.
+assert_eq "$HIT_K1_OK" "yes" "TEST K: cumulative=1 continuation matches cumulative=1 state"
+# Bumping cumulative to 2 must not match the round-1 continuation.
 HIT_K2="$(run_helper_with_mutations "$REPO_K" "$RID_K" "$MUT_K2")"
 HIT_K2_OK="$(python3 -c "
 import json
 ctx = json.loads('''$HIT_K2'''.strip().splitlines()[0] if False else '''$HIT_K2''')
 print('yes' if ctx else 'no')
 ")"
-assert_eq "$HIT_K2_OK" "no" "TEST K: round-1 continuation does NOT match state.repair_round=2"
+assert_eq "$HIT_K2_OK" "no" "TEST K: cumulative=1 continuation does NOT match cumulative=2 state"
 pass "TEST K: continuation matching rounds must not conflict across rounds"

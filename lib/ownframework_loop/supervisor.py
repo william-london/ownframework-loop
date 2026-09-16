@@ -789,14 +789,17 @@ def _continuation_conflict(
         ):
             continue
         if target_repair_round is not None:
-            after = value.get("after") or {}
+            before = value.get("before") or {}
             try:
-                round_after = int(after.get("repair_round") or -1)
+                before_round = int(before.get("repair_round") or -1)
             except (TypeError, ValueError):
-                round_after = -1
-            # Same run/cp/candidate AND same target_repair_round → conflict.
-            # Different round → not a conflict.
-            if round_after != int(target_repair_round):
+                before_round = -1
+            # Same run/cp/candidate AND same pre-funding repair_round →
+            # conflict. Different round → not a conflict. continue_program
+            # captures current.repair_round into before.repair_round BEFORE
+            # the eventual increment, so each funded round has a distinct
+            # before.repair_round and never blocks its successor.
+            if before_round != int(target_repair_round):
                 continue
         return True
     return False
@@ -965,13 +968,19 @@ def continue_program(
         return {"schema": SCHEMA, "ok": False, "reason": "candidate_branch_head_mismatch", "candidate_branch": branch}
     if git_checks.current_head(builder_path) != active_candidate_sha:
         return {"schema": SCHEMA, "ok": False, "reason": "builder_worktree_candidate_mismatch"}
+    cumulative_round = int(
+        (((current.get("program") or {}).get("cumulative_counters") or {}).get(
+            "repair_round_count"
+        ) or 0)
+    )
+    pre_repair_round = int(current.get("repair_round") or 0)
     if _continuation_conflict(
         repo_path,
         run_id,
         checkpoint_id=checkpoint_id,
         candidate_sha=expected_candidate_sha,
         continuation_id=continuation_id,
-        target_repair_round=int(current.get("repair_round") or 0),
+        target_repair_round=pre_repair_round,
     ):
         return {"schema": SCHEMA, "ok": False, "reason": "continuation_receipt_conflict"}
     if current.get("state") == _PROGRAM_READY_STATE and receipt is None:
