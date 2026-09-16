@@ -262,8 +262,7 @@ pass "TEST D: six failing-formatting paths are extracted from the receipt into r
 # TEST E — `_format_validation_repair_instruction` includes key directives.
 # ---------------------------------------------------------------------------
 E_OUT="$(python3 - <<'PY'
-import json, os
-os.environ.setdefault("PYTHONPATH", "/Users/mr.mrs.london/projects/ownframework-loop/lib")
+import json
 from ownframework_loop import dispatch
 text = dispatch._format_validation_repair_instruction(
     checkpoint_id="CP-9",

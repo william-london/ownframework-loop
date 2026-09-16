@@ -414,6 +414,7 @@ def _resolve_executable(
     entry: dict[str, Any],
     *,
     broker: bool = False,
+    probe_cwd: Path | None = None,
 ) -> tuple[str | None, str | None, str | None, list[str]]:
     field = "broker_executable" if broker else "executable"
     explicit = entry.get(field)
@@ -471,6 +472,12 @@ def _resolve_executable(
             proc = subprocess.run(
                 [executable, *args], capture_output=True, text=True,
                 check=False, timeout=5,
+                # Some package-manager shims (notably Corepack/pnpm) resolve
+                # their effective version from the nearest package manifest.
+                # Capability authority must be derived from the canonical
+                # repository, not from the caller's ambient CWD; migration
+                # and worker processes otherwise seal different projections.
+                cwd=str(probe_cwd) if probe_cwd is not None else None,
             )
         except (OSError, subprocess.SubprocessError) as exc:
             raise CapabilityResolutionError(
@@ -597,7 +604,9 @@ def resolve_capabilities(
                 })
             continue
 
-        executable, version, executable_sha256, extra_reads = _resolve_executable(definition, entry)
+        executable, version, executable_sha256, extra_reads = _resolve_executable(
+            definition, entry, probe_cwd=canonical_repo
+        )
         allow_read.update(extra_reads)
         stable_allow_read.update(extra_reads)
         manifest_domains = _network_domains(entry.get("network_domains"), name=name)
