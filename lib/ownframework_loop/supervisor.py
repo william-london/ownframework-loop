@@ -5126,7 +5126,6 @@ def _maybe_complete_semantic_artifact(
 
     current = util.run_subprocess(
         ["git", "-C", str(repo_path), "rev-parse", "--verify", f"{branch}^{{commit}}"],
-        capture=True,
     )
     candidate_sha = (current.stdout or "").strip() if hasattr(current, "stdout") else ""
     if not candidate_sha:
