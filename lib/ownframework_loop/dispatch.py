@@ -56,6 +56,16 @@ _RETRYABLE_SEMANTIC_RESULT_REASONS = frozenset({
     "builder_semantic_shape_invalid",
     "builder_work_unit_mismatch",
     "builder_fixed_identity_mismatch",
+    # A completed BUILD whose builder author left useful work in the worktree
+    # but failed to commit a candidate is NOT an invariant failure: the
+    # artifact path is irreparably unfit for deterministic finalization, but
+    # the worktree still carries the author's staged bytes and a fresh
+    # provider process on the same claimed pass can finish the work. Treat
+    # the same way as the other retryable shape failures: archive the
+    # poisoned envelope privately, reseed the canonical artifact path, and
+    # requeue a fresh builder on the same claimed pass without consuming the
+    # engineering repair budget.
+    "builder_worktree_dirty",
     "review_schema_mismatch",
     "review_candidate_mismatch",
     "review_fixed_identity_mismatch",

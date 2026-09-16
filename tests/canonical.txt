@@ -110,6 +110,7 @@ tests/integration/test_v096_capability_binding_migration.sh
 tests/integration/test_v097_capability_binding_atomicity.sh
 tests/integration/test_v098_capability_binding_replay.sh
 tests/integration/test_v099_capability_binding_multi_migration.sh
+tests/integration/test_v099b_dirty_builder_same_pass_retry.sh
 tests/integration/test_program_blocked_continuation.sh
 tests/integration/test_v093_blocked_protected_continuation.sh
 tests/unit/test_v096_legacy_anchor_event_contract.sh
