@@ -563,7 +563,7 @@ PY
 OUT_H="$(python3 - "$REPO_H" "$RID_H" 2>&1 <<'PY'
 import sys, json
 from pathlib import Path
-sys.path.insert(0, '/Users/mr.mrs.london/projects/ownframework-loop/lib')
+sys.path.insert(0, '$ROOT_DIR/lib')
 repo = Path(sys.argv[1])
 rid = sys.argv[2]
 from ownframework_loop import dispatch
@@ -605,3 +605,41 @@ write_blocked_receipt "$REPO_J" "$RID_J" 33521 30000
 OUT_J="$(run_helper "$REPO_J" "$RID_J")"
 assert_contains "$OUT_J" 'null' "TEST J: BLOCKED alone refuses repair context"
 pass "TEST J: BLOCKED receipt alone cannot independently reopen the run"
+
+# =========================================================================
+# TEST K — multi-round repair: a later-funded continuation is NOT a conflict
+# =========================================================================
+# Two funded continuations at the same (run, cp, candidate) but at DIFFERENT
+# repair rounds must not produce a continuation_receipt_conflict.
+REPO_K="$(make_tmp_repo)"
+"$OFLOOP_BIN" spec new "$REPO_K" "multi-round-$RANDOM" >/dev/null
+RID_K="$(ls -1t "$REPO_K/.ownframework-loop" | head -n1)"
+write_blocked_receipt "$REPO_K" "$RID_K" 33521 30000
+write_canonical_state "$REPO_K" "$RID_K"
+# One funded continuation at after.repair_round=1
+write_supported_continuation "$REPO_K" "$RID_K" "TEST K round-1 reason"
+# With state.repair_round=1, the single round-1 continuation matches.
+MUT_K1="$(python3 -c '
+import json, base64
+print(base64.b64encode(json.dumps({"repair_round": 1}).encode()).decode())
+')"
+MUT_K2="$(python3 -c '
+import json, base64
+print(base64.b64encode(json.dumps({"repair_round": 2}).encode()).decode())
+')"
+HIT_K1="$(run_helper_with_mutations "$REPO_K" "$RID_K" "$MUT_K1")"
+HIT_K1_OK="$(python3 -c "
+import json
+ctx = json.loads('''$HIT_K1'''.strip().splitlines()[0] if False else '''$HIT_K1''')
+print('yes' if ctx else 'no')
+")"
+assert_eq "$HIT_K1_OK" "yes" "TEST K: round-1 continuation matches state.repair_round=1"
+# Bumping state to 2 must not match the round-1 continuation.
+HIT_K2="$(run_helper_with_mutations "$REPO_K" "$RID_K" "$MUT_K2")"
+HIT_K2_OK="$(python3 -c "
+import json
+ctx = json.loads('''$HIT_K2'''.strip().splitlines()[0] if False else '''$HIT_K2''')
+print('yes' if ctx else 'no')
+")"
+assert_eq "$HIT_K2_OK" "no" "TEST K: round-1 continuation does NOT match state.repair_round=2"
+pass "TEST K: continuation matching rounds must not conflict across rounds"
