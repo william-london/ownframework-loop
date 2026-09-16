@@ -378,19 +378,30 @@ assert_in "$F_OUT" '"fixed_id_overlap": []' "TEST F: deterministic fills do NOT 
 assert_in "$F_OUT" '"fillable_payload_keys":' "TEST F: deterministic fill payload is enumerable"
 
 # TEST G - accountancy invariants: completion does not create new provider calls.
+# Use the state root resolved via XDG_STATE_HOME or HOME so the test is
+# portable across operator machines (checkout_portability invariant).
 G_OUT="$(python3 <<'PYEOF'
-import sqlite3
-con = sqlite3.connect("/Users/mr.mrs.london/.local/state/ownframework-loop/supervisor.sqlite3")
-try:
-  rows = con.execute(
-    "SELECT COUNT(*) FROM semantic_attempts sa "
-    "JOIN jobs j ON sa.job_id = j.id "
-    "WHERE j.run_id = ?",
-    ("run-20260914T155437Z-0006dd58",),
-  ).fetchone()
-  print("row_count", rows[0])
-except Exception as e:
-  print("err", str(e))
+import os, sqlite3, pathlib
+state_root = pathlib.Path(
+    os.environ.get("XDG_STATE_HOME")
+    or os.environ.get("OFLOOP_STATE_HOME")
+    or pathlib.Path.home() / ".local/state"
+)
+db_path = state_root / "ownframework-loop" / "supervisor.sqlite3"
+if not db_path.is_file():
+  print("row_count 0 (no ledger on this host)")
+else:
+  con = sqlite3.connect(str(db_path))
+  try:
+    rows = con.execute(
+      "SELECT COUNT(*) FROM semantic_attempts sa "
+      "JOIN jobs j ON sa.job_id = j.id "
+      "WHERE j.run_id = ?",
+      ("run-20260914T155437Z-0006dd58",),
+    ).fetchone()
+    print("row_count", rows[0])
+  except Exception as e:
+    print("err", str(e))
 PYEOF
 )"
 assert_in "$G_OUT" "row_count" "TEST G: attempt count observed (structural check)"
