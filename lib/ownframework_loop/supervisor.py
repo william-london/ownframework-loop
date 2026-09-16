@@ -31,7 +31,25 @@ from functools import wraps
 from pathlib import Path
 from typing import Any
 
-from . import approval as approval_mod, branch_resolver as branch_resolver_mod, capabilities as capabilities_mod, capability_binding as capability_binding_mod, dispatch as dispatch_mod, dispatch_hold as dispatch_hold_mod, git_checks, packet as packet_mod, program as program_mod, protected_recovery, runner_profiles as runner_profiles_mod, runtime_env, state as state_mod, transitions, util, runtime_identity
+from . import (
+    approval as approval_mod,
+    branch_resolver as branch_resolver_mod,
+    capabilities as capabilities_mod,
+    capability_binding as capability_binding_mod,
+    continuation_authority as continuation_authority_mod,
+    dispatch as dispatch_mod,
+    dispatch_hold as dispatch_hold_mod,
+    git_checks,
+    packet as packet_mod,
+    program as program_mod,
+    protected_recovery,
+    runner_profiles as runner_profiles_mod,
+    runtime_env,
+    state as state_mod,
+    transitions,
+    util,
+    runtime_identity,
+)
 from .locking import flock_exclusive
 
 SCHEMA = "ownframework-loop-supervisor/v1"
@@ -715,8 +733,16 @@ def _continuation_path(canonical_repo: Path, run_id: str, continuation_id: str) 
 
 
 def _continuation_id(run_id: str, checkpoint_id: str, candidate_sha: str, reason: str) -> str:
-    body = "\x00".join((run_id, checkpoint_id, candidate_sha, reason))
-    return hashlib.sha256(body.encode("utf-8")).hexdigest()[:32]
+    # Canonical writer of continuation identity. Continuation-Authority
+    # (`continuation_authority.derive_continuation_id`) must always agree
+    # byte-for-byte with this hash so the dispatcher can reproduce the file
+    # path when validating the durable ledger.
+    return continuation_authority_mod.derive_continuation_id(
+        run_id=run_id,
+        checkpoint_id=checkpoint_id,
+        candidate_sha=candidate_sha,
+        reason=reason,
+    )
 
 
 def _continuation_read(path: Path) -> dict[str, Any] | None:

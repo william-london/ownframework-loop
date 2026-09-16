@@ -21,6 +21,7 @@ from . import (
     approval as approval_mod,
     assessment as assessment_mod,
     build_agent as build_agent_mod,
+    continuation_authority as continuation_authority_mod,
     git_checks as git_checks_mod,
     packet as packet_mod,
     program as program_mod,
@@ -689,12 +690,28 @@ def _repair_context_from_receipt(
     findings) without any fresh review verdict. The authoritative
     BUILD_RECEIPT.json then carries the exact failed evidence; transport it
     so the fresh builder does not have to rediscover the failure blindly.
+
+    A BLOCKED state can originate from a deterministic source-budget breach
+    (or other bounded structural stop) — but a BLOCKED receipt by itself is
+    NOT authority to run another build. The repair context is produced only
+    when a matching supported continuation receipt at the same checkpoint,
+    candidate, and funded repair round exists. Fail closed otherwise.
     """
     path = state_mod.run_dir(canonical_repo, run_id) / "BUILD_RECEIPT.json"
     receipt = _load_json_file(path)
     if receipt is None:
         return None
-    if str(receipt.get("next_state") or "") != "CHANGES_REQUESTED":
+    receipt_next = str(receipt.get("next_state") or "")
+
+    if receipt_next == "BLOCKED":
+        return _repair_context_from_blocked_receipt(
+            canonical_repo=canonical_repo,
+            run_id=run_id,
+            state_doc=state_doc,
+            receipt=receipt,
+        )
+
+    if receipt_next != "CHANGES_REQUESTED":
         return None
     receipt_candidate = str(receipt.get("candidate_sha") or "")
     state_candidate = str(state_doc.get("last_candidate_sha") or "")
@@ -752,6 +769,165 @@ def _repair_context_from_receipt(
         "blocker_reason": receipt.get("blocker_reason"),
         "escalation_recommended": bool(receipt.get("escalation_recommended")),
         "escalation_reason": receipt.get("escalation_reason"),
+    }
+
+
+def _blocked_evidence_is_repairable(receipt: dict[str, Any]) -> dict[str, Any] | None:
+    """Return the program_source_ceiling_check evidence iff the receipt's
+    BLOCKED state actually originated from a bounded source-budget breach.
+
+    Other BLOCKED categories (authority corruption, hard secrets, packet
+    corruption, ambiguous lineage) must NOT be silently converted into a
+    model repair mission — they are terminal and require operator-gated
+    adjudication through channels other than a deterministic bounded
+    repair. This gate keeps the BLOCKED repair context narrowly scoped.
+    """
+    ps = receipt.get("program_source_ceiling_check")
+    if not isinstance(ps, dict):
+        return None
+    if str(ps.get("result") or "") != "fail":
+        return None
+    if str(ps.get("accounting") or "") != "absolute_baseline_to_candidate":
+        return None
+    # Other checks must NOT also fail; if scope/protected/secret/validation
+    # co-failed with source-budget, this is not a clean source-budget repair.
+    for key in ("scope_check", "protected_path_check", "secret_scan_check"):
+        chk = receipt.get(key)
+        if isinstance(chk, dict) and str(chk.get("result") or "") == "fail":
+            return None
+    if not bool(receipt.get("validation_pass", True)):
+        return None
+    return ps
+
+
+def _format_repair_instruction(
+    *,
+    measured_diff_lines: int,
+    effective_max_diff_lines: int,
+    measured_files: int,
+    effective_max_files: int,
+    breach_text: str,
+    checkpoint_id: str,
+    candidate_sha: str,
+) -> str:
+    """Deterministic Bounded-Source-Budget Repair instruction.
+
+    The model must NOT have to invent why it was authorized. The core
+    formulates the purpose from the receipt evidence: reduce the exact
+    candidate's baseline-to-candidate source size to fit inside the exact
+    effective envelope while preserving checkpoint acceptance.
+    """
+    over_lines = measured_diff_lines - effective_max_diff_lines
+    return (
+        f"The exact prior candidate {candidate_sha} for {checkpoint_id} was "
+        f"deterministically BLOCKED because its baseline-to-candidate source "
+        f"size ({measured_diff_lines} diff_lines across {measured_files} "
+        f"files) exceeds the frozen approved effective source ceiling "
+        f"({effective_max_diff_lines} diff_lines, {effective_max_files} "
+        f"files) by {over_lines} diff_lines. Preserve the current "
+        f"checkpoint's acceptance criteria while reducing the candidate "
+        f"inside the recorded effective source ceiling. Do not widen or "
+        f"modify the packet. The recorded breach is: {breach_text}"
+    )
+
+
+def _repair_context_from_blocked_receipt(
+    *,
+    canonical_repo: Path,
+    run_id: str,
+    state_doc: dict[str, Any],
+    receipt: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Return a typed BLOCKED source-budget repair context.
+
+    Authority is established only by the convergence of:
+
+      * BLOCKED BUILD_RECEIPT with ``program_source_ceiling_check=fail``
+        and no co-failing scope/protected/secret/validation check;
+      * a matching funded PROGRAM continuation receipt at the same
+        checkpoint, candidate, and funded repair round.
+
+    A BLOCKED BUILD_RECEIPT alone is never authoritative. The dispatcher
+    fails closed when either side is missing or disagrees.
+    """
+    ps = _blocked_evidence_is_repairable(receipt)
+    if ps is None:
+        return None
+
+    continuation = continuation_authority_mod.find_supported_for_blocked_repair(
+        canonical_repo=canonical_repo,
+        run_id=run_id,
+        state_doc=state_doc,
+    )
+    if continuation is None:
+        return None
+
+    program_state = state_doc.get("program") or {}
+    current_checkpoints = program_state.get("current_checkpoints") or []
+    checkpoint_id = str(current_checkpoints[0]) if current_checkpoints else ""
+
+    measured_diff_lines = int(ps.get("diff_lines_total") or 0)
+    effective_max_diff_lines = int(ps.get("effective_max_diff_lines") or 0)
+    measured_files = int(ps.get("files_changed_unique") or 0)
+    effective_max_files = int(ps.get("effective_max_files_changed") or 0)
+    breach_text = str(ps.get("breach") or "")
+
+    candidate_sha = str(receipt.get("candidate_sha") or "")
+
+    return {
+        "schema": "ownframework-loop-blocked-repair-context/v1",
+        "source": str(
+            state_mod.run_dir(canonical_repo, run_id) / "BUILD_RECEIPT.json"
+        ),
+        "source_kind": "blocked_build_receipt",
+        "verification_chain": {
+            "block_kind": "frozen_source_budget_breach",
+            "blocked_receipt_run_id": run_id,
+            "blocked_receipt_candidate_sha": candidate_sha,
+            "continuation_id": str(continuation.get("continuation_id") or ""),
+            "continuation_run_id": str(continuation.get("run_id") or ""),
+            "continuation_checkpoint_id": str(continuation.get("checkpoint_id") or ""),
+            "continuation_candidate_sha": str(continuation.get("candidate_sha") or ""),
+            "continuation_active_candidate_sha": str(
+                continuation.get("active_candidate_sha") or ""
+            ),
+            "continuation_status": str(continuation.get("status") or ""),
+            "current_repair_round": int(state_doc.get("repair_round") or 0),
+            "current_checkpoints": list(current_checkpoints),
+            "current_last_candidate_sha": str(state_doc.get("last_candidate_sha") or ""),
+        },
+        "checkpoint_id": checkpoint_id,
+        "candidate_sha_reviewed": candidate_sha,
+        "repair_round": int(state_doc.get("repair_round") or 0),
+        "continuation_id": str(continuation.get("continuation_id") or ""),
+        "continuation_reason": str(continuation.get("reason") or ""),
+        "measured_files_changed": measured_files,
+        "measured_diff_lines": measured_diff_lines,
+        "effective_max_files_changed": effective_max_files,
+        "effective_max_diff_lines": effective_max_diff_lines,
+        "top_level_risk_max_files_changed": int(
+            ps.get("top_level_risk_max_files_changed") or 0
+        ),
+        "top_level_risk_max_diff_lines": int(
+            ps.get("top_level_risk_max_diff_lines") or 0
+        ),
+        "program_max_unique_changed_files": int(
+            ps.get("program_max_unique_changed_files") or 0
+        ),
+        "program_max_baseline_to_final_diff_lines": int(
+            ps.get("program_max_baseline_to_final_diff_lines") or 0
+        ),
+        "program_source_ceiling_result": str(ps.get("result") or ""),
+        "breach_text": breach_text,
+        "repair_instruction": _format_repair_instruction(
+            measured_diff_lines=measured_diff_lines,
+            effective_max_diff_lines=effective_max_diff_lines,
+            measured_files=measured_files,
+            effective_max_files=effective_max_files,
+            breach_text=breach_text,
+            checkpoint_id=checkpoint_id,
+            candidate_sha=candidate_sha,
+        ),
     }
 
 
