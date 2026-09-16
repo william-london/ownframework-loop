@@ -34,6 +34,7 @@ from typing import Any
 from . import (
     approval as approval_mod,
     branch_resolver as branch_resolver_mod,
+    build_agent as build_agent_mod,
     capabilities as capabilities_mod,
     capability_binding as capability_binding_mod,
     continuation_authority as continuation_authority_mod,
@@ -5059,6 +5060,103 @@ def _ensure_execution_started(conn: sqlite3.Connection, job_id: int) -> float:
     return float(row[0])
 
 
+def _maybe_complete_semantic_artifact(
+    *,
+    conn: sqlite3.Connection,
+    work_order: dict[str, Any],
+    semantic_reason: str,
+    job_id: int,
+) -> bool:
+    """One-shot deterministic completion of the typed semantic-result contract.
+
+    Returns True iff the existing on-disk artifact was rendered valid by
+    authoritative-source fillable completion (no provider spend, no model
+    call, no repair-counter increment, no engineering replay).
+
+    Conditions for invoking the completion path:
+
+      * the worker has already terminated (semantic_result_ready returned False),
+      * worktree is clean at `git status --porcelain`,
+      * a candidate HEAD exists on the prepared candidate branch,
+      * all fixed-identity fields the supervisor can re-prove are intact,
+      * only fillable/runtime fields are blank — never identity fields.
+
+    When any of these conditions fail, the function returns False and the
+    supervisor falls through to its retry path. The retry path itself is
+    unchanged; this function only short-circuits a subset of retryable
+    failures that turn out to be a missing typed-artifact, not a missing
+    engineering pass.
+    """
+    if not isinstance(work_order, dict):
+        return False
+    decision = str(work_order.get("decision") or "")
+    canonical_repo = work_order.get("canonical_repo")
+    run_id = str(work_order.get("run_id") or "")
+    worktree = work_order.get("worktree")
+    baseline_sha = str(work_order.get("baseline_sha") or "")
+    branch = str(work_order.get("candidate_branch") or "")
+    cp_id = str(work_order.get("cp_id") or "")
+    role = str(work_order.get("role") or "")
+    if not all([canonical_repo, run_id, worktree, baseline_sha, branch]):
+        return False
+    try:
+        wt_path = Path(str(worktree)).resolve(strict=False)
+        repo_path = Path(str(canonical_repo)).resolve(strict=False)
+    except Exception:
+        return False
+    if not wt_path.is_dir():
+        return False
+
+    cleanliness = git_checks.dirty_status(wt_path)
+    if cleanliness not in ("clean",):
+        return False
+
+    head = git_checks.current_head(wt_path)
+    if not head:
+        return False
+
+    actual_branch = git_checks.current_branch(wt_path) or ""
+    if branch and actual_branch and branch != actual_branch:
+        return False
+
+    current = util.run_subprocess(
+        ["git", "-C", str(repo_path), "rev-parse", "--verify", f"{branch}^{{commit}}"],
+        capture=True,
+    )
+    candidate_sha = (current.stdout or "").strip() if hasattr(current, "stdout") else ""
+    if not candidate_sha:
+        return False
+
+    from . import packet as packet_mod
+    try:
+        packet_path = Path(repo_path) / ".ownframework-loop" / str(run_id) / "WORK_PACKET.md"
+        if not packet_path.is_file():
+            packet = None
+        else:
+            packet, _raw = packet_mod.parse_packet_file(packet_path)
+            if not isinstance(packet, dict):
+                packet = None
+    except Exception:
+        packet = None
+
+    if role == "":
+        role = "builder" if decision == "BUILD" else "reviewer"
+
+    completed = build_agent_mod.semantically_complete_artifact(
+        canonical_repo=repo_path,
+        run_id=run_id,
+        worktree=wt_path,
+        baseline_sha=baseline_sha,
+        current_sha=candidate_sha,
+        role=role,
+        cp_id=cp_id,
+        packet=packet if isinstance(packet, dict) else None,
+    )
+    if completed is None:
+        return False
+    return True
+
+
 def run_one(*, db_path: Path | None = None, timeout_seconds: int = 0) -> dict[str, Any]:
     """Execute at most one semantic BUILD/REVIEW action."""
     db = db_path or default_db_path()
@@ -5194,6 +5292,22 @@ def run_one(*, db_path: Path | None = None, timeout_seconds: int = 0) -> dict[st
             semantic_ready, semantic_reason = dispatch_mod.semantic_result_ready(
                 work_order
             )
+            if not semantic_ready:
+                # v0.9.9-h: deterministic semantic-result completion recovery.
+                #
+                # When a paid semantic pass exits with the engineering work
+                # already durably complete (clean worktree, candidate HEAD
+                # exists on the right branch, all fixed-identity fields intact)
+                # but the typed JSON contract is still unpopulated, the
+                # core fills the deterministic fillable fields itself rather
+                # than burning another full provider call to redo engineering
+                # that already exists.
+                completed = _maybe_complete_semantic_artifact(
+                    conn=conn, work_order=work_order, semantic_reason=semantic_reason,
+                    job_id=int(job["id"]),
+                )
+                if completed:
+                    semantic_ready, semantic_reason = dispatch_mod.semantic_result_ready(work_order)
             if semantic_ready:
                 replay_attempt_id = str(job["latest_attempt_id"] or "")
                 replay_ok, replay_reason, _receipt = _attempt_provenance_gate(

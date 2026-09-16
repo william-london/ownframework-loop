@@ -70,16 +70,22 @@ and controls the pass through its wall-clock budget.
    Do not emit synonyms such as PASS, SATISFIED, OK, UNCHANGED, or prose in a result field.
 6. Record findings only in the exact authoritative-compatible shape: finding_id (F-...), severity (critical|high|medium|low|info), classification (must_fix|advisory), title, description, with optional string file and optional integer line >= 1. Do not add other finding keys.
 7. Run required validations where permitted; never fabricate results.
-8. Fill only semantic/runtime fields in the existing skeleton. The assessment
-   path is outside restricted built-in file-tool scope, so write exactly that
-   file with sandboxed Bash:
-   `validation_results`, `acceptance_results`, `non_goal_results`,
-   `findings`, `recommended_verdict`, `escalation_recommended`,
-   `escalation_reason`, and `timestamp`.
+8. The pass-scoped semantic artifact (`REVIEW_ASSESSMENT.json` at the
+   supplied `assessment_path`) is supplied by the deterministic core as a
+   typed skeleton with all FIXED identity fields pre-populated. The CORE
+   owns contract completion: when this pass exits with the artifact still
+   in skeleton state and the candidate verifiable, the supervisor fills the
+   deterministic fillable fields from authoritative sources (packet identity
+   for schema markers and IDs; git / build_receipt for evidence) without
+   spending another provider call. The deterministic finalizer remains
+   authoritative. Reviewers structurally cannot Edit/Write; if you cannot
+   use `Read`/Bash to inspect the skeleton, stop and report. You MAY fill
+   fillable fields by writing the artifact via sandboxed Bash; doing so
+   is encouraged when you have substantive findings to report.
 9. Leave all pre-populated identity fields unchanged.
-10. Before stopping, re-read and parse the exact `assessment_path` with
-   sandboxed Bash/Python and verify: JSON is valid; run/candidate identity is
-   unchanged; acceptance IDs exactly equal the supplied
+10. Before stopping, IF you wrote to `assessment_path`, re-read it with
+   sandboxed Bash/Python and verify: JSON is valid; run/candidate identity
+   is unchanged; acceptance IDs exactly equal the supplied
    `acceptance_criterion_ids`; non-goal IDs exactly equal supplied
    `non_goal_ids`; every acceptance result is exactly pass|fail|inconclusive;
    every non-goal result is exactly preserved|violated|inconclusive; every
@@ -91,7 +97,8 @@ and controls the pass through its wall-clock budget.
    identity fields are unchanged, and that no unexpected top-level keys were
    introduced. If a fixed field is malformed when the process starts, stop
    and report transport corruption; do not invent replacement identity.
-11. Stop. The parent calls the deterministic finalizer.
+11. Stop. The parent (or the supervisor completion path) calls the
+    deterministic finalizer.
 
 Recommended verdict is exactly one of `APPROVED`, `CHANGES_REQUESTED`,
 `BLOCKED`, `HUMAN_REVIEW_REQUIRED`, `STALE_CANDIDATE`. It is semantic

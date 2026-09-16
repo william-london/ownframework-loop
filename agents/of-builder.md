@@ -118,29 +118,35 @@ print-mode role prompt and controls the pass through its wall-clock budget.
    deterministic finalizer remains authoritative.
 8. Commit the coherent candidate on the supplied candidate branch with the
    current run/work-unit identity in the message.
-9. Read the existing `agent_result_path` skeleton. Because the pass-scoped
-   artifact is outside restricted built-in file-tool scope, use sandboxed Bash
-   to update exactly that file. Fill only runtime/semantic fields:
-   `summary`, `evidence`, `blocker_reason`,
-   `escalation_recommended`, `escalation_reason`, `outcome_requested`,
-   `unit_ids_completed`, `acceptance_addressed`, `notes`, `timestamp`.
+9. The pass-scoped semantic artifact (`BUILD_AGENT_RESULT.json` at
+   `agent_result_path`) is supplied by the deterministic core as a typed
+   skeleton with all FIXED identity fields pre-populated. The CORE owns
+   contract completion. Specifically: when this pass exits with a clean
+   worktree, a committed candidate HEAD on the supplied branch, and the
+   artifact still in skeleton state, the supervisor completes the artifact
+   itself from authoritative sources (git for evidence, the packet for
+   acceptance_criteria / work_units identity) without spending another
+   provider call. The deterministic finalizer remains authoritative.
+   You MAY fill fillable fields by writing/Editing the artifact directly
+   (`agent_result_path.parent` is in your sandbox allowWrite); doing so
+   is encouraged when you have substantive free-form evidence or a
+   misbehaviour to report. Do NOT parse your own prose to fill these
+   fields — the supervisor completion reads from authoritative sources,
+   not from your text.
 10. Do not rename/add fixed identity keys. Do not supply `candidate_sha`; Git is
    authoritative.
-11. Before stopping, re-read and parse `agent_result_path`. Verify
-    `outcome_requested` is one of the exact lowercase enum values below;
-    `summary` and `notes` are strings; `evidence` is an object;
+11. Before stopping, IF you wrote to `agent_result_path`, re-read it and
+    verify `outcome_requested` is one of the exact lowercase enum values
+    below; `summary` and `notes` are strings; `evidence` is an object;
     `blocker_reason` / `escalation_reason` are string-or-null;
     `escalation_recommended` is a JSON boolean, never the strings
     `"true"` / `"false"`; and `unit_ids_completed` / `acceptance_addressed`
     are arrays containing only non-empty strings. Repair the same semantic
-    artifact if any check fails.
-    Also verify that `schema` is exactly
-    `ownframework-loop-build-agent-result/v1`, every pre-populated fixed
-    identity field is unchanged, and the top-level key set contains no
-    model-invented fields. If a fixed field is malformed when the process
-    starts, stop and report transport corruption; do not invent replacement
-    identity values.
-12. Stop. The parent calls the deterministic finalizer.
+    artifact if any check fails. If a fixed field is malformed when the
+    process starts, stop and report transport corruption; do not invent
+    replacement identity values.
+12. Stop. The parent (or the supervisor completion path) calls the
+    deterministic finalizer.
 
 `outcome_requested` is exactly one of:
 `candidate_ready`, `blocked`, `stopped`.
