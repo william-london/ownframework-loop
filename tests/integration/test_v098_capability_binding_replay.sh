@@ -138,7 +138,10 @@ with tempfile.TemporaryDirectory(prefix="ofloop-v098-replay-") as td:
                 tokens_known=True, cost_known=True, effective_model=profile["model"],
             )
 
-    supervisor.write_minimal_valid_packet(repo, run_id)
+    # The packet was already written by packet_and_approval(repo, run_id)
+    # and keyed to an APPROVAL.json whose packet_sha256 is the SHA of that
+    # packet. Do NOT call write_minimal_valid_packet here — it would rewrite
+    # the packet with a different SHA and break the resume SHA-drift check.
     enrolled = supervisor.enqueue(
         canonical_repo=repo, run_id=run_id, db_path=db,
         runner=ReplayRunner.runner_id, max_infra_failures=1,
