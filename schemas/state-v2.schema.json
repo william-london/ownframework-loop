@@ -184,6 +184,10 @@
           "type": "string",
           "pattern": "^[a-f0-9]{64}$"
         },
+        "review_scope": {
+          "type": ["string", "null"],
+          "enum": ["checkpoint", "program_final", null]
+        },
         "promotion_policy": {
           "type": "string",
           "enum": [

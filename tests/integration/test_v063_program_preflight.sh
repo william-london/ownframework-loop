@@ -14,7 +14,7 @@ base = {
  "non_goals":[],"allowed_paths":["src/**"],"protected_paths":[".ownframework-loop/**"],
  "work_units":[{"id":"UNIT-1","title":"u","scope":"src"}],
  "merge_authority":"human_only","deploy_authority":"human_only","push_authority":"human_only","external_action_authority":"none",
- "risk_budget":{"max_build_passes":3,"max_review_passes":3,"max_repair_rounds":1,"max_files_changed":500,"max_diff_lines":30000,"max_pass_runtime_seconds":7200},
+ "risk_budget":{"max_build_passes":4,"max_review_passes":4,"max_repair_rounds":1,"max_files_changed":500,"max_diff_lines":30000,"max_pass_runtime_seconds":7200},
  "checkpoint_graph":{"execution_order":["CP-0","CP-1"],"checkpoints":[
   {"id":"CP-0","title":"one","scope":"one","depends_on":[],"acceptance_criterion_ids":["AC-1"],"risk_budget":{"max_build_passes":2,"max_review_passes":2,"max_repair_rounds":1}},
   {"id":"CP-1","title":"two","scope":"two","depends_on":["CP-0"],"acceptance_criterion_ids":["AC-2"],"risk_budget":{"max_build_passes":2,"max_review_passes":2,"max_repair_rounds":1}}
@@ -26,7 +26,12 @@ errs=packet.validate_packet_metadata(bad)
 assert any("max_diff_lines=50000 exceeds executable ceiling 30000" in e for e in errs), errs
 bad2={**base,"risk_budget":{**base["risk_budget"],"max_build_passes":2,"max_review_passes":2}}
 errs=packet.validate_packet_metadata(bad2)
-assert any("cannot realize max_repair_rounds=1" in e for e in errs), errs
+# v0.9.1+: with the mandatory final whole-product review requirement
+# the failure mode is the undersized final-review budget slot rather than
+# the per-checkpoint repair realisation. Either rejection is acceptable
+# evidence that the budget validator is fail-closed.
+assert any("cannot realize max_repair_rounds=1" in e for e in errs) or \
+    any("cannot fund the mandatory final whole-product review" in e for e in errs), errs
 badcp={**base,"checkpoint_graph":{**base["checkpoint_graph"],"checkpoints":[dict(base["checkpoint_graph"]["checkpoints"][0]),base["checkpoint_graph"]["checkpoints"][1]]}}
 badcp["checkpoint_graph"]["checkpoints"][0].pop("acceptance_criterion_ids")
 badcp["checkpoint_graph"]["checkpoints"][0]["acceptance_criteria"]=["AC-1"]

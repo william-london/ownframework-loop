@@ -112,7 +112,14 @@ FIXED_KEYS: frozenset[str] = frozenset(
         "protected_findings",
         "secret_findings",
         "reviewer_identity",
+        # v0.9.1+: review scope is a deterministic core-owned field. The
+        # model may not spoof it; the finalizer compares it against the
+        # durable program_state.review_scope on the exact candidate.
+        "review_scope",
     }
+)
+_ALLOWED_REVIEW_SCOPES: frozenset[str] = frozenset(
+    {"checkpoint", "program_final"}
 )
 ALLOWED_ASSESSMENT_KEYS: frozenset[str] = frozenset(
     {*FIXED_KEYS, *FILLABLE_KEYS}
@@ -200,11 +207,21 @@ def validate_assessment_envelope_contract(assessment: Any) -> list[str]:
     if unknown:
         errors.append("unsupported top-level keys: " + ",".join(unknown))
     for field in sorted(FIXED_KEYS):
-        if field in assessment and field not in {"scope_findings", "protected_findings", "secret_findings"} and (
+        if field in assessment and field not in {
+            "scope_findings", "protected_findings", "secret_findings",
+            "review_scope",
+        } and (
             not isinstance(assessment.get(field), str)
             or not str(assessment.get(field) or "").strip()
         ):
             errors.append(f"fixed field {field} must be a non-empty string")
+    if "review_scope" in assessment:
+        scope = assessment.get("review_scope")
+        if scope not in _ALLOWED_REVIEW_SCOPES:
+            errors.append(
+                f"review_scope={scope!r} must be one of "
+                f"{sorted(_ALLOWED_REVIEW_SCOPES)}"
+            )
     if assessment.get("schema") != SCHEMA_AGENT_ASSESSMENT:
         errors.append(f"schema must be {SCHEMA_AGENT_ASSESSMENT}")
     if "reviewer_identity" in assessment and assessment.get("reviewer_identity") != "of-reviewer":
@@ -485,10 +502,23 @@ def build_skeleton(
         return out
 
     if state_mod.is_program_state(state_doc):
-        expected_ac_ids = program_mod.current_checkpoint_acceptance_criterion_ids(
-            meta, (state_doc or {}).get("program") or {}
-        )
+        program_state = (state_doc or {}).get("program") or {}
+        # v0.9.1+: review scope is core-owned. Default to "checkpoint" when
+        # missing (legacy / first-pass review); the final whole-product
+        # review is gated by "program_final" and stamped by the
+        # deterministic core at the same time it routes REVIEWING ->
+        # READY_FOR_REVIEW after the last CP.
+        raw_scope = program_state.get("review_scope")
+        if raw_scope == "program_final":
+            review_scope = "program_final"
+            expected_ac_ids = program_mod.packet_acceptance_criterion_ids(meta)
+        else:
+            review_scope = "checkpoint"
+            expected_ac_ids = program_mod.current_checkpoint_acceptance_criterion_ids(
+                meta, program_state
+            )
     else:
+        review_scope = "checkpoint"
         expected_ac_ids = _expected_ids(meta.get("acceptance_criteria") or [], "AC")
     expected_ng_ids = _expected_ids(meta.get("non_goals") or [], "NG")
 
@@ -508,6 +538,7 @@ def build_skeleton(
     clean["secret_findings"] = []
     # Missing reviewer intent must never inherit an APPROVED template default.
     clean["recommended_verdict"] = "HUMAN_REVIEW_REQUIRED"
+    clean["review_scope"] = review_scope
 
     return clean
 

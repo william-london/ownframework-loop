@@ -317,7 +317,7 @@ fence = chr(96) * 3
         "deploy_authority": "human_only",
         "push_authority": "human_only",
         "external_action_authority": "none",
-        "risk_budget": {"max_build_passes": 4, "max_review_passes": 4, "max_repair_rounds": 1,
+        "risk_budget": {"max_build_passes": 5, "max_review_passes": 5, "max_repair_rounds": 1,
                         "max_files_changed": 5, "max_diff_lines": 100},
     })
     + '\n' + fence + '\n'
@@ -807,11 +807,11 @@ fence = chr(96) * 3
                 {"id": "CP-0", "title": "f", "scope": "do first",
                  "acceptance_criterion_ids": ["AC-1"],
                  "work_units": ["UNIT-1"],
-                 "risk_budget": {"max_build_passes": 4, "max_review_passes": 4, "max_repair_rounds": 2}},
+                 "risk_budget": {"max_build_passes": 5, "max_review_passes": 5, "max_repair_rounds": 2}},
                 {"id": "CP-1", "title": "s", "scope": "do second",
                  "depends_on": ["CP-0"], "acceptance_criterion_ids": ["AC-1"],
                  "work_units": ["UNIT-1"],
-                 "risk_budget": {"max_build_passes": 4, "max_review_passes": 4, "max_repair_rounds": 2}},
+                 "risk_budget": {"max_build_passes": 5, "max_review_passes": 5, "max_repair_rounds": 2}},
             ],
         },
         "promotion_policy": "human_gate",

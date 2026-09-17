@@ -73,7 +73,7 @@ mkpkg() {
   "required_validation": [{"name": "t", "command": "true", "kind": "bad_kind", "expected_exit_code": 0}],
   "work_units": [{"id": "UNIT-1", "title": "t", "scope": "do"}],
   "risk_budget": {
-    "max_build_passes": 4, "max_review_passes": 4, "max_repair_rounds": 1,
+    "max_build_passes": 5, "max_review_passes": 5, "max_repair_rounds": 1,
     "max_diff_lines": 100, "max_files_changed": 5,
     "max_pass_runtime_seconds": 3600, "max_runtime_seconds": 86400,
     "max_consecutive_no_progress_passes": 3, "max_identical_finding_repeats": 3

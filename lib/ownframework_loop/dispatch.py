@@ -1248,24 +1248,51 @@ def _checkpoint_authority_context(
     authority.  Keeping the exact packet lists in the work order prevents a
     builder from having to infer that a specific protected child overrides a
     broad allowed parent.
+
+    v0.9.1+: when the durable ``program.review_scope == "program_final"``
+    the checkpoint_id is forced empty and the AC list is the full packet
+    contract — this is the whole-product review and is NOT scoped to any
+    one checkpoint.
     """
-    cp = next(
-        (item for item in (packet.get("checkpoint_graph") or {}).get("checkpoints", [])
-         if isinstance(item, dict) and item.get("id") == checkpoint_id),
-        None,
-    )
+    cp = None
+    ac_ids: list[str] = []
+    durable_scope = None
+    if isinstance(state_doc, dict):
+        program_state = state_doc.get("program") or {}
+        if isinstance(program_state, dict):
+            durable_scope = program_state.get("review_scope")
+    if durable_scope == program_mod.REVIEW_SCOPE_PROGRAM_FINAL:
+        # The final whole-product review sees the full packet contract;
+        # no per-checkpoint scope applies.
+        checkpoint_id = ""
+        cp = None
+        ac_ids = program_mod.packet_acceptance_criterion_ids(packet)
+    else:
+        cp = next(
+            (item for item in (packet.get("checkpoint_graph") or {}).get("checkpoints", [])
+             if isinstance(item, dict) and item.get("id") == checkpoint_id),
+            None,
+        )
+        ac_ids = list((cp or {}).get("acceptance_criterion_ids") or [])
+        if not ac_ids:
+            ac_ids = program_mod.packet_acceptance_criterion_ids(packet)
     ac_by_id = {
         str(item.get("id")): str(item.get("text") or "")
         for item in packet.get("acceptance_criteria") or []
         if isinstance(item, dict) and item.get("id")
     }
-    ac_ids = list((cp or {}).get("acceptance_criterion_ids") or [])
-    if not ac_ids:
-        ac_ids = program_mod.packet_acceptance_criterion_ids(packet)
     return {
         "checkpoint_id": checkpoint_id,
         "work_unit_id": work_unit_id,
         "checkpoint_scope": str((cp or {}).get("scope") or packet.get("scope") or ""),
+        "review_scope": (
+            durable_scope
+            if durable_scope in (
+                program_mod.REVIEW_SCOPE_CHECKPOINT,
+                program_mod.REVIEW_SCOPE_PROGRAM_FINAL,
+            )
+            else program_mod.REVIEW_SCOPE_CHECKPOINT
+        ),
         "acceptance_criterion_ids": ac_ids,
         "acceptance_criteria": [
             {"id": item, "text": ac_by_id.get(str(item), "")}
@@ -1431,6 +1458,7 @@ def claim_next(*, canonical_repo: Path, run_id: str) -> dict[str, Any]:
                 if not semantic_path:
                     raise DispatchError("review preparation returned no semantic path")
                 checkpoint_id = str(prep.get("checkpoint_id") or "")
+                review_scope = str(prep.get("review_scope") or "checkpoint")
                 return {
                     "schema": SCHEMA,
                     "decision": "REVIEW",
@@ -1448,6 +1476,7 @@ def claim_next(*, canonical_repo: Path, run_id: str) -> dict[str, Any]:
                     "build_receipt_sha256": prep.get("build_receipt_sha256"),
                     "candidate_sha": prep.get("candidate_sha"),
                     "checkpoint_id": checkpoint_id,
+                    "review_scope": review_scope,
                     "acceptance_criterion_ids": prep.get("acceptance_criterion_ids"),
                     "checkpoint_authority": _checkpoint_authority_context(
                         pmeta, cur, checkpoint_id=checkpoint_id,

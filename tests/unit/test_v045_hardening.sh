@@ -173,7 +173,7 @@ from state_seed import seed_state
 repo=Path(os.environ["PREPO"]); rid=os.environ["PRID"]
 packet={
  "schema":"ownframework-work-packet/v3","execution_mode":"program",
- "risk_budget":{"max_build_passes":2,"max_review_passes":2,"max_repair_rounds":1},
+ "risk_budget":{"max_build_passes":3,"max_review_passes":3,"max_repair_rounds":1},
  "checkpoint_graph":{"execution_order":["CP-1"],"checkpoints":[{
    "id":"CP-1","title":"one","scope":"one","depends_on":[],
    "risk_budget":{"max_build_passes":2,"max_review_passes":2,"max_repair_rounds":1}}]},

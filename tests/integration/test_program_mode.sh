@@ -54,8 +54,8 @@ packet = {
     "push_authority": "human_only",
     "external_action_authority": "none",
     "risk_budget": {
-        "max_build_passes": 4,
-        "max_review_passes": 4,
+        "max_build_passes": 5,
+        "max_review_passes": 5,
         "max_repair_rounds": 2,
         "max_files_changed": 25,
         "max_diff_lines": 1000
@@ -84,16 +84,20 @@ PY
 }
 
 fill_review_semantic() {
-  local semantic="$1" label="$2" ac_id="$3"
-  python3 - "$semantic" "$label" "$ac_id" <<'PY'
+  local semantic="$1" label="$2" ac_ids="$3"
+  python3 - "$semantic" "$label" "$ac_ids" <<'PY'
 import json, sys
 from pathlib import Path
 p = Path(sys.argv[1])
 label = sys.argv[2]
-ac_id = sys.argv[3]
+ac_ids_raw = sys.argv[3]
+ac_ids = [a.strip() for a in ac_ids_raw.split(",") if a.strip()]
 d = json.loads(p.read_text())
 d["validation_results"] = []
-d["acceptance_results"] = [{"id": ac_id, "result": "pass", "evidence": f"{label} exact-SHA review"}]
+d["acceptance_results"] = [
+    {"id": ac, "result": "pass", "evidence": f"{label} exact-SHA review for {ac}"}
+    for ac in ac_ids
+]
 d["non_goal_results"] = []
 d["findings"] = []
 d["recommended_verdict"] = "APPROVED"
@@ -158,6 +162,17 @@ print("PASS CP-1 advanced deterministically to CP-2")
 PY
 
 run_checkpoint "CP-2" "two" "AC-2"
+# v0.9.1+: after the final CP review APPROVES, the run is in
+# READY_FOR_REVIEW awaiting the mandatory final whole-product review.
+# Drive the final review through the standard pipeline so the test can
+# observe the same terminal state the historical flow produced.
+FINAL_ORDER="$("$OFLOOP" dispatch claim "$REPO" "$RUN_ID")"
+assert_eq "$(printf '%s' "$FINAL_ORDER" | jq -r '.decision')" "REVIEW" "PROGRAM final-review claim"
+assert_eq "$(printf '%s' "$FINAL_ORDER" | jq -r '.review_scope')" "program_final" "PROGRAM final-review scope"
+FSEM="$(printf '%s' "$FINAL_ORDER" | jq -r '.semantic_path')"
+assert_file_exists "$FSEM" "PROGRAM final-review semantic skeleton exists"
+fill_review_semantic "$FSEM" "PROGRAM_FINAL" "AC-1,AC-2"
+"$OFLOOP" dispatch finalize "$REPO" "$RUN_ID" REVIEW "$FSEM" >/dev/null
 TERMINAL="$("$OFLOOP" dispatch claim "$REPO" "$RUN_ID")"
 assert_eq "$(printf '%s' "$TERMINAL" | jq -r '.decision')" "TERMINAL" "PROGRAM dispatch terminal"
 assert_eq "$(printf '%s' "$TERMINAL" | jq -r '.state')" "APPROVED" "PROGRAM terminal APPROVED"
@@ -171,7 +186,10 @@ assert s["state"] == "APPROVED", s
 assert prog["current_checkpoints"] == [], prog
 assert [x["id"] for x in prog["finalized_checkpoints"]] == ["CP-1", "CP-2"], prog
 assert prog["cumulative_counters"]["build_pass_count"] == 2, prog
-assert prog["cumulative_counters"]["review_pass_count"] == 2, prog
+# v0.9.1+: review_pass_count is 3 (2 CP reviews + 1 mandatory final whole-
+# product review). The final review is gated by the +1 budget slot and
+# never bumps per-checkpoint review counters.
+assert prog["cumulative_counters"]["review_pass_count"] == 3, prog
 print("PASS PROGRAM finalized CP-1 and CP-2 exactly once")
 PY
 

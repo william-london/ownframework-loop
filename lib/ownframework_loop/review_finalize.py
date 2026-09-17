@@ -482,13 +482,18 @@ def finalize_review(
     checkpoint_id = ""
     if state_mod.is_program_state(active_state):
         program_state = (active_state or {}).get("program") or {}
-        current = list(program_state.get("current_checkpoints") or [])
-        if not current:
-            raise RuntimeError("PROGRAM review has no current checkpoint")
-        checkpoint_id = str(current[0])
-        expected_ac_ids = program_mod.current_checkpoint_acceptance_criterion_ids(
-            meta, program_state
-        )
+        # v0.9.1+: a final whole-product review has no current checkpoint;
+        # the AC set is the full packet contract.
+        if program_state.get("review_scope") == program_mod.REVIEW_SCOPE_PROGRAM_FINAL:
+            expected_ac_ids = program_mod.packet_acceptance_criterion_ids(meta)
+        else:
+            current = list(program_state.get("current_checkpoints") or [])
+            if not current:
+                raise RuntimeError("PROGRAM review has no current checkpoint")
+            checkpoint_id = str(current[0])
+            expected_ac_ids = program_mod.current_checkpoint_acceptance_criterion_ids(
+                meta, program_state
+            )
     else:
         expected_ac_ids = _expected_ids(meta.get("acceptance_criteria") or [], "AC")
     expected_ng_ids = _expected_ids(meta.get("non_goals") or [], "NG")
@@ -616,6 +621,15 @@ def finalize_review(
         next_state = "BLOCKED"
 
     # 19. Build authoritative verdict.
+    durable_review_scope: str | None = None
+    durable_cur = state_mod.load_verified(canonical_repo, run_id)
+    if state_mod.is_program_state(durable_cur):
+        durable_program_state = (durable_cur.get("program") or {})
+        durable_review_scope = (
+            durable_program_state.get("review_scope")
+            if isinstance(durable_program_state, dict)
+            else None
+        )
     new_verdict = {
         "schema": "ownframework-loop-review-verdict/v2",
         "run_id": run_id,
@@ -670,6 +684,20 @@ def finalize_review(
         "escalation_recommended": assessment.get("escalation_recommended") is True,
         "escalation_reason": (assessment.get("escalation_reason") if assessment else None),
     }
+    # v0.9.1+: stamp the core-owned review scope on the durable verdict so
+    # the audit trail can prove the finalizer saw the matching scope. The
+    # value is sourced from STATE.json, not the model-authored assessment,
+    # so the model cannot smuggle a scope change into the verdict.
+    # Legacy/None scope (first CP of a freshly-materialised PROGRAM) is
+    # normalised to "checkpoint" so the verdict always carries an explicit,
+    # non-null core-owned scope.
+    if durable_review_scope in (
+        program_mod.REVIEW_SCOPE_CHECKPOINT,
+        program_mod.REVIEW_SCOPE_PROGRAM_FINAL,
+    ):
+        new_verdict["review_scope"] = durable_review_scope
+    elif durable_review_scope is None:
+        new_verdict["review_scope"] = program_mod.REVIEW_SCOPE_CHECKPOINT
 
     # Validate authoritative protocol shape before persistence. The low-level
     # writer retains its historical identity/cleanliness-only contract for
@@ -701,23 +729,51 @@ def finalize_review(
             and next_state == "APPROVED"
         ):
             verdict_sha256 = util.sha256_file(verdicts.verdict_path(canonical_repo, run_id))
-            try:
-                adv = program_mod.advance_after_review_approval(
-                    canonical_repo=canonical_repo,
-                    run_id=run_id,
-                    packet=meta,
-                    state=cur,
-                    candidate_sha=receipt_candidate_sha,
-                    verdict_sha256=verdict_sha256,
-                    review_pass_number=int(new_review_pass_count),
-                    actor=actor,
-                )
+            durable_scope = (
+                (cur.get("program") or {}).get("review_scope")
+                if isinstance(cur.get("program"), dict) else None
+            )
+            if durable_scope == program_mod.REVIEW_SCOPE_PROGRAM_FINAL:
+                # v0.9.1+: top-level PROGRAM APPROVED is gated by the
+                # mandatory final whole-product review. The checkpoint
+                # graph is fully finalized; this review sees the
+                # assembled candidate. terminalize_program_after_final_review
+                # is the SOLE owner of REVIEWING -> APPROVED in this
+                # branch.
+                try:
+                    adv = program_mod.terminalize_program_after_final_review(
+                        canonical_repo=canonical_repo,
+                        run_id=run_id,
+                        packet=meta,
+                        state=cur,
+                        candidate_sha=receipt_candidate_sha,
+                        verdict_sha256=verdict_sha256,
+                        review_pass_number=int(new_review_pass_count),
+                        actor=actor,
+                    )
+                except program_mod.ProgramStateError as e:
+                    raise RuntimeError(
+                        f"final whole-product review terminalize refused: {e}"
+                    ) from e
                 next_state = adv["next_top_state"]
-                # The persisted REVIEW_VERDICT is the immutable review result.
-                # PROGRAM advancement is recorded in STATE/EVENTS; do not mutate
-                # the in-memory verdict after hashing/writing it.
-            except program_mod.ProgramStateError as e:
-                raise RuntimeError(f"program advancement refused: {e}")
+            else:
+                try:
+                    adv = program_mod.advance_after_review_approval(
+                        canonical_repo=canonical_repo,
+                        run_id=run_id,
+                        packet=meta,
+                        state=cur,
+                        candidate_sha=receipt_candidate_sha,
+                        verdict_sha256=verdict_sha256,
+                        review_pass_number=int(new_review_pass_count),
+                        actor=actor,
+                    )
+                    next_state = adv["next_top_state"]
+                    # The persisted REVIEW_VERDICT is the immutable review result.
+                    # PROGRAM advancement is recorded in STATE/EVENTS; do not mutate
+                    # the in-memory verdict after hashing/writing it.
+                except program_mod.ProgramStateError as e:
+                    raise RuntimeError(f"program advancement refused: {e}")
         elif next_state == "CHANGES_REQUESTED":
             # The rejection state and its repair entitlement are one
             # STATE_TXN-backed mutation. A crash can no longer expose a

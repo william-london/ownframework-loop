@@ -119,17 +119,33 @@ def prepare(*, canonical_repo: Path, run_id: str) -> dict[str, Any]:
         )
 
     checkpoint_id = ""
+    review_scope = program_mod.REVIEW_SCOPE_CHECKPOINT
+    execution_mode = "single"
     if state_mod.is_program_state(state):
         program_state = (state or {}).get("program") or {}
-        current = list(program_state.get("current_checkpoints") or [])
-        if not current:
-            raise ReviewPrepareRefused("PROGRAM review has no current checkpoint")
-        checkpoint_id = str(current[0])
-        acceptance_criterion_ids = (
-            program_mod.current_checkpoint_acceptance_criterion_ids(
-                meta, program_state
+        durable_scope = program_state.get("review_scope")
+        if durable_scope == program_mod.REVIEW_SCOPE_PROGRAM_FINAL:
+            # v0.9.1+: mandatory final whole-product review. The CP
+            # graph is fully finalized-APPROVED; this review sees the
+            # exact assembled candidate as one product and applies the
+            # full packet contract (every AC id, every non-goal).
+            review_scope = program_mod.REVIEW_SCOPE_PROGRAM_FINAL
+            checkpoint_id = ""
+            acceptance_criterion_ids = (
+                program_mod.packet_acceptance_criterion_ids(meta)
             )
-        )
+            execution_mode = "program_final"
+        else:
+            current = list(program_state.get("current_checkpoints") or [])
+            if not current:
+                raise ReviewPrepareRefused("PROGRAM review has no current checkpoint")
+            checkpoint_id = str(current[0])
+            acceptance_criterion_ids = (
+                program_mod.current_checkpoint_acceptance_criterion_ids(
+                    meta, program_state
+                )
+            )
+            execution_mode = "program"
     else:
         acceptance_criterion_ids = program_mod.packet_acceptance_criterion_ids(meta)
 
@@ -148,7 +164,8 @@ def prepare(*, canonical_repo: Path, run_id: str) -> dict[str, Any]:
         "schema": "ownframework-loop-review-prepare/v1",
         "canonical_repo": str(canonical_repo),
         "run_id": run_id,
-        "execution_mode": "program" if state_mod.is_program_state(state) else "single",
+        "execution_mode": execution_mode,
+        "review_scope": review_scope,
         "candidate_sha": candidate_sha,
         "baseline_sha": baseline_sha,
         "candidate_branch": candidate_branch,

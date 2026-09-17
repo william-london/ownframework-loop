@@ -960,29 +960,54 @@ def transition_funded_repair(
                 raise RuntimeError(
                     f"repair counter mirror drift: top={mirror}, cumulative={cumulative}"
                 )
-            cp_id = program_mod.select_next_checkpoint(packet, program_state)
-            if cp_id is None:
-                raise RuntimeError("PROGRAM review rejection has no current checkpoint")
-            packet_cp = program_mod._resolve_packet_cp(packet, cp_id)
-            try:
-                new_program = program_mod._bump_counter_one(
-                    program_state,
-                    cp_id=cp_id,
-                    counter="repair_round_count",
-                    packet_cp=packet_cp,
-                )
-            except program_mod.ProgramStateError as exc:
-                target = "BLOCKED"
-                repair_block_reason = f"repair claim refused (cap exhausted): {exc}"
+            # v0.9.1+: when program.review_scope == "program_final" there is
+            # no current checkpoint; the final review's repair entitlement
+            # is funded against the program-wide cumulative cap only.
+            if (
+                isinstance(program_state, dict)
+                and program_state.get("review_scope")
+                == program_mod.REVIEW_SCOPE_PROGRAM_FINAL
+            ):
+                cum_cap = int(program_state["cumulative_ceilings"]["max_repair_rounds"])
+                if cumulative >= cum_cap:
+                    target = "BLOCKED"
+                    repair_block_reason = (
+                        f"repair claim refused (cap exhausted): "
+                        f"program-wide {cumulative}/{cum_cap}"
+                    )
+                else:
+                    new_program = json.loads(integrity.canonical_json_dumps(program_state))
+                    new_program["cumulative_counters"]["repair_round_count"] = (
+                        cumulative + 1
+                    )
+                    new["program"] = new_program
+                    new["repair_round"] = mirror + 1
+                    target = "CHANGES_REQUESTED"
+                    repair_claimed = True
             else:
-                cp_new = program_mod._find_cp(new_program, cp_id)
-                ev_map = dict(cp_new.get("last_evidence_sha_by_counter") or {})
-                ev_map["repair_round_count"] = commit_sha
-                cp_new["last_evidence_sha_by_counter"] = ev_map
-                new["program"] = new_program
-                new["repair_round"] = mirror + 1
-                target = "CHANGES_REQUESTED"
-                repair_claimed = True
+                cp_id = program_mod.select_next_checkpoint(packet, program_state)
+                if cp_id is None:
+                    raise RuntimeError("PROGRAM review rejection has no current checkpoint")
+                packet_cp = program_mod._resolve_packet_cp(packet, cp_id)
+                try:
+                    new_program = program_mod._bump_counter_one(
+                        program_state,
+                        cp_id=cp_id,
+                        counter="repair_round_count",
+                        packet_cp=packet_cp,
+                    )
+                except program_mod.ProgramStateError as exc:
+                    target = "BLOCKED"
+                    repair_block_reason = f"repair claim refused (cap exhausted): {exc}"
+                else:
+                    cp_new = program_mod._find_cp(new_program, cp_id)
+                    ev_map = dict(cp_new.get("last_evidence_sha_by_counter") or {})
+                    ev_map["repair_round_count"] = commit_sha
+                    cp_new["last_evidence_sha_by_counter"] = ev_map
+                    new["program"] = new_program
+                    new["repair_round"] = mirror + 1
+                    target = "CHANGES_REQUESTED"
+                    repair_claimed = True
         else:
             current_round = int(current.get("repair_round", 0) or 0)
             cap = limits_mod.effective_cap("repair_round", packet)

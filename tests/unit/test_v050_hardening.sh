@@ -104,7 +104,7 @@ packet={
  'promotion_policy':'human_gate','acceptance_criteria':[{'id':'AC-1','text':'ok'}],'non_goals':[],
  'allowed_paths':['src/'],'protected_paths':['.ownframework-loop/'],'work_units':[{'id':'UNIT-1','title':'u','scope':'s'}],
  'merge_authority':'human_only','deploy_authority':'human_only','push_authority':'human_only','external_action_authority':'none',
- 'risk_budget':{'max_build_passes':2,'max_review_passes':2,'max_repair_rounds':1,'max_files_changed':25,'max_diff_lines':1000}}
+ 'risk_budget':{'max_build_passes':3,'max_review_passes':3,'max_repair_rounds':1,'max_files_changed':25,'max_diff_lines':1000}}
 p.write_text('```json\n'+json.dumps(packet,sort_keys=True)+'\n```\n')
 PY
 $OFLOOP build claim "$T4" "$RID4" >/dev/null

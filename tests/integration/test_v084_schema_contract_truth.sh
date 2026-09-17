@@ -132,7 +132,7 @@ packet={
  "work_units":[{"id":"UNIT-1","title":"program","scope":"src/"}],
  "merge_authority":"human_only","deploy_authority":"human_only","push_authority":"human_only",
  "external_action_authority":"none",
- "risk_budget":{"max_build_passes":4,"max_review_passes":4,"max_repair_rounds":2,"max_files_changed":25,"max_diff_lines":1000}
+ "risk_budget":{"max_build_passes":6,"max_review_passes":6,"max_repair_rounds":2,"max_files_changed":25,"max_diff_lines":1000}
 }
 fence=chr(96)*3
 p.write_text(fence+"json\n"+json.dumps(packet,sort_keys=True)+"\n"+fence+"\n")
@@ -242,7 +242,7 @@ valid={
  "work_units":[{"id":"UNIT-1","title":"program","scope":"src/"}],
  "merge_authority":"human_only","deploy_authority":"human_only","push_authority":"human_only",
  "external_action_authority":"none",
- "risk_budget":{"max_build_passes":4,"max_review_passes":4,"max_repair_rounds":2,"max_files_changed":25,"max_diff_lines":1000}
+ "risk_budget":{"max_build_passes":6,"max_review_passes":6,"max_repair_rounds":2,"max_files_changed":25,"max_diff_lines":1000}
 }
 errors=packet.validate_packet_for_approval(valid)
 assert errors == [], errors

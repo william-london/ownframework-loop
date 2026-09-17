@@ -533,6 +533,10 @@
         "null"
       ]
     },
+    "review_scope": {
+      "type": "string",
+      "enum": ["checkpoint", "program_final"]
+    },
     "checkpoint_id": {
       "type": "string"
     },

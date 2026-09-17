@@ -112,8 +112,8 @@ def packet_for(repo: Path) -> dict:
         "push_authority": "human_only",
         "external_action_authority": "none",
         "risk_budget": {
-            "max_build_passes": 5,
-            "max_review_passes": 5,
+            "max_build_passes": 6,
+            "max_review_passes": 6,
             "max_repair_rounds": 3,
             "max_files_changed": 12,
             "max_diff_lines": 600,

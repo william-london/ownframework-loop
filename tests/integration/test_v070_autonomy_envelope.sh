@@ -63,7 +63,7 @@ cat > "$REPO1/.ownframework-loop/$RID1/WORK_PACKET.md" <<EOF
     "checkpoints": [{
       "id": "CP-1", "title": "one", "scope": "src", "depends_on": [],
       "work_units": ["UNIT-1"],
-      "risk_budget": {"max_build_passes": 4, "max_review_passes": 4, "max_repair_rounds": 3}
+      "risk_budget": {"max_build_passes": 6, "max_review_passes": 6, "max_repair_rounds": 3}
     }]
   }
 }
@@ -260,9 +260,9 @@ cat > "$REPO4/.ownframework-loop/$RID4/WORK_PACKET.md" <<EOF
   "risk_budget": {
     "max_files_changed": 25,
     "max_diff_lines": 1000,
-    "max_repair_rounds": 4,
+    "max_repair_rounds": 0,
     "max_build_passes": 1,
-    "max_review_passes": 4
+    "max_review_passes": 2
   }
 }
 \`\`\`

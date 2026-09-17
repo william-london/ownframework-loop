@@ -109,3 +109,55 @@ input, not authority.
 A replayed review claim keeps the same pass number, candidate/worktree and
 assessment path. Re-inspect and continue the same assessment; never create a
 new pass or scratch path yourself.
+
+## Whole-Product Final Review (`review_scope = "program_final"`)
+
+When the durable `program.review_scope` is `"program_final"`, the parent has
+already finalized every checkpoint in the program graph. Your pass is the
+mandatory **final whole-product review** of the exact assembled candidate.
+The deterministic core routes top-level `PROGRAM APPROVED` through your
+verdict; a CP-scope verdict cannot terminalize the program.
+
+The prepared inputs change shape under `review_scope = "program_final"`:
+
+- `checkpoint_id` is `""` — no checkpoint owns this review.
+- `acceptance_criterion_ids` is the **full packet contract** — every packet
+  AC id, not a CP subset.
+- Every non-goal in the packet applies globally.
+- `execution_mode` is `"program_final"`.
+
+Apply this scope by reasoning about the **assembled product**, not any one
+checkpoint:
+
+- Treat the candidate as one deliverable the operator or end user will
+  actually consume. Identify interfaces between completed pieces that no
+  individual checkpoint owned: do two subsystems compete for the same
+  authority? Does a public entry point bypass the canonical internal path?
+  Does configuration documentation disagree with the actual loading
+  behavior? Are retry / idempotency semantics correct at the real
+  logical-action boundary, not merely inside one subsystem?
+- Detect contradictions, missing proof, broken interactions, and
+  materially-incomplete intended deliverable state. The checkpoint reviews
+  have already approved local correctness; your job is to challenge the
+  interactions.
+- Where the repository produces something that can actually be consumed
+  (CLI, library API, generated artifact, install path, rendered output),
+  inspect that output directly. Do not rely on internal implementation
+  evidence when a real deliverable inspection is authorized and relevant.
+- Do NOT reopen intentionally deferred work (packet `non_goals`). Do NOT
+  demand visual polish, aesthetic refactors, or speculative improvements.
+  The bar is merge-ready, not perfect.
+- Distinguish concrete must-fix defects from advisory improvements. A
+  must-fix finding must name a concrete consequence: broken behavior,
+  contradictory behavior, unsafe behavior, materially-incomplete intended
+  deliverable, missing required flow, invalid runtime assumption,
+  unsupported strong claim, broken bootstrap, or stale/deceptive product
+  truth.
+
+The scope is stamped on the assessment's `review_scope` field by the
+deterministic core; do not modify it. A `checkpoint`-scope assessment on a
+`program_final` review is itself a must-fix finding because the model
+failed to engage the whole-product reasoning the pass is meant to enforce.
+
+The existing scope="checkpoint" instructions remain unchanged.
+

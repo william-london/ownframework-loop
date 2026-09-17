@@ -51,7 +51,7 @@ minimal_packet = {
     "deploy_authority": "human_only",
     "push_authority": "human_only",
     "external_action_authority": "none",
-    "risk_budget": {"max_build_passes": 4, "max_review_passes": 4, "max_repair_rounds": 1,
+    "risk_budget": {"max_build_passes": 5, "max_review_passes": 5, "max_repair_rounds": 1,
                     "max_files_changed": 5, "max_diff_lines": 100},
 }
 fence = chr(96) * 3
@@ -98,7 +98,7 @@ def _write_minimal_packet(p, rid):
         "deploy_authority": "human_only",
         "push_authority": "human_only",
         "external_action_authority": "none",
-        "risk_budget": {"max_build_passes": 4, "max_review_passes": 4, "max_repair_rounds": 1,
+        "risk_budget": {"max_build_passes": 5, "max_review_passes": 5, "max_repair_rounds": 1,
                         "max_files_changed": 5, "max_diff_lines": 100},
     }
     fence = chr(96) * 3
@@ -160,7 +160,7 @@ minimal_packet = {
     "deploy_authority": "human_only",
     "push_authority": "human_only",
     "external_action_authority": "none",
-    "risk_budget": {"max_build_passes": 4, "max_review_passes": 4, "max_repair_rounds": 1,
+    "risk_budget": {"max_build_passes": 5, "max_review_passes": 5, "max_repair_rounds": 1,
                     "max_files_changed": 5, "max_diff_lines": 100},
 }
 fence = chr(96) * 3

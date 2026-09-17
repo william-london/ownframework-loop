@@ -45,6 +45,17 @@ MAX_CP_REPAIR_ROUNDS = 32
 GLOBAL_MAX_UNIQUE_CHANGED_FILES = 500
 GLOBAL_MAX_BASELINE_TO_FINAL_DIFF_LINES = 30000
 
+# Review scope values carried on program_state. ``None`` means no scope has
+# been set yet (legacy / pre-materialise / non-program runs). ``"checkpoint"``
+# is the default scope for ordinary checkpoint reviews. ``"program_final"``
+# marks the mandatory whole-product review that gates top-level APPROVED
+# after all checkpoints have finalized- APPROVED.
+REVIEW_SCOPE_CHECKPOINT = "checkpoint"
+REVIEW_SCOPE_PROGRAM_FINAL = "program_final"
+_REVIEW_SCOPE_VALUES = frozenset(
+    {None, REVIEW_SCOPE_CHECKPOINT, REVIEW_SCOPE_PROGRAM_FINAL}
+)
+
 
 class ProgramGraphError(ValueError):
     """Static graph contract violation (DAG, deps, caps)."""
@@ -186,12 +197,19 @@ def resolve_effective_required_validation(
     PROGRAM checkpoint-local validations are appended only for the exact
     current checkpoint.  This intentionally never inspects future checkpoints
     and preserves the historical SINGLE-mode list unchanged.
+
+    v0.9.1+: when the durable ``program.review_scope == "program_final"`` the
+    run is in REVIEWING awaiting the mandatory final whole-product review.
+    There is no current checkpoint; the effective validation set is the
+    full top-level contract (no per-checkpoint extensions).
     """
     effective = list(packet.get("required_validation") or [])
     if not is_program_state(state):
         return effective
 
     program_state = state.get("program") or {}
+    if program_state.get("review_scope") == REVIEW_SCOPE_PROGRAM_FINAL:
+        return effective
     current = list(program_state.get("current_checkpoints") or [])
     if not current:
         raise ProgramStateError("PROGRAM state has no current checkpoint")
@@ -429,6 +447,20 @@ def validate_checkpoint_graph(packet: dict[str, Any]) -> list[str]:
                     f"packet-level max_review_passes={gr} cannot realize "
                     f"max_repair_rounds={gp} across {n_cps} checkpoints; need >= {needed}"
                 )
+        # Mandatory final whole-product review requires one additional
+        # review pass beyond the sum of n_cps initial reviews and gp
+        # repair rounds (builds are unaffected — the final pass is a
+        # review, not a build). This is funded from the existing global
+        # risk_budget envelope, not from any new authority; the packet's
+        # deliberate budget declaration remains the operator's contract.
+        if isinstance(gr, int):
+            needed_final = n_cps + (gp if isinstance(gp, int) and gp > 0 else 0) + 1
+            if gr < needed_final:
+                errors.append(
+                    f"packet-level max_review_passes={gr} cannot fund the "
+                    f"mandatory final whole-product review across {n_cps} "
+                    f"checkpoints; need >= {needed_final}"
+                )
     return errors
 
 
@@ -525,6 +557,11 @@ def materialise_initial_program_state(
         "execution_mode": "program",
         "checkpoint_graph_sha256": checkpoint_graph_sha256(packet),
         "promotion_policy": resolve_promotion_policy(packet),
+        # v0.9.1+: review scope carried on the durable program_state.
+        # None means no scope set (legacy / non-program runs); the
+        # first checkpoint review stamps "checkpoint"; the final
+        # whole-product review is gated by "program_final".
+        "review_scope": None,
         "current_checkpoints": current,
         "finalized_checkpoints": [],
         "cumulative_counters": {
@@ -745,15 +782,30 @@ def advance_after_review_approval(
     if new_cps:
         next_cp = _find_cp(new_program, new_cps[0])
         next_cp["checkpoint_entry_candidate_sha"] = candidate_sha
-    next_top_state = "READY_TO_BUILD" if new_cps else "APPROVED"
+        # Stamping the scope as the default for ordinary CP reviews keeps
+        # the field authoritative on every program_state snapshot the
+        # final reviewer inspects.
+        new_program["review_scope"] = REVIEW_SCOPE_CHECKPOINT
+    else:
+        # v0.9.1+: All checkpoints are APPROVED. Top-level PROGRAM APPROVED
+        # is now gated by a mandatory final whole-product review of the
+        # exact assembled candidate. The deterministic core routes
+        # REVIEWING -> READY_FOR_REVIEW here and stamps program_final on
+        # the durable scope. terminalize_program_after_final_review is the
+        # sole owner of REVIEWING -> APPROVED after that final review.
+        new_program["review_scope"] = REVIEW_SCOPE_PROGRAM_FINAL
+    next_top_state = "READY_TO_BUILD" if new_cps else "READY_FOR_REVIEW"
 
     # v0.4.6: PROGRAM advancement uses the atomic FSM-owned transition path.
     # The prospective PROGRAM block is supplied so program_transition validates
     # REVIEWING -> READY_TO_BUILD against the post-finalization graph.
     from . import state as state_mod
     transition_reason = (
-        "all_checkpoints_approved"
-        if next_top_state == "APPROVED"
+        # v0.9.1+: "READY_FOR_REVIEW" replaced "APPROVED" as the post-final-CP
+        # routing target — top-level PROGRAM APPROVED is now gated by a
+        # mandatory final whole-product review.
+        "all_checkpoints_approved_awaiting_final_review"
+        if next_top_state == "READY_FOR_REVIEW"
         else f"checkpoint {cp_id} approved; advancing to {new_cps[0]}"
     )
     # Typed owner parameters only; terminal_reason is owned by the transition
@@ -792,6 +844,112 @@ def advance_after_review_approval(
         "next_top_state": next_top_state,
         "evidence_manifest_sha256": sha256_text(canonical_json_dumps(evidence_manifest)),
         "terminal_state": "APPROVED",
+    }
+
+
+def terminalize_program_after_final_review(
+    *,
+    canonical_repo: Path,
+    run_id: str,
+    packet: dict[str, Any],
+    state: dict[str, Any],
+    candidate_sha: str,
+    verdict_sha256: str,
+    review_pass_number: int,
+    actor: str,
+) -> dict[str, Any]:
+    """Sole owner of PROGRAM REVIEWING -> APPROVED after a final whole-product review.
+
+    Invariants enforced (fail-closed on any violation):
+
+      * the run is in PROGRAM state with ``state.state == 'REVIEWING'``;
+      * the durable ``program.review_scope == REVIEW_SCOPE_PROGRAM_FINAL``
+        (a CP-scope review can never terminalize the program);
+      * the supplied ``candidate_sha`` matches ``state.last_candidate_sha``
+        (the bound-candidate TOCTOU defence — same rule used by
+        ``state.program_transition``);
+      * the frozen checkpoint graph SHA has not drifted
+        (``verify_frozen_graph``).
+
+    The transition is performed via ``state.program_transition`` so the
+    STATE_TXN + event-chain semantics remain identical to every other
+    PROGRAM terminalization. The ``review_scope`` field is left as-is in
+    the durable record (the program is now terminal; ``is_program_state``
+    continues to be the authoritative gate).
+    """
+    if not is_program_state(state):
+        raise ProgramStateError(
+            "final_review_terminalize_refused: not a program run"
+        )
+    if state.get("state") != "REVIEWING":
+        raise ProgramStateError(
+            f"final_review_terminalize_refused: requires top-level REVIEWING, "
+            f"got {state.get('state')!r}"
+        )
+    program_state = state.get("program") or {}
+    scope = program_state.get("review_scope")
+    if scope != REVIEW_SCOPE_PROGRAM_FINAL:
+        raise ProgramStateError(
+            f"final_review_terminalize_refused: program.review_scope={scope!r} "
+            f"!= {REVIEW_SCOPE_PROGRAM_FINAL!r}"
+        )
+    bound_candidate = state.get("last_candidate_sha") or ""
+    if not bound_candidate or bound_candidate != candidate_sha:
+        raise ProgramStateError(
+            f"final_review_terminalize_refused: bound_candidate_sha mismatch: "
+            f"provided={candidate_sha[:12]} last={bound_candidate[:12]}"
+        )
+    frozen_ok, frozen_reason = verify_frozen_graph(packet, program_state)
+    if not frozen_ok:
+        raise ProgramStateError(
+            f"final_review_terminalize_refused: frozen graph invalid ({frozen_reason})"
+        )
+
+    manifest = {
+        "_packet": packet,
+        "candidate_sha": candidate_sha,
+        "verdict_sha256": verdict_sha256,
+        "review_pass_number": int(review_pass_number),
+        "final_review_approved_at": utc_now_iso(),
+        "approved_actor": actor,
+        "review_scope": REVIEW_SCOPE_PROGRAM_FINAL,
+    }
+    from . import state as state_mod
+
+    new_top = state_mod.program_transition(
+        canonical_repo,
+        run_id,
+        to_state="APPROVED",
+        actor=actor,
+        reason="final_whole_product_review_approved",
+        commit_sha=candidate_sha,
+        program_block=program_state,
+        schema_version=state_mod.PROGRAM_STATE_SCHEMA_VERSION,
+        identical_finding_streak=0,
+        last_must_fix_fingerprint="",
+    )
+    append_event(
+        canonical_repo, run_id,
+        event_type="program_finalized",
+        old_state=state.get("state"),
+        new_state="APPROVED",
+        actor=actor,
+        commit_sha=candidate_sha,
+        reason=(
+            f"mandatory final whole-product review APPROVED via pass "
+            f"{review_pass_number}; PROGRAM terminalized"
+        ),
+        extras={
+            "review_scope": REVIEW_SCOPE_PROGRAM_FINAL,
+            "verdict_sha256": verdict_sha256,
+            "review_pass_number": int(review_pass_number),
+            "candidate_sha": candidate_sha,
+        },
+    )
+    return {
+        "terminal_state": "APPROVED",
+        "next_top_state": "APPROVED",
+        "evidence_manifest_sha256": sha256_text(canonical_json_dumps(manifest)),
     }
 
 
@@ -1018,15 +1176,25 @@ def _unified_claim_pass(
             ):
                 is_replay = True
         elif cur_state == replay_states[counter]:
-            if existing_cp is None or existing_cp_pass < 1:
+            # v0.9.1+: the final whole-product review is in-flight in
+            # REVIEWING but no checkpoint owns the pass; permit replay
+            # when program.review_scope == program_final.
+            if (
+                counter == "review_pass_count"
+                and program_state.get("review_scope") == REVIEW_SCOPE_PROGRAM_FINAL
+                and existing_cum >= 1
+            ):
+                is_replay = True
+            elif existing_cp is None or existing_cp_pass < 1:
                 raise ClaimRefused(
                     f"{pass_kind} replay refused: in-flight state has no claimed current-checkpoint pass"
                 )
-            if existing_cum < 1:
+            elif existing_cum < 1:
                 raise ClaimRefused(
                     f"{pass_kind} replay refused: cumulative counter is zero"
                 )
-            is_replay = True
+            else:
+                is_replay = True
 
         if is_replay:
             return {
@@ -1068,10 +1236,101 @@ def _unified_claim_pass(
             ("CHANGES_REQUESTED", "CHANGES_REQUESTED"),
         }
         if (cur_state, replay_states[counter]) not in _CLAIM_OWNER_EDGES:
-            raise ClaimRefused(
-                f"{pass_kind} claim edge {cur_state!r} -> "
-                f"{replay_states[counter]!r} is not a legal claim-owner edge"
-            )
+            # v0.9.1+: permit a final whole-product review claim to land from
+            # READY_FOR_REVIEW -> REVIEWING even though no checkpoint owns
+            # the pass; the durable program.review_scope gate carries the
+            # whole-product authority.
+            if not (
+                counter == "review_pass_count"
+                and cur_state == "READY_FOR_REVIEW"
+                and replay_states[counter] == "REVIEWING"
+                and program_state.get("review_scope") == REVIEW_SCOPE_PROGRAM_FINAL
+            ):
+                raise ClaimRefused(
+                    f"{pass_kind} claim edge {cur_state!r} -> "
+                    f"{replay_states[counter]!r} is not a legal claim-owner edge"
+                )
+
+        # v0.9.1+: when program.review_scope == "program_final" the run is
+        # in READY_FOR_REVIEW awaiting the mandatory final whole-product
+        # review (current_checkpoints is empty by design). The review pass
+        # claim owner must still fund that semantic pass so the final
+        # reviewer can author the verdict; terminalize_program_after_final_review
+        # is the sole consumer of that REVIEWING -> APPROVED transition.
+        if (
+            counter == "review_pass_count"
+            and program_state.get("review_scope") == REVIEW_SCOPE_PROGRAM_FINAL
+        ):
+            cap_key = "max_review_passes"
+            cum_cap = int(program_state["cumulative_ceilings"][cap_key])
+            existing_top = int(cur.get(top_counter_name, 0) or 0)
+            existing_cum = int(program_state["cumulative_counters"].get(counter, 0))
+            if existing_cum >= cum_cap:
+                raise ClaimCapExhausted(
+                    f"{pass_kind} cap reached (program-wide): "
+                    f"{existing_cum}/{cum_cap}"
+                )
+            new_state = dict(cur)
+            new_state["program"] = _deepcopy_program(program_state)
+            new_state["program"]["cumulative_counters"][counter] = existing_cum + 1
+            new_state[top_counter_name] = existing_top + 1
+            new_state["updated_at"] = state_mod.utc_now_iso()
+            new_state["last_actor"] = "of-loop-claim"
+            new_state["state"] = replay_states[counter]
+            state_mod._write_state_locked(canonical_repo, run_id, new_state)
+            return {
+                "ok": True,
+                "run_id": run_id,
+                "counter": counter,
+                "pass_kind": pass_kind,
+                "cp_id": "",
+                "claimed_pass_number": existing_top + 1,
+                "cp_pass_number": 0,
+                "cumulative": existing_cum + 1,
+                "cap": cum_cap,
+                "replayed": False,
+                "review_scope": REVIEW_SCOPE_PROGRAM_FINAL,
+            }
+
+        # v0.9.1+: when program.review_scope == "program_final" the run is
+        # in CHANGES_REQUESTED after a final-review must-fix. Allow a
+        # repair build to claim against the program-wide build cap so the
+        # final repair can land and the re-review can run.
+        if (
+            counter == "build_pass_count"
+            and cur_state == "CHANGES_REQUESTED"
+            and program_state.get("review_scope") == REVIEW_SCOPE_PROGRAM_FINAL
+        ):
+            cap_key = "max_build_passes"
+            cum_cap = int(program_state["cumulative_ceilings"][cap_key])
+            existing_top = int(cur.get(top_counter_name, 0) or 0)
+            existing_cum = int(program_state["cumulative_counters"].get(counter, 0))
+            if existing_cum >= cum_cap:
+                raise ClaimCapExhausted(
+                    f"{pass_kind} cap reached (program-wide): "
+                    f"{existing_cum}/{cum_cap}"
+                )
+            new_state = dict(cur)
+            new_state["program"] = _deepcopy_program(program_state)
+            new_state["program"]["cumulative_counters"][counter] = existing_cum + 1
+            new_state[top_counter_name] = existing_top + 1
+            new_state["updated_at"] = state_mod.utc_now_iso()
+            new_state["last_actor"] = "of-loop-claim"
+            new_state["state"] = replay_states[counter]
+            state_mod._write_state_locked(canonical_repo, run_id, new_state)
+            return {
+                "ok": True,
+                "run_id": run_id,
+                "counter": counter,
+                "pass_kind": pass_kind,
+                "cp_id": "",
+                "claimed_pass_number": existing_top + 1,
+                "cp_pass_number": 0,
+                "cumulative": existing_cum + 1,
+                "cap": cum_cap,
+                "replayed": False,
+                "review_scope": REVIEW_SCOPE_PROGRAM_FINAL,
+            }
 
         cp_id = select_next_checkpoint(packet, program_state)
         if cp_id is None:
@@ -1345,11 +1604,13 @@ __all__ = [
     "MAX_CP_BUILD_PASSES", "MAX_CP_REVIEW_PASSES", "MAX_CP_REPAIR_ROUNDS",
     "GLOBAL_MAX_UNIQUE_CHANGED_FILES", "GLOBAL_MAX_BASELINE_TO_FINAL_DIFF_LINES",
     "ProgramGraphError", "ProgramStateError",
+    "REVIEW_SCOPE_CHECKPOINT", "REVIEW_SCOPE_PROGRAM_FINAL",
     "resolve_execution_mode", "validate_checkpoint_graph",
     "checkpoint_graph_sha256", "resolve_promotion_policy",
     "materialise_initial_program_state",
     "select_next_checkpoint", "ready_to_claim",
     "finalize_checkpoint", "advance_to_next", "advance_after_review_approval",
+    "terminalize_program_after_final_review",
     "increment_cp_counter", "record_source_accounting",
     "ClaimRefused", "claim_build_pass", "claim_review_pass",
     "claim_repair_round", "_unified_claim_pass", "_bump_counter_one",

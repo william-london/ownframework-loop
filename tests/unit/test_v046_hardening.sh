@@ -106,7 +106,7 @@ def program_fixture(two=True, verdict="APPROVED"):
       "checkpoint_graph":{"execution_order":order,"checkpoints":cps},"promotion_policy":"human_gate","acceptance_criteria":[],"non_goals":[],
       "allowed_paths":["src/"],"protected_paths":[".ownframework-loop/"],"work_units":[{"id":"UNIT-1","title":"u","scope":"s"}],
       "merge_authority":"human_only","deploy_authority":"human_only","push_authority":"human_only","external_action_authority":"none",
-      "risk_budget":{"max_build_passes":4,"max_review_passes":4,"max_repair_rounds":2,"max_files_changed":20,"max_diff_lines":500}}
+      "risk_budget":{"max_build_passes":5,"max_review_passes":5,"max_repair_rounds":2,"max_files_changed":20,"max_diff_lines":500}}
     pp=run/"WORK_PACKET.md"; pp.write_text("```json\n"+json.dumps(packet,sort_keys=True)+"\n```\n"); sha=hashlib.sha256(pp.read_bytes()).hexdigest()
     app={"schema":"ownframework-loop-approval/v1","run_id":rid,"packet_sha256":sha,"approved_at":"2026-08-28T00:00:00Z","approved_actor":"test",
       "canonical_repo":str(repo.resolve()),"baseline_branch":"master","baseline_sha":base,"candidate_branch":branch,"packet_schema":"ownframework-work-packet/v3",

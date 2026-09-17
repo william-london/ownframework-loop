@@ -273,7 +273,7 @@ with tempfile.TemporaryDirectory() as td:
         "checkpoint_graph": {"execution_order": ["CP-1"], "checkpoints": [{
             "id": "CP-1", "title": "protected drift", "scope": "recovery",
             "depends_on": [], "acceptance_criterion_ids": ["AC-1"],
-            "risk_budget": {"max_build_passes": 3, "max_review_passes": 3, "max_repair_rounds": 2},
+            "risk_budget": {"max_build_passes": 4, "max_review_passes": 4, "max_repair_rounds": 2},
         }]},
         "promotion_policy": "human_gate",
         "acceptance_criteria": [{"id": "AC-1", "text": "repair protected drift"}],
@@ -282,7 +282,7 @@ with tempfile.TemporaryDirectory() as td:
         "work_units": [{"id": "UNIT-1", "title": "unit", "scope": "src/"}],
         "merge_authority": "human_only", "deploy_authority": "human_only",
         "push_authority": "human_only", "external_action_authority": "none",
-        "risk_budget": {"max_build_passes": 3, "max_review_passes": 3,
+        "risk_budget": {"max_build_passes": 4, "max_review_passes": 4,
                          "max_repair_rounds": 2, "max_files_changed": 10,
                          "max_diff_lines": 500},
     }

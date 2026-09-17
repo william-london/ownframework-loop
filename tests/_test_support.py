@@ -55,7 +55,7 @@ def minimal_valid_packet(
         "push_authority": "human_only",
         "external_action_authority": "none",
         "risk_budget": {
-            "max_build_passes": 4, "max_review_passes": 4, "max_repair_rounds": 1,
+            "max_build_passes": 5, "max_review_passes": 5, "max_repair_rounds": 1,
             "max_files_changed": 5, "max_diff_lines": 100,
         },
     }

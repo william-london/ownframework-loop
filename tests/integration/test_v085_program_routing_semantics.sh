@@ -166,9 +166,14 @@ fill_build "$BSEM4" "$RID_REVIEW" repaired-candidate
 RSEM2="$(claim_review "$REPO_REVIEW" "$RID_REVIEW" review-funded-repair-2)"
 fill_review "$RSEM2" "$RID_REVIEW" APPROVED
 "$OFLOOP" dispatch finalize "$REPO_REVIEW" "$RID_REVIEW" REVIEW "$RSEM2" >/dev/null
+# v0.9.1+: after the last CP review APPROVES, a mandatory final whole-
+# product review gate runs before top-level APPROVED. Drive it.
+FSEM="$(claim_review "$REPO_REVIEW" "$RID_REVIEW" review-funded-repair-final)"
+fill_review "$FSEM" "$RID_REVIEW" APPROVED
+"$OFLOOP" dispatch finalize "$REPO_REVIEW" "$RID_REVIEW" REVIEW "$FSEM" >/dev/null
 assert_eq "$(jq -r '.state' "$STATE_REVIEW")" "APPROVED" "REVIEW_FUNDED_REPAIR terminal state"
 assert_eq "$(jq -r '.build_pass_count' "$STATE_REVIEW")" "2" "REVIEW_FUNDED_REPAIR build count"
-assert_eq "$(jq -r '.review_pass_count' "$STATE_REVIEW")" "2" "REVIEW_FUNDED_REPAIR review count"
+assert_eq "$(jq -r '.review_pass_count' "$STATE_REVIEW")" "3" "REVIEW_FUNDED_REPAIR review count includes final"
 assert_eq "$(jq -r '.repair_round' "$STATE_REVIEW")" "1" "REVIEW_FUNDED_REPAIR repair count remains exact"
 echo "REVIEW_FUNDED_REPAIR=PASS"
 echo "PROGRAM_ROUTING_SEMANTICS=PASS"

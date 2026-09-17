@@ -300,20 +300,48 @@ def reconcile_run(
                         from . import packet as packet_mod, program as prog_mod
                         meta, _ = packet_mod.parse_packet_file(packet_path)
                         if next_state == "APPROVED" and verdict.get("verdict") == "APPROVED":
-                            adv = prog_mod.advance_after_review_approval(
-                                canonical_repo=canonical_repo,
-                                run_id=run_id,
-                                packet=meta,
-                                state=latest,
-                                candidate_sha=str(candidate_sha or ""),
-                                verdict_sha256=util.sha256_file(run_d / "REVIEW_VERDICT.json"),
-                                review_pass_number=artifact_pass,
-                                actor="reconciler",
+                            durable_scope = (
+                                (latest.get("program") or {}).get("review_scope")
+                                if isinstance(latest.get("program"), dict)
+                                else None
                             )
-                            cur_state = adv["next_top_state"]
-                            actions.append(
-                                f"adopt_program_review_approval:REVIEWING->{cur_state}"
-                            )
+                            if durable_scope == prog_mod.REVIEW_SCOPE_PROGRAM_FINAL:
+                                # v0.9.1+: crash-recovery adoption of a final
+                                # whole-product review verdict must route
+                                # through terminalize_program_after_final_review
+                                # so the durable program_state scope gate is
+                                # honored. A reconciler may not silently
+                                # terminalize a CP-scope verdict as if it were
+                                # the final review.
+                                adv = prog_mod.terminalize_program_after_final_review(
+                                    canonical_repo=canonical_repo,
+                                    run_id=run_id,
+                                    packet=meta,
+                                    state=latest,
+                                    candidate_sha=str(candidate_sha or ""),
+                                    verdict_sha256=util.sha256_file(run_d / "REVIEW_VERDICT.json"),
+                                    review_pass_number=artifact_pass,
+                                    actor="reconciler",
+                                )
+                                cur_state = adv["next_top_state"]
+                                actions.append(
+                                    f"adopt_program_final_review_approval:REVIEWING->{cur_state}"
+                                )
+                            else:
+                                adv = prog_mod.advance_after_review_approval(
+                                    canonical_repo=canonical_repo,
+                                    run_id=run_id,
+                                    packet=meta,
+                                    state=latest,
+                                    candidate_sha=str(candidate_sha or ""),
+                                    verdict_sha256=util.sha256_file(run_d / "REVIEW_VERDICT.json"),
+                                    review_pass_number=artifact_pass,
+                                    actor="reconciler",
+                                )
+                                cur_state = adv["next_top_state"]
+                                actions.append(
+                                    f"adopt_program_review_approval:REVIEWING->{cur_state}"
+                                )
                         elif next_state == "CHANGES_REQUESTED":
                             # The rejection state and its repair entitlement are
                             # ONE atomic mutation (same owner as the live

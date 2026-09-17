@@ -267,11 +267,11 @@ packet = {
         },
         "checkpoints": [{
             "id": "CP-1", "title": "t", "scope": "s", "depends_on": [],
-            "risk_budget": {"max_build_passes": 2, "max_review_passes": 2,
+            "risk_budget": {"max_build_passes": 3, "max_review_passes": 3,
                             "max_repair_rounds": 1},
         }],
     },
-    "risk_budget": {"max_build_passes": 2, "max_review_passes": 2,
+    "risk_budget": {"max_build_passes": 3, "max_review_passes": 3,
                     "max_repair_rounds": 1},
     "work_units": [{"id": "UNIT-1", "title": "source ceiling", "scope": "s"}],
 }
@@ -330,7 +330,7 @@ packet = {
         },
         "checkpoints": [{
             "id": "CP-1", "title": "t", "scope": "src/", "depends_on": [],
-            "risk_budget": {"max_build_passes": 2, "max_review_passes": 2,
+            "risk_budget": {"max_build_passes": 3, "max_review_passes": 3,
                             "max_repair_rounds": 1}
         }]
     },
@@ -344,7 +344,7 @@ packet = {
     "deploy_authority": "human_only",
     "push_authority": "human_only",
     "external_action_authority": "none",
-    "risk_budget": {"max_build_passes": 2, "max_review_passes": 2,
+    "risk_budget": {"max_build_passes": 3, "max_review_passes": 3,
                     "max_repair_rounds": 1, "max_files_changed": 25,
                     "max_diff_lines": 1000}
 }
@@ -430,7 +430,7 @@ rd.mkdir(parents=True)
         "deploy_authority": "human_only",
         "push_authority": "human_only",
         "external_action_authority": "none",
-        "risk_budget": {"max_build_passes": 4, "max_review_passes": 4, "max_repair_rounds": 1,
+        "risk_budget": {"max_build_passes": 5, "max_review_passes": 5, "max_repair_rounds": 1,
                         "max_files_changed": 5, "max_diff_lines": 100},
     })
     + "\n```\n", encoding="utf-8")

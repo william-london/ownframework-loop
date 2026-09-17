@@ -90,8 +90,8 @@ checkpoint graph rather than separate independent runs.
     }
   ],
   "risk_budget": {
-    "max_build_passes": 4,
-    "max_review_passes": 4,
+    "max_build_passes": 5,
+    "max_review_passes": 5,
     "max_repair_rounds": 2,
     "max_diff_lines": 800,
     "max_files_changed": 12,

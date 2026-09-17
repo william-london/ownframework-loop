@@ -47,10 +47,15 @@ def new_verdict(
     validation_results: list[dict[str, Any]] | None = None,
     commands_executed: list[str] | None = None,
     builder_pass_number_ref: int | None = None,
+    review_scope: str | None = None,
 ) -> dict[str, Any]:
     """Build a review-verdict document. Does not write."""
     if verdict not in VERDICTS:
         raise ValueError(f"invalid verdict: {verdict}")
+    if review_scope is not None and review_scope not in (
+        "checkpoint", "program_final",
+    ):
+        raise ValueError(f"invalid review_scope: {review_scope!r}")
     out: dict[str, Any] = {
         "schema": SCHEMA_VERSION,
         "run_id": run_id,
@@ -82,6 +87,12 @@ def new_verdict(
         out["builder_pass_number_ref"] = builder_pass_number_ref
     if escalation_reason is not None:
         out["escalation_reason"] = escalation_reason
+    if review_scope is not None:
+        # Core-owned scope tag. Verbatim copy of the durable
+        # program_state.review_scope at finalization time so an
+        # independent reader can prove the verdict was assembled under
+        # the matching scope without re-deriving it.
+        out["review_scope"] = review_scope
     return out
 
 

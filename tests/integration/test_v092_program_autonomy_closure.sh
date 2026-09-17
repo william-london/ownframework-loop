@@ -39,7 +39,7 @@ base = {
     "merge_authority": "human_only", "deploy_authority": "human_only",
     "push_authority": "human_only", "external_action_authority": "none",
     "required_validation": [validation("global", "printf GLOBAL")],
-    "risk_budget": {"max_build_passes": 4, "max_review_passes": 4, "max_repair_rounds": 2,
+    "risk_budget": {"max_build_passes": 5, "max_review_passes": 5, "max_repair_rounds": 2,
                      "max_files_changed": 25, "max_diff_lines": 1000},
 }
 state0 = {"program": {"current_checkpoints": ["CP-0"]}}
