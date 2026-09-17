@@ -79,10 +79,37 @@ PY
 pass "T2 supervisor status cannot migrate an observed legacy ledger"
 
 python3 -B - "$TMP" <<'PY'
+import json
 from pathlib import Path
 import sys
 from ownframework_loop import supervisor
 tmp=Path(sys.argv[1]); db=tmp/"gen-unavailable.sqlite3"; repo=tmp/"gen-unavailable"; repo.mkdir()
+# v0.9.9 admission invariant: pre-write a minimal valid v3 packet.
+_rd = repo / ".ownframework-loop" / "run-generation-proof"
+_rd.mkdir(parents=True, exist_ok=True)
+_pk = {
+    "schema": "ownframework-work-packet/v3",
+    "packet_id": "v082-gen-unavailable-fixture",
+    "created_at": "2026-09-17T00:00:00Z",
+    "work_class": "FEATURE",
+    "risk_class": "low",
+    "title": "v082 gen unavailable fixture",
+    "target": {"repo": str(repo), "branch": "master", "classification": "local_only"},
+    "execution_mode": "single",
+    "acceptance_criteria": [{"id": "AC-1", "text": "ok"}],
+    "non_goals": [],
+    "allowed_paths": ["a.txt"],
+    "protected_paths": [".ownframework-loop/"],
+    "work_units": [{"id": "UNIT-1", "title": "u", "scope": "do"}],
+    "merge_authority": "human_only",
+    "deploy_authority": "human_only",
+    "push_authority": "human_only",
+    "external_action_authority": "none",
+    "risk_budget": {"max_build_passes": 4, "max_review_passes": 4, "max_repair_rounds": 1,
+                    "max_files_changed": 5, "max_diff_lines": 100},
+}
+_fence = chr(96) * 3
+(_rd / "WORK_PACKET.md").write_text(_fence + "json\n" + json.dumps(_pk) + "\n" + _fence + "\n", encoding="utf-8")
 supervisor.enqueue(canonical_repo=repo, run_id="run-generation-proof", db_path=db, runtime_generation="ofloop-known@git-deadbeef")
 def boom():
     raise RuntimeError("identity unavailable")
@@ -94,10 +121,36 @@ PY
 pass "T3 runtime identity proof failure quarantines before semantic dispatch"
 
 python3 -B - "$TMP" <<'PY'
-import sqlite3, sys
+import json, sqlite3, sys
 from pathlib import Path
 from ownframework_loop import supervisor
 tmp=Path(sys.argv[1]); db=tmp/"reenqueue.sqlite3"; repo=tmp/"reenqueue-repo"; repo.mkdir()
+# v0.9.9 admission invariant: pre-write a minimal valid v3 packet.
+_rd = repo / ".ownframework-loop" / "run-live"
+_rd.mkdir(parents=True, exist_ok=True)
+_pk = {
+    "schema": "ownframework-work-packet/v3",
+    "packet_id": "v082-reenqueue-fixture",
+    "created_at": "2026-09-17T00:00:00Z",
+    "work_class": "FEATURE",
+    "risk_class": "low",
+    "title": "v082 reenqueue fixture",
+    "target": {"repo": str(repo), "branch": "master", "classification": "local_only"},
+    "execution_mode": "single",
+    "acceptance_criteria": [{"id": "AC-1", "text": "ok"}],
+    "non_goals": [],
+    "allowed_paths": ["a.txt"],
+    "protected_paths": [".ownframework-loop/"],
+    "work_units": [{"id": "UNIT-1", "title": "u", "scope": "do"}],
+    "merge_authority": "human_only",
+    "deploy_authority": "human_only",
+    "push_authority": "human_only",
+    "external_action_authority": "none",
+    "risk_budget": {"max_build_passes": 4, "max_review_passes": 4, "max_repair_rounds": 1,
+                    "max_files_changed": 5, "max_diff_lines": 100},
+}
+_fence = chr(96) * 3
+(_rd / "WORK_PACKET.md").write_text(_fence + "json\n" + json.dumps(_pk) + "\n" + _fence + "\n", encoding="utf-8")
 supervisor.enqueue(canonical_repo=repo, run_id="run-live", db_path=db, runtime_generation="ofloop-old@git-a", max_wall_seconds=600)
 c=sqlite3.connect(str(db)); c.execute("UPDATE jobs SET status='RUNNING', worker_pid=12345 WHERE run_id='run-live'"); c.commit(); c.close()
 out=supervisor.enqueue(canonical_repo=repo, run_id="run-live", db_path=db, runtime_generation="ofloop-new@git-b", max_wall_seconds=0)
