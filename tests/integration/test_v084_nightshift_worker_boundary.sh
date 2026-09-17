@@ -372,6 +372,35 @@ else:
 retire_repo = root / "retire-repo"
 retire_repo.mkdir()
 retire_db = root / "retire.sqlite3"
+# v0.9.9 admission invariant: pre-write a minimal valid v3 packet.
+import json
+retire_run_dir = retire_repo / ".ownframework-loop" / "run-retire-attempt"
+retire_run_dir.mkdir(parents=True, exist_ok=True)
+retire_packet = {
+    "schema": "ownframework-work-packet/v3",
+    "packet_id": "v084-retire-attempt-fixture",
+    "created_at": "2026-09-17T00:00:00Z",
+    "work_class": "FEATURE",
+    "risk_class": "low",
+    "title": "v084 retire attempt fixture",
+    "target": {"repo": str(retire_repo), "branch": "master", "classification": "local_only"},
+    "execution_mode": "single",
+    "acceptance_criteria": [{"id": "AC-1", "text": "ok"}],
+    "non_goals": [],
+    "allowed_paths": ["a.txt"],
+    "protected_paths": [".ownframework-loop/"],
+    "work_units": [{"id": "UNIT-1", "title": "u", "scope": "do"}],
+    "merge_authority": "human_only",
+    "deploy_authority": "human_only",
+    "push_authority": "human_only",
+    "external_action_authority": "none",
+    "risk_budget": {"max_build_passes": 4, "max_review_passes": 4, "max_repair_rounds": 1,
+                    "max_files_changed": 5, "max_diff_lines": 100},
+}
+_fence = chr(96) * 3
+(retire_run_dir / "WORK_PACKET.md").write_text(
+    _fence + "json\n" + json.dumps(retire_packet) + "\n" + _fence + "\n", encoding="utf-8"
+)
 enrolled = supervisor.enqueue(
     canonical_repo=retire_repo,
     run_id="run-retire-attempt",
@@ -422,6 +451,35 @@ gc_repo.mkdir()
 gc_db = root / "gc.sqlite3"
 done_run = "run-gc-done"
 quarantine_run = "run-gc-quarantine"
+# v0.9.9 admission invariant: pre-write minimal valid v3 packets for both runs.
+for rid in (done_run, quarantine_run):
+    rd = gc_repo / ".ownframework-loop" / rid
+    rd.mkdir(parents=True, exist_ok=True)
+    pkt = {
+        "schema": "ownframework-work-packet/v3",
+        "packet_id": f"v084-{rid}",
+        "created_at": "2026-09-17T00:00:00Z",
+        "work_class": "FEATURE",
+        "risk_class": "low",
+        "title": f"v084 {rid} fixture",
+        "target": {"repo": str(gc_repo), "branch": "master", "classification": "local_only"},
+        "execution_mode": "single",
+        "acceptance_criteria": [{"id": "AC-1", "text": "ok"}],
+        "non_goals": [],
+        "allowed_paths": ["a.txt"],
+        "protected_paths": [".ownframework-loop/"],
+        "work_units": [{"id": "UNIT-1", "title": "u", "scope": "do"}],
+        "merge_authority": "human_only",
+        "deploy_authority": "human_only",
+        "push_authority": "human_only",
+        "external_action_authority": "none",
+        "risk_budget": {"max_build_passes": 4, "max_review_passes": 4, "max_repair_rounds": 1,
+                        "max_files_changed": 5, "max_diff_lines": 100},
+    }
+    _fence = chr(96) * 3
+    (rd / "WORK_PACKET.md").write_text(
+        _fence + "json\n" + json.dumps(pkt) + "\n" + _fence + "\n", encoding="utf-8"
+    )
 for rid in (done_run, quarantine_run):
     enq = supervisor.enqueue(
         canonical_repo=gc_repo,
