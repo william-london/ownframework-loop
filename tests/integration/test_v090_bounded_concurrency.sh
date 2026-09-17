@@ -22,6 +22,7 @@ def repo(name):
     (p / "README.md").write_text("seed\n"); git(p, "add", "README.md"); git(p, "commit", "-qm", "seed")
     return p
 def enqueue(p, rid, mode="SINGLE"):
+    supervisor.write_minimal_valid_packet(p, rid)
     out = supervisor.enqueue(canonical_repo=p, run_id=rid, db_path=db, runtime_generation="test-generation")
     with supervisor._connect(db) as c:
         c.execute("UPDATE jobs SET execution_mode=? WHERE id=?", (mode, out["id"])); c.commit()
