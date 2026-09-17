@@ -131,7 +131,10 @@ def make_quarantined(root: Path, label: str, old_resolution: dict) -> tuple[Path
         repo, run_id, old_resolution, PROFILE, allow_create=True
     )
     db = root / (label + ".sqlite3")
-    supervisor.write_minimal_valid_packet(repo, run_id)
+    # packet_and_approval(repo, run_id) already wrote a valid v3 packet
+    # plus a matching APPROVAL.json keyed to the packet SHA. Do NOT call
+    # write_minimal_valid_packet here — it would rewrite the packet with a
+    # different SHA and break the approval SHA contract during resume.
     enrolled = supervisor.enqueue(
         canonical_repo=repo,
         run_id=run_id,
