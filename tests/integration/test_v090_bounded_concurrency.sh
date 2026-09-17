@@ -77,6 +77,7 @@ stale_db = stale_root / "supervisor.sqlite3"
 stale_jobs = []
 for index in range(2):
     stale_repo = repo(f"multi-stale-{index}")
+    supervisor.write_minimal_valid_packet(stale_repo, f"run-multi-stale-{index}")
     stale_jobs.append(
         supervisor.enqueue(
             canonical_repo=stale_repo,
@@ -119,6 +120,7 @@ print("MULTI_WORKER_STALE_RECOVERY=PASS")
 # resumes. The stale caller must not overwrite the new RUNNING ownership.
 race_db = tmp / "recovery-race.sqlite3"
 race_repo = repo("recovery-race")
+supervisor.write_minimal_valid_packet(race_repo, "recovery-race")
 race_job = supervisor.enqueue(
     canonical_repo=race_repo, run_id="recovery-race", db_path=race_db,
     runtime_generation="test-generation",
@@ -397,12 +399,14 @@ done_repo = repo("done-workspace-release")
 orig_resolver = supervisor.branch_resolver_mod.resolve_candidate_branch
 supervisor.branch_resolver_mod.resolve_candidate_branch = lambda *_a, **_k: "factory/candidate/reusable-name"
 try:
+    supervisor.write_minimal_valid_packet(done_repo, "done-first")
     done_first = supervisor.enqueue(
         canonical_repo=done_repo, run_id="done-first", db_path=db,
         runtime_generation="test-generation",
     )
     assert done_first.get("ok", True), done_first
     reset(done_first, "DONE")
+    supervisor.write_minimal_valid_packet(done_repo, "done-second")
     done_second = supervisor.enqueue(
         canonical_repo=done_repo, run_id="done-second", db_path=db,
         runtime_generation="test-generation",
@@ -419,6 +423,7 @@ op_linked = tmp / "operator-linked"
 op_linked2 = tmp / "operator-linked-2"
 git(op_repo, "worktree", "add", "-q", str(op_linked), "-b", "operator-linked-branch")
 git(op_repo, "worktree", "add", "-q", str(op_linked2), "-b", "operator-linked-branch-2")
+supervisor.write_minimal_valid_packet(op_repo, "operator-alias-run")
 op_job = supervisor.enqueue(
     canonical_repo=op_repo, run_id="operator-alias-run", db_path=db,
     runtime_generation="test-generation",
@@ -473,6 +478,7 @@ amb_repo = repo("operator-ambiguous")
 amb_linked1 = tmp / "amb-linked-1"; amb_linked2 = tmp / "amb-linked-2"
 git(amb_repo, "worktree", "add", "-q", str(amb_linked1), "-b", "amb-linked-1")
 git(amb_repo, "worktree", "add", "-q", str(amb_linked2), "-b", "amb-linked-2")
+supervisor.write_minimal_valid_packet(amb_repo, "ambiguous-run")
 amb = supervisor.enqueue(canonical_repo=amb_repo, run_id="ambiguous-run", db_path=amb_db, runtime_generation="test-generation")
 with supervisor._connect(amb_db) as c:
     row = c.execute("SELECT * FROM jobs WHERE id=?", (amb["id"],)).fetchone()
@@ -681,6 +687,7 @@ print("REAL_GIT_IDENTITY_UNCERTAINTY_FAILS_CLOSED=PASS")
 orig_identity = supervisor._repository_scheduling_identity
 supervisor._repository_scheduling_identity = lambda _p: ("unproven", False)
 try:
+    supervisor.write_minimal_valid_packet(identity_repo, "identity-enqueue-refusal")
     refused_identity = supervisor.enqueue(
         canonical_repo=identity_repo,
         run_id="identity-enqueue-refusal",
@@ -699,6 +706,7 @@ logical_repo = repo("logical-duplicate")
 logical_linked = tmp / "logical-linked"
 git(logical_repo, "worktree", "add", "-q", str(logical_linked), "-b", "logical-linked-branch")
 logical_first = enqueue(logical_repo, "logical-run")
+supervisor.write_minimal_valid_packet(logical_linked, "logical-run")
 logical_second = supervisor.enqueue(
     canonical_repo=logical_linked,
     run_id="logical-run",
@@ -716,10 +724,12 @@ branch_repo = repo("branch-enrollment-collision")
 orig_branch = supervisor.branch_resolver_mod.resolve_candidate_branch
 supervisor.branch_resolver_mod.resolve_candidate_branch = lambda *_a, **_k: "factory/candidate/shared"
 try:
+    supervisor.write_minimal_valid_packet(branch_repo, "branch-first")
     branch_first = supervisor.enqueue(
         canonical_repo=branch_repo, run_id="branch-first", db_path=db,
         runtime_generation="test-generation",
     )
+    supervisor.write_minimal_valid_packet(branch_repo, "branch-second")
     branch_second = supervisor.enqueue(
         canonical_repo=branch_repo, run_id="branch-second", db_path=db,
         runtime_generation="test-generation",
@@ -744,6 +754,7 @@ with supervisor._connect(db) as c:
 orig_identity = supervisor._repository_scheduling_identity
 supervisor._repository_scheduling_identity = lambda _p: ("synthetic-drift-key", True)
 try:
+    supervisor.write_minimal_valid_packet(Path(identity_job["repo"]), "identity-running")
     refused = supervisor.enqueue(
         canonical_repo=Path(identity_job["repo"]),
         run_id="identity-running",
@@ -895,9 +906,12 @@ with supervisor._connect(idle_db):
 assert supervisor._scheduler_submission_budget(
     db_path=idle_db, configured=64, local_inflight=0
 ) == 0
+budget_repos = [repo(f"budget-{i}") for i in range(3)]
+for i in range(3):
+    supervisor.write_minimal_valid_packet(budget_repos[i], f"budget-{i}")
 budget_jobs = [
     supervisor.enqueue(
-        canonical_repo=repo(f"budget-{i}"),
+        canonical_repo=budget_repos[i],
         run_id=f"budget-{i}",
         db_path=idle_db,
         runtime_generation="test-generation",
