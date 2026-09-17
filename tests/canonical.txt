@@ -101,14 +101,7 @@ tests/integration/test_single_mode_repair_continuity.sh
 tests/integration/test_final_source_closure_hostsafe.sh
 tests/integration/test_source_authority_final.sh
 tests/integration/test_single_claim_atomicity.sh
-# tests/integration/test_v091_terminal_source_closure.sh — temporarily
-# removed from canonical for the v0.9.9 admission-closure fix. The test
-# relies on the legacy 'enqueue without packet' path (every supervisor.enqueue
-# call pre-existed without a WORK_PACKET.md and the test patches
-# packet_mod.parse_packet_file to return an empty dict mid-test, breaking
-# downstream assertions). The pre-existing test isolation fragility is
-# unrelated to the admission invariant; a separate fix is required.
-# tests/integration/test_v091_terminal_source_closure.sh
+tests/integration/test_v091_terminal_source_closure.sh
 tests/integration/test_v091_final_frontier_seams.sh
 tests/integration/test_v093_semantic_retry_reseed.sh
 tests/integration/test_v094_semantic_retry_atomic_envelope.sh

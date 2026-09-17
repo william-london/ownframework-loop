@@ -2,8 +2,7 @@
 set -euo pipefail
 TESTS_DIR="$(cd "$(dirname "$0")" && pwd)"
 . "$TESTS_DIR/../_helpers.sh"
-export PYTHONPATH="$ROOT_DIR/lib"
-
+export PYTHONPATH="$(cd "$(dirname "$0")"/.. && pwd):$ROOT_DIR/lib"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
@@ -11,6 +10,9 @@ python3 - "$TMP" <<'PY'
 import os, subprocess, sys, time
 from pathlib import Path
 from ownframework_loop import program, runtime_env, supervisor
+import sys as _sys_h
+_sys_h.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from _test_support import write_minimal_valid_packet  # noqa: E402
 
 root=Path(sys.argv[1])
 
@@ -25,7 +27,7 @@ assert ca != cb, (ca,cb)
 # Supervisor external boundaries reject unsafe run ids before DB/log path use.
 for rid in ("../../outside","run-a/b","run-../escape"):
     try:
-        supervisor.write_minimal_valid_packet(root, rid)
+        write_minimal_valid_packet(root, rid)
         supervisor.enqueue(canonical_repo=root,run_id=rid,db_path=root/"unsafe.sqlite3")
     except ValueError:
         pass

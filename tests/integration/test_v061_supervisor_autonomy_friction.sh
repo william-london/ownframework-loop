@@ -2,8 +2,7 @@
 set -euo pipefail
 TESTS_DIR="$(cd "$(dirname "$0")" && pwd)"
 . "$TESTS_DIR/../_helpers.sh"
-export PYTHONPATH="$ROOT_DIR/lib"
-
+export PYTHONPATH="$(cd "$(dirname "$0")"/.. && pwd):$ROOT_DIR/lib"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
@@ -15,6 +14,9 @@ import sys
 from pathlib import Path
 
 from ownframework_loop import supervisor
+import sys as _sys_h
+_sys_h.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from _test_support import write_minimal_valid_packet  # noqa: E402
 
 root = Path(sys.argv[1])
 repo = root / "repo"
@@ -138,7 +140,7 @@ def fake_finalize(work_order, **kwargs):
     return {"ok": True, "finalized": True}
 supervisor.dispatch_mod.finalize_work_order = fake_finalize
 
-supervisor.write_minimal_valid_packet(repo, 'run-auto')
+write_minimal_valid_packet(repo, 'run-auto')
 supervisor.enqueue(
     canonical_repo=repo,
     run_id="run-auto",

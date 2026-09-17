@@ -7,10 +7,14 @@ TMP="$(mktemp -d -t ofloop_dispatch_hold.XXXXXX)"
 trap 'rm -rf "$TMP"' EXIT
 
 TMP_ROOT="$TMP" ROOT_DIR="$ROOT_DIR" OFLOOP_BIN="$OFLOOP_BIN" \
-PYTHONDONTWRITEBYTECODE=1 python3 -B - <<'PY'
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$(cd "$HERE/.." && pwd):$LIB_DIR" \
+python3 -B - <<'PY'
 import json, os, subprocess, sys, time
 from pathlib import Path
 from ownframework_loop import state as state_mod, supervisor
+import sys as _sys_h
+_sys_h.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from _test_support import write_minimal_valid_packet  # noqa: E402
 
 tmp = Path(os.environ["TMP_ROOT"])
 root = Path(os.environ["ROOT_DIR"])
@@ -69,7 +73,7 @@ original_uuid4 = supervisor.uuid.uuid4
 supervisor.uuid.uuid4 = lambda: (_ for _ in ()).throw(RuntimeError("injected hold failure"))
 try:
     try:
-        supervisor.write_minimal_valid_packet(rollback_repo, 'run-rollback')
+        write_minimal_valid_packet(rollback_repo, 'run-rollback')
         supervisor.enqueue(canonical_repo=rollback_repo, run_id="run-rollback", db_path=rollback_db,
                            runtime_generation="test-generation",
                            dispatch_hold_kind=supervisor.DISPATCH_HOLD_KIND,
@@ -111,7 +115,7 @@ print("HOLD_HISTORY_PRESERVED=PASS")
 # another queued run may use the operational slot.
 mismatch = make_repo("mismatch"); make_program(mismatch, "run-mismatch")
 mdb = tmp / "mismatch.sqlite3"
-supervisor.write_minimal_valid_packet(mismatch, 'run-mismatch')
+write_minimal_valid_packet(mismatch, 'run-mismatch')
 mjob = supervisor.enqueue(canonical_repo=mismatch, run_id="run-mismatch", db_path=mdb, runtime_generation="test-generation",
                           dispatch_hold_kind=supervisor.DISPATCH_HOLD_KIND,
                           dispatch_hold_previous_checkpoint_id="CP-X", dispatch_hold_next_checkpoint_id="CP-Y")
@@ -122,7 +126,7 @@ print("WRONG_CHECKPOINT_DOES_NOT_HOLD=PASS")
 
 held2, db2, job2, hold2 = held_fixture("held2", "run-held2")
 plain = make_repo("plain")
-supervisor.write_minimal_valid_packet(plain, 'run-plain')
+write_minimal_valid_packet(plain, 'run-plain')
 plain_job = supervisor.enqueue(canonical_repo=plain, run_id="run-plain", db_path=db2, runtime_generation="test-generation")
 with supervisor._connect(db2) as conn:
     assert supervisor._take_next_job(conn)["id"] == plain_job["id"]

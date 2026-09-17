@@ -14,10 +14,6 @@
 # operator workstation's real XDG host-capability authority.
 tests/integration/test_final_source_closure.sh
 
-# v091_terminal_source_closure — pre-existing test isolation fragility: the
-# test relies on the legacy "enqueue without packet" path and patches
-# packet_mod.parse_packet_file to return an empty dict mid-test, breaking
-# downstream assertions. The new v0.9.9 admission backstop correctly refuses
-# such enqueues. A separate fix (packet fixtures + restored parse_packet_file
-# mocks) is required to re-include this test in the canonical suite.
-tests/integration/test_v091_terminal_source_closure.sh
+# v091_terminal_source_closure — re-included in canonical; packet fixture
+# helper added and parse_packet_file mocks properly scoped.
+

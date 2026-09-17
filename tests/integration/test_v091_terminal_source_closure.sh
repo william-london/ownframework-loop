@@ -3,12 +3,18 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 export PYTHONPATH="$ROOT/lib${PYTHONPATH:+:$PYTHONPATH}"
+export PYTHONPATH="$ROOT/tests${PYTHONPATH:+:$PYTHONPATH}"
 
 python3 -B - <<'PY'
 import json
 import subprocess
 import tempfile
 from pathlib import Path
+
+# Test-only support helper. NOT a production module.
+import sys as _sys
+_sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from _test_support import write_minimal_valid_packet  # noqa: E402
 
 from ownframework_loop import capabilities, supervisor
 
@@ -62,6 +68,7 @@ try:
                 stdout="provider failed", stderr="provider failed",
                 cost_known=True, tokens_known=True,
             )
+    write_minimal_valid_packet(p, rid)
     supervisor.enqueue(canonical_repo=p, run_id=rid, db_path=db, runner=FailedCrashRunner.runner_id)
     work = wo_for(p, rid)
     ready_count = {"n": 0}
@@ -112,6 +119,8 @@ try:
         job = conn.execute("SELECT * FROM jobs WHERE run_id=?", (rid,)).fetchone()
         assert abs(float(job["total_cost_usd"]) - 1.25) < 1e-9, dict(job)
 
+    supervisor.packet_mod.parse_packet_file = real_parse
+
     # B. Successful result + valid strict model/receipt publishes acceptance
     # before finalization. A crash in finalizer can replay with zero new cost.
     p2 = repo("accepted-crash")
@@ -131,6 +140,7 @@ try:
                 stdout="ok", stderr="", cost_known=True,
                 tokens_known=True, effective_model="model-a",
             )
+    write_minimal_valid_packet(p2, rid2)
     supervisor.enqueue(canonical_repo=p2, run_id=rid2, db_path=db2, runner=AcceptedCrashRunner.runner_id)
     work2 = wo_for(p2, rid2)
     ready2 = {"n": 0}
@@ -187,6 +197,8 @@ try:
     supervisor.run_one(db_path=db2)
     assert calls2["finalizer"] == 1, calls2
 
+    supervisor.packet_mod.parse_packet_file = real_parse
+
     # C. Strict-model substitution: cost may be durable, but acceptance is not.
     p3 = repo("strict-sub")
     db3 = tmp / "strict.sqlite3"
@@ -202,6 +214,7 @@ try:
                 ok=True, returncode=0, cost_usd=0.75, stdout="ok", stderr="",
                 cost_known=True, tokens_known=True, effective_model="model-b",
             )
+    write_minimal_valid_packet(p3, rid3)
     supervisor.enqueue(canonical_repo=p3, run_id=rid3, db_path=db3, runner=StrictSubRunner.runner_id)
     work3 = wo_for(p3, rid3)
     supervisor.dispatch_mod.claim_next = lambda **kwargs: dict(work3)
@@ -215,6 +228,8 @@ try:
         job = conn.execute("SELECT * FROM jobs WHERE run_id=?", (rid3,)).fetchone()
         a3 = conn.execute("SELECT * FROM semantic_attempts WHERE job_id=?", (int(job["id"]),)).fetchone()
         assert int(a3["cost_accounted"]) == 1 and int(a3["semantic_accepted"]) == 0, dict(a3)
+
+    supervisor.packet_mod.parse_packet_file = real_parse
 
     # D. Missing/invalid capability receipt: same refusal.
     p4 = repo("bad-receipt")
@@ -231,6 +246,7 @@ try:
                 ok=True, returncode=0, cost_usd=0.5, stdout="ok", stderr="",
                 cost_known=True, tokens_known=True, effective_model="model-a",
             )
+    write_minimal_valid_packet(p4, rid4)
     supervisor.enqueue(canonical_repo=p4, run_id=rid4, db_path=db4, runner=BadReceiptRunner.runner_id)
     work4 = wo_for(p4, rid4)
     supervisor.dispatch_mod.claim_next = lambda **kwargs: dict(work4)
@@ -244,6 +260,8 @@ try:
         job = conn.execute("SELECT * FROM jobs WHERE run_id=?", (rid4,)).fetchone()
         a4 = conn.execute("SELECT * FROM semantic_attempts WHERE job_id=?", (int(job["id"]),)).fetchone()
         assert int(a4["cost_accounted"]) == 1 and int(a4["semantic_accepted"]) == 0, dict(a4)
+
+    supervisor.packet_mod.parse_packet_file = real_parse
 
     # E. Acceptance identity must reject replay when the exact semantic
     # artifact bytes mutate between acceptance and replay. A successful
@@ -268,6 +286,7 @@ try:
                 stdout="ok", stderr="", cost_known=True,
                 tokens_known=True, effective_model="model-a",
             )
+    write_minimal_valid_packet(p5, rid5)
     supervisor.enqueue(canonical_repo=p5, run_id=rid5, db_path=db5, runner=IdentityArtifactRunner.runner_id)
     work5 = wo_for(p5, rid5)
     ready5 = {"n": 0}
@@ -317,6 +336,8 @@ try:
     assert calls5["runner"] == 1, calls5
     assert calls5["finalizer"] == 1, calls5
 
+    supervisor.packet_mod.parse_packet_file = real_parse
+
     # F. Acceptance identity must reject replay when the BUILD candidate HEAD
     # changes between acceptance and replay. The acceptance publication
     # captured the builder worktree HEAD at the moment of acceptance; a
@@ -339,6 +360,7 @@ try:
                 stdout="ok", stderr="", cost_known=True,
                 tokens_known=True, effective_model="model-a",
             )
+    write_minimal_valid_packet(p6, rid6)
     supervisor.enqueue(canonical_repo=p6, run_id=rid6, db_path=db6, runner=IdentityCandidateRunner.runner_id)
     work6 = wo_for(p6, rid6)
     ready6 = {"n": 0}
@@ -376,6 +398,8 @@ try:
     assert calls6["runner"] == 1, calls6
     assert calls6["finalizer"] == 1, calls6
 
+    supervisor.packet_mod.parse_packet_file = real_parse
+
     # G. REVIEW acceptance identity must reject replay when the protocol
     # state's last_candidate_sha mutates between acceptance and replay.
     # The review acceptance captures the exact candidate the review would
@@ -398,6 +422,7 @@ try:
                 stdout="ok", stderr="", cost_known=True,
                 tokens_known=True, effective_model="model-a",
             )
+    write_minimal_valid_packet(p7, rid7)
     supervisor.enqueue(canonical_repo=p7, run_id=rid7, db_path=db7, runner=IdentityReviewRunner.runner_id)
     work7 = wo_for(p7, rid7, decision="REVIEW", role="reviewer")
     ready7 = {"n": 0}
@@ -462,6 +487,8 @@ try:
     assert calls7["runner"] == 1, calls7
     assert calls7["finalizer"] == 1, calls7
 
+    supervisor.packet_mod.parse_packet_file = real_parse
+
     # H. Exact accepted artifact + exact identity unchanged: zero-cost
     # deterministic replay still succeeds, does not invoke the provider
     # again, and does not charge cost twice.
@@ -482,6 +509,7 @@ try:
                 stdout="ok", stderr="", cost_known=True,
                 tokens_known=True, effective_model="model-a",
             )
+    write_minimal_valid_packet(p8, rid8)
     supervisor.enqueue(canonical_repo=p8, run_id=rid8, db_path=db8, runner=IdentityStableRunner.runner_id)
     work8 = wo_for(p8, rid8)
     ready8 = {"n": 0}

@@ -6303,61 +6303,6 @@ def _migrate_quarantined_run_capabilities(
     )
 
 
-def write_minimal_valid_packet(
-    canonical_repo: Path,
-    run_id: str,
-    *,
-    work_class: str = "FEATURE",
-    risk_class: str = "low",
-    branch: str = "master",
-    packet_id: str | None = None,
-) -> Path:
-    """Write the smallest WORK_PACKET.md that satisfies the v0.9.9 admission
-    backstop. Tests that exercise supervisor.enqueue() without going through
-    ``spec new`` MUST call this first, or the enqueue will be refused with
-    reason=pre_seal_packet_missing.
-
-    The returned path is the WORK_PACKET.md that was written.
-    """
-    rid_short = re.sub(r"[^A-Za-z0-9_-]", "", run_id)[:64] or "fixture"
-    run_dir = state_mod.run_dir(canonical_repo, run_id)
-    run_dir.mkdir(parents=True, exist_ok=True)
-    packet = {
-        "schema": "ownframework-work-packet/v3",
-        "packet_id": packet_id or f"min-{rid_short}",
-        "created_at": "2026-09-17T00:00:00Z",
-        "work_class": work_class,
-        "risk_class": risk_class,
-        "title": f"minimal valid v3 fixture for {run_id}",
-        "target": {
-            "repo": str(canonical_repo.resolve(strict=False)),
-            "branch": branch,
-            "classification": "local_only",
-        },
-        "execution_mode": "single",
-        "acceptance_criteria": [{"id": "AC-1", "text": "ok"}],
-        "non_goals": [],
-        "allowed_paths": ["a.txt"],
-        "protected_paths": [".ownframework-loop/"],
-        "work_units": [{"id": "UNIT-1", "title": "u", "scope": "do"}],
-        "merge_authority": "human_only",
-        "deploy_authority": "human_only",
-        "push_authority": "human_only",
-        "external_action_authority": "none",
-        "risk_budget": {
-            "max_build_passes": 4, "max_review_passes": 4, "max_repair_rounds": 1,
-            "max_files_changed": 5, "max_diff_lines": 100,
-        },
-    }
-    fence = "`" * 3
-    packet_path = run_dir / "WORK_PACKET.md"
-    packet_path.write_text(
-        fence + "json\n" + json.dumps(packet, sort_keys=True) + "\n" + fence + "\n",
-        encoding="utf-8",
-    )
-    return packet_path
-
-
 __all__ = [
     "SCHEMA",
     "ClaudeCodeRunner",
@@ -6367,7 +6312,6 @@ __all__ = [
     "DISPATCH_HOLD_KIND",
     "DISPATCH_HOLD_STATES",
     "dispatch_hold_status",
-    "write_minimal_valid_packet",
     "release_dispatch_hold",
     "cancel_dispatch_hold",
     "supervisor_config_get",

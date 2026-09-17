@@ -14,15 +14,20 @@
 set -euo pipefail
 TESTS_DIR="$(cd "$(dirname "$0")" && pwd)"
 . "$TESTS_DIR/../_helpers.sh"
-export PYTHONPATH="$ROOT_DIR/lib"
+export PYTHONPATH="$(cd "$(dirname "$0")"/.. && pwd):$ROOT_DIR/lib"
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
 
-python3 -B - "$ROOT_DIR" <<'PY'
+python3 -B - "$TMP" <<'PY'
 import json
 import sys
 import tempfile
 from pathlib import Path
 
 from ownframework_loop import supervisor
+import sys as _sys_h
+_sys_h.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from _test_support import write_minimal_valid_packet  # noqa: E402
 
 root = Path(sys.argv[1])
 tmp = Path(tempfile.mkdtemp(prefix="ofloop-tokens-unknown-"))
@@ -72,7 +77,7 @@ class TokensKnownCost:
 db1 = tmp / "tokens-known-cost.sqlite3"
 repo1 = new_repo("tokens-known-cost")
 run1 = "run-tokens-known-cost"
-supervisor.write_minimal_valid_packet(repo1, run1)
+write_minimal_valid_packet(repo1, run1)
 supervisor.enqueue(
     canonical_repo=repo1, run_id=run1, db_path=db1,
     runner="tokens-known-cost", max_total_tokens=1000,
@@ -128,7 +133,7 @@ class TokensUnknownCost:
 db2 = tmp / "tokens-unknown-cost.sqlite3"
 repo2 = new_repo("tokens-unknown-cost")
 run2 = "run-tokens-unknown-cost"
-supervisor.write_minimal_valid_packet(repo2, run2)
+write_minimal_valid_packet(repo2, run2)
 supervisor.enqueue(
     canonical_repo=repo2, run_id=run2, db_path=db2,
     runner="tokens-unknown-cost", max_total_tokens=1000,
@@ -183,7 +188,7 @@ print("T02_LATER_COST_CEILING_FAILS_CLOSED_ON_TOKENS_UNKNOWN=yes")
 db3 = tmp / "tokens-recovery.sqlite3"
 repo3 = new_repo("tokens-recovery")
 run3 = "run-tokens-recovery"
-supervisor.write_minimal_valid_packet(repo3, run3)
+write_minimal_valid_packet(repo3, run3)
 supervisor.enqueue(
     canonical_repo=repo3, run_id=run3, db_path=db3, max_total_tokens=1000,
 )
