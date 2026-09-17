@@ -137,8 +137,9 @@ assert_in "$B_OUT" "status_fail FAIL" "TEST B: receipt writer derives FAIL from 
 
 # TEST C - dispatch consumers fail closed on UNKNOWN.
 C_OUT="$(python3 <<'PYEOF'
+import os
 import sys
-sys.path.insert(0, "/Users/mr.mrs.london/projects/ownframework-loop/lib")
+sys.path.insert(0, os.environ.get("OFLOOP_TEST_LIB") or (os.path.dirname(os.path.dirname(os.path.abspath(__file__))) + "/lib"))
 from ownframework_loop import dispatch
 unknown_receipt = {
   "program_source_ceiling_check": {
@@ -180,9 +181,9 @@ assert_in "$C_OUT" "ps_when_val_pass True" "TEST C: source-ceiling accepts when 
 
 # TEST D - REVIEW dispatch refused at the completion boundary.
 D_OUT="$(python3 <<'PYEOF'
-import sqlite3, tempfile, pathlib
+import os, sqlite3, tempfile, pathlib
 sys = __import__("sys")
-sys.path.insert(0, "/Users/mr.mrs.london/projects/ownframework-loop/lib")
+sys.path.insert(0, os.environ.get("OFLOOP_TEST_LIB") or (os.path.dirname(os.path.dirname(os.path.abspath(__file__))) + "/lib"))
 from ownframework_loop import supervisor
 root = pathlib.Path(tempfile.mkdtemp(prefix="ofloop-h-d-"))
 subprocess = __import__("subprocess")

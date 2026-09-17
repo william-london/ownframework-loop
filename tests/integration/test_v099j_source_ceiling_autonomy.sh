@@ -24,8 +24,9 @@ assert_in() {
 
 # TEST A - dispatch repair_context_from_receipt surfaces source-budget breach.
 A_OUT="$(python3 <<'PYEOF'
+import os
 import sys
-sys.path.insert(0, "/Users/mr.mrs.london/projects/ownframework-loop/lib")
+sys.path.insert(0, os.environ.get("OFLOOP_TEST_LIB") or (os.path.dirname(os.path.dirname(os.path.abspath(__file__))) + "/lib"))
 import json
 from ownframework_loop import dispatch
 state = {
@@ -71,7 +72,7 @@ class _P:
         return self._p
 import unittest.mock as _mock
 real_path = dispatch._repair_context_from_receipt.__globals__["state_mod"].run_dir
-real_path_resolved = "/Users/mr.mrs.london/.local/state/ownframework-loop/run-x"
+real_path_resolved = "/tmp/state-root/run-x"
 with _mock.patch.object(dispatch, "_load_json_file", return_value=receipt), \
      _mock.patch.object(dispatch.state_mod, "run_dir",
                         return_value=__import__("pathlib").Path(real_path_resolved)):
@@ -105,8 +106,9 @@ assert_in "$A_OUT" "breach_max_files 500" "TEST A: breach carries effective max 
 
 # TEST B - failure_reason priority: source-budget wins over validation.
 B_OUT="$(python3 <<'PYEOF'
+import os
 import sys
-sys.path.insert(0, "/Users/mr.mrs.london/projects/ownframework-loop/lib")
+sys.path.insert(0, os.environ.get("OFLOOP_TEST_LIB") or (os.path.dirname(os.path.dirname(os.path.abspath(__file__))) + "/lib"))
 import unittest.mock as _mock
 import pathlib
 from ownframework_loop import dispatch
@@ -160,8 +162,9 @@ assert_in "$B_OUT" "failed_validations_count 1" "TEST B: failed validation rows 
 
 # TEST C - validation-only failure keeps validation failure_reason.
 C_OUT="$(python3 <<'PYEOF'
+import os
 import sys
-sys.path.insert(0, "/Users/mr.mrs.london/projects/ownframework-loop/lib")
+sys.path.insert(0, os.environ.get("OFLOOP_TEST_LIB") or (os.path.dirname(os.path.dirname(os.path.abspath(__file__))) + "/lib"))
 import unittest.mock as _mock
 import pathlib
 from ownframework_loop import dispatch
@@ -200,8 +203,9 @@ assert_in "$C_OUT" "breach_present False" "TEST C: validation-only has no source
 
 # TEST D - BLOCKED receipt for source-budget still requires continuation.
 D_OUT="$(python3 <<'PYEOF'
+import os
 import sys
-sys.path.insert(0, "/Users/mr.mrs.london/projects/ownframework-loop/lib")
+sys.path.insert(0, os.environ.get("OFLOOP_TEST_LIB") or (os.path.dirname(os.path.dirname(os.path.abspath(__file__))) + "/lib"))
 from ownframework_loop import dispatch
 receipt_blocked = {
   "schema": "ownframework-loop-build-receipt/v2",
