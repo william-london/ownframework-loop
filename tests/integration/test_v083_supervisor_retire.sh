@@ -198,11 +198,30 @@ def make_repo(label: str) -> Path:
         json.dumps({"state": "BUILDING", "label": label}), encoding="utf-8"
     )
     packet_meta = {
-        "schema": "ownframework-work-packet/v2",
+        "schema": "ownframework-work-packet/v3",
+        "packet_id": f"v083-{label}",
+        "created_at": "2026-09-17T00:00:00Z",
+        "work_class": "FEATURE",
+        "risk_class": "low",
+        "title": f"v083 retire fixture ({label})",
         "target": {
             "repo": str(r.resolve()),
             "branch": "master",
             "classification": "local_only",
+        },
+        "execution_mode": "single",
+        "acceptance_criteria": [{"id": "AC-1", "text": "ok"}],
+        "non_goals": [],
+        "allowed_paths": ["README.md"],
+        "protected_paths": [".ownframework-loop/"],
+        "work_units": [{"id": "UNIT-1", "title": "u", "scope": "do"}],
+        "merge_authority": "human_only",
+        "deploy_authority": "human_only",
+        "push_authority": "human_only",
+        "external_action_authority": "none",
+        "risk_budget": {
+            "max_build_passes": 4, "max_review_passes": 4, "max_repair_rounds": 1,
+            "max_files_changed": 5, "max_diff_lines": 100,
         },
     }
     fence = chr(96) * 3
