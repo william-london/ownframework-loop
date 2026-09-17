@@ -31,7 +31,7 @@ TESTS_DIR="$(cd "$(dirname "$0")" && pwd)"
 # Build a shared python helper for tests that need to scaffold a tempdir's
 # Ofloop run state (packet + approval) so that build_agent.build_skeleton
 # can compute its envelope. Each test imports it via sys.path.
-OFLOOP_V099H_SETUP_DIR="$(mktemp -d -t ofloop-v099h)"
+OFLOOP_V099H_SETUP_DIR="$(mktemp -d -t ofloop-v099h.XXXXXX)"
 cat > "$OFLOOP_V099H_SETUP_DIR/ofloop_v099h_setup.py" <<'PYEOF'
 import json, subprocess, pathlib
 
