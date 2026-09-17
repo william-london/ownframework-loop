@@ -5,7 +5,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 TMP="$(mktemp -d -t ofloop-v090-concurrency.XXXXXX)"
 trap 'rm -rf "$TMP"' EXIT
 TMP_ROOT="$TMP" PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$LIB_DIR" python3 -B - <<'PY'
-import hashlib, os, sqlite3, subprocess, tempfile, threading, time
+import hashlib, json, os, sqlite3, subprocess, tempfile, threading, time
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 from ownframework_loop import dispatch, guards, supervisor, worktrees
@@ -291,7 +291,30 @@ custom_dir = custom_repo / ".ownframework-loop" / custom_run
 custom_dir.mkdir(parents=True)
 fence = chr(96) * 3
 (custom_dir / "WORK_PACKET.md").write_text(
-    fence + 'json\n{"target":{"candidate_branch_prefix":"factory/candidate/custom-preapproval"}}\n' + fence + '\n'
+    fence + 'json\n'
+    + json.dumps({
+        "schema": "ownframework-work-packet/v3",
+        "packet_id": "v090-custom-preapproval",
+        "created_at": "2026-09-17T00:00:00Z",
+        "work_class": "FEATURE",
+        "risk_class": "low",
+        "title": "v090 custom preapproval fixture",
+        "target": {"candidate_branch_prefix": "factory/candidate/custom-preapproval",
+                   "repo": str(custom_repo), "branch": "master", "classification": "local_only"},
+        "execution_mode": "single",
+        "acceptance_criteria": [{"id": "AC-1", "text": "ok"}],
+        "non_goals": [],
+        "allowed_paths": ["README.md"],
+        "protected_paths": [".ownframework-loop/"],
+        "work_units": [{"id": "UNIT-1", "title": "u", "scope": "do"}],
+        "merge_authority": "human_only",
+        "deploy_authority": "human_only",
+        "push_authority": "human_only",
+        "external_action_authority": "none",
+        "risk_budget": {"max_build_passes": 4, "max_review_passes": 4, "max_repair_rounds": 1,
+                        "max_files_changed": 5, "max_diff_lines": 100},
+    })
+    + '\n' + fence + '\n'
 )
 custom_job = supervisor.enqueue(
     canonical_repo=custom_repo, run_id=custom_run, db_path=db,
@@ -753,7 +776,43 @@ migration_dir = migration_repo / ".ownframework-loop" / migration_run
 migration_dir.mkdir(parents=True)
 fence = chr(96) * 3
 (migration_dir / "WORK_PACKET.md").write_text(
-    fence + 'json\n{"execution_mode":"program"}\n' + fence + '\n'
+    fence + 'json\n'
+    + json.dumps({
+        "schema": "ownframework-work-packet/v3",
+        "packet_id": "v090-migration-program",
+        "created_at": "2026-09-17T00:00:00Z",
+        "work_class": "FEATURE",
+        "risk_class": "low",
+        "title": "v090 migration program fixture",
+        "target": {"repo": str(migration_repo), "branch": "master", "classification": "local_only"},
+        "execution_mode": "program",
+        "checkpoint_graph": {
+            "execution_order": ["CP-0", "CP-1"],
+            "checkpoints": [
+                {"id": "CP-0", "title": "f", "scope": "do first",
+                 "acceptance_criterion_ids": ["AC-1"],
+                 "work_units": ["UNIT-1"],
+                 "risk_budget": {"max_build_passes": 4, "max_review_passes": 4, "max_repair_rounds": 2}},
+                {"id": "CP-1", "title": "s", "scope": "do second",
+                 "depends_on": ["CP-0"], "acceptance_criterion_ids": ["AC-1"],
+                 "work_units": ["UNIT-1"],
+                 "risk_budget": {"max_build_passes": 4, "max_review_passes": 4, "max_repair_rounds": 2}},
+            ],
+        },
+        "promotion_policy": "human_gate",
+        "acceptance_criteria": [{"id": "AC-1", "text": "ok"}],
+        "non_goals": [],
+        "allowed_paths": ["README.md"],
+        "protected_paths": [".ownframework-loop/"],
+        "work_units": [{"id": "UNIT-1", "title": "u", "scope": "do"}],
+        "merge_authority": "human_only",
+        "deploy_authority": "human_only",
+        "push_authority": "human_only",
+        "external_action_authority": "none",
+        "risk_budget": {"max_build_passes": 8, "max_review_passes": 8, "max_repair_rounds": 2,
+                        "max_files_changed": 25, "max_diff_lines": 1000},
+    })
+    + '\n' + fence + '\n'
 )
 migration_job = supervisor.enqueue(
     canonical_repo=migration_repo,
