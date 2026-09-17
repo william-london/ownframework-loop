@@ -302,7 +302,8 @@ PY
 pass "PROGRAM source ceilings use absolute baseline-to-candidate accounting and fail closed"
 
 # End-to-end PROGRAM enforcement: a candidate exceeding the packet's
-# max_baseline_to_final_diff_lines must BLOCK at build finalize.
+# max_baseline_to_final_diff_lines must enter the funded autonomous repair
+# path at build finalize when its other deterministic evidence is clean.
 REP5="$(make_tmp_repo)"
 "$OFLOOP" spec new "$REP5" "program-ceiling-mission" >/dev/null
 RUN5="$(ls -1t "$REP5/.ownframework-loop" | head -n1)"
@@ -370,8 +371,8 @@ d["acceptance_addressed"] = ["AC-1"]
 p.write_text(json.dumps(d, indent=2, sort_keys=True) + "\n")
 PY
 "$OFLOOP" dispatch finalize "$REP5" "$RUN5" BUILD "$SEM5" >/dev/null
-assert_eq "$(jq -r '.state' "$REP5/.ownframework-loop/$RUN5/STATE.json")" "BLOCKED" \
-  "PROGRAM diff-lines ceiling breach blocks at build finalize"
+assert_eq "$(jq -r '.state' "$REP5/.ownframework-loop/$RUN5/STATE.json")" "CHANGES_REQUESTED" \
+  "PROGRAM diff-lines ceiling breach funds repair at build finalize"
 assert_eq "$(jq -r '.program_source_ceiling_check.result' "$REP5/.ownframework-loop/$RUN5/BUILD_RECEIPT.json")" \
   "fail" "receipt records the ceiling breach"
 python3 - "$REP5" "$RUN5" <<'PY'

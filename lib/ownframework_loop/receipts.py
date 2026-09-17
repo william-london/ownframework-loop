@@ -30,17 +30,23 @@ VALIDATION_STATUSES = (
 def compute_validation_status(validation: list[dict[str, Any]] | None) -> str:
     """Derive canonical validation status from authoritative validation rows.
 
-    PASS    at least one row exists and every row has ``passed=True`` and
+    PASS    an explicit empty list (zero declared validations), or at least
+            one row exists and every row has ``passed=True`` and
             ``exit_code`` matches ``expected_exit_code`` (or no
             ``expected_exit_code`` is recorded and ``exit_code == 0``).
     FAIL    at least one row has ``passed=False`` or its exit code disagrees
             with the expected code.
-    UNKNOWN the receipt has no validation rows, validation rows are
-            malformed, or essential fields are missing. UNKNOWN fails
-            closed at every consumer.
+    UNKNOWN the validation field is missing/non-list, validation rows are
+            malformed, or essential fields are missing. UNKNOWN fails closed
+            at every consumer.
     """
-    if not isinstance(validation, list) or not validation:
+    if validation is None or not isinstance(validation, list):
         return VALIDATION_STATUS_UNKNOWN
+    if not validation:
+        # An explicit [] is authoritative evidence that this checkpoint
+        # declared zero deterministic gates. All zero declared gates are
+        # vacuously satisfied; missing/malformed evidence remains UNKNOWN.
+        return VALIDATION_STATUS_PASS
     saw_passed = False
     for row in validation:
         if not isinstance(row, dict):

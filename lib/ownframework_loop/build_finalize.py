@@ -66,6 +66,28 @@ AGENT_RESULT_REQUIRED = tuple(sorted(build_agent_mod.REQUIRED_RESULT_KEYS))
 AGENT_RESULT_ALLOWED_OUTCOMES = set(build_agent_mod.ALLOWED_OUTCOMES)
 
 
+def _compute_no_progress_streak(
+    last_candidate_sha: str | None,
+    candidate_sha: str,
+    prior_streak: int,
+) -> int:
+    """Track candidate convergence independently of repair authorization."""
+    if not last_candidate_sha or last_candidate_sha != candidate_sha:
+        return 0
+    return int(prior_streak) + 1
+
+
+def _repair_blocked_by_no_progress(
+    no_progress_streak: int,
+    packet: dict[str, Any],
+    repair_required: bool,
+) -> bool:
+    """Return whether repair would consume work after the fuse is exhausted."""
+    return repair_required and no_progress_streak >= limits_mod.effective_cap(
+        "no_progress_streak", packet
+    )
+
+
 def _read_json(path: Path, default: Any = None) -> Any:
     if not path.exists():
         return default
@@ -688,12 +710,10 @@ def finalize_build(
     # passes continue indefinitely; identical-no-progress only stops at the
     # threshold.
     last_candidate = state.get("last_candidate_sha")
-    no_progress_streak = int(state.get("no_progress_streak") or 0)
-    progress_made = (not last_candidate) or (last_candidate != candidate_sha)
-    if not progress_made:
-        no_progress_streak += 1
-    else:
-        no_progress_streak = 0
+    prior_no_progress_streak = int(state.get("no_progress_streak") or 0)
+    no_progress_streak = _compute_no_progress_streak(
+        last_candidate, candidate_sha, prior_no_progress_streak
+    )
 
     # 18. Pass limits.
     # build_pass_count is owned by the claim path (cmd_build_claim).
@@ -730,6 +750,11 @@ def finalize_build(
         program_source_check is not None
         and program_source_check["result"] != "pass"
     )
+    if program_source_breach:
+        repair_causes.append("source_budget_breach")
+    no_progress_cap_reached = _repair_blocked_by_no_progress(
+        no_progress_streak, meta, bool(repair_causes)
+    )
 
     # 19. Derive next_state. (Approval binding was proven at step 1; there is
     # no path back to AWAITING_APPROVAL from BUILDING.)
@@ -740,6 +765,11 @@ def finalize_build(
         # branch behind the finalizer's back. The sealing contract is
         # broken; terminalize deterministically with the evidence in the
         # receipt rather than hand a tampered tree to review.
+        next_state = "BLOCKED"
+    elif no_progress_cap_reached and repair_causes:
+        # Candidate convergence is independent of repair funding. Once the
+        # identical-candidate fuse is exhausted, block before the atomic repair
+        # owner can consume another entitlement or launch another provider.
         next_state = "BLOCKED"
     elif program_source_breach:
         # v0.9.9-i: repairable source-budget breach is autonomous. When
@@ -773,7 +803,6 @@ def finalize_build(
             )
             if entitlement["eligible"]:
                 next_state = "CHANGES_REQUESTED"
-                repair_causes.append("source_budget_breach")
             else:
                 next_state = "BLOCKED"
         else:
@@ -849,7 +878,7 @@ def finalize_build(
         next_state = "BLOCKED"
     elif outcome_requested == "stopped":
         next_state = "STOPPED"
-    elif no_progress_streak >= limits_mod.effective_cap("no_progress_streak", meta):
+    elif no_progress_cap_reached:
         next_state = "BLOCKED"
     else:
         next_state = "READY_FOR_REVIEW"
@@ -956,6 +985,8 @@ def finalize_build(
                 packet=meta,
                 actor=actor,
                 commit_sha=candidate_sha,
+                no_progress_streak=no_progress_streak,
+                program_block=program_block,
                 allowed_sources=frozenset({"BUILDING"}),
                 claimed_reason=(
                     "build finalization requested repair: "

@@ -17,12 +17,11 @@
 #   * defers the early top-level source-size check when in PROGRAM mode;
 #   * preserves the strict envelope (min of top-level and PROGRAM-global);
 #   * routes any source-budget breach through the structured
-#     `program_source_ceiling_check` evidence path;
+#     `program_source_ceiling_check` evidence path and the funded autonomous
+#     PROGRAM repair path;
 #   * leaves SINGLE-mode semantics unchanged (still raises on breach);
 #   * allows zero-cost replay of the already-paid semantic result;
-#   * permits a single operator-gated `continue-program` after the
-#     corrected BLOCKED evidence, which consumes exactly one repair
-#     entitlement and requeues the supervisor.
+#   * preserves zero-cost replay of the already-funded repair decision.
 set -euo pipefail
 TESTS_DIR="$(cd "$(dirname "$0")" && pwd)"
 . "$TESTS_DIR/../_helpers.sh"
@@ -123,14 +122,14 @@ PY
   printf '%s' "$SEM"
 }
 
-assert_no_opaque_quarantine() {
+assert_repairable_source_breach() {
   local repo="$1" rid="$2"
   local state_json="$repo/.ownframework-loop/$rid/STATE.json"
   local receipt_json="$repo/.ownframework-loop/$rid/BUILD_RECEIPT.json"
   [[ -f "$receipt_json" ]] || fail "expected BUILD_RECEIPT.json at $receipt_json"
   local next_state
   next_state="$(jq -r '.next_state' "$receipt_json")"
-  assert_eq "$next_state" "BLOCKED" "next_state = BLOCKED (not READY_FOR_REVIEW)"
+  assert_eq "$next_state" "CHANGES_REQUESTED" "next_state = CHANGES_REQUESTED (autonomous repair)"
   local ps_result
   ps_result="$(jq -r '.program_source_ceiling_check.result' "$receipt_json")"
   assert_eq "$ps_result" "fail" "program_source_ceiling_check.result = fail"
@@ -139,7 +138,7 @@ assert_no_opaque_quarantine() {
   [[ -n "$breach" && "$breach" != "null" && "$breach" != "" ]] || fail "breach text missing in receipt"
   local run_state
   run_state="$(jq -r '.state' "$state_json")"
-  assert_eq "$run_state" "BLOCKED" "STATE.json.state = BLOCKED"
+  assert_eq "$run_state" "CHANGES_REQUESTED" "STATE.json.state = CHANGES_REQUESTED"
 }
 
 make_program_run() {
@@ -158,14 +157,14 @@ if echo "$OUT_A" | grep -q 'OF_LOOP_BUILD_FINALIZE_REFUSED'; then
   echo "$OUT_A"
   fail "TEST A: finalizer escaped as opaque RuntimeError (R3 CP-9 defect regression)"
 fi
-assert_no_opaque_quarantine "$REPO_CURR" "$RID_CURR"
+assert_repairable_source_breach "$REPO_CURR" "$RID_CURR"
 EFF_TOP_A="$(jq -r '.program_source_ceiling_check.top_level_risk_max_diff_lines' "$REPO_CURR/.ownframework-loop/$RID_CURR/BUILD_RECEIPT.json")"
 EFF_PROG_A="$(jq -r '.program_source_ceiling_check.program_max_baseline_to_final_diff_lines' "$REPO_CURR/.ownframework-loop/$RID_CURR/BUILD_RECEIPT.json")"
 EFF_FINAL_A="$(jq -r '.program_source_ceiling_check.effective_max_diff_lines' "$REPO_CURR/.ownframework-loop/$RID_CURR/BUILD_RECEIPT.json")"
 assert_eq "$EFF_TOP_A" "50" "TEST A: top_level_risk_max_diff_lines = 50"
 assert_eq "$EFF_PROG_A" "5000" "TEST A: program_max_baseline_to_final_diff_lines = 5000"
 assert_eq "$EFF_FINAL_A" "50" "TEST A: effective_max_diff_lines = min(50, 5000) = 50"
-pass "TEST A: PROGRAM source breach produces BUILD_RECEIPT + BLOCKED, no opaque RuntimeError"
+pass "TEST A: PROGRAM source breach produces BUILD_RECEIPT + funded repair, no opaque RuntimeError"
 
 # ===========================================================================
 # TEST B — top-level risk limit is strictly stricter
@@ -177,7 +176,7 @@ if echo "$OUT_B" | grep -q 'OF_LOOP_BUILD_FINALIZE_REFUSED'; then
   echo "$OUT_B"
   fail "TEST B: opaque RuntimeError escape (top-level must be enforced via program_source_check)"
 fi
-assert_no_opaque_quarantine "$REPO_CURR" "$RID_CURR"
+assert_repairable_source_breach "$REPO_CURR" "$RID_CURR"
 EFFB="$(jq -r '.program_source_ceiling_check.effective_max_diff_lines' "$REPO_CURR/.ownframework-loop/$RID_CURR/BUILD_RECEIPT.json")"
 assert_eq "$EFFB" "30" "TEST B: effective_max_diff_lines = 30 (top-level wins)"
 pass "TEST B: top-level limit is preserved as the stricter limit"
@@ -192,7 +191,7 @@ if echo "$OUT_C" | grep -q 'OF_LOOP_BUILD_FINALIZE_REFUSED'; then
   echo "$OUT_C"
   fail "TEST C: opaque RuntimeError escape"
 fi
-assert_no_opaque_quarantine "$REPO_CURR" "$RID_CURR"
+assert_repairable_source_breach "$REPO_CURR" "$RID_CURR"
 EFFC="$(jq -r '.program_source_ceiling_check.effective_max_diff_lines' "$REPO_CURR/.ownframework-loop/$RID_CURR/BUILD_RECEIPT.json")"
 assert_eq "$EFFC" "5" "TEST C: effective_max_diff_lines = 5 (PROGRAM ceiling wins)"
 pass "TEST C: PROGRAM ceiling is preserved as the stricter limit"
@@ -268,54 +267,17 @@ NEXT_AFTER="$(jq -r '.next_state' "$REPO_CURR/.ownframework-loop/$RID_CURR/BUILD
 assert_eq "$STATE_AFTER" "$STATE_BEFORE" "TEST F: build_pass_count unchanged after replay"
 assert_eq "$REPAIR_AFTER" "$REPAIR_BEFORE" "TEST F: repair_round unchanged after replay"
 assert_eq "$SHA_AFTER" "$SHA_BEFORE" "TEST F: candidate_sha unchanged after replay"
-assert_eq "$NEXT_AFTER" "BLOCKED" "TEST F: replay next_state stays BLOCKED (idempotent)"
-pass "TEST F: replay finalizes the same already-paid artifact at zero semantic cost"
+assert_eq "$NEXT_AFTER" "CHANGES_REQUESTED" "TEST F: replay next_state stays CHANGES_REQUESTED (idempotent)"
+pass "TEST F: replay preserves the same funded repair at zero semantic cost"
 
 # ===========================================================================
-# TEST G — continuation after BLOCKED consumes exactly one repair round
+# TEST G — the autonomous source-budget repair needs no continuation ceremony
 # ===========================================================================
 make_program_run
 SEM_G="$(prep_program_run "$REPO_CURR" "$RID_CURR" 50 5000 200)"
-
-# Enroll the run into the supervisor ledger first so continue-program can
-# resolve the job row. The dispatched run already saw its finalizer run.
-DB_G="$(mktemp -u -t ofloop_v099c_db.XXXXXX)"
-"$OFLOOP_BIN" supervisor enqueue "$REPO_CURR" "$RID_CURR" --runner claude-code --db "$DB_G" >/dev/null 2>&1 || true
-
 "$OFLOOP_BIN" dispatch finalize "$REPO_CURR" "$RID_CURR" BUILD "$SEM_G" >/dev/null 2>&1 || true
-CAND_G="$(jq -r '.candidate_sha' "$REPO_CURR/.ownframework-loop/$RID_CURR/BUILD_RECEIPT.json")"
-REPAIR_BEFORE_G="$(jq -r '.repair_round' "$REPO_CURR/.ownframework-loop/$RID_CURR/STATE.json")"
-
-OUT_G="$("$OFLOOP_BIN" supervisor continue-program "$REPO_CURR" "$RID_CURR" \
-  --reason "TEST G: source-budget breach requires one bounded product repair; repair goal is to REDUCE candidate inside the existing source envelope, NOT to widen the packet" \
-  --expected-candidate-sha "$CAND_G" --db "$DB_G" 2>&1)" || true
-echo "$OUT_G" | head -10
-
 STATE_G="$(jq -r '.state' "$REPO_CURR/.ownframework-loop/$RID_CURR/STATE.json")"
-REPAIR_AFTER_G="$(jq -r '.repair_round' "$REPO_CURR/.ownframework-loop/$RID_CURR/STATE.json")"
-PERSISTED_CAND="$(python3 -c "
-import json, sys
-from pathlib import Path
-continuations = sorted((Path(sys.argv[1]) / '.ownframework-loop' / sys.argv[2] / 'continuations').glob('*.json'))
-if not continuations:
-    print('')
-else:
-    latest = continuations[-1]
-    d = json.loads(latest.read_text())
-    print(d.get('active_candidate_sha') or d.get('expected_candidate_sha') or '')
-" "$REPO_CURR" "$RID_CURR")"
-assert_eq "$STATE_G" "READY_TO_BUILD" "TEST G: BLOCKED -> READY_TO_BUILD after continue-program"
-EXPECT_REPAIR_G=$((REPAIR_BEFORE_G + 1))
-assert_eq "$REPAIR_AFTER_G" "$EXPECT_REPAIR_G" "TEST G: repair_round consumed exactly +1"
-assert_eq "$PERSISTED_CAND" "$CAND_G" "TEST G: candidate lineage preserved on continuation"
-PACKET_MAX_G="$(python3 -c "
-import json, sys, re
-from pathlib import Path
-pp = Path(sys.argv[1]) / '.ownframework-loop' / sys.argv[2] / 'WORK_PACKET.md'
-text = pp.read_text()
-m = re.search(r'\`\`\`json\n(.*?)\n\`\`\`', text, re.DOTALL)
-d = json.loads(m.group(1))
-print(d['risk_budget']['max_diff_lines'])
-" "$REPO_CURR" "$RID_CURR")"
-assert_eq "$PACKET_MAX_G" "50" "TEST G: packet max_diff_lines unchanged (50)"
-pass "TEST G: continue-program consumes one repair round, preserves lineage, leaves packet unchanged"
+REPAIR_G="$(jq -r '.repair_round' "$REPO_CURR/.ownframework-loop/$RID_CURR/STATE.json")"
+assert_eq "$STATE_G" "CHANGES_REQUESTED" "TEST G: source-budget breach funds repair directly"
+assert_eq "$REPAIR_G" "1" "TEST G: autonomous source-budget repair consumes one round"
+pass "TEST G: source-budget repair requires no continue-program ceremony"

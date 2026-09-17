@@ -905,6 +905,8 @@ def transition_funded_repair(
     packet: dict[str, Any],
     actor: str,
     commit_sha: str,
+    no_progress_streak: int | None = None,
+    program_block: dict[str, Any] | None = None,
     identical_finding_streak: int | None = None,
     last_must_fix_fingerprint: str | None = None,
     allowed_sources: frozenset[str] = frozenset({"REVIEWING"}),
@@ -919,9 +921,10 @@ def transition_funded_repair(
     crash-atomic funding owner shared by the live review finalizer, crash
     reconciliation, and the foreground repair transition (SINGLE + PROGRAM).
 
-    This owner has NO generic extras channel. Funding a repair round is a new
-    work context, so the owner itself resets `no_progress_streak`; the review
-    fuses travel through the typed parameters.
+    This owner has NO generic extras channel. The caller supplies the already
+    computed candidate-convergence streak and, when needed, the already
+    computed PROGRAM accounting block. Repair funding, accounting, and the
+    streak update stay in this same atomic owner.
     """
     sp = state_path(canonical_repo, run_id)
     with flock_exclusive(lock_path(canonical_repo, run_id)):
@@ -1016,9 +1019,21 @@ def transition_funded_repair(
         new["state_history"] = history
         if target == "BLOCKED":
             new["terminal_reason"] = reason
-        # Owner-owned: a funded repair round is a fresh work context, so the
-        # no-progress fuse resets inside the same atomic mutation.
-        new["no_progress_streak"] = 0
+        if program_block is not None:
+            if not isinstance(program_block, dict) or not program_block:
+                raise ValueError("typed owner field 'program_block' must be a non-empty dict")
+            if not is_program_state(current):
+                raise ValueError("program_block supplied for a non-PROGRAM run")
+            new["program"] = program_block
+        # Owner-owned: preserve the finalizer's candidate-convergence result
+        # inside the same atomic funding mutation. A missing value retains the
+        # historical fresh-context default for callers without a candidate
+        # comparison (for example review rejection).
+        new["no_progress_streak"] = (
+            _owner_int("no_progress_streak", no_progress_streak)
+            if no_progress_streak is not None
+            else 0
+        )
         if identical_finding_streak is not None:
             new["identical_finding_streak"] = _owner_int(
                 "identical_finding_streak", identical_finding_streak

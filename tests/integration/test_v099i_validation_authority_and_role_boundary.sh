@@ -67,7 +67,7 @@ PYEOF
 assert_in "$A_OUT" '"all_pass": "PASS"' "TEST A: all rows passed → PASS"
 assert_in "$A_OUT" '"any_fail": "FAIL"' "TEST A: any row passed=False → FAIL"
 assert_in "$A_OUT" '"exit_mismatch": "FAIL"' "TEST A: exit_code mismatch → FAIL"
-assert_in "$A_OUT" '"empty": "UNKNOWN"' "TEST A: empty list → UNKNOWN"
+assert_in "$A_OUT" '"empty": "PASS"' "TEST A: explicit empty list → PASS"
 assert_in "$A_OUT" '"malformed": "UNKNOWN"' "TEST A: malformed row → UNKNOWN"
 assert_in "$A_OUT" '"no_passed_key": "UNKNOWN"' "TEST A: missing passed key → UNKNOWN"
 assert_in "$A_OUT" '"non_list": "UNKNOWN"' "TEST A: non-list input → UNKNOWN"

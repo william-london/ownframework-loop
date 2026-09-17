@@ -152,8 +152,9 @@ from ownframework_loop import build_finalize
 src = inspect.getsource(build_finalize)
 # Old code: last_candidate.startswith(candidate_sha[:7])
 assert "startswith(candidate_sha[:7])" not in src, "still using 7-char prefix"
-assert "last_candidate != candidate_sha" in src, "exact SHA comparison missing"
-print("  build_finalize no-progress now uses exact SHA equality")
+assert "_compute_no_progress_streak(" in src, "no-progress helper missing"
+assert "last_candidate_sha != candidate_sha" in src, "exact SHA comparison missing"
+print("  build_finalize no-progress helper uses exact SHA equality")
 PY
 [[ $? -eq 0 ]] && pass "Progress-sensitive continuation" || fail "Progress-sensitive continuation broken"
 
