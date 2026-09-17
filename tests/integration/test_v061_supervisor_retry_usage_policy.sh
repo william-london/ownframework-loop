@@ -19,6 +19,34 @@ repo.mkdir()
 rd = repo / ".ownframework-loop" / "run-policy"
 rd.mkdir(parents=True)
 (rd / "STATE.json").write_text(json.dumps({"state": "BUILDING"}), encoding="utf-8")
+# v0.9.9 admission invariant: enqueue requires a current pre-seal packet.
+# Write a minimal valid v3 packet so the retry-usage-policy assertion
+# below exercises durable enqueue + policy persistence, not admission.
+minimal_packet = {
+    "schema": "ownframework-work-packet/v3",
+    "packet_id": "v061-retry-usage-policy-fixture",
+    "created_at": "2026-09-17T00:00:00Z",
+    "work_class": "FEATURE",
+    "risk_class": "low",
+    "title": "v061 retry usage policy fixture",
+    "target": {"repo": str(repo), "branch": "master", "classification": "local_only"},
+    "execution_mode": "single",
+    "acceptance_criteria": [{"id": "AC-1", "text": "ok"}],
+    "non_goals": [],
+    "allowed_paths": ["a.txt"],
+    "protected_paths": [".ownframework-loop/"],
+    "work_units": [{"id": "UNIT-1", "title": "u", "scope": "do"}],
+    "merge_authority": "human_only",
+    "deploy_authority": "human_only",
+    "push_authority": "human_only",
+    "external_action_authority": "none",
+    "risk_budget": {"max_build_passes": 4, "max_review_passes": 4, "max_repair_rounds": 1,
+                    "max_files_changed": 5, "max_diff_lines": 100},
+}
+fence = chr(96) * 3
+(rd / "WORK_PACKET.md").write_text(
+    fence + "json\n" + json.dumps(minimal_packet) + "\n" + fence + "\n", encoding="utf-8"
+)
 db = root / "supervisor.sqlite3"
 
 s = supervisor.enqueue(
@@ -222,6 +250,34 @@ vrun = "run-visibility"
 vbranch = f"factory/candidate/{vrun}"
 vrd = vrepo / ".ownframework-loop" / vrun
 vrd.mkdir(parents=True)
+# v0.9.9 admission invariant: enqueue requires a current pre-seal packet.
+# Write a minimal valid v3 packet so the visibility assertion below
+# exercises durable enqueue + visibility, not admission.
+visibility_packet = {
+    "schema": "ownframework-work-packet/v3",
+    "packet_id": "v061-visibility-fixture",
+    "created_at": "2026-09-17T00:00:00Z",
+    "work_class": "FEATURE",
+    "risk_class": "low",
+    "title": "v061 visibility fixture",
+    "target": {"repo": str(vrepo), "branch": "master", "classification": "local_only"},
+    "execution_mode": "single",
+    "acceptance_criteria": [{"id": "AC-1", "text": "ok"}],
+    "non_goals": [],
+    "allowed_paths": ["a.txt"],
+    "protected_paths": [".ownframework-loop/"],
+    "work_units": [{"id": "UNIT-1", "title": "u", "scope": "do"}],
+    "merge_authority": "human_only",
+    "deploy_authority": "human_only",
+    "push_authority": "human_only",
+    "external_action_authority": "none",
+    "risk_budget": {"max_build_passes": 4, "max_review_passes": 4, "max_repair_rounds": 1,
+                    "max_files_changed": 5, "max_diff_lines": 100},
+}
+fence = chr(96) * 3
+(vrd / "WORK_PACKET.md").write_text(
+    fence + "json\n" + json.dumps(visibility_packet) + "\n" + fence + "\n", encoding="utf-8"
+)
 builder = vrepo / ".worktrees" / "ownframework-loop" / vrun / "builder"
 builder.parent.mkdir(parents=True)
 subprocess.run(
