@@ -412,8 +412,27 @@ rd = repo / ".ownframework-loop" / "run-wall"
 rd.mkdir(parents=True)
 (rd / "STATE.json").write_text(json.dumps({"state": "BUILDING"}), encoding="utf-8")
 (rd / "WORK_PACKET.md").write_text(
-    "```json\n" + json.dumps({"schema": "ownframework-work-packet/v2",
-                              "execution_mode": "single", "risk_budget": {}})
+    "```json\n" + json.dumps({
+        "schema": "ownframework-work-packet/v3",
+        "packet_id": "v072-wall-fixture",
+        "created_at": "2026-09-17T00:00:00Z",
+        "work_class": "FEATURE",
+        "risk_class": "low",
+        "title": "v072 wall clock fixture",
+        "target": {"repo": str(repo), "branch": "main", "classification": "local_only"},
+        "execution_mode": "single",
+        "acceptance_criteria": [{"id": "AC-1", "text": "ok"}],
+        "non_goals": [],
+        "allowed_paths": ["a.txt"],
+        "protected_paths": [".ownframework-loop/"],
+        "work_units": [{"id": "UNIT-1", "title": "u", "scope": "do"}],
+        "merge_authority": "human_only",
+        "deploy_authority": "human_only",
+        "push_authority": "human_only",
+        "external_action_authority": "none",
+        "risk_budget": {"max_build_passes": 4, "max_review_passes": 4, "max_repair_rounds": 1,
+                        "max_files_changed": 5, "max_diff_lines": 100},
+    })
     + "\n```\n", encoding="utf-8")
 semantic = rd / "BUILD_AGENT_RESULT.json"
 semantic.write_text("{}", encoding="utf-8")
