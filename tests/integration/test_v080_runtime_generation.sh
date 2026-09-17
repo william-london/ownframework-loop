@@ -227,6 +227,37 @@ repo = tmp / "contract-repo"
 repo.mkdir(exist_ok=True)
 gen = supervisor.runtime_generation()
 
+# v0.9.9 admission invariant: enqueue requires a current pre-seal packet.
+# Write a minimal valid v3 packet so the contract assertion below exercises
+# generation binding, not admission.
+gen_run_dir = repo / ".ownframework-loop" / "run-gen"
+gen_run_dir.mkdir(parents=True, exist_ok=True)
+gen_packet = {
+    "schema": "ownframework-work-packet/v3",
+    "packet_id": "v080-runtime-gen-fixture",
+    "created_at": "2026-09-17T00:00:00Z",
+    "work_class": "FEATURE",
+    "risk_class": "low",
+    "title": "v080 runtime gen fixture",
+    "target": {"repo": str(repo), "branch": "master", "classification": "local_only"},
+    "execution_mode": "single",
+    "acceptance_criteria": [{"id": "AC-1", "text": "ok"}],
+    "non_goals": [],
+    "allowed_paths": ["a.txt"],
+    "protected_paths": [".ownframework-loop/"],
+    "work_units": [{"id": "UNIT-1", "title": "u", "scope": "do"}],
+    "merge_authority": "human_only",
+    "deploy_authority": "human_only",
+    "push_authority": "human_only",
+    "external_action_authority": "none",
+    "risk_budget": {"max_build_passes": 4, "max_review_passes": 4, "max_repair_rounds": 1,
+                    "max_files_changed": 5, "max_diff_lines": 100},
+}
+_fence = chr(96) * 3
+(gen_run_dir / "WORK_PACKET.md").write_text(
+    _fence + "json\n" + json.dumps(gen_packet) + "\n" + _fence + "\n", encoding="utf-8"
+)
+
 # Enqueue binds the enqueuing generation.
 job = supervisor.enqueue(canonical_repo=repo, run_id="run-gen", db_path=db)
 conn = sqlite3.connect(str(db))
@@ -261,7 +292,7 @@ pass "T9 generation binding: mismatch quarantines fail-closed; resume rebinds ex
 # T10: a legacy UNBOUND unfinished job fails closed until explicit migration.
 # ---------------------------------------------------------------------------
 PYTHONPATH="$LIB_DIR" python3 -B - "$TMP" <<'PY'
-import sqlite3, sys
+import json, sqlite3, sys
 from pathlib import Path
 sys.path.insert(0, str(Path.cwd() / "lib"))
 from ownframework_loop import supervisor
@@ -270,6 +301,37 @@ tmp = Path(sys.argv[1])
 db = tmp / "unbound.sqlite3"
 repo = tmp / "unbound-repo"
 repo.mkdir(exist_ok=True)
+
+# v0.9.9 admission invariant: enqueue requires a current pre-seal packet.
+# Write a minimal valid v3 packet so the unbound-generation assertion below
+# exercises generation binding, not admission.
+unbound_run_dir = repo / ".ownframework-loop" / "run-unbound"
+unbound_run_dir.mkdir(parents=True, exist_ok=True)
+unbound_packet = {
+    "schema": "ownframework-work-packet/v3",
+    "packet_id": "v080-unbound-fixture",
+    "created_at": "2026-09-17T00:00:00Z",
+    "work_class": "FEATURE",
+    "risk_class": "low",
+    "title": "v080 unbound fixture",
+    "target": {"repo": str(repo), "branch": "master", "classification": "local_only"},
+    "execution_mode": "single",
+    "acceptance_criteria": [{"id": "AC-1", "text": "ok"}],
+    "non_goals": [],
+    "allowed_paths": ["a.txt"],
+    "protected_paths": [".ownframework-loop/"],
+    "work_units": [{"id": "UNIT-1", "title": "u", "scope": "do"}],
+    "merge_authority": "human_only",
+    "deploy_authority": "human_only",
+    "push_authority": "human_only",
+    "external_action_authority": "none",
+    "risk_budget": {"max_build_passes": 4, "max_review_passes": 4, "max_repair_rounds": 1,
+                    "max_files_changed": 5, "max_diff_lines": 100},
+}
+_fence = chr(96) * 3
+(unbound_run_dir / "WORK_PACKET.md").write_text(
+    _fence + "json\n" + json.dumps(unbound_packet) + "\n" + _fence + "\n", encoding="utf-8"
+)
 
 supervisor.enqueue(
     canonical_repo=repo,
@@ -302,7 +364,7 @@ pass "T10 legacy unbound unfinished jobs fail closed until explicit resume/rebin
 #      fingerprint rows are normalized once; explicit values preserved.
 # ---------------------------------------------------------------------------
 PYTHONPATH="$LIB_DIR" python3 -B - "$TMP" <<'PY'
-import os, sqlite3, sys
+import json, os, sqlite3, sys
 sys.path.insert(0, os.path.join(os.getcwd(), "lib"))
 from pathlib import Path
 from ownframework_loop import supervisor
@@ -311,6 +373,37 @@ tmp = Path(sys.argv[1])
 db = tmp / "ledger.sqlite3"
 repo = tmp / "ledger-repo"
 repo.mkdir(exist_ok=True)
+
+# v0.9.9 admission invariant: enqueue requires a current pre-seal packet.
+# Write a minimal valid v3 packet so the ledger-default assertion below
+# exercises durable enqueue + ledger ceiling materialization, not admission.
+ledger_run_dir = repo / ".ownframework-loop" / "run-fresh-ledger"
+ledger_run_dir.mkdir(parents=True, exist_ok=True)
+ledger_packet = {
+    "schema": "ownframework-work-packet/v3",
+    "packet_id": "v080-fresh-ledger-fixture",
+    "created_at": "2026-09-17T00:00:00Z",
+    "work_class": "FEATURE",
+    "risk_class": "low",
+    "title": "v080 fresh ledger fixture",
+    "target": {"repo": str(repo), "branch": "master", "classification": "local_only"},
+    "execution_mode": "single",
+    "acceptance_criteria": [{"id": "AC-1", "text": "ok"}],
+    "non_goals": [],
+    "allowed_paths": ["a.txt"],
+    "protected_paths": [".ownframework-loop/"],
+    "work_units": [{"id": "UNIT-1", "title": "u", "scope": "do"}],
+    "merge_authority": "human_only",
+    "deploy_authority": "human_only",
+    "push_authority": "human_only",
+    "external_action_authority": "none",
+    "risk_budget": {"max_build_passes": 4, "max_review_passes": 4, "max_repair_rounds": 1,
+                    "max_files_changed": 5, "max_diff_lines": 100},
+}
+_fence = chr(96) * 3
+(ledger_run_dir / "WORK_PACKET.md").write_text(
+    _fence + "json\n" + json.dumps(ledger_packet) + "\n" + _fence + "\n", encoding="utf-8"
+)
 
 # Fresh database: enqueue materializes DISABLED ceilings, not $25/8h.
 job = supervisor.enqueue(canonical_repo=repo, run_id="run-fresh-ledger", db_path=db)
@@ -361,6 +454,37 @@ conn.execute(
     "VALUES (?,?,?,'DONE',25.0,500,28800,1,1)", (str(repo), "run-explicit-intent", "claude-code"))
 conn.commit()
 conn.close()
+
+# v0.9.9 admission invariant: enqueue requires a current pre-seal packet.
+# Write a minimal valid v3 packet so the legacy-ledger assertion below
+# exercises legacy normalization + fresh enqueue ceilings, not admission.
+fresh2_run_dir = repo / ".ownframework-loop" / "run-fresh2"
+fresh2_run_dir.mkdir(parents=True, exist_ok=True)
+fresh2_packet = {
+    "schema": "ownframework-work-packet/v3",
+    "packet_id": "v080-fresh2-fixture",
+    "created_at": "2026-09-17T00:00:00Z",
+    "work_class": "FEATURE",
+    "risk_class": "low",
+    "title": "v080 fresh2 fixture",
+    "target": {"repo": str(repo), "branch": "master", "classification": "local_only"},
+    "execution_mode": "single",
+    "acceptance_criteria": [{"id": "AC-1", "text": "ok"}],
+    "non_goals": [],
+    "allowed_paths": ["a.txt"],
+    "protected_paths": [".ownframework-loop/"],
+    "work_units": [{"id": "UNIT-1", "title": "u", "scope": "do"}],
+    "merge_authority": "human_only",
+    "deploy_authority": "human_only",
+    "push_authority": "human_only",
+    "external_action_authority": "none",
+    "risk_budget": {"max_build_passes": 4, "max_review_passes": 4, "max_repair_rounds": 1,
+                    "max_files_changed": 5, "max_diff_lines": 100},
+}
+_fence = chr(96) * 3
+(fresh2_run_dir / "WORK_PACKET.md").write_text(
+    _fence + "json\n" + json.dumps(fresh2_packet) + "\n" + _fence + "\n", encoding="utf-8"
+)
 
 supervisor.enqueue(canonical_repo=repo, run_id="run-fresh2", db_path=db2)
 conn = supervisor._connect(db2)
