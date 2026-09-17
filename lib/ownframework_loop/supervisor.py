@@ -2759,6 +2759,48 @@ def enqueue(
             })
             return out
 
+        # Pre-enqueue admission backstop: refuse durable admission of a
+        # never-started run whose current pre-seal packet is deterministically
+        # invalid for execution. The trusted spec adapter is supposed to
+        # validate its own packet before enqueueing (per the spec workflow),
+        # but if the adapter skips or mishandles that step, the deterministic
+        # supervisor must still fail closed BEFORE the run becomes durable.
+        # This check is bounded and reuses the authoritative
+        # ``validate_packet_for_approval`` (also called by execution_start and
+        # capability_migration); it does not fork schema logic, weaken
+        # existing QUARANTINE semantics, or auto-reactivate operational rows.
+        packet_path_for_admission = state_mod.run_dir(Path(repo), run_id) / "WORK_PACKET.md"
+        packet_meta_for_admission: dict[str, Any] | None = None
+        if packet_path_for_admission.is_file():
+            try:
+                packet_meta_for_admission, _ = packet_mod.parse_packet_file(packet_path_for_admission)
+            except Exception:
+                packet_meta_for_admission = None
+        if packet_meta_for_admission is None:
+            return {
+                "schema": SCHEMA,
+                "ok": False,
+                "db_path": str(db),
+                "repo": repo,
+                "run_id": run_id,
+                "enqueue_refused": True,
+                "reason": "pre_seal_packet_missing",
+                "packet_path": str(packet_path_for_admission),
+            }
+        admission_errors = packet_mod.validate_packet_for_approval(packet_meta_for_admission)
+        if admission_errors:
+            return {
+                "schema": SCHEMA,
+                "ok": False,
+                "db_path": str(db),
+                "repo": repo,
+                "run_id": run_id,
+                "enqueue_refused": True,
+                "reason": "pre_seal_packet_invalid",
+                "packet_path": str(packet_path_for_admission),
+                "packet_errors": list(admission_errors),
+            }
+
         existing = conn.execute(
             "SELECT * FROM jobs WHERE repo=? AND run_id=?", (repo, run_id)
         ).fetchone()
