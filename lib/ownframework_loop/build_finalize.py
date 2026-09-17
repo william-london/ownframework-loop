@@ -642,6 +642,10 @@ def finalize_build(
     # 16. Validation succeeds only when every declared command satisfies its
     # own exit-code/marker contract and no command timed out.
     validation_pass = all(bool(v.get("passed")) for v in validations) if validations else True
+    # v0.9.9-i: canonical validation_status derived from authoritative
+    # validation rows; UNKNOWN on missing/malformed evidence so consumers
+    # fail closed at every repair classifier.
+    validation_status = receipts.compute_validation_status(validations)
 
     # 16b. Candidate identity re-proof AFTER validation.
     #
@@ -722,6 +726,10 @@ def finalize_build(
         repair_causes.append("validation_failed")
     if protected_drift_recovery is not None:
         repair_causes.append("protected_candidate_drift")
+    program_source_breach = (
+        program_source_check is not None
+        and program_source_check["result"] != "pass"
+    )
 
     # 19. Derive next_state. (Approval binding was proven at step 1; there is
     # no path back to AWAITING_APPROVAL from BUILDING.)
@@ -733,8 +741,43 @@ def finalize_build(
         # broken; terminalize deterministically with the evidence in the
         # receipt rather than hand a tampered tree to review.
         next_state = "BLOCKED"
-    elif program_source_check is not None and program_source_check["result"] != "pass":
-        next_state = "BLOCKED"
+    elif program_source_breach:
+        # v0.9.9-i: repairable source-budget breach is autonomous. When
+        # scope/protected/secret/identity are clean, validation_status is
+        # PASS, and the PROGRAM repair entitlement remains, transition to
+        # CHANGES_REQUESTED via the atomic funded repair owner. Operator
+        # intervention (`continue-program`) is required only when these
+        # preconditions fail. The next builder pass receives the
+        # program_source_ceiling_check evidence through dispatch and the
+        # receipt's `validation_status` plus the BLOCKED-CHANGES_REQUESTED
+        # transport from _repair_context_from_receipt.
+        clean_for_source_ceiling_repair = (
+            not hard_secret_blocks
+            and not scope_findings
+            and not (protected_findings and protected_drift_recovery is None)
+            and validation_status == "PASS"
+            and identity_reproof["result"] == "pass"
+        )
+        if clean_for_source_ceiling_repair and state_mod.is_program_state(state):
+            program_state = state.get("program") or {}
+            cp_id = (program_state.get("current_checkpoints") or [None])[0]
+            cp_meta = next(
+                (cp for cp in (meta.get("checkpoint_graph") or {}).get("checkpoints", [])
+                 if isinstance(cp, dict) and cp.get("id") == cp_id),
+                None,
+            )
+            if cp_meta is None:
+                raise RuntimeError(f"current checkpoint {cp_id!r} missing from packet")
+            entitlement = program_mod.repair_entitlement(
+                program_state, cp_id=cp_id, packet_cp=cp_meta,
+            )
+            if entitlement["eligible"]:
+                next_state = "CHANGES_REQUESTED"
+                repair_causes.append("source_budget_breach")
+            else:
+                next_state = "BLOCKED"
+        else:
+            next_state = "BLOCKED"
     elif hard_secret_blocks:
         next_state = "BLOCKED"
     elif protected_findings and protected_drift_recovery is None:
@@ -829,6 +872,7 @@ def finalize_build(
         "removed_lines": int(stats["removed_lines"]),
         "changed_paths": sorted(changed_paths),
         "validation": validations,
+        "validation_status": validation_status,
         "protected_path_check": {
             "result": "fail" if protected_findings else "pass",
             "offending_paths": [p["path"] for p in protected_findings],

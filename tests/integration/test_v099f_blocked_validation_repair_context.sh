@@ -4,10 +4,10 @@
 #
 # R3 round-13 evidence: candidate eaf34dfe3c160603b9741dcc86c8003a0724b71e
 # was deterministically BLOCKED with program_source_ceiling_check=pass
-# (29944 / 30000) and validation_pass=False (just-validate pnpm
+# (29944 / 30000) and validation_status=FAIL (just-validate pnpm
 # format:check failed on six front-end files). Before this fix the
 # dispatcher's BLOCKED-receipt transport only accepted source-ceiling
-# BLOCKED receipts (validation_pass must be True), so the historical
+# BLOCKED receipts (validation_status must be PASS), so the historical
 # BLOCKED receipt for eaf34dfe could not authorize the bounded
 # validation-formatting repair that the operator-needed next step is.
 #
@@ -38,7 +38,7 @@ receipt = {
     "schema": "ownframework-loop-build-receipt/v2",
     "next_state": "BLOCKED",
     "candidate_sha": "eaf34dfe3c160603b9741dcc86c8003a0724b71e",
-    "validation_pass": False,
+    "validation_status": "FAIL",
     "validation": [{
         "command": "just validate",
         "exit_code": 1,
@@ -114,7 +114,7 @@ from ownframework_loop import dispatch
 receipt = {
     "schema": "ownframework-loop-build-receipt/v2",
     "next_state": "BLOCKED",
-    "validation_pass": True,
+    "validation_status": "PASS",
     "validation": [],
     "program_source_ceiling_check": {
         "result": "fail",
@@ -160,7 +160,7 @@ from ownframework_loop import dispatch
 receipt = {
     "schema": "ownframework-loop-build-receipt/v2",
     "next_state": "BLOCKED",
-    "validation_pass": False,
+    "validation_status": "FAIL",
     "validation": [{"name": "validate", "passed": False, "command": "just validate", "exit_code": 1}],
     "program_source_ceiling_check": {"result": "pass", "accounting": "absolute_baseline_to_candidate", "files_changed_unique": 100, "diff_lines_total": 1000, "effective_max_diff_lines": 5000, "effective_max_files_changed": 500, "top_level_risk_max_files_changed": 500, "top_level_risk_max_diff_lines": 5000, "program_max_unique_changed_files": 500, "program_max_baseline_to_final_diff_lines": 5000, "breach": ""},
     "scope_check": {"result": "fail", "findings": [{"path": "extra/path.ts", "reason": "off-scope"}]},
@@ -188,7 +188,7 @@ from ownframework_loop import dispatch
 receipt = {
     "schema": "ownframework-loop-build-receipt/v2",
     "next_state": "BLOCKED",
-    "validation_pass": False,
+    "validation_status": "FAIL",
     "validation": [{
         "name": "validate",
         "command": "just validate",
@@ -301,7 +301,7 @@ import json
 from ownframework_loop import dispatch
 receipt = {
     "next_state": "BLOCKED",
-    "validation_pass": True,
+    "validation_status": "PASS",
     "validation": [{"name": "validate", "passed": True}],
     "program_source_ceiling_check": {
         "result": "fail",

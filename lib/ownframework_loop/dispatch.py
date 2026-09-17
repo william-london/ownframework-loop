@@ -740,15 +740,69 @@ def _repair_context_from_receipt(
     protected_check = receipt.get("protected_path_check") or {}
     secret_check = receipt.get("secret_scan_check") or {}
     recovery = receipt.get("protected_drift_recovery") or {}
+    # v0.9.9-i: source-budget breach evidence (program_source_ceiling_check).
+    # When this receipt carries a clean source-budget breach, surface it so
+    # the next builder pass can read the recorded breach and shrink to the
+    # sealed envelope rather than rediscover it.
+    source_ceiling_check = receipt.get("program_source_ceiling_check") or {}
+    source_ceiling_breach = (
+        isinstance(source_ceiling_check, dict)
+        and str(source_ceiling_check.get("result") or "") == "fail"
+        and str(source_ceiling_check.get("accounting") or "")
+        == "absolute_baseline_to_candidate"
+    )
+    measured_diff_lines = (
+        int(source_ceiling_check.get("diff_lines_total") or 0)
+        if source_ceiling_breach
+        else 0
+    )
+    effective_max_diff_lines = (
+        int(source_ceiling_check.get("effective_max_diff_lines") or 0)
+        if source_ceiling_breach
+        else 0
+    )
+    measured_files = (
+        int(source_ceiling_check.get("files_changed_unique") or 0)
+        if source_ceiling_breach
+        else 0
+    )
+    effective_max_files = (
+        int(source_ceiling_check.get("effective_max_files_changed") or 0)
+        if source_ceiling_breach
+        else 0
+    )
+    breach_text = (
+        str(source_ceiling_check.get("breach") or "") if source_ceiling_breach else ""
+    )
+    current_checkpoints = (state_doc.get("program") or {}).get(
+        "current_checkpoints"
+    ) or []
+    checkpoint_id = str(current_checkpoints[0]) if current_checkpoints else ""
 
-    return {
+    # v0.9.9-i: pick the most authoritative failure_reason so the builder
+    # knows which deterministic finalizer gate failed (source-budget is
+    # checked first because it is the only check that blocks via envelope,
+    # not via scope/protected/secret/identity).
+    failure_reason = "build_finalizer_validation_failed"
+    if source_ceiling_breach:
+        failure_reason = "build_finalizer_source_budget_breach"
+    elif scope_check and str(scope_check.get("result") or "") == "fail":
+        failure_reason = "build_finalizer_scope_drift"
+    elif protected_check and str(protected_check.get("result") or "") == "fail":
+        failure_reason = "build_finalizer_protected_path_violation"
+    elif failed_validations:
+        failure_reason = "build_finalizer_validation_failed"
+    elif secret_check and str(secret_check.get("result") or "") == "fail":
+        failure_reason = "build_finalizer_secret_scan"
+
+    out: dict[str, Any] = {
         "schema": "ownframework-loop-repair-context/v1",
         "source": str(path.resolve(strict=False)),
         "source_kind": "build_receipt",
         "repair_round": int(state_doc.get("repair_round") or 0),
         "candidate_sha_reviewed": receipt_candidate,
         "verdict": "CHANGES_REQUESTED",
-        "failure_reason": "build_finalizer_validation_failed",
+        "failure_reason": failure_reason,
         "failed_validation_results": failed_validations,
         "scope_findings": scope_check.get("findings") or [],
         "protected_path_findings": protected_check.get("offending_paths") or [],
@@ -770,6 +824,27 @@ def _repair_context_from_receipt(
         "escalation_recommended": bool(receipt.get("escalation_recommended")),
         "escalation_reason": receipt.get("escalation_reason"),
     }
+    # v0.9.9-i: surface the source-budget breach evidence so the next
+    # builder pass can read the exact measured/envelope pair.
+    if source_ceiling_breach:
+        out["source_ceiling_breach"] = {
+            "checkpoint_id": checkpoint_id,
+            "measured_diff_lines": measured_diff_lines,
+            "effective_max_diff_lines": effective_max_diff_lines,
+            "measured_files": measured_files,
+            "effective_max_files": effective_max_files,
+            "breach": breach_text,
+            "repair_instruction": _format_repair_instruction(
+                measured_diff_lines=measured_diff_lines,
+                effective_max_diff_lines=effective_max_diff_lines,
+                measured_files=measured_files,
+                effective_max_files=effective_max_files,
+                breach_text=breach_text,
+                checkpoint_id=checkpoint_id,
+                candidate_sha=receipt_candidate,
+            ),
+        }
+    return out
 
 
 def _blocked_evidence_is_repairable(receipt: dict[str, Any]) -> dict[str, Any] | None:
@@ -795,7 +870,9 @@ def _blocked_evidence_is_repairable(receipt: dict[str, Any]) -> dict[str, Any] |
         chk = receipt.get(key)
         if isinstance(chk, dict) and str(chk.get("result") or "") == "fail":
             return None
-    if not bool(receipt.get("validation_pass", True)):
+    # v0.9.9-i: validation must PASS to authorize a clean source-budget
+    # repair. UNKNOWN fails closed.
+    if str(receipt.get("validation_status") or "") != "PASS":
         return None
     return ps
 
@@ -828,7 +905,7 @@ def _validation_evidence_is_repairable(
     """
     if not isinstance(receipt, dict):
         return None
-    if bool(receipt.get("validation_pass", True)):
+    if str(receipt.get("validation_status") or "") != "FAIL":
         return None
     ps = receipt.get("program_source_ceiling_check")
     if not isinstance(ps, dict) or str(ps.get("result") or "") != "pass":

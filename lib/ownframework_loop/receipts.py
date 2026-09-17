@@ -14,6 +14,52 @@ from .util import (
 
 SCHEMA_VERSION = "ownframework-loop-build-receipt/v2"
 
+# Canonical validation-status enum derived from authoritative validation rows.
+# Every receipt MUST carry one of these three strings in the
+# `validation_status` top-level field. UNKNOWN fails closed at every consumer.
+VALIDATION_STATUS_PASS = "PASS"
+VALIDATION_STATUS_FAIL = "FAIL"
+VALIDATION_STATUS_UNKNOWN = "UNKNOWN"
+VALIDATION_STATUSES = (
+    VALIDATION_STATUS_PASS,
+    VALIDATION_STATUS_FAIL,
+    VALIDATION_STATUS_UNKNOWN,
+)
+
+
+def compute_validation_status(validation: list[dict[str, Any]] | None) -> str:
+    """Derive canonical validation status from authoritative validation rows.
+
+    PASS    at least one row exists and every row has ``passed=True`` and
+            ``exit_code`` matches ``expected_exit_code`` (or no
+            ``expected_exit_code`` is recorded and ``exit_code == 0``).
+    FAIL    at least one row has ``passed=False`` or its exit code disagrees
+            with the expected code.
+    UNKNOWN the receipt has no validation rows, validation rows are
+            malformed, or essential fields are missing. UNKNOWN fails
+            closed at every consumer.
+    """
+    if not isinstance(validation, list) or not validation:
+        return VALIDATION_STATUS_UNKNOWN
+    saw_passed = False
+    for row in validation:
+        if not isinstance(row, dict):
+            return VALIDATION_STATUS_UNKNOWN
+        if "passed" not in row:
+            return VALIDATION_STATUS_UNKNOWN
+        saw_passed = True
+        if bool(row.get("passed")) is False:
+            return VALIDATION_STATUS_FAIL
+        expected = row.get("expected_exit_code")
+        actual = row.get("exit_code")
+        if expected is None and actual not in (None, 0):
+            return VALIDATION_STATUS_FAIL
+        if expected is not None and actual is not None and int(expected) != int(actual):
+            return VALIDATION_STATUS_FAIL
+    if not saw_passed:
+        return VALIDATION_STATUS_UNKNOWN
+    return VALIDATION_STATUS_PASS
+
 
 def receipt_path(canonical_repo: Path, run_id: str) -> Path:
     return run_dir(canonical_repo, run_id) / "BUILD_RECEIPT.json"
@@ -49,6 +95,7 @@ def new_receipt(
     escalation_reason: str | None = None,
     review_pass_number_ref: int | None = None,
     notes: str | None = None,
+    validation_status: str | None = None,
 ) -> dict[str, Any]:
     """Build a build-receipt document. Does not write.
 
@@ -73,6 +120,11 @@ def new_receipt(
         "removed_lines": removed_lines,
         "changed_paths": changed_paths,
         "validation": validation,
+        "validation_status": (
+            validation_status
+            if validation_status in VALIDATION_STATUSES
+            else compute_validation_status(validation)
+        ),
         "protected_path_check": protected_path_check,
         "secret_scan_check": secret_scan_check,
         "scope_check": scope_check,

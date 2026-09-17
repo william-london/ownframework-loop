@@ -5073,6 +5073,11 @@ def _maybe_complete_semantic_artifact(
     authoritative-source fillable completion (no provider spend, no model
     call, no repair-counter increment, no engineering replay).
 
+    v0.9.9-i: BUILD-only. REVIEW dispatches must NEVER route through this
+    helper. Reviewer verdict is a separate authority class; only the
+    provenance-publication follow-on (`_publish_acceptance_for_ready_artifact`)
+    is safe to invoke for review, never the builder-side fillable completion.
+
     Conditions for invoking the completion path:
 
       * the worker has already terminated (semantic_result_ready returned False),
@@ -5095,6 +5100,11 @@ def _maybe_complete_semantic_artifact(
     if not isinstance(work_order, dict):
         return False
     decision = str(work_order.get("decision") or "")
+    # v0.9.9-i: explicit BUILD/REVIEW role boundary. REVIEW must never
+    # invoke builder-side fillable completion; verdict is a separate
+    # authority class that only the model can author.
+    if decision != "BUILD":
+        return False
     canonical_repo = work_order.get("canonical_repo")
     run_id = str(work_order.get("run_id") or "")
     worktree = work_order.get("worktree")
@@ -5143,8 +5153,9 @@ def _maybe_complete_semantic_artifact(
     except Exception:
         packet = None
 
+    # v0.9.9-i: decision is always "BUILD" here (early return above).
     if role == "":
-        role = "builder" if decision == "BUILD" else "reviewer"
+        role = "builder"
 
     completed = build_agent_mod.semantically_complete_artifact(
         canonical_repo=repo_path,

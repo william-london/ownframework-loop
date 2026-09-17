@@ -19,6 +19,7 @@
     "added_lines",
     "removed_lines",
     "validation",
+    "validation_status",
     "timestamp",
     "builder_agent",
     "next_state",
@@ -169,6 +170,14 @@
           }
         }
       }
+    },
+    "validation_status": {
+      "type": "string",
+      "enum": [
+        "PASS",
+        "FAIL",
+        "UNKNOWN"
+      ]
     },
     "protected_path_check": {
       "type": "object",
