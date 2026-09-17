@@ -138,6 +138,7 @@ def fake_finalize(work_order, **kwargs):
     return {"ok": True, "finalized": True}
 supervisor.dispatch_mod.finalize_work_order = fake_finalize
 
+supervisor.write_minimal_valid_packet(repo, 'run-auto')
 supervisor.enqueue(
     canonical_repo=repo,
     run_id="run-auto",

@@ -78,6 +78,51 @@ make_tmp_run() {
   echo "$latest"
 }
 
+# write_minimal_valid_packet <repo> <run_id>
+# Pre-write the smallest WORK_PACKET.md that satisfies the v0.9.9 admission
+# backstop. Python-based tests that call supervisor.enqueue() directly (without
+# going through spec new) MUST call this first, or the enqueue will be refused
+# with reason=pre_seal_packet_missing.
+write_minimal_valid_packet() {
+  local repo="$1"
+  local run_id="$2"
+  local branch="${3:-master}"
+  local wc="${4:-FEATURE}"
+  local risk="${5:-low}"
+  local rid_short
+  rid_short="$(echo "$run_id" | tr -cd 'a-zA-Z0-9_-' | cut -c1-32)"
+  if [[ -z "$rid_short" ]]; then rid_short="fixture"; fi
+  local pp="$repo/.ownframework-loop/$run_id/WORK_PACKET.md"
+  mkdir -p "$(dirname "$pp")"
+  cat > "$pp" <<EOF
+\`\`\`json
+{
+  "schema": "ownframework-work-packet/v3",
+  "packet_id": "${rid_short}",
+  "created_at": "2026-09-17T00:00:00Z",
+  "work_class": "${wc}",
+  "risk_class": "${risk}",
+  "title": "minimal valid v3 fixture for ${run_id}",
+  "target": {"repo": "${repo}", "branch": "${branch}", "classification": "local_only"},
+  "execution_mode": "single",
+  "acceptance_criteria": [{"id": "AC-1", "text": "ok"}],
+  "non_goals": [],
+  "allowed_paths": ["a.txt"],
+  "protected_paths": [".ownframework-loop/"],
+  "work_units": [{"id": "UNIT-1", "title": "u", "scope": "do"}],
+  "merge_authority": "human_only",
+  "deploy_authority": "human_only",
+  "push_authority": "human_only",
+  "external_action_authority": "none",
+  "risk_budget": {
+    "max_build_passes": 4, "max_review_passes": 4, "max_repair_rounds": 1,
+    "max_files_changed": 5, "max_diff_lines": 100
+  }
+}
+\`\`\`
+EOF
+}
+
 # Direct finalizer tests model the supervisor's pre-provider commissioning
 # boundary explicitly. Production workers create this immutable binding before
 # the first semantic call; deterministic validation then reuses it.

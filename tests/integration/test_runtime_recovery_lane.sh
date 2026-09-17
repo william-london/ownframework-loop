@@ -127,6 +127,7 @@ print("A01_DUPLICATE_SEMANTIC_EXECUTION=0")
 # reservation is known zero-execution; a legacy pre-gate reservation is NOT.
 db_gate = tmp / "gate-ledger.sqlite3"
 repo_gate = new_repo("gate-ledger")
+supervisor.write_minimal_valid_packet(repo_gate, 'run-gate-ledger')
 supervisor.enqueue(canonical_repo=repo_gate, run_id="run-gate-ledger", db_path=db_gate)
 with supervisor._connect(db_gate) as conn:
     conn.execute(
@@ -152,6 +153,7 @@ assert int(gated_row["cost_known"]) == 1 and float(gated_row["cost_usd"]) == 0.0
 
 db_legacy = tmp / "legacy-reservation.sqlite3"
 repo_legacy = new_repo("legacy-reservation")
+supervisor.write_minimal_valid_packet(repo_legacy, 'run-legacy-reserved')
 supervisor.enqueue(canonical_repo=repo_legacy, run_id="run-legacy-reserved", db_path=db_legacy)
 with supervisor._connect(db_legacy) as conn:
     conn.execute(
@@ -187,6 +189,7 @@ print("A01_LEGACY_RESERVATION_REMAINS_AMBIGUOUS=yes")
 # ------------------------------------------------------------------
 db = tmp / "orphan.sqlite3"
 repo2 = new_repo("orphan")
+supervisor.write_minimal_valid_packet(repo2, 'run-orphan')
 supervisor.enqueue(canonical_repo=repo2, run_id="run-orphan", db_path=db)
 with supervisor._connect(db) as conn:
     conn.execute("UPDATE jobs SET status='RUNNING' WHERE run_id='run-orphan'")
@@ -282,6 +285,7 @@ print("A06_LATER_FINITE_CEILING_REFUSES_KNOWN_ZERO_LIE=yes")
 # Active finite-ceiling crash recovery must persist cost uncertainty too.
 db6c = tmp / "unknown-active-cap.sqlite3"
 repo6c = new_repo("unknown-active-cap")
+supervisor.write_minimal_valid_packet(repo6c, 'run-unknown-cap')
 supervisor.enqueue(
     canonical_repo=repo6c, run_id="run-unknown-cap", db_path=db6c,
     max_total_cost_usd=5,
@@ -338,6 +342,7 @@ class LaneLaunchFail:
             raise supervisor.WorkerLaunchError("synthetic real Popen failure") from exc
         raise AssertionError("missing executable unexpectedly launched")
 
+supervisor.write_minimal_valid_packet(repo8, 'run-launch')
 enrolled8 = supervisor.enqueue(
     canonical_repo=repo8, run_id="run-launch", db_path=db8, runner="lane-launch-fail"
 )
@@ -372,6 +377,7 @@ print("A08_RESERVED_ATTEMPT_TERMINAL=yes")
 # terminalize as a known-zero launch failure.
 db8b = tmp / "release-fail.sqlite3"
 repo8b = new_repo("release-fail")
+supervisor.write_minimal_valid_packet(repo8b, 'run-release-fail')
 supervisor.enqueue(
     canonical_repo=repo8b, run_id="run-release-fail", db_path=db8b,
 )
@@ -407,6 +413,7 @@ print("A08_POST_PUBLICATION_PRE_RELEASE_TERMINAL=yes")
 # ------------------------------------------------------------------
 db4 = tmp / "resume-retire.sqlite3"
 repo4 = new_repo("resume-retire")
+supervisor.write_minimal_valid_packet(repo4, 'run-race')
 supervisor.enqueue(
     canonical_repo=repo4, run_id="run-race", db_path=db4,
     runtime_generation="ofloop-old@test",
@@ -447,6 +454,7 @@ print("A04_LIFECYCLE_SERIALIZATION_CLOSED=yes")
 # ------------------------------------------------------------------
 db5 = tmp / "enqueue-claim.sqlite3"
 repo5 = new_repo("enqueue-claim")
+supervisor.write_minimal_valid_packet(repo5, 'run-gen-race')
 supervisor.enqueue(
     canonical_repo=repo5, run_id="run-gen-race", db_path=db5,
     runtime_generation="ofloop-g1@test",
@@ -460,6 +468,7 @@ started = threading.Event()
 enqueue_result = {}
 def do_enqueue():
     started.set()
+    supervisor.write_minimal_valid_packet(repo5, 'run-gen-race')
     enqueue_result.update(supervisor.enqueue(
         canonical_repo=repo5,
         run_id="run-gen-race",
