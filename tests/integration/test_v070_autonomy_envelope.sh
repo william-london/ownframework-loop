@@ -260,7 +260,7 @@ cat > "$REPO4/.ownframework-loop/$RID4/WORK_PACKET.md" <<EOF
   "risk_budget": {
     "max_files_changed": 25,
     "max_diff_lines": 1000,
-    "max_repair_rounds": 0,
+    "max_repair_rounds": 1,
     "max_build_passes": 1,
     "max_review_passes": 2
   }
