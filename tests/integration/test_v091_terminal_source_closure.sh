@@ -62,6 +62,7 @@ try:
                 stdout="provider failed", stderr="provider failed",
                 cost_known=True, tokens_known=True,
             )
+    supervisor.write_minimal_valid_packet(p, rid)
     supervisor.enqueue(canonical_repo=p, run_id=rid, db_path=db, runner=FailedCrashRunner.runner_id)
     work = wo_for(p, rid)
     ready_count = {"n": 0}
@@ -131,6 +132,7 @@ try:
                 stdout="ok", stderr="", cost_known=True,
                 tokens_known=True, effective_model="model-a",
             )
+    supervisor.write_minimal_valid_packet(p2, rid2)
     supervisor.enqueue(canonical_repo=p2, run_id=rid2, db_path=db2, runner=AcceptedCrashRunner.runner_id)
     work2 = wo_for(p2, rid2)
     ready2 = {"n": 0}
@@ -202,6 +204,7 @@ try:
                 ok=True, returncode=0, cost_usd=0.75, stdout="ok", stderr="",
                 cost_known=True, tokens_known=True, effective_model="model-b",
             )
+    supervisor.write_minimal_valid_packet(p3, rid3)
     supervisor.enqueue(canonical_repo=p3, run_id=rid3, db_path=db3, runner=StrictSubRunner.runner_id)
     work3 = wo_for(p3, rid3)
     supervisor.dispatch_mod.claim_next = lambda **kwargs: dict(work3)
@@ -231,6 +234,7 @@ try:
                 ok=True, returncode=0, cost_usd=0.5, stdout="ok", stderr="",
                 cost_known=True, tokens_known=True, effective_model="model-a",
             )
+    supervisor.write_minimal_valid_packet(p4, rid4)
     supervisor.enqueue(canonical_repo=p4, run_id=rid4, db_path=db4, runner=BadReceiptRunner.runner_id)
     work4 = wo_for(p4, rid4)
     supervisor.dispatch_mod.claim_next = lambda **kwargs: dict(work4)
@@ -268,6 +272,7 @@ try:
                 stdout="ok", stderr="", cost_known=True,
                 tokens_known=True, effective_model="model-a",
             )
+    supervisor.write_minimal_valid_packet(p5, rid5)
     supervisor.enqueue(canonical_repo=p5, run_id=rid5, db_path=db5, runner=IdentityArtifactRunner.runner_id)
     work5 = wo_for(p5, rid5)
     ready5 = {"n": 0}
@@ -339,6 +344,7 @@ try:
                 stdout="ok", stderr="", cost_known=True,
                 tokens_known=True, effective_model="model-a",
             )
+    supervisor.write_minimal_valid_packet(p6, rid6)
     supervisor.enqueue(canonical_repo=p6, run_id=rid6, db_path=db6, runner=IdentityCandidateRunner.runner_id)
     work6 = wo_for(p6, rid6)
     ready6 = {"n": 0}
@@ -398,6 +404,7 @@ try:
                 stdout="ok", stderr="", cost_known=True,
                 tokens_known=True, effective_model="model-a",
             )
+    supervisor.write_minimal_valid_packet(p7, rid7)
     supervisor.enqueue(canonical_repo=p7, run_id=rid7, db_path=db7, runner=IdentityReviewRunner.runner_id)
     work7 = wo_for(p7, rid7, decision="REVIEW", role="reviewer")
     ready7 = {"n": 0}
@@ -482,6 +489,7 @@ try:
                 stdout="ok", stderr="", cost_known=True,
                 tokens_known=True, effective_model="model-a",
             )
+    supervisor.write_minimal_valid_packet(p8, rid8)
     supervisor.enqueue(canonical_repo=p8, run_id=rid8, db_path=db8, runner=IdentityStableRunner.runner_id)
     work8 = wo_for(p8, rid8)
     ready8 = {"n": 0}

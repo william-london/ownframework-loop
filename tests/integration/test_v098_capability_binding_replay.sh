@@ -138,6 +138,7 @@ with tempfile.TemporaryDirectory(prefix="ofloop-v098-replay-") as td:
                 tokens_known=True, cost_known=True, effective_model=profile["model"],
             )
 
+    supervisor.write_minimal_valid_packet(repo, run_id)
     enrolled = supervisor.enqueue(
         canonical_repo=repo, run_id=run_id, db_path=db,
         runner=ReplayRunner.runner_id, max_infra_failures=1,

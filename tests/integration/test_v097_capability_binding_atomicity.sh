@@ -131,6 +131,7 @@ def make_quarantined(root: Path, label: str, old_resolution: dict) -> tuple[Path
         repo, run_id, old_resolution, PROFILE, allow_create=True
     )
     db = root / (label + ".sqlite3")
+    supervisor.write_minimal_valid_packet(repo, run_id)
     enrolled = supervisor.enqueue(
         canonical_repo=repo,
         run_id=run_id,

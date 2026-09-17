@@ -25,6 +25,7 @@ assert ca != cb, (ca,cb)
 # Supervisor external boundaries reject unsafe run ids before DB/log path use.
 for rid in ("../../outside","run-a/b","run-../escape"):
     try:
+        supervisor.write_minimal_valid_packet(root, rid)
         supervisor.enqueue(canonical_repo=root,run_id=rid,db_path=root/"unsafe.sqlite3")
     except ValueError:
         pass
