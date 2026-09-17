@@ -21,7 +21,7 @@ TESTS_DIR="$(cd "$(dirname "$0")" && pwd)"
 export PYTHONPATH="$ROOT_DIR/lib"
 export PYTHONDONTWRITEBYTECODE=1
 
-OFLOOP_BIN="${OFLOOP_BIN:-/Users/mr.mrs.london/.local/share/ownframework-loop/0.9.1/bin/ofloop}"
+# OFLOOP_BIN is provided by tests/_helpers.sh from the canonical BIN_DIR.
 
 fail_counter=0
 pass_counter=0
