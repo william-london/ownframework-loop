@@ -16,6 +16,34 @@ repo=root/"repo"; repo.mkdir()
 (repo/".ownframework-loop"/"run-safe").mkdir(parents=True)
 (repo/".ownframework-loop"/"run-safe"/"STATE.json").write_text(
     json.dumps({"state":"BUILDING","build_pass_count":1}), encoding="utf-8")
+# v0.9.9 admission invariant: enqueue requires a current pre-seal packet.
+# Write a minimal valid v3 packet so the operator-safety assertion below
+# exercises durable enqueue, not admission.
+minimal_packet = {
+    "schema": "ownframework-work-packet/v3",
+    "packet_id": "v061-operator-safety-fixture",
+    "created_at": "2026-09-17T00:00:00Z",
+    "work_class": "FEATURE",
+    "risk_class": "low",
+    "title": "v061 operator safety fixture",
+    "target": {"repo": str(repo), "branch": "master", "classification": "local_only"},
+    "execution_mode": "single",
+    "acceptance_criteria": [{"id": "AC-1", "text": "ok"}],
+    "non_goals": [],
+    "allowed_paths": ["a.txt"],
+    "protected_paths": [".ownframework-loop/"],
+    "work_units": [{"id": "UNIT-1", "title": "u", "scope": "do"}],
+    "merge_authority": "human_only",
+    "deploy_authority": "human_only",
+    "push_authority": "human_only",
+    "external_action_authority": "none",
+    "risk_budget": {"max_build_passes": 4, "max_review_passes": 4, "max_repair_rounds": 1,
+                    "max_files_changed": 5, "max_diff_lines": 100},
+}
+fence = chr(96) * 3
+(repo / ".ownframework-loop" / "run-safe" / "WORK_PACKET.md").write_text(
+    fence + "json\n" + json.dumps(minimal_packet) + "\n" + fence + "\n", encoding="utf-8"
+)
 db=root/"supervisor.sqlite3"
 
 first=supervisor.enqueue(canonical_repo=repo,run_id="run-safe",db_path=db,
