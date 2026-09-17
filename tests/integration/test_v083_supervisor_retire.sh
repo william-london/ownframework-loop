@@ -180,7 +180,7 @@ def enqueue_quarantined(repo: Path, run_id: str, db: Path, *, generation: str | 
         conn.commit()
     return out
 
-def make_repo(label: str) -> Path:
+def make_repo(label: str, *, run_id: str | None = None) -> Path:
     r = tmp / f"repo-{label}"
     if r.exists():
         shutil.rmtree(r)
@@ -192,7 +192,8 @@ def make_repo(label: str) -> Path:
     subprocess.run(["git", "-C", str(r), "add", "README.md"], check=True)
     subprocess.run(["git", "-C", str(r), "commit", "-qm", "fixture"], check=True)
 
-    run_dir = r / ".ownframework-loop" / f"run-{label}"
+    effective_run_id = run_id or f"run-{label}"
+    run_dir = r / ".ownframework-loop" / effective_run_id
     run_dir.mkdir(parents=True)
     run_dir.joinpath("STATE.json").write_text(
         json.dumps({"state": "BUILDING", "label": label}), encoding="utf-8"
@@ -233,7 +234,7 @@ def make_repo(label: str) -> Path:
 
 # 7) Retirement from QUARANTINED with no live worker SUCCEEDS.
 db = fresh_db()
-repo = make_repo("retire-success")
+repo = make_repo("retire-success", run_id="run-retire-ok")
 out = enqueue_quarantined(repo, "run-retire-ok", db, generation="ofloop-0.6.2@git-OLD")
 # Snapshot the row's pre-retirement digest.
 with supervisor._connect(db) as conn:
@@ -241,8 +242,8 @@ with supervisor._connect(db) as conn:
         "SELECT runtime_generation, total_cost_usd, latest_attempt_id FROM jobs "
         "WHERE repo=? AND run_id=?", (str(repo.resolve()), "run-retire-ok"),
     ).fetchone()
-state_before = (repo / ".ownframework-loop" / "run-retire-success" / "STATE.json").read_text()
-packet_before = (repo / ".ownframework-loop" / "run-retire-success" / "WORK_PACKET.md").read_text()
+state_before = (repo / ".ownframework-loop" / "run-retire-ok" / "STATE.json").read_text()
+packet_before = (repo / ".ownframework-loop" / "run-retire-ok" / "WORK_PACKET.md").read_text()
 retire_out = supervisor.retire(canonical_repo=repo, run_id="run-retire-ok", db_path=db)
 assert retire_out.get("retired") is True, retire_out
 assert retire_out["status"] == "RETIRED", retire_out
@@ -261,8 +262,8 @@ assert row["total_cost_usd"] == before["total_cost_usd"], row["total_cost_usd"]
 assert row["latest_attempt_id"] == before["latest_attempt_id"], row["latest_attempt_id"]
 
 # 13) Repository / run artifacts untouched by retirement.
-state_after = (repo / ".ownframework-loop" / "run-retire-success" / "STATE.json").read_text()
-packet_after = (repo / ".ownframework-loop" / "run-retire-success" / "WORK_PACKET.md").read_text()
+state_after = (repo / ".ownframework-loop" / "run-retire-ok" / "STATE.json").read_text()
+packet_after = (repo / ".ownframework-loop" / "run-retire-ok" / "WORK_PACKET.md").read_text()
 assert state_before == state_after, "STATE.json altered by retire"
 assert packet_before == packet_after, "WORK_PACKET.md altered by retire"
 
@@ -385,7 +386,7 @@ assert live_out.get("reason") == "quarantined_worker_still_alive", live_out
 # 9) Retirement refuses QUEUED/BACKOFF/RUNNING.
 for forbidden in ("QUEUED", "BACKOFF", "RUNNING"):
     db5 = fresh_db()
-    repo5 = make_repo(f"refuse-{forbidden.lower()}")
+    repo5 = make_repo(f"refuse-{forbidden.lower()}", run_id=f"run-{forbidden.lower()}")
     supervisor.enqueue(canonical_repo=repo5, run_id=f"run-{forbidden.lower()}", db_path=db5)
     with supervisor._connect(db5) as conn:
         conn.execute(
@@ -400,7 +401,7 @@ for forbidden in ("QUEUED", "BACKOFF", "RUNNING"):
     assert refused.get("reason") == "retire_requires_quarantined", (forbidden, refused)
     # DONE also refused (terminal, not a real enrollment).
 db_done = fresh_db()
-repo_done = make_repo("refuse-done")
+repo_done = make_repo("refuse-done", run_id="run-done")
 supervisor.enqueue(canonical_repo=repo_done, run_id="run-done", db_path=db_done)
 with supervisor._connect(db_done) as conn:
     conn.execute(
@@ -424,7 +425,7 @@ assert "generation_dependency" not in out_again or "RETIRED" not in out_again, (
 
 # Enqueue refuses RETIRED: prevents silent reactivation through normal enqueue.
 db6 = fresh_db()
-repo6 = make_repo("enqueue-retired")
+repo6 = make_repo("enqueue-retired", run_id="run-enqueue-retired")
 supervisor.enqueue(canonical_repo=repo6, run_id="run-enqueue-retired", db_path=db6)
 with supervisor._connect(db6) as conn:
     conn.execute(
