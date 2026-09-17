@@ -22,12 +22,42 @@ pass "retired unattended orchestrator/parser are absent"
 # 2. Supervisor store is durable/idempotent operational state only.
 DB="$(mktemp -t ofloop-supervisor.XXXXXX.sqlite3)"
 PYTHONPATH="$LIB_DIR" python3 - "$DB" <<'PY'
-import sys, tempfile
+import json, sys, tempfile
 from pathlib import Path
 from ownframework_loop import supervisor
 
 db = Path(sys.argv[1])
 repo = Path(tempfile.mkdtemp(prefix="ofloop-supervisor-repo-"))
+# v0.9.9 admission invariant: enqueue requires a current pre-seal packet
+# that parses AND validates. Write a minimal valid v3 packet so the
+# plumbing assertion below exercises durable enqueue, not admission.
+run_dir = repo / ".ownframework-loop" / "run-test"
+run_dir.mkdir(parents=True)
+minimal_packet = {
+    "schema": "ownframework-work-packet/v3",
+    "packet_id": "v060-supervisor-architecture-fixture",
+    "created_at": "2026-09-17T00:00:00Z",
+    "work_class": "FEATURE",
+    "risk_class": "low",
+    "title": "v060 supervisor architecture fixture",
+    "target": {"repo": str(repo), "branch": "master", "classification": "local_only"},
+    "execution_mode": "single",
+    "acceptance_criteria": [{"id": "AC-1", "text": "ok"}],
+    "non_goals": [],
+    "allowed_paths": ["a.txt"],
+    "protected_paths": [".ownframework-loop/"],
+    "work_units": [{"id": "UNIT-1", "title": "u", "scope": "do"}],
+    "merge_authority": "human_only",
+    "deploy_authority": "human_only",
+    "push_authority": "human_only",
+    "external_action_authority": "none",
+    "risk_budget": {"max_build_passes": 4, "max_review_passes": 4, "max_repair_rounds": 1,
+                    "max_files_changed": 5, "max_diff_lines": 100},
+}
+fence = chr(96) * 3
+(run_dir / "WORK_PACKET.md").write_text(
+    fence + "json\n" + json.dumps(minimal_packet) + "\n" + fence + "\n", encoding="utf-8"
+)
 a = supervisor.enqueue(canonical_repo=repo, run_id="run-test", db_path=db)
 b = supervisor.enqueue(canonical_repo=repo, run_id="run-test", db_path=db)
 s = supervisor.status(canonical_repo=repo, run_id="run-test", db_path=db)
@@ -38,12 +68,45 @@ PY
 
 # 3. Stale RUNNING recovery is PID-aware and never duplicates a live owner.
 PYTHONPATH="$LIB_DIR" python3 - "$DB" <<'PY'
-import os, sqlite3, sys, tempfile
+import json, os, sqlite3, sys, tempfile
 from pathlib import Path
 from ownframework_loop import supervisor
 
 db = Path(sys.argv[1])
 repo = Path(tempfile.mkdtemp(prefix="ofloop-supervisor-recovery-"))
+# Pre-write the minimal valid packet for both run-dead and run-live so
+# the recovery assertion below exercises stale-RUNNING semantics, not
+# the admission backstop.
+def _write_minimal_packet(p, rid):
+    run_dir = p / ".ownframework-loop" / rid
+    run_dir.mkdir(parents=True, exist_ok=True)
+    pkt = {
+        "schema": "ownframework-work-packet/v3",
+        "packet_id": f"v060-recovery-{rid}",
+        "created_at": "2026-09-17T00:00:00Z",
+        "work_class": "FEATURE",
+        "risk_class": "low",
+        "title": f"v060 recovery fixture {rid}",
+        "target": {"repo": str(p), "branch": "master", "classification": "local_only"},
+        "execution_mode": "single",
+        "acceptance_criteria": [{"id": "AC-1", "text": "ok"}],
+        "non_goals": [],
+        "allowed_paths": ["a.txt"],
+        "protected_paths": [".ownframework-loop/"],
+        "work_units": [{"id": "UNIT-1", "title": "u", "scope": "do"}],
+        "merge_authority": "human_only",
+        "deploy_authority": "human_only",
+        "push_authority": "human_only",
+        "external_action_authority": "none",
+        "risk_budget": {"max_build_passes": 4, "max_review_passes": 4, "max_repair_rounds": 1,
+                        "max_files_changed": 5, "max_diff_lines": 100},
+    }
+    fence = chr(96) * 3
+    (run_dir / "WORK_PACKET.md").write_text(
+        fence + "json\n" + json.dumps(pkt) + "\n" + fence + "\n", encoding="utf-8"
+    )
+_write_minimal_packet(repo, "run-dead")
+_write_minimal_packet(repo, "run-live")
 supervisor.enqueue(canonical_repo=repo, run_id="run-dead", db_path=db)
 supervisor.enqueue(canonical_repo=repo, run_id="run-live", db_path=db)
 with supervisor._connect(db) as conn:
@@ -69,11 +132,41 @@ PY
 # Operational budgets are durable supervisor policy, not protocol state.
 DB_CAP="$(mktemp -t ofloop-supervisor-cap.XXXXXX.sqlite3)"
 PYTHONPATH="$LIB_DIR" python3 - "$DB_CAP" <<'PY'
-import sys, tempfile
+import json, sys, tempfile
 from pathlib import Path
 from ownframework_loop import supervisor
 db = Path(sys.argv[1])
 repo = Path(tempfile.mkdtemp(prefix="ofloop-supervisor-caps-"))
+# v0.9.9 admission invariant: enqueue requires a current pre-seal packet.
+# Write a minimal valid v3 packet so the operational-budgets assertion
+# below exercises durable enqueue + ceiling persistence, not admission.
+run_dir = repo / ".ownframework-loop" / "run-cap"
+run_dir.mkdir(parents=True)
+minimal_packet = {
+    "schema": "ownframework-work-packet/v3",
+    "packet_id": "v060-supervisor-caps-fixture",
+    "created_at": "2026-09-17T00:00:00Z",
+    "work_class": "FEATURE",
+    "risk_class": "low",
+    "title": "v060 caps fixture",
+    "target": {"repo": str(repo), "branch": "master", "classification": "local_only"},
+    "execution_mode": "single",
+    "acceptance_criteria": [{"id": "AC-1", "text": "ok"}],
+    "non_goals": [],
+    "allowed_paths": ["a.txt"],
+    "protected_paths": [".ownframework-loop/"],
+    "work_units": [{"id": "UNIT-1", "title": "u", "scope": "do"}],
+    "merge_authority": "human_only",
+    "deploy_authority": "human_only",
+    "push_authority": "human_only",
+    "external_action_authority": "none",
+    "risk_budget": {"max_build_passes": 4, "max_review_passes": 4, "max_repair_rounds": 1,
+                    "max_files_changed": 5, "max_diff_lines": 100},
+}
+fence = chr(96) * 3
+(run_dir / "WORK_PACKET.md").write_text(
+    fence + "json\n" + json.dumps(minimal_packet) + "\n" + fence + "\n", encoding="utf-8"
+)
 supervisor.enqueue(
     canonical_repo=repo,
     run_id="run-cap",

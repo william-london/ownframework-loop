@@ -172,6 +172,75 @@ else
 fi
 
 # ----------------------------------------------------------------------
+# TEST MISSING: absent WORK_PACKET.md refused pre-admission.
+# ----------------------------------------------------------------------
+echo "TEST MISSING: absent WORK_PACKET.md refused before durable admission"
+# Build a fresh repo + run directory WITHOUT a WORK_PACKET.md.
+REPO_M="$WORK/repo-missing-$RANDOM"
+git init -q -b master "$REPO_M" >/dev/null
+echo "x" > "$REPO_M/a.txt"
+git -C "$REPO_M" add a.txt >/dev/null
+git -C "$REPO_M" -c user.email=t@t -c user.name=t commit -q -m init >/dev/null
+RID_M="run-$(date -u +%Y%m%dT%H%M%SZ)-$(printf '%s' "$RANDOM" | head -c 8)"
+mkdir -p "$REPO_M/.ownframework-loop/$RID_M"
+# Intentionally do NOT create WORK_PACKET.md.
+OUT_M="$($OFLOOP_BIN supervisor enqueue --db "$DB" "$REPO_M" "$RID_M" 2>&1 || true)"
+if [[ "$OUT_M" == *"pre_seal_packet_missing"* ]]; then
+  pass "TEST MISSING: absent packet triggers pre_seal_packet_missing"
+else
+  fail "TEST MISSING: expected pre_seal_packet_missing; got: $OUT_M"
+fi
+NQM=$(count_total "$DB")
+NQMq=$(count_quarantined "$DB")
+if [[ "$NQM" == "0" ]] && [[ "$NQMq" == "0" ]]; then
+  pass "TEST MISSING: no job row, no QUARANTINED row"
+else
+  fail "TEST MISSING: expected 0 jobs / 0 QUARANTINED; got jobs=$NQM quarantined=$NQMq"
+fi
+
+# ----------------------------------------------------------------------
+# TEST MALFORMED: present-but-unparseable packet refused pre-admission.
+# ----------------------------------------------------------------------
+echo "TEST MALFORMED: unparseable packet refused before durable admission"
+REPO_MAL="$WORK/repo-malformed-$RANDOM"
+git init -q -b master "$REPO_MAL" >/dev/null
+echo "x" > "$REPO_MAL/a.txt"
+git -C "$REPO_MAL" add a.txt >/dev/null
+git -C "$REPO_MAL" -c user.email=t@t -c user.name=t commit -q -m init >/dev/null
+RID_MAL="run-$(date -u +%Y%m%dT%H%M%SZ)-$(printf '%s' "$RANDOM" | head -c 8)"
+mkdir -p "$REPO_MAL/.ownframework-loop/$RID_MAL"
+# Pre-write APPROVAL.json so workspace identity is proven without
+# touching the (deliberately malformed) WORK_PACKET.md. The approval
+# loader requires owner-only mode (chmod 600), so the test must match.
+cat > "$REPO_MAL/.ownframework-loop/$RID_MAL/APPROVAL.json" <<EOF
+{"schema":"ownframework-loop-approval/v1","candidate_branch":"factory/candidate/$RID_MAL"}
+EOF
+chmod 600 "$REPO_MAL/.ownframework-loop/$RID_MAL/APPROVAL.json"
+# Write garbage that cannot parse as JSON.
+printf 'this is not a json fence\n\n```json\n{not valid at all\n```\nrandom garbage content\n' \
+  > "$REPO_MAL/.ownframework-loop/$RID_MAL/WORK_PACKET.md"
+OUT_MAL="$($OFLOOP_BIN supervisor enqueue --db "$DB" "$REPO_MAL" "$RID_MAL" 2>&1 || true)"
+if [[ "$OUT_MAL" == *"pre_seal_packet_invalid"* ]] && [[ "$OUT_MAL" == *"could not be parsed"* ]]; then
+  pass "TEST MALFORMED: unparseable packet triggers pre_seal_packet_invalid"
+else
+  fail "TEST MALFORMED: expected pre_seal_packet_invalid with parse diagnostic; got: $OUT_MAL"
+fi
+NQMA=$(count_total "$DB")
+NQMAq=$(count_quarantined "$DB")
+if [[ "$NQMA" == "0" ]] && [[ "$NQMAq" == "0" ]]; then
+  pass "TEST MALFORMED: no job row, no QUARANTINED row"
+else
+  fail "TEST MALFORMED: expected 0 jobs / 0 QUARANTINED; got jobs=$NQMA quarantined=$NQMAq"
+fi
+# Confirm the refusal does not contain raw exception text or file bytes
+# (bounded diagnostic surface).
+if [[ "$OUT_MAL" != *"Traceback"* ]] && [[ "$OUT_MAL" != *"not valid at all"* ]]; then
+  pass "TEST MALFORMED: diagnostic is bounded (no raw exception or file content leak)"
+else
+  fail "TEST MALFORMED: refusal leaked raw exception text or file content: $OUT_MAL"
+fi
+
+# ----------------------------------------------------------------------
 # TEST C: invalid → refusal → correction → enqueue succeeds without resume.
 # ----------------------------------------------------------------------
 echo "TEST C: correction path bypasses resume ceremony"
