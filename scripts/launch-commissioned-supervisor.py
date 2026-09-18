@@ -106,6 +106,10 @@ def main() -> int:
         f"pid={derived['pid']}",
         f"receipt={args.receipt_path}",
     )
+    # The post-exec supervisor inherits the activation context via
+    # environment variables that the installer's plist exported
+    # (OFLOOP_ACTIVATION_ID, OFLOOP_RECEIPT_PATH).  No extra argv
+    # flags are needed; the receipt is the durable artifact.
     os.execv(
         sys.executable,
         [
@@ -113,8 +117,6 @@ def main() -> int:
             "-B",
             args.ofloop,
             "supervisor", "serve",
-            "--ofloop-activation-id", str(args.activation_id),
-            "--ofloop-receipt-path", str(args.receipt_path),
         ],
     )
     return 127

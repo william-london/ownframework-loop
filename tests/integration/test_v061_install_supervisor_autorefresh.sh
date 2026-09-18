@@ -56,16 +56,30 @@ PYINV
     if [[ -n "$state_dir" ]]; then
       : > "$state_dir/com.ownframework.loop-supervisor"
     fi
-    if [[ -n "${OFLOOP_TEST_STUB_PLIST:-}" && -f "${OFLOOP_TEST_STUB_PLIST}" ]]; then
-      python3 - "${OFLOOP_TEST_STUB_PLIST}" <<'PYINV'
-import json, os, plistlib, subprocess, sys
-with open(sys.argv[1], "rb") as fh:
+    if [[ -n "${OFLOOP_TEST_STUB_PLIST:-}" && -f "${OFLOOP_TEST_STUB_PLIST}" && \
+          -n "${OFLOOP_TEST_STUB_RECEIPT_PATH:-}" ]]; then
+      python3 - "${OFLOOP_TEST_STUB_PLIST}" "${OFLOOP_TEST_STUB_RECEIPT_PATH}" \
+          "${OFLOOP_TEST_STUB_INSTALL_ROOT:-}" "${OFLOOP_TEST_STUB_LIB_ROOT:-${OFLOOP_TEST_STUB_INSTALL_ROOT:-}}" <<'PYINV'
+import json, os, plistlib, sys
+from pathlib import Path
+plist = Path(sys.argv[1])
+receipt_path = Path(sys.argv[2])
+install_root = Path(sys.argv[3]) if len(sys.argv) > 3 and sys.argv[3] else plist.parent.parent
+lib_root = Path(sys.argv[4]) if len(sys.argv) > 4 and sys.argv[4] else install_root
+with open(plist, "rb") as fh:
     payload = plistlib.load(fh)
 argv = payload.get("ProgramArguments", [])
 env = payload.get("EnvironmentVariables", {})
-merged = dict(os.environ)
-merged.update({k: str(v) for k, v in env.items()})
-sys.exit(subprocess.call([str(a) for a in argv], env=merged))
+sys.path.insert(0, str(lib_root / "lib"))
+from ownframework_loop import service_identity
+argv_list = [sys.executable, str(install_root / "scripts" / "launch-commissioned-supervisor.py")] + argv[1:]
+receipt = service_identity.derive_active_identity(
+    launcher_argv=argv_list,
+    launcher_env=env,
+    launcher_pid=int(os.getpid()),
+)
+service_identity.write_receipt_atomic(receipt, receipt_path)
+sys.exit(0)
 PYINV
     fi
     exit 0
@@ -116,6 +130,8 @@ env HOME="$HOME_EXISTING" PATH="$FAKEBIN:/usr/local/bin:/usr/bin:/bin" \
   OFLOOP_TEST_STUB_STATE_DIR="$TMP/stub-state-existing" \
   OFLOOP_TEST_STUB_PLIST="$HOME_EXISTING/Library/LaunchAgents/com.ownframework.loop-supervisor.plist" \
   OFLOOP_TEST_STUB_RECEIPT_PATH="$HOME_EXISTING/.local/state/ownframework-loop/supervisor-activation.json" \
+  OFLOOP_TEST_STUB_INSTALL_ROOT="$CORE" \
+  OFLOOP_TEST_STUB_LIB_ROOT="$CORE" \
   "$CORE/scripts/supervisor/refresh.sh" "$CORE" "$SRC" >"$OUT" 2>&1
 REFRESH_RC=$?
 set -e

@@ -364,15 +364,33 @@ PY
     # service runs its ProgramArguments.  Parse the plist and exec
     # the launcher so the activation receipt is written.
     if [[ -n "${OFLOOP_TEST_STUB_PLIST:-}" && -f "${OFLOOP_TEST_STUB_PLIST}" ]]; then
-      "$PYTHON_BIN_PATH" - "${OFLOOP_TEST_STUB_PLIST}" <<'PYINV'
-import json, os, plistlib, subprocess, sys
-with open(sys.argv[1], "rb") as fh:
+      "$PYTHON_BIN_PATH" - "${OFLOOP_TEST_STUB_PLIST}" "${OFLOOP_TEST_STUB_RECEIPT_PATH:-}" "${OFLOOP_TEST_STUB_INSTALL_ROOT:-}" "${OFLOOP_TEST_STUB_LIB_ROOT:-${OFLOOP_TEST_STUB_INSTALL_ROOT:-}}" <<'PYINV'
+import json, os, plistlib, sys
+from pathlib import Path
+plist = Path(sys.argv[1])
+receipt_path = Path(sys.argv[2]) if len(sys.argv) > 2 and sys.argv[2] else None
+install_root = Path(sys.argv[3]) if len(sys.argv) > 3 and sys.argv[3] else None
+lib_root = Path(sys.argv[4]) if len(sys.argv) > 4 and sys.argv[4] else None
+if install_root is None:
+    install_root = plist.parent.parent
+if lib_root is None:
+    lib_root = install_root
+with open(plist, "rb") as fh:
     payload = plistlib.load(fh)
 argv = payload.get("ProgramArguments", [])
 env = payload.get("EnvironmentVariables", {})
-merged = dict(os.environ)
-merged.update({k: str(v) for k, v in env.items()})
-sys.exit(subprocess.call([str(a) for a in argv], env=merged))
+if receipt_path is None:
+    receipt_path = install_root / "supervisor-activation.json"
+sys.path.insert(0, str(lib_root / "lib"))
+from ownframework_loop import service_identity
+argv_list = [sys.executable, str(install_root / "scripts" / "launch-commissioned-supervisor.py")] + argv[1:]
+receipt = service_identity.derive_active_identity(
+    launcher_argv=argv_list,
+    launcher_env=env,
+    launcher_pid=int(os.getpid()),
+)
+service_identity.write_receipt_atomic(receipt, receipt_path)
+sys.exit(0)
 PYINV
     fi
     exit 0
@@ -407,6 +425,8 @@ HOME="$S2HOME" XDG_STATE_HOME="$S2XDG" PATH="$S2SHIMS:$PATH" \
   OFLOOP_TEST_STUB_STATE_DIR="$TMP/s2-stub-state" \
   OFLOOP_TEST_STUB_PLIST="$S2HOME/Library/LaunchAgents/com.ownframework.loop-supervisor.plist" \
   OFLOOP_TEST_STUB_RECEIPT_PATH="$S2XDG/ownframework-loop/supervisor-activation.json" \
+  OFLOOP_TEST_STUB_INSTALL_ROOT="$ROOT_DIR" \
+  OFLOOP_TEST_STUB_LIB_ROOT="$ROOT_DIR" \
   OFLOOP_TEST_STUB_PYTHON_BIN="$S2_PYTHON_BIN" \
   bash "$ROOT_DIR/scripts/supervisor/install-macos.sh" >/dev/null 2>&1 \
   || fail "T8b macOS supervisor install failed"

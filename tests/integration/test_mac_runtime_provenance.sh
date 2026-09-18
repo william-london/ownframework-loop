@@ -195,21 +195,37 @@ case "$cmd" in
     if [[ -n "$state_dir" ]]; then
       : > "$state_dir/com.ownframework.loop-supervisor"
     fi
-    # Model real launchd: after a successful bootstrap, the loaded
-    # service runs its ProgramArguments.  Parse the plist and exec the
-    # launcher so the activation receipt is written.
+    # Model the launcher's activation-receipt behavior without exec'ing
+    # the real launcher (which would start a real supervisor).  Parse
+    # the plist, derive a receipt from the launcher's argv + plist env,
+    # write the receipt, and exit.  This matches the launcher contract
+    # for tests without starting a real durable supervisor process.
     if [[ -n "${OFLOOP_TEST_STUB_PLIST:-}" && -f "${OFLOOP_TEST_STUB_PLIST}" && \
+          -n "${OFLOOP_TEST_STUB_RECEIPT_PATH:-}" && \
           "${OFLOOP_TEST_STUB_NO_LAUNCH:-0}" != "1" ]]; then
-      python3 - "${OFLOOP_TEST_STUB_PLIST}" <<'PY'
-import json, os, plistlib, subprocess, sys
-with open(sys.argv[1], "rb") as fh:
+      python3 - "${OFLOOP_TEST_STUB_PLIST}" "${OFLOOP_TEST_STUB_RECEIPT_PATH}" \
+          "${OFLOOP_TEST_STUB_INSTALL_ROOT:-}" "${OFLOOP_TEST_STUB_LIB_ROOT:-${OFLOOP_TEST_STUB_INSTALL_ROOT:-}}" <<'PYINV'
+import json, os, plistlib, sys
+from pathlib import Path
+plist = Path(sys.argv[1])
+receipt_path = Path(sys.argv[2])
+install_root = Path(sys.argv[3]) if len(sys.argv) > 3 and sys.argv[3] else plist.parent.parent
+lib_root = Path(sys.argv[4]) if len(sys.argv) > 4 and sys.argv[4] else install_root
+with open(plist, "rb") as fh:
     payload = plistlib.load(fh)
 argv = payload.get("ProgramArguments", [])
 env = payload.get("EnvironmentVariables", {})
-merged = dict(os.environ)
-merged.update({k: str(v) for k, v in env.items()})
-sys.exit(subprocess.call([str(a) for a in argv], env=merged))
-PY
+sys.path.insert(0, str(lib_root / "lib"))
+from ownframework_loop import service_identity
+argv_list = [sys.executable, str(install_root / "scripts" / "launch-commissioned-supervisor.py")] + argv[1:]
+receipt = service_identity.derive_active_identity(
+    launcher_argv=argv_list,
+    launcher_env=env,
+    launcher_pid=int(os.getpid()),
+)
+service_identity.write_receipt_atomic(receipt, receipt_path)
+sys.exit(0)
+PYINV
     fi
     exit 0
     ;;
@@ -230,9 +246,12 @@ run_installer() {
     OFLOOP_BIN="$OFLOOP_FAKE" \
     CLAUDE_BIN="${CLAUDE_BIN:-}" \
     XDG_STATE_HOME="${XDG_STATE_HOME:-}" \
+    ROOT_DIR="$ROOT" \
     OFLOOP_TEST_STUB_STATE_DIR="$STUB_STATE_DIR" \
     OFLOOP_TEST_STUB_PLIST="$HOME/Library/LaunchAgents/com.ownframework.loop-supervisor.plist" \
     OFLOOP_TEST_STUB_RECEIPT_PATH="${XDG_STATE_HOME:-$HOME/.local/state}/ownframework-loop/supervisor-activation.json" \
+    OFLOOP_TEST_STUB_INSTALL_ROOT="$ROOT" \
+    OFLOOP_TEST_STUB_LIB_ROOT="$ROOT" \
     bash "$INSTALLER" 2>&1)
 }
 
@@ -435,9 +454,12 @@ ln -sf "$REAL_OFLOOP" "$IDLE_FAKEBIN_DIR/ofloop"
   PYTHON_BIN="$PYTHON_FAKE" \
   OFLOOP_BIN="$OFLOOP_FAKE" \
   XDG_STATE_HOME="$IDLE_XDG" \
+  ROOT_DIR="$ROOT" \
   OFLOOP_TEST_STUB_STATE_DIR="$STUB_STATE_DIR" \
   OFLOOP_TEST_STUB_PLIST="$IDLE_HOME/Library/LaunchAgents/com.ownframework.loop-supervisor.plist" \
   OFLOOP_TEST_STUB_RECEIPT_PATH="$IDLE_XDG/ownframework-loop/supervisor-activation.json" \
+  OFLOOP_TEST_STUB_INSTALL_ROOT="$ROOT" \
+  OFLOOP_TEST_STUB_LIB_ROOT="$ROOT" \
   bash "$INSTALLER" > /tmp/t4.out 2>&1 || true)
 IDLE_PROV="$IDLE_XDG/ownframework-loop/runtime-provenance.json"
 IDLE_SERVICE_ENV="$IDLE_XDG/ownframework-loop/service-env.json"
@@ -527,9 +549,12 @@ mkdir -p "$DEF_HOME"
   PYTHON_BIN="$PYTHON_FAKE" \
   OFLOOP_BIN="$OFLOOP_FAKE" \
   CLAUDE_BIN="$CLAUDE_FAKE" \
+  ROOT_DIR="$ROOT" \
   OFLOOP_TEST_STUB_STATE_DIR="$STUB_STATE_DIR" \
   OFLOOP_TEST_STUB_PLIST="$DEF_HOME/Library/LaunchAgents/com.ownframework.loop-supervisor.plist" \
   OFLOOP_TEST_STUB_RECEIPT_PATH="$DEF_HOME/.local/state/ownframework-loop/supervisor-activation.json" \
+  OFLOOP_TEST_STUB_INSTALL_ROOT="$ROOT" \
+  OFLOOP_TEST_STUB_LIB_ROOT="$ROOT" \
   bash "$INSTALLER" > /tmp/t6.out 2>&1 || true)
 DEF_PROV="$DEF_HOME/.local/state/ownframework-loop/runtime-provenance.json"
 [[ -f "$DEF_PROV" ]] || { fail "T6: default provenance not written. out=$(cat /tmp/t6.out)"; }
