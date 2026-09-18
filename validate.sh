@@ -102,11 +102,15 @@ if [[ ! -d "$ROOT" ]]; then
 fi
 
 # 1. Core version truth.
+# Accept either released semver (X.Y.Z) or development pre-release
+# markers (X.Y.Z.devN).  Development markers are tolerated because
+# the v0.10.0-dev consolidation series must be distinguishable from
+# the FROZEN v0.9.1 release tag without forcing a version bump.
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$ROOT/lib" python3 -B - <<'PY'
 import re
 from ownframework_loop import __version__
-m=re.fullmatch(r"(\d+)\.(\d+)\.(\d+)", __version__)
-assert m, f"core version must be semver, got {__version__!r}"
+m=re.fullmatch(r"(\d+)\.(\d+)\.(\d+)(?:\.dev\d+)?", __version__)
+assert m, f"core version must be semver (X.Y.Z or X.Y.Z.devN), got {__version__!r}"
 print(f"  PASS: core version valid ({__version__})")
 PY
 

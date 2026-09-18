@@ -443,3 +443,114 @@ def classify_cleanup_result(
         unexpected_nonzero=unexpected_nonzero,
         detail=cleanup_stdout,
     )
+
+
+# ---------------------------------------------------------------------------
+# Lifecycle primitive driver — wraps macos_service_lifecycle's
+# probe + remove + prove trio with the typed marker discipline.
+# This is the canonical implementation of the lifecycle-helper
+# command-substitution boundary the installer uses everywhere.
+# ---------------------------------------------------------------------------
+
+def run_stale_label_removal(
+    *, lib_path: str, python_bin: str, domain: str, label: str, plist: str
+) -> LifecycleHelperResult:
+    """Run the canonical stale-label-removal helper.
+
+    Preserves both stdout/stderr AND return code (Defect B1
+    invariant).  Prints ``reason=stale_label_removal_failed`` on
+    the canonical stale-label condition; exits 1.  Exits 0 on
+    proven absence.
+    """
+    import subprocess
+    import sys
+    proc = subprocess.run(
+        [python_bin, "-B", "-", domain, label, plist],
+        env={**__import__("os").environ, "PYTHONPATH": lib_path},
+        input=(
+            "from ownframework_loop import macos_service_lifecycle\n"
+            "import sys\n"
+            f"domain = sys.argv[1]\n"
+            f"label = sys.argv[2]\n"
+            f"plist = sys.argv[3]\n"
+            "if macos_service_lifecycle.probe_canonical_label(label, domain):\n"
+            "    macos_service_lifecycle.remove_canonical_label(label, domain, plist)\n"
+            "    if not macos_service_lifecycle.prove_canonical_label_absent(label, domain):\n"
+            "        print('reason=stale_label_removal_failed')\n"
+            "        sys.exit(1)\n"
+            "sys.exit(0)\n"
+        ),
+        capture_output=True, text=True, check=False,
+    )
+    return classify_lifecycle_helper_result(
+        proc.stdout + (proc.stderr or ""), proc.returncode,
+    )
+
+
+def run_pending_transaction_removal(
+    *, lib_path: str, python_bin: str, domain: str, label: str, plist: str
+) -> LifecycleHelperResult:
+    """Run the recover_pending_transaction stale-label-removal helper."""
+    import subprocess
+    proc = subprocess.run(
+        [python_bin, "-B", "-", domain, label, plist],
+        env={**__import__("os").environ, "PYTHONPATH": lib_path},
+        input=(
+            "from ownframework_loop import macos_service_lifecycle\n"
+            "import sys\n"
+            f"domain = sys.argv[1]\n"
+            f"label = sys.argv[2]\n"
+            f"plist = sys.argv[3]\n"
+            "if macos_service_lifecycle.probe_canonical_label(label, domain):\n"
+            "    macos_service_lifecycle.remove_canonical_label(label, domain, plist)\n"
+            "    if not macos_service_lifecycle.prove_canonical_label_absent(label, domain):\n"
+            "        print('reason=transaction_recovery_stale_label_removal_failed')\n"
+            "        sys.exit(1)\n"
+            "sys.exit(0)\n"
+        ),
+        capture_output=True, text=True, check=False,
+    )
+    return classify_lifecycle_helper_result(
+        proc.stdout + (proc.stderr or ""), proc.returncode,
+    )
+
+
+def run_cleanup_with_absence_proof(
+    *, lib_path: str, python_bin: str, domain: str, label: str, plist: str
+) -> CleanupClassification:
+    """Run the canonical cleanup helper with absence proof.
+
+    Distinct from stale-label-removal: this helper is invoked on
+    a bootstrap-failure or active-identity-failure path where the
+    label SHOULD be absent after cleanup.  It runs
+    ``remove_canonical_label`` then ``prove_canonical_label_absent``
+    and emits a typed marker that distinguishes the two absence
+    outcomes.
+
+    Defect B2 of the commissioning closure: the installer's
+    rollback wording may only claim ``label_absent`` when this
+    helper has positively proven absence.
+    """
+    import subprocess
+    proc = subprocess.run(
+        [python_bin, "-B", "-", domain, label, plist],
+        env={**__import__("os").environ, "PYTHONPATH": lib_path},
+        input=(
+            "from ownframework_loop import macos_service_lifecycle\n"
+            "import sys\n"
+            f"domain = sys.argv[1]\n"
+            f"label = sys.argv[2]\n"
+            f"plist = sys.argv[3]\n"
+            "macos_service_lifecycle.remove_canonical_label(label, domain, plist)\n"
+            "absent = macos_service_lifecycle.prove_canonical_label_absent(label, domain)\n"
+            "if absent:\n"
+            "    print('reason=cleanup_label_absence_proven')\n"
+            "    sys.exit(0)\n"
+            "print('reason=cleanup_label_absence_unproven')\n"
+            "sys.exit(1)\n"
+        ),
+        capture_output=True, text=True, check=False,
+    )
+    return classify_cleanup_result(
+        proc.stdout + (proc.stderr or ""), proc.returncode,
+    )

@@ -2,13 +2,50 @@
 
 All notable source/master release-line changes to OwnFramework Loop are documented here.
 
-**Publication status:** 0.9.1 is the current closed source/master line and its
-source-hardening gates are complete. **v0.9.1** is the current published
-GitHub Release at `d23cadca751c9ed37b5eeab25415c8b0574dae4e`.
-**v0.8.4** (`134a7ce543e2d5858b3a4613c49d49959fe0b029`) remains the
+**Publication status:** **v0.9.1** is the current published
+GitHub Release at `d23cadca751c9ed37b5eeab25415c8b0574dae4e` and
+remains FROZEN. Current source/master is the **0.10.0-dev**
+consolidation series (development; NOT yet released). **v0.8.4**
+(`134a7ce543e2d5858b3a4613c49d49959fe0b029`) remains the
 immutable historical baseline of the previous published line.
 The complete historical changelog through 0.5.2 is preserved at
 [`docs/history/CHANGELOG-through-0.5.2.md`](docs/history/CHANGELOG-through-0.5.2.md).
+
+## 0.10.0.dev0 - Architectural Consolidation (in-progress, 2026-09-18)
+
+- Source-quality consolidation; no product behavior change, no
+  schema bump, no packet bump, no commissioning semantic change,
+  no FSM change. Behavior-freeze preserved.
+- macOS commissioning implementation extracted from install-macos.sh
+  heredocs into scripts/supervisor/install_helpers.py
+  (typed result classes, lifecycle-primitive drivers, classification
+  helpers). Shell now delegates publication-files generation;
+  v091m/v091n commissioning tests pass unchanged.
+- finalize_proof.py: shared deterministic proof primitives
+  (read_json, candidate_branch_contains, ancestor_of,
+  path_in_list, classify_path_against_packet, strict_ceiling)
+  extracted from build_finalize.py and review_finalize.py.
+  Both finalizers now delegate to the canonical shared module.
+- docs/architecture/IMPLEMENTATION_CONSOLIDATION.md: source
+  map of supervisor.py / program.py / cli.py / dispatch.py /
+  capabilities.py / state.py / build_finalize.py /
+  review_finalize.py / install-macos.sh at the start of the
+  consolidation series, with the authority boundaries the next
+  refactor commits will extract.
+- docs/certification/evidence: corrected historical evidence for
+  greenfield cert (job 64, candidate SHA
+  f075e638ff84d660d2904a4bbf5cd54db35ccb8b, reviewer verdict
+  APPROVED, total cost ~$8.18) and mature R2 cert (CERT_TIME_
+  OUTCOME = supervisor non-progress, LATER_PRESERVATION_STATE =
+  QUARANTINED via runtime_generation_mismatch).
+- New tests: test_v10a_install_helpers.sh (lifecycle driver +
+  classification coverage) and test_v10b_finalize_proof.sh
+  (shared primitives).
+- Version-truth: source version is now **0.10.0.dev0** to
+  distinguish development master from the FROZEN v0.9.1
+  release tag.
+
+## 0.9.1 - Host Capability Runtime (2026-09-01)
 
 ## 0.9.1 - Host Capability Runtime (2026-09-01)
 

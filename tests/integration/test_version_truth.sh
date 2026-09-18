@@ -4,6 +4,12 @@
 # (canonical single source of truth) and asserts every other release surface
 # matches. Future patches only need to update lib + the matching JSON/Markdown
 # files; this test follows automatically.
+#
+# v0.10.0-dev: when lib/ownframework_loop/__init__.py reports a development
+# version (e.g. "0.10.0.dev0"), the test distinguishes dev vs release:
+# the canonical source line and JSON surfaces must agree with the dev
+# version; the historical FROZEN release (v0.9.1) continues to be the
+# "latest published GitHub Release" until v0.10.0 is tagged.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/../.." && pwd)"
@@ -25,6 +31,14 @@ except Exception:
 if not EXPECTED:
     print("  FAIL: could not derive EXPECTED from lib/ownframework_loop/__init__.py")
     sys.exit(1)
+# IS_DEV: True when EXPECTED is a development pre-release marker (e.g.
+# "0.10.0.dev0").  When IS_DEV, the historical published release
+# (v0.9.1 at d23cadca751c9ed37b5eeab25415c8b0574dae4e) remains the
+# "latest published GitHub Release" until the next tagged release.
+IS_DEV = bool(re.search(r"\.dev\d+$", EXPECTED))
+PUBLISHED_RELEASE_TAG = "v0.9.1"
+PUBLISHED_RELEASE_SHA = "d23cadca751c9ed37b5eeab25415c8b0574dae4e"
+
 failures = []
 
 def check(label, ok, detail=""):
@@ -68,10 +82,19 @@ except Exception as e:
 # 4. README.md
 try:
     text = open(os.path.join(ROOT, "README.md")).read()
-    m = re.search(r"Source/master release line:\s*\*\*([0-9]+\.[0-9]+\.[0-9]+)\*\*", text)
+    # Accept either X.Y.Z or X.Y.Z.devN in the source/master line
+    m = re.search(r"Source/master release line:\s*\*\*([0-9]+\.[0-9]+\.[0-9]+(?:\.dev\d+)?)\*\*", text)
     readme_ver = m.group(1) if m else ""
     check("README source/master release line", readme_ver == EXPECTED, f"= {readme_ver!r}, expected {EXPECTED!r}")
-    check("README published release truth", f"Latest published GitHub Release: **v{EXPECTED}**" in text and "d23cadca751c9ed37b5eeab25415c8b0574dae4e" in text)
+    # Published-release truth: always references the FROZEN historical
+    # release when current source is dev.
+    pub_ver = EXPECTED if not IS_DEV else PUBLISHED_RELEASE_TAG
+    pub_sha = "" if not IS_DEV else PUBLISHED_RELEASE_SHA
+    check(
+        "README published release truth",
+        f"Latest published GitHub Release: **{pub_ver}**" in text and (not pub_sha or pub_sha in text),
+        f"(must reference {pub_ver}{' @ '+pub_sha if pub_sha else ''})",
+    )
     check("README workspace concurrency truth", "execution ownership is that" in text and "run-frozen candidate branch" in text and "may run concurrently" in text)
 except Exception as e:
     check("README readable", False, f"({e})")
@@ -80,10 +103,16 @@ except Exception as e:
 # 5. SECURITY.md
 try:
     text = open(os.path.join(ROOT, "SECURITY.md")).read()
-    m = re.search(r"source/master supported line in this repository is\s*\*\*([0-9]+\.[0-9]+\.[0-9]+)\*\*", text)
+    m = re.search(r"source/master supported line in this repository is\s*\*\*([0-9]+\.[0-9]+\.[0-9]+(?:\.dev\d+)?)\*\*", text)
     sec_ver = m.group(1) if m else ""
     check("SECURITY source/master supported line", sec_ver == EXPECTED, f"= {sec_ver!r}, expected {EXPECTED!r}")
-    check("SECURITY published release truth", f"latest published GitHub Release is **v{EXPECTED}**" in text and "d23cadca751c9ed37b5eeab25415c8b0574dae4e" in text)
+    pub_ver = EXPECTED if not IS_DEV else PUBLISHED_RELEASE_TAG
+    pub_sha = "" if not IS_DEV else PUBLISHED_RELEASE_SHA
+    check(
+        "SECURITY published release truth",
+        f"latest published GitHub Release is **{pub_ver}**" in text and (not pub_sha or pub_sha in text),
+        f"(must reference {pub_ver}{' @ '+pub_sha if pub_sha else ''})",
+    )
 except Exception as e:
     check("SECURITY readable", False, f"({e})")
     sec_ver = ""
@@ -102,7 +131,7 @@ except Exception as e:
 # 6. CHANGELOG.md (most recent entry must equal EXPECTED)
 try:
     text = open(os.path.join(ROOT, "CHANGELOG.md")).read()
-    m = re.search(r"^## ([0-9]+\.[0-9]+\.[0-9]+)\s+[—\-]", text, re.MULTILINE)
+    m = re.search(r"^## ([0-9]+\.[0-9]+\.[0-9]+(?:\.dev\d+)?)\s+[—\-]", text, re.MULTILINE)
     cl_ver = m.group(1) if m else ""
     check("CHANGELOG most recent entry", cl_ver == EXPECTED, f"= {cl_ver!r}, expected {EXPECTED!r}")
 except Exception as e:
@@ -113,5 +142,6 @@ print()
 if failures:
     print(f"  VERSION_TRUTH=FAIL ({len(failures)} mismatch(es))")
     sys.exit(1)
-print(f"  VERSION_TRUTH=PASS (source line = {EXPECTED}; published release = v{EXPECTED}; v0.9.1 workspace doctrine current)")
+status = "DEVELOPMENT" if IS_DEV else "RELEASE"
+print(f"  VERSION_TRUTH=PASS (source line = {EXPECTED}; status = {status}; published release = {PUBLISHED_RELEASE_TAG}; v0.9.1 workspace doctrine current)")
 PYEOF

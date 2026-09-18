@@ -1,11 +1,15 @@
 # OwnFramework Loop
 
-Source/master release line: **0.9.1**
+Source/master release line: **0.10.0.dev0** (in-progress architectural
+consolidation; NOT yet released).
 
 Latest published GitHub Release: **v0.9.1** at
 `d23cadca751c9ed37b5eeab25415c8b0574dae4e`. v0.8.4
 (`134a7ce543e2d5858b3a4613c49d49959fe0b029`) remains the immutable
-historical baseline of the previous published line.
+historical baseline of the previous published line. The v0.9.1 tag is
+FROZEN; the v0.10.0 series is the in-progress source-quality
+consolidation that began after v0.9.1 and will not be released until
+independent adjudication of the consolidated source.
 
 OwnFramework Loop is a vendor-neutral, execution-sealed engineering runtime for
 autonomous coding agents.

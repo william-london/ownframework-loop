@@ -152,4 +152,121 @@ print('ok')
 " || fail "cleanup classification test failed"
 pass "cleanup helper: absence_proven vs unproven classified"
 
+echo "=== lifecycle driver: stale-label-removal with proven absence ==="
+# Build a shadow module that emulates macos_service_lifecycle for
+# the duration of the helper subprocess.  The shadow's probe
+# returns False (no service loaded), so the helper exits 0.
+SHADOW="$(mktemp -d)"
+mkdir -p "$SHADOW/ownframework_loop"
+cat > "$SHADOW/ownframework_loop/__init__.py" <<'PY'
+PY
+cat > "$SHADOW/ownframework_loop/macos_service_lifecycle.py" <<'PY'
+def probe_canonical_label(label, domain):
+    return False
+def remove_canonical_label(label, domain, plist=None):
+    return
+def prove_canonical_label_absent(label, domain):
+    return True
+PY
+PYTHONPATH="$SHADOW:$ROOT_DIR/scripts/supervisor" "$PYTHON_BIN" -B -c "
+from install_helpers import run_stale_label_removal
+r = run_stale_label_removal(
+    lib_path='$SHADOW',
+    python_bin='$PYTHON_BIN',
+    domain='gui/501',
+    label='com.test',
+    plist='/tmp/none.plist',
+)
+assert r.returncode == 0, r.returncode
+assert r.marker == ''
+assert r.unexpected is False
+print('ok')
+" || fail "lifecycle driver stale-removal success test failed"
+rm -rf "$SHADOW"
+pass "lifecycle driver: stale-removal success"
+
+echo "=== lifecycle driver: stale-label-refusal emits typed marker ==="
+SHADOW="$(mktemp -d)"
+mkdir -p "$SHADOW/ownframework_loop"
+cat > "$SHADOW/ownframework_loop/__init__.py" <<'PY'
+PY
+cat > "$SHADOW/ownframework_loop/macos_service_lifecycle.py" <<'PY'
+def probe_canonical_label(label, domain):
+    return True
+def remove_canonical_label(label, domain, plist=None):
+    return
+def prove_canonical_label_absent(label, domain):
+    return False
+PY
+PYTHONPATH="$SHADOW:$ROOT_DIR/scripts/supervisor" "$PYTHON_BIN" -B -c "
+from install_helpers import run_stale_label_removal
+r = run_stale_label_removal(
+    lib_path='$SHADOW',
+    python_bin='$PYTHON_BIN',
+    domain='gui/501',
+    label='com.test',
+    plist='/tmp/none.plist',
+)
+assert r.returncode == 1, r.returncode
+assert r.marker == 'reason=stale_label_removal_failed', r.marker
+assert r.unexpected is False
+print('ok')
+" || fail "lifecycle driver stale-removal typed-refusal test failed"
+rm -rf "$SHADOW"
+pass "lifecycle driver: stale-removal typed-refusal marker preserved"
+
+echo "=== cleanup driver: absence proven ==="
+SHADOW="$(mktemp -d)"
+mkdir -p "$SHADOW/ownframework_loop"
+cat > "$SHADOW/ownframework_loop/__init__.py" <<'PY'
+PY
+cat > "$SHADOW/ownframework_loop/macos_service_lifecycle.py" <<'PY'
+def remove_canonical_label(label, domain, plist=None):
+    return
+def prove_canonical_label_absent(label, domain):
+    return True
+PY
+PYTHONPATH="$SHADOW:$ROOT_DIR/scripts/supervisor" "$PYTHON_BIN" -B -c "
+from install_helpers import run_cleanup_with_absence_proof
+r = run_cleanup_with_absence_proof(
+    lib_path='$SHADOW',
+    python_bin='$PYTHON_BIN',
+    domain='gui/501',
+    label='com.test',
+    plist='/tmp/none.plist',
+)
+assert r.absence_proven is True
+assert r.unexpected_nonzero is False
+print('ok')
+" || fail "cleanup driver proven test failed"
+rm -rf "$SHADOW"
+pass "cleanup driver: absence proven"
+
+echo "=== cleanup driver: absence unproven ==="
+SHADOW="$(mktemp -d)"
+mkdir -p "$SHADOW/ownframework_loop"
+cat > "$SHADOW/ownframework_loop/__init__.py" <<'PY'
+PY
+cat > "$SHADOW/ownframework_loop/macos_service_lifecycle.py" <<'PY'
+def remove_canonical_label(label, domain, plist=None):
+    return
+def prove_canonical_label_absent(label, domain):
+    return False
+PY
+PYTHONPATH="$SHADOW:$ROOT_DIR/scripts/supervisor" "$PYTHON_BIN" -B -c "
+from install_helpers import run_cleanup_with_absence_proof
+r = run_cleanup_with_absence_proof(
+    lib_path='$SHADOW',
+    python_bin='$PYTHON_BIN',
+    domain='gui/501',
+    label='com.test',
+    plist='/tmp/none.plist',
+)
+assert r.absence_proven is False
+assert r.unexpected_nonzero is False
+print('ok')
+" || fail "cleanup driver unproven test failed"
+rm -rf "$SHADOW"
+pass "cleanup driver: absence unproven"
+
 echo "V10A_INSTALL_HELPERS=PASS"
