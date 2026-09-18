@@ -30,7 +30,49 @@ chmod +x "$FAKEBIN/uname"
 
 cat > "$FAKEBIN/launchctl" <<'EOF'
 #!/usr/bin/env bash
-exit 0
+# v0.9.1 closure m: shim models launchd's post-bootstrap process startup
+# so the launcher writes an activation receipt and the installer's
+# active-identity proof can verify identity.
+state_dir="${OFLOOP_TEST_STUB_STATE_DIR:-}"
+case "${1:-}" in
+  print)
+    if [[ -n "${OFLOOP_TEST_STUB_PLIST:-}" && -f "${OFLOOP_TEST_STUB_PLIST}" ]]; then
+      python3 - "${OFLOOP_TEST_STUB_PLIST}" <<'PYINV'
+import json, os, plistlib, subprocess, sys
+with open(sys.argv[1], "rb") as fh:
+    payload = plistlib.load(fh)
+argv = payload.get("ProgramArguments", [])
+env = payload.get("EnvironmentVariables", {})
+merged = dict(os.environ)
+merged.update({k: str(v) for k, v in env.items()})
+sys.exit(subprocess.call([str(a) for a in argv], env=merged))
+PYINV
+    fi
+    exit 0
+    ;;
+  kickstart) exit 0 ;;
+  bootout) exit 0 ;;
+  bootstrap)
+    if [[ -n "$state_dir" ]]; then
+      : > "$state_dir/com.ownframework.loop-supervisor"
+    fi
+    if [[ -n "${OFLOOP_TEST_STUB_PLIST:-}" && -f "${OFLOOP_TEST_STUB_PLIST}" ]]; then
+      python3 - "${OFLOOP_TEST_STUB_PLIST}" <<'PYINV'
+import json, os, plistlib, subprocess, sys
+with open(sys.argv[1], "rb") as fh:
+    payload = plistlib.load(fh)
+argv = payload.get("ProgramArguments", [])
+env = payload.get("EnvironmentVariables", {})
+merged = dict(os.environ)
+merged.update({k: str(v) for k, v in env.items()})
+sys.exit(subprocess.call([str(a) for a in argv], env=merged))
+PYINV
+    fi
+    exit 0
+    ;;
+  enable) exit 0 ;;
+  *) exit 0 ;;
+esac
 EOF
 chmod +x "$FAKEBIN/launchctl"
 
@@ -56,6 +98,7 @@ chmod +x "$FAKEBIN/python3"
 # Existing commissioning signal must refresh to CORE/bin/ofloop.
 mkdir -p "$HOME_EXISTING/Library/LaunchAgents"
 echo existing > "$HOME_EXISTING/Library/LaunchAgents/com.ownframework.loop-supervisor.plist"
+mkdir -p "$TMP/stub-state-existing"
 # v0.8.2 lifecycle safety: a commissioned service without its ledger is
 # intentionally unverifiable and fails closed. Model a legitimate existing
 # commissioning with an intact empty ledger (no unfinished runtime dependencies).
@@ -70,6 +113,9 @@ PY
 OUT="$TMP/refresh.out"
 set +e
 env HOME="$HOME_EXISTING" PATH="$FAKEBIN:/usr/local/bin:/usr/bin:/bin" \
+  OFLOOP_TEST_STUB_STATE_DIR="$TMP/stub-state-existing" \
+  OFLOOP_TEST_STUB_PLIST="$HOME_EXISTING/Library/LaunchAgents/com.ownframework.loop-supervisor.plist" \
+  OFLOOP_TEST_STUB_RECEIPT_PATH="$HOME_EXISTING/.local/state/ownframework-loop/supervisor-activation.json" \
   "$CORE/scripts/supervisor/refresh.sh" "$CORE" "$SRC" >"$OUT" 2>&1
 REFRESH_RC=$?
 set -e
