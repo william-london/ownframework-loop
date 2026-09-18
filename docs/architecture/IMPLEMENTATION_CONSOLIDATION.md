@@ -1,0 +1,303 @@
+# Implementation Architecture Map
+
+This document describes OwnFramework Loop source AS IT ACTUALLY
+EXISTS at the start of the v0.10.0-dev consolidation mission
+(`08488a2ac4c85cb3a91725efe7e68424c3431aad`). It is a factual
+map for refactoring, not an aspirational redesign.
+
+The mission is implementation consolidation only. The product's
+architecture and behavior are accepted.
+
+## Module Inventory
+
+| Module | Lines | Top-level defs | Authority Domain |
+|---|---|---|---|
+| `supervisor.py` | 6817 | 118 | durable execution-plane (everything) |
+| `cli.py` | 2293 | ~ | command surface |
+| `state.py` | 1738 | ~ | durable state validation + atomic persistence |
+| `program.py` | 1824 | ~ | PROGRAM authority + progression + claims |
+| `dispatch.py` | 1578 | 46 | semantic dispatch + acceptance + repair context |
+| `capabilities.py` | 1425 | ~ | capability declarations + migration + discovery |
+| `build_finalize.py` | 1124 | ~ | BUILD finalize deterministic proof |
+| `build_agent.py` | 778 | ~ | build agent prompt construction |
+| `review_finalize.py` | 852 | ~ | REVIEW finalize deterministic proof |
+| `service_identity.py` | 718 | ~ | activation receipt + startup-ready attestation |
+| `macos_service_lifecycle.py` | 137 | ~ | canonical-label lifecycle primitive |
+| `scripts/supervisor/install-macos.sh` | 1012 | ~ | macOS commissioning shell + Python heredocs |
+
+## supervisor.py — Authority Domains (mixed)
+
+`supervisor.py` simultaneously owns several authority domains
+that would each justify their own module. The following list is
+derived from the actual function call graph, not invented:
+
+### A. DATABASE / SCHEMA CORE (mixed with everything)
+- `_apply_data_migrations` (1231)
+- `_connect` / `_managed_connect` / `_connect_readonly` / `_managed_connect_readonly` (1320-1599)
+- `_pid_alive` / `_read_pid_start_identity` / `_pid_identity_proven` / `_terminate_owned_process_group` / `_read_pid_start_time` / `_boot_time_unix` (1601-1838) — process-id introspection helpers
+- Schema migration helpers
+
+### B. ATTEMPT / ACCOUNTING (mixed with execution)
+- `_parse_cost_from_durable_stdout` / `_parse_token_usage_from_durable_stdout` (1840-1902)
+- `_extract_effective_model_from_durable_stdout` / `_extract_model_usage_json_from_durable_stdout` / `_extract_effective_model` (1917-1949)
+- `_strict_profile_model_violation` (1951)
+- `_account_attempt_cost` (2116)
+- `_publish_semantic_acceptance` (2213)
+- `_remaining_funded_cost_budget` / `_unknown_cost_attempt_count` (2305-2343)
+- `_capability_binding_creation_allowed` (2345)
+
+### C. REPLAY / ACCEPTANCE GATE
+- `_replay_candidate_sha` (1974)
+- `_attempt_provenance_gate` (2011)
+- `_extract_model_usage_json` (2093)
+- `_maybe_complete_semantic_artifact` (5236)
+- `_publish_acceptance_for_ready_artifact` (5374)
+
+### D. SCHEDULING / CLAIMS / DISPATCH HOLDS
+- `_validate_dispatch_hold_request` (2688)
+- `_hold_row` / `_hold_dict` / `_hold_matches_before_claim` (2702-2712)
+- `enqueue` (2730)
+- `_take_next_job` (4868)
+- `_scheduler_submission_budget` (6207)
+
+### E. EXECUTION / RUNNER
+- `_semantic_worker_settings` (391)
+- `resolve_semantic_timeout` (511)
+- `_publish_startup_ready_attestation` (614)
+- `worker_log_paths` (725)
+- `_repository_scheduling_identity` / `_workspace_scheduling_identity` (771-822)
+- `_terminate_group` (4006)
+- `RunnerResult` / `ClaudeCodeRunner` (4027-4660)
+- `_apply_failure_policy` (4780)
+
+### F. RECOVERY
+- `_recover_stale_running` (2425)
+- `_protected_terminal_recovery` (914)
+- `continue_program` (961)
+- `_migrate_quarantined_run_capabilities` (6318)
+- `resume` (6438)
+
+### G. IDENTITY / RUNTIME GENERATION
+- `runtime_generation` (545)
+- `default_db_path` (557)
+- `default_worker_log_dir` (563)
+- `_runtime_cache_run_root` / `_cleanup_terminal_runtime_cache` / `_cleanup_done_runtime_caches` (569-612)
+
+### H. SERVE-LOOP / COMPOSITION FACADE
+- `run_one` (5428)
+- `serve` (6254)
+- `retire` (6654)
+
+### I. OPERATOR / FLEET READ MODEL
+- `status` (3159)
+- `_logical_job_row` (3128)
+- `supervisor_config_get` / `supervisor_config_set` (3253-3292)
+- `fleet_status` (3292)
+- `dispatch_hold_status` / `release_dispatch_hold` / `cancel_dispatch_hold` (3380-3517)
+
+The same module owns the durable execution-loop facade, every
+supporting domain, and every CLI-facing query. This is the
+concentration that motivates decomposition.
+
+## supervisor.py — Externally-Imported Functions (test surface)
+
+`tests/integration/test_release_gate_preflight.sh`,
+`tests/integration/test_checkout_portability.sh`, and similar
+files import many top-level names from `supervisor`. Any
+decomposition must keep `from supervisor import X` working as a
+thin delegation facade.
+
+Key externally-imported functions:
+- `enqueue`, `status`, `resume`, `retire`, `fleet_status`
+- `supervisor_config_get`, `supervisor_config_set`
+- `dispatch_hold_status`, `release_dispatch_hold`, `cancel_dispatch_hold`
+- `runtime_generation`, `default_db_path`, `default_worker_log_dir`
+- `serve`, `run_one`
+- `ClaudeCodeRunner`, `register_runner`, `registered_runner_ids`,
+  `_runner`, `_runner_preflight`
+- `WorkerLaunchError`, `DispatchError`, etc.
+
+## program.py — Authority Domains
+
+PROGRAM owns:
+
+1. **Graph authority** — `_resolve_checkpoint_work_unit_id`,
+   `resolve_execution_mode`, `packet_acceptance_criterion_ids`,
+   `current_checkpoint_*`, `resolve_effective_required_validation`,
+   `_validation_dedup_key`, `validate_checkpoint_graph`,
+   `checkpoint_graph_sha256`, `resolve_promotion_policy`,
+   `materialise_initial_program_state`
+
+2. **Progression** — `select_next_checkpoint`,
+   `checkpoint_entry_candidate_sha`,
+   `program_final_safe_repair_anchor`, `ready_to_claim`,
+   `finalize_checkpoint`, `advance_to_next`,
+   `advance_after_review_approval`,
+   `terminalize_program_after_final_review`,
+   `verify_frozen_graph`, `is_program_terminal`,
+   `program_terminal_reason`
+
+3. **Entitlements / Counters** — `increment_cp_counter`,
+   `_bump_counter_one`, `repair_entitlement`,
+   `program_final_repair_entitlement`,
+   `_scheduler_submission_budget` (in supervisor but PROGRAM
+   semantics)
+
+4. **Unified claim pass** — `_resolve_packet_cp`,
+   `_unified_claim_pass`, `claim_build_pass`,
+   `claim_review_pass`, `claim_repair_round`,
+   `record_source_accounting`
+
+5. **PROGRAM CONTINUATION / PROTECTED RECOVERY** — `continue_program`,
+   `_protected_terminal_recovery`,
+   `_continuation_path`, `_continuation_id`,
+   `_continuation_read`, `_continuation_write`,
+   `_continuation_conflict`. (These cross boundaries with
+   `supervisor.py`.)
+
+PROGRAM's claim machinery is the load-bearing authority for what
+gets dispatched. The graph authority, progression, and entitlements
+are tightly coupled (they share `program_state` and `packet`
+shapes), but the claim dispatch is genuinely a separate concern.
+
+## build_finalize.py / review_finalize.py
+
+These modules share the same deterministic proof machinery
+because BUILD and REVIEW are two roles of the same underlying
+dispatch contract. Genuine shared primitives:
+
+- validation execution helpers;
+- evidence normalization;
+- atomic publication of finalized results;
+- exact-candidate acceptance.
+
+Role-specific orchestration (BUILD-only: source-mutation
+ownership; REVIEW-only: protected_findings / must_fix_count) must
+remain in each module's own owner.
+
+## cli.py
+
+CLI is a thin composition layer on top of the supervisor +
+program + dispatch + capabilities + state modules. It mixes
+parsing with command implementations. Command-handler
+extraction is a low-risk structural improvement (commands are
+already grouped by domain in the existing `if/elif` chain).
+
+## dispatch.py
+
+Owns deterministic dispatch authority (claim → finalize →
+publish). Splits naturally into:
+
+- semantic result construction (`_fresh_semantic_skeleton`,
+  `reseed_semantic_artifact_for_retry`,
+  `semantic_result_ready`, etc.);
+- repair context construction (`_repair_context_*`,
+  `_blocked_evidence_is_repairable`,
+  `_validation_evidence_is_repairable`, etc.);
+- claim-or-terminal (`_claim_or_terminal`, `claim_next`,
+  `finalize_work_order`).
+
+## capabilities.py
+
+Owns:
+
+- immutable capability declarations;
+- compatibility / migration logic;
+- runtime capability discovery;
+- validation.
+
+The mix of these is real but the validation logic is already
+separated. A useful extraction is the migration-vs-discovery
+boundary; the validation logic should not be split.
+
+## state.py
+
+Owns durable state validation and atomic persistence — these
+legitimately belong together (transaction ownership). Should be
+LEFT INTACT in this mission unless a clear cohesion problem is
+identified. STATE invariants must not be fragmented.
+
+## scripts/supervisor/install-macos.sh
+
+The shell script embeds too much procedural Python (heredocs).
+Behavior-preserving extraction can move the major Python heredocs
+into a commissioning helper module so that the shell becomes a
+thin platform entrypoint. Reuses `service_identity.py` and
+`macos_service_lifecycle.py`.
+
+## Cross-Module Dependency Direction
+
+Conceptually:
+
+```
+   pure validation / schema / contracts
+        ↓
+   domain primitives (service_identity, runtime_identity,
+                       macos_service_lifecycle)
+        ↓
+   state / persistence owners (state.py + supervisor.py
+                                database/schema core)
+        ↓
+   execution domains (program progression, dispatch,
+                       runner, accounting, recovery)
+        ↓
+   composition / CLI
+```
+
+The decomposition MUST NOT introduce cycles. Low-level modules
+must not import supervisor just to call back upward.
+
+## Authority Boundaries Chosen for the Consolidation
+
+Based on the call graph, the following seams are real:
+
+1. **Supervisor → supervisor_db** — connection setup + schema
+   migration + transaction primitives.
+2. **Supervisor → supervisor_runner** — provider process launch
+   + subprocess lifecycle + output capture.
+3. **Supervisor → supervisor_accounting** — cost/token accounting,
+   attempt recording.
+4. **Supervisor → supervisor_recovery** — stale-running recovery,
+   crash recovery, protected-recovery coordination.
+5. **Supervisor → supervisor_claims** — runnable-candidate
+   selection, concurrency limits, dispatch holds, claim mechanics.
+6. **Supervisor → supervisor_attempts** — semantic-attempt
+   creation, acceptance, replay gates.
+7. **Supervisor → supervisor_readmodel** — operator/fleet
+   read-only queries.
+8. **Supervisor (composition facade)** — durable execution-loop
+   facade, `serve`, `run_one`, `enqueue`, `status`, `resume`,
+   `retire`.
+
+PROGRAM keeps its tight coupling but is split into:
+- `program_graph.py` (frozen DAG + acceptance criteria + validation);
+- `program_progression.py` (frontier + advancement + finalization);
+- `program_entitlements.py` (caps + repair counters + budgets);
+- `program_claims.py` (unified claim pass + claim_build/review/repair).
+
+`program.py` becomes the composition surface that re-exports.
+
+Build/review finalize: shared primitives extracted to
+`finalize_proof.py` (validation execution + evidence normalization
++ atomic publication). Role-specific orchestration remains in
+`build_finalize.py` / `review_finalize.py`.
+
+CLI: commands extracted into per-domain command modules
+(`cli_spec.py`, `cli_build.py`, `cli_review.py`, `cli_supervisor.py`,
+`cli_program.py`, `cli_diagnostics.py`); `cli.py` becomes a thin
+registration surface.
+
+Dispatch: split into `dispatch_semantic.py`
+(`semantic_result_ready`, `reseed_semantic_artifact_for_retry`),
+`dispatch_repair.py` (`_repair_context_*`, evidence-repairable
+checks), `dispatch_authority.py` (`_claim_or_terminal`,
+`claim_next`, `finalize_work_order`).
+
+Commissioning: extract `scripts/supervisor/install_helpers.py`
+(plist/provenance generation, lifecycle-helper result
+classification, active-identity verification, cleanup/absence
+proof, rollback result construction). `install-macos.sh` becomes
+a thin shell entrypoint that delegates to the helper.
+
+`state.py` is LEFT INTACT. `capabilities.py` keeps its current
+shape unless a domain seam is empirically justified.

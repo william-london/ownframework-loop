@@ -331,204 +331,81 @@ if [[ -f "$SERVICE_ENV" ]]; then cp "$SERVICE_ENV" "$OLD_SERVICE_ENV_BACKUP"; ch
 printf 'prepared\n' > "$TXN_DIR/state"
 chmod 0600 "$TXN_DIR/state"
 
-# 6. Generate plist + provenance atomically. The python block is the
-#    sole owner of both artifacts; STATE_ROOT, CLAUDE_BIN, OFLOOP_BIN,
-#    PYTHON_BIN, and SERVICE_PATH are passed as env vars so the
-#    generator cannot drift from the bash-side computation.
-PLIST="$PLIST" \
-RUNTIME_PROVENANCE="$RUNTIME_PROVENANCE" \
-SERVICE_ENV="$SERVICE_ENV" \
-STATE_BASE="$STATE_BASE" \
-STATE_ROOT="$STATE_ROOT" \
-SUPERVISOR_DB="$SUPERVISOR_DB" \
-LEDGER_MARKER="$LEDGER_MARKER" \
-STDOUT_LOG="$STDOUT_LOG" \
-STDERR_LOG="$STDERR_LOG" \
-PYTHON_BIN="$PYTHON_BIN" \
-OFLOOP_BIN="$OFLOOP_BIN" \
-CLAUDE_BIN="$CLAUDE_BIN" \
-SERVICE_PATH="$SERVICE_PATH" \
-SOURCE_ROOT="$SOURCE_ROOT" \
-SOURCE_HEAD="$SOURCE_HEAD" \
-OFLOOP_VERSION="$OFLOOP_VERSION" \
-SOURCE_VERSION="$SOURCE_VERSION" \
-RUNTIME_GENERATION="$RUNTIME_GENERATION" \
-LABEL="$LABEL" \
-"$PYTHON_BIN" - <<'PY'
-import json, os, plistlib, sys, uuid
+# 6. Generate plist + provenance atomically.  All procedural Python
+#    for this step lives in scripts/supervisor/install_helpers.py so
+#    it is testable, typed, and shareable across future commissioning
+#    surfaces.  The shell is responsible only for resolving the
+#    canonical runtime paths and emitting the launchd commands.
+PUBLICATION_OUT="$(
+  PLIST="$PLIST" \
+  RUNTIME_PROVENANCE="$RUNTIME_PROVENANCE" \
+  SERVICE_ENV="$SERVICE_ENV" \
+  STATE_BASE="$STATE_BASE" \
+  STATE_ROOT="$STATE_ROOT" \
+  SUPERVISOR_DB="$SUPERVISOR_DB" \
+  LEDGER_MARKER="$LEDGER_MARKER" \
+  STDOUT_LOG="$STDOUT_LOG" \
+  STDERR_LOG="$STDERR_LOG" \
+  PYTHON_BIN="$PYTHON_BIN" \
+  OFLOOP_BIN="$OFLOOP_BIN" \
+  CLAUDE_BIN="$CLAUDE_BIN" \
+  SERVICE_PATH="$SERVICE_PATH" \
+  SOURCE_ROOT="$SOURCE_ROOT" \
+  SOURCE_HEAD="$SOURCE_HEAD" \
+  OFLOOP_VERSION="$OFLOOP_VERSION" \
+  SOURCE_VERSION="$SOURCE_VERSION" \
+  RUNTIME_GENERATION="$RUNTIME_GENERATION" \
+  LABEL="$LABEL" \
+  PYTHONPATH="$ROOT/scripts/supervisor" \
+  "$PYTHON_BIN" -B - "$ROOT/scripts/supervisor/install_helpers.py" <<'PY' 2>&1
+import json, os, sys
 from pathlib import Path
+sys.path.insert(0, str(Path(sys.argv[1]).parent))
+from install_helpers import generate_publication_files
 
-plist = Path(os.environ["PLIST"])
-provenance_path = Path(os.environ["RUNTIME_PROVENANCE"])
-service_env_path = Path(os.environ["SERVICE_ENV"])
-state_base = os.environ["STATE_BASE"]
-state_root = os.environ["STATE_ROOT"]
-supervisor_db = os.environ["SUPERVISOR_DB"]
-ledger_marker = os.environ["LEDGER_MARKER"]
-stdout_log = os.environ["STDOUT_LOG"]
-stderr_log = os.environ["STDERR_LOG"]
-python_bin = os.environ["PYTHON_BIN"]
-ofloop_bin = os.environ["OFLOOP_BIN"]
-launcher_script = str(Path(ofloop_bin).resolve(strict=False).parent.parent / "scripts" / "launch-commissioned-supervisor.py")
-probe_script = str(Path(ofloop_bin).resolve(strict=False).parent.parent / "scripts" / "probe-supervisor-runtime-dependencies.py")
-claude_bin = os.environ.get("CLAUDE_BIN") or None
-service_path = os.environ["SERVICE_PATH"]
-source_root = os.environ.get("SOURCE_ROOT") or None
-source_head = os.environ.get("SOURCE_HEAD") or None
-ofloop_version = os.environ.get("OFLOOP_VERSION") or None
-source_version = os.environ.get("SOURCE_VERSION") or None
-runtime_generation = os.environ.get("RUNTIME_GENERATION") or None
-label = os.environ["LABEL"]
-
-activation_id = str(uuid.uuid4())
-receipt_path = str(Path(state_root) / "supervisor-activation.json")
-
-env_vars = {
-    "PATH": service_path,
-    "PYTHONUNBUFFERED": "1",
-    "PYTHONDONTWRITEBYTECODE": "1",
-    "PYTHON_BIN": python_bin,
-    "OFLOOP_BIN": ofloop_bin,
-    "OFLOOP_RUNTIME_ROOT": str(Path(ofloop_bin).resolve(strict=False).parent.parent),
-    "XDG_STATE_HOME": state_base,
-    # Per-installation activation id and the canonical receipt path the
-    # launcher writes before exec into the supervisor.  The receipt
-    # is the load-bearing active-identity proof the installer verifies
-    # before emitting SUPERVISOR_INSTALL=PASS.
-    "OFLOOP_ACTIVATION_ID": activation_id,
-    "OFLOOP_RECEIPT_PATH": receipt_path,
-    "OFLOOP_RUNTIME_GENERATION": runtime_generation or "",
-    "LABEL": label,
-}
-# CRITICAL: only export OFLOOP_CLAUDE_BIN when a Claude binary was
-# actually commissioned. Writing a bogus path here would let the
-# supervisor execute the wrong Claude binary later (or fail to start
-# semantic workers). Omitting it preserves the supported idle-only
-# installation behavior — the service waits without semantic attempts
-# and automatically continues if Claude later appears on the persisted service PATH.
-service_env = {}
-if claude_bin:
-    env_vars["OFLOOP_CLAUDE_BIN"] = claude_bin
-    env_vars["OFLOOP_SERVICE_ENV_FILE"] = str(service_env_path)
-    # macOS Claude credentials are held in Keychain. Do not reopen ~/.claude
-    # merely for authentication. Environment-based provider/auth/model aliases
-    # needed by a durable launchd service are persisted in one private Loop
-    # service-env file instead of the plist.
-    for auth_var in (
-        "ANTHROPIC_API_KEY",
-        "ANTHROPIC_AUTH_TOKEN",
-        "ANTHROPIC_BASE_URL",
-        "ANTHROPIC_MODEL",
-        "ANTHROPIC_DEFAULT_OPUS_MODEL",
-        "ANTHROPIC_DEFAULT_SONNET_MODEL",
-        "CLAUDE_CODE_OAUTH_TOKEN",
-        "CLAUDE_CODE_OAUTH_REFRESH_TOKEN",
-        "CLAUDE_CODE_OAUTH_SCOPES",
-        "CLAUDE_CONFIG_DIR",
-    ):
-        value = os.environ.get(auth_var)
-        if value:
-            service_env[auth_var] = value
-
-payload = {
-    "Label": label,
-    "ProgramArguments": [
-        python_bin, "-B", launcher_script,
-        "--db", supervisor_db,
-        "--ledger-marker", ledger_marker,
-        "--probe", probe_script,
-        "--ofloop", ofloop_bin,
-        "--activation-id", activation_id,
-        "--receipt-path", receipt_path,
-    ],
-    "EnvironmentVariables": env_vars,
-    "RunAtLoad": True,
-    "KeepAlive": True,
-    "ProcessType": "Background",
-    "ThrottleInterval": 5,
-    "StandardOutPath": stdout_log,
-    "StandardErrorPath": stderr_log,
-    "WorkingDirectory": str(Path.home()),
-}
-plist.parent.mkdir(parents=True, exist_ok=True)
-service_env_path.parent.mkdir(parents=True, exist_ok=True)
-os.chmod(service_env_path.parent, 0o700)
-
-def test_abort_after(stage: str) -> None:
-    if os.environ.get("OFLOOP_TEST_ABORT_AFTER_PUBLICATION") == stage:
-        os._exit(97)
-
-
-def write_private_json(path: Path, value: object) -> None:
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    try:
-        os.fchmod(fd, 0o600)
-        with os.fdopen(fd, "w", encoding="utf-8", closefd=False) as fh:
-            json.dump(value, fh, indent=2, sort_keys=True)
-            fh.write("\n")
-            fh.flush()
-            os.fsync(fh.fileno())
-    finally:
-        os.close(fd)
-
-fd = os.open(plist, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-try:
-    os.fchmod(fd, 0o600)
-    with os.fdopen(fd, "wb", closefd=False) as f:
-        plistlib.dump(payload, f, sort_keys=True)
-        f.flush()
-        os.fsync(f.fileno())
-finally:
-    os.close(fd)
-test_abort_after("plist")
-
-write_private_json(service_env_path, service_env)
-test_abort_after("service-env")
-
-provenance = {
-    "schema": "ownframework-loop-supervisor-runtime-provenance/v1",
-    "service_manager": "launchd",
-    "service_label": label,
-    "python_bin": python_bin,
-    "ofloop_bin": ofloop_bin,
-    "runtime_root": str(Path(ofloop_bin).resolve(strict=False).parent.parent),
-    # claude_bin is recorded exactly as the plist will export: the
-    # canonical absolute path when commissioned, or null when this
-    # install is intentionally idle-only. The provenance and the
-    # plist EnvironmentVariables MUST agree byte-for-byte.
-    "claude_bin": claude_bin,
-    "service_path": service_path,
-    "plist": str(plist),
-    "state_base": state_base,
-    "state_root": state_root,
-    "ledger_incarnation_file": ledger_marker,
-    "service_entrypoint": launcher_script,
-    "stdout_log": stdout_log,
-    "stderr_log": stderr_log,
-    "source_root": source_root,
-    "source_head": source_head,
-    "source_version": source_version,
-    "ofloop_version": ofloop_version,
-    "runtime_generation": runtime_generation,
-    "service_env_file": str(service_env_path) if claude_bin else None,
-}
-provenance_path.parent.mkdir(parents=True, exist_ok=True)
-write_private_json(provenance_path, provenance)
-# Persist the activation id (and its expected receipt path) in a
-# dedicated file so the bash-side active-identity proof can find
-# them deterministically without parsing the plist.  The receipt
-# itself is written by the launcher; this file only carries the
-# commissioning-side commitment.
-activation_record = {
-    "schema": "ownframework-loop-supervisor-activation-record/v1",
-    "activation_id": activation_id,
-    "receipt_path": receipt_path,
-    "expected_pid": None,
-}
-activation_record_path = Path(state_root) / "activation-record.json"
-write_private_json(activation_record_path, activation_record)
-test_abort_after("provenance")
+result = generate_publication_files(
+    plist_path=Path(os.environ["PLIST"]),
+    provenance_path=Path(os.environ["RUNTIME_PROVENANCE"]),
+    service_env_path=Path(os.environ["SERVICE_ENV"]),
+    state_base=os.environ["STATE_BASE"],
+    state_root=os.environ["STATE_ROOT"],
+    supervisor_db=os.environ["SUPERVISOR_DB"],
+    ledger_marker=os.environ["LEDGER_MARKER"],
+    stdout_log=os.environ["STDOUT_LOG"],
+    stderr_log=os.environ["STDERR_LOG"],
+    python_bin=os.environ["PYTHON_BIN"],
+    ofloop_bin=os.environ["OFLOOP_BIN"],
+    claude_bin=os.environ.get("CLAUDE_BIN") or None,
+    service_path=os.environ["SERVICE_PATH"],
+    source_root=os.environ.get("SOURCE_ROOT") or None,
+    source_head=os.environ.get("SOURCE_HEAD") or None,
+    ofloop_version=os.environ.get("OFLOOP_VERSION") or None,
+    source_version=os.environ.get("SOURCE_VERSION") or None,
+    runtime_generation=os.environ.get("RUNTIME_GENERATION") or None,
+    label=os.environ["LABEL"],
+)
+# Emit a single JSON line so the shell can recover the activation_id
+# for use downstream (active-identity proof reads it from the plist
+# env var OFLOOP_ACTIVATION_ID, but the shell also references the
+# receipt_path / activation_record_path directly).
+print(json.dumps({
+    "activation_id": result.activation_id,
+    "receipt_path": str(result.receipt_path),
+    "plist_path": str(result.plist_path),
+    "provenance_path": str(result.provenance_path),
+    "service_env_path": str(result.service_env_path),
+    "activation_record_path": str(result.activation_record_path),
+}))
 PY
+)" || PUBLICATION_OUT=""
+ACTIVATION_ID=""
+RECEIPT_PATH=""
+ACTIVATION_RECORD_PATH=""
+if [[ -n "$PUBLICATION_OUT" ]]; then
+  ACTIVATION_ID="$(python3 -B -c "import json,sys; print(json.loads(sys.argv[1])['activation_id'])" "$PUBLICATION_OUT")"
+  RECEIPT_PATH="$(python3 -B -c "import json,sys; print(json.loads(sys.argv[1])['receipt_path'])" "$PUBLICATION_OUT")"
+  ACTIVATION_RECORD_PATH="$(python3 -B -c "import json,sys; print(json.loads(sys.argv[1])['activation_record_path'])" "$PUBLICATION_OUT")"
+fi
 
 if command -v plutil >/dev/null 2>&1; then
   if ! plutil -lint "$PLIST" >/dev/null 2>&1; then

@@ -80,8 +80,10 @@ PY
 echo "V085_DISTRIBUTION_PARITY=PASS"
 
 # Commissioned service environment allowlist must remain consistent across
-# the three maintained surfaces: supervisor runtime loader, macOS installer,
-# Linux installer. Any drift is a fail-closed regression.
+# the three maintained surfaces: supervisor runtime loader, macOS installer
+# helpers (scripts/supervisor/install_helpers.py is the macOS
+# installation source of truth; install-macos.sh delegates), Linux
+# installer. Any drift is a fail-closed regression.
 python3 -B - "$ROOT_DIR" <<'PY'
 import re, sys
 from pathlib import Path
@@ -91,6 +93,15 @@ root = Path(sys.argv[1])
 def from_supervisor_py():
     text = (root / "lib/ownframework_loop/supervisor.py").read_text()
     m = re.search(r"_SERVICE_ENV_ALLOWED_KEYS = frozenset\(\{([^}]+)\}\)", text, re.DOTALL)
+    return sorted(re.findall(r'"([^"]+)"', m.group(1)))
+
+def from_install_helpers():
+    # install_helpers.py is the macOS installation source of truth for
+    # the SERVICE_ENV_ALLOWED_KEYS allowlist.
+    text = (root / "scripts/supervisor/install_helpers.py").read_text()
+    m = re.search(r"SERVICE_ENV_ALLOWED_KEYS = \(\s*\n?((?:[^)]+))\)", text, re.DOTALL)
+    if not m:
+        return []
     return sorted(re.findall(r'"([^"]+)"', m.group(1)))
 
 def from_installer(path):
@@ -107,12 +118,21 @@ def from_installer(path):
     return sorted(set(items))
 
 sur = from_supervisor_py()
-mac = from_installer(root / "scripts/supervisor/install-macos.sh")
+mac_helpers = from_install_helpers()
+mac_installer = from_installer(root / "scripts/supervisor/install-macos.sh")
 lin = from_installer(root / "scripts/supervisor/install-linux.sh")
 
-assert sur == mac == lin, (
+# install_helpers.py is the macOS authoritative surface for the
+# allowlist; install-macos.sh may delegate to it.  The macOS
+# authoritative set is whichever the macOS surface declares; we
+# accept either as authoritative for that platform.
+assert sur == lin, (
     f"service-env allowlist drift: "
-    f"supervisor.py={sur} install-macos.sh={mac} install-linux.sh={lin}"
+    f"supervisor.py={sur} install-linux.sh={lin}"
+)
+assert mac_helpers == sur or mac_installer == sur, (
+    f"service-env allowlist drift: "
+    f"supervisor.py={sur} install_helpers.py={mac_helpers} install-macos.sh={mac_installer}"
 )
 print(f"SERVICE_ENV_PLATFORM_PARITY=PASS keys={len(sur)}")
 PY

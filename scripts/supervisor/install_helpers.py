@@ -123,6 +123,24 @@ class CleanupClassification:
     detail: str
 
 
+# Canonical set of auth/provider vars that may be persisted into the
+# commissioned Loop service-env file.  Kept here as a module-level
+# constant so the allowlist drift test can grep this file (and the
+# Linux installer's parallel surface) for the canonical set.
+SERVICE_ENV_ALLOWED_KEYS = (
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_BASE_URL",
+    "ANTHROPIC_MODEL",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL",
+    "CLAUDE_CODE_OAUTH_TOKEN",
+    "CLAUDE_CODE_OAUTH_REFRESH_TOKEN",
+    "CLAUDE_CODE_OAUTH_SCOPES",
+    "CLAUDE_CONFIG_DIR",
+)
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -152,6 +170,7 @@ def _build_payload(
     label: str,
     python_bin: str,
     ofloop_bin: str,
+    state_base: str,
     supervisor_db: str,
     ledger_marker: str,
     probe_script: str,
@@ -176,7 +195,14 @@ def _build_payload(
         "PYTHON_BIN": python_bin,
         "OFLOOP_BIN": ofloop_bin,
         "OFLOOP_RUNTIME_ROOT": str(Path(ofloop_bin).resolve(strict=False).parent.parent),
-        "XDG_STATE_HOME": str(Path(supervisor_db).resolve(strict=False).parent.parent),
+        # XDG_STATE_HOME is the raw state_base the installer passed in,
+        # NOT a canonicalized derivation.  The installer pre-canonicalizes
+        # other paths (--db, OFLOOP_RUNTIME_ROOT) but the plist's
+        # XDG_STATE_HOME must match the runtime's view of STATE_BASE
+        # verbatim so the launched supervisor's env agrees byte-for-byte
+        # with the plist (real macOS launchd propagates the env to the
+        # child verbatim).
+        "XDG_STATE_HOME": state_base,
         "OFLOOP_ACTIVATION_ID": activation_id,
         "OFLOOP_RECEIPT_PATH": receipt_path,
         "OFLOOP_RUNTIME_GENERATION": "",  # filled by caller
@@ -190,18 +216,7 @@ def _build_payload(
         # provider/auth/model aliases the durable launchd service
         # needs are persisted in one private Loop service-env file
         # instead of being embedded in the plist.
-        for auth_var in (
-            "ANTHROPIC_API_KEY",
-            "ANTHROPIC_AUTH_TOKEN",
-            "ANTHROPIC_BASE_URL",
-            "ANTHROPIC_MODEL",
-            "ANTHROPIC_DEFAULT_OPUS_MODEL",
-            "ANTHROPIC_DEFAULT_SONNET_MODEL",
-            "CLAUDE_CODE_OAUTH_TOKEN",
-            "CLAUDE_CODE_OAUTH_REFRESH_TOKEN",
-            "CLAUDE_CODE_OAUTH_SCOPES",
-            "CLAUDE_CONFIG_DIR",
-        ):
+        for auth_var in SERVICE_ENV_ALLOWED_KEYS:
             value = os.environ.get(auth_var)
             if value:
                 service_env[auth_var] = value
@@ -279,6 +294,7 @@ def generate_publication_files(
         label=label,
         python_bin=python_bin,
         ofloop_bin=ofloop_bin,
+        state_base=state_base,
         supervisor_db=supervisor_db,
         ledger_marker=ledger_marker,
         probe_script=probe_script,
@@ -315,18 +331,7 @@ def generate_publication_files(
     # resolving the env-var presence; mirror that exactly.
     service_env: dict[str, str] = {}
     if claude_bin:
-        for auth_var in (
-            "ANTHROPIC_API_KEY",
-            "ANTHROPIC_AUTH_TOKEN",
-            "ANTHROPIC_BASE_URL",
-            "ANTHROPIC_MODEL",
-            "ANTHROPIC_DEFAULT_OPUS_MODEL",
-            "ANTHROPIC_DEFAULT_SONNET_MODEL",
-            "CLAUDE_CODE_OAUTH_TOKEN",
-            "CLAUDE_CODE_OAUTH_REFRESH_TOKEN",
-            "CLAUDE_CODE_OAUTH_SCOPES",
-            "CLAUDE_CONFIG_DIR",
-        ):
+        for auth_var in SERVICE_ENV_ALLOWED_KEYS:
             value = os.environ.get(auth_var)
             if value:
                 service_env[auth_var] = value
