@@ -127,6 +127,21 @@ def default_startup_ready_path(state_root: Path | str) -> Path:
     return Path(state_root).expanduser().resolve(strict=False) / "ownframework-loop" / "supervisor-startup-ready.json"
 
 
+def _default_supervisor_db_path() -> str:
+    """Best-effort canonical default supervisor db path for the durable supervisor.
+
+    Mirrors ``supervisor.default_db_path`` so the durable
+    attestation can independently derive the canonical db path
+    when the supervisor was launched without an explicit ``--db``.
+    Uses ``XDG_STATE_HOME`` (or ``$HOME/.local/state``) and
+    canonicalizes the result the same way ``Path.resolve()`` does
+    at every other layer.
+    """
+    import os as _os
+    state_base = _os.environ.get("XDG_STATE_HOME") or str(Path.home() / ".local" / "state")
+    return str(Path(state_base).expanduser().resolve(strict=False) / "ownframework-loop" / "supervisor.sqlite3")
+
+
 def derive_startup_ready(
     receipt: Mapping[str, Any],
     ready_pid: int,
@@ -189,10 +204,12 @@ def derive_startup_ready(
             "fields into a durable attestation"
         )
     if actual_db_path is None and default_db_path_resolver is None:
-        raise ValueError(
-            "startup_ready requires actual_db_path or a default_db_path_resolver; refusing "
-            "to copy receipt fields into a durable attestation"
-        )
+        # The supervisor may legitimately not have been told its db
+        # path explicitly; resolve the canonical default the same way
+        # the supervisor's own ``default_db_path`` does.  This keeps
+        # the durable attestation independently derivable without
+        # forcing callers to pass every parameter redundantly.
+        actual_db_path = _default_supervisor_db_path()
 
     # Independently derive the durable supervisor's own runtime
     # context from its argv and env.  ``read_runtime_context_from_argv``
