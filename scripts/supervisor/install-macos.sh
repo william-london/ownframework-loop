@@ -158,7 +158,7 @@ if macos_service_lifecycle.probe_canonical_label(label, domain):
         sys.exit(1)
 sys.exit(0)
 PY
-)"
+)" || REMOVE_OUT=""
   if [[ "$REMOVE_OUT" == *"reason=transaction_recovery_stale_label_removal_failed"* ]]; then
     echo "SUPERVISOR_INSTALL=REFUSED reason=transaction_recovery_stale_label_removal_failed" >&2
     return 15
@@ -550,7 +550,7 @@ if macos_service_lifecycle.probe_canonical_label(label, domain):
         sys.exit(1)
 sys.exit(0)
 PY
-)"
+)" || REMOVE_OUT=""
 if [[ "$REMOVE_OUT" == *"reason=stale_label_removal_failed"* ]]; then
   # Canonical label still loaded after removal attempt.  Restore
   # prior on-disk configuration bytes (for evidence / retry) but
