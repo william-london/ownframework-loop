@@ -720,8 +720,13 @@ expected = {
     "runtime_generation": exp_runtime_generation,
     "runtime_root": exp_runtime_root,
     "ofloop_bin": exp_ofloop_bin,
-    "supervisor_db": exp_db,
-    "ledger_marker": exp_ledger,
+    # Canonicalize the expected supervisor_db and ledger_marker the
+    # same way the launcher did (_Path.resolve(strict=False)), so
+    # /var/... becomes /private/var/... on macOS.  Receipt-vs-
+    # verification exact-match would otherwise fail on path
+    # symlink-only differences.
+    "supervisor_db": str(_Path(exp_db).expanduser().resolve(strict=False)),
+    "ledger_marker": str(_Path(exp_ledger).expanduser().resolve(strict=False)),
 }
 ok, reason = service_identity.verify_active_identity(receipt, activation_id, expected)
 if not ok:
@@ -774,8 +779,8 @@ ready_expected = {
     "runtime_generation": exp_runtime_generation,
     "runtime_root": exp_runtime_root,
     "ofloop_bin": exp_ofloop_bin,
-    "supervisor_db": exp_db,
-    "ledger_marker": exp_ledger,
+    "supervisor_db": str(_Path(exp_db).expanduser().resolve(strict=False)),
+    "ledger_marker": str(_Path(exp_ledger).expanduser().resolve(strict=False)),
 }
 ok2, reason2 = service_identity.verify_startup_ready(startup_ready, activation_id, ready_expected)
 if not ok2:

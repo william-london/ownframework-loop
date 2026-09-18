@@ -146,11 +146,14 @@ except ValueError as exc:
 # Override supervisor_db / ledger_marker / runtime_root / runtime_generation
 # in the receipt to match what the test wants to assert. These mirror the
 # installer's installed layout when the test wants the receipt to pass
-# verification.
+# verification.  Canonicalize the paths the same way
+# ``derive_active_identity`` does (via .resolve(strict=False)) so the
+# receipt's supervisor_db/ledger_marker match the canonical paths the
+# startup-ready attestation will derive post-exec.
 if supervisor_db:
-    receipt["supervisor_db"] = supervisor_db
+    receipt["supervisor_db"] = str(Path(supervisor_db).expanduser().resolve(strict=False))
 if ledger_marker:
-    receipt["ledger_marker"] = ledger_marker
+    receipt["ledger_marker"] = str(Path(ledger_marker).expanduser().resolve(strict=False))
 if override_generation:
     receipt["runtime_generation"] = override_generation
 service_identity.write_receipt_atomic(receipt, Path(receipt_path))
@@ -158,15 +161,19 @@ service_identity.write_receipt_atomic(receipt, Path(receipt_path))
 # Now write the startup-ready attestation.  Seam 8 of the residual
 # closure: exercise the REAL durable-attestation owner with INDEPENDENT
 # actual runtime context.  In production the launcher exec's into the
-# durable supervisor with argv ``[<ofloop>, "supervisor", "serve"]``;
+# durable supervisor with argv ``[<ofloop_bin>, "supervisor", "serve"]``;
 # the supervisor's startup attestation derives everything from its own
 # post-exec context and compares to the receipt.  The shim simulates
-# that exact flow: it derives the post-exec argv from the plist's
-# ProgramArguments (dropping the launcher preamble), the post-exec
-# env from the plist's EnvironmentVariables, and the post-exec db
-# path from the receipt-supervisor_db override (or canonical default).
-post_exec_argv = argv_list[2:] if len(argv_list) > 2 else argv_list
-actual_db = supervisor_db if supervisor_db else None
+# that exact flow: it reconstructs the post-exec argv from the plist
+# by extracting ``--ofloop`` from the launcher argv (which is the
+# actual exec target) and using it as ``argv[0]``.
+ofloop_argv = ""
+for i, tok in enumerate(argv_list):
+    if tok == "--ofloop" and i + 1 < len(argv_list):
+        ofloop_argv = str(argv_list[i + 1])
+        break
+post_exec_argv = [ofloop_argv, "supervisor", "serve"] if ofloop_argv else argv_list
+actual_db = str(Path(supervisor_db).expanduser().resolve(strict=False)) if supervisor_db else None
 actual_ledger = ledger_marker if ledger_marker else None
 try:
     attestation = service_identity.derive_startup_ready(

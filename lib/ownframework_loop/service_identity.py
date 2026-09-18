@@ -541,9 +541,15 @@ def derive_active_identity(
     supervisor_db = parsed_args.get("db") or ""
     if not supervisor_db:
         raise ValueError("--db is required to derive an activation receipt")
+    # Canonicalize the supervisor_db the same way the durable
+    # supervisor will resolve it post-exec; otherwise receipt-vs-
+    # attestation exact-match fails on macOS where /var is a symlink
+    # to /private/var.
+    supervisor_db = str(Path(supervisor_db).expanduser().resolve(strict=False))
     ledger_marker = parsed_args.get("ledger_marker") or ""
     if not ledger_marker:
         raise ValueError("--ledger-marker is required to derive an activation receipt")
+    ledger_marker = str(Path(ledger_marker).expanduser().resolve(strict=False))
     receipt = {
         "schema": ACTIVATION_RECEIPT_SCHEMA,
         "activation_id": activation_id,
