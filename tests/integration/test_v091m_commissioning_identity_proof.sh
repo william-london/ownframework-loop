@@ -185,6 +185,7 @@ attestation = {
     "supervisor_db": body["supervisor_db"],
     "ledger_marker": body["ledger_marker"],
     "ready_at": body.get("started_at", 0.0),
+    "generation_source": body.get("generation_source", "recomputed_from_payload"),
 }
 tmp = ready_path.with_name(ready_path.name + ".tmp")
 with open(tmp, "w", encoding="utf-8") as fh:
