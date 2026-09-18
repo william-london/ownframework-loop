@@ -84,6 +84,14 @@ def _resolve_current_work_unit(canonical_repo: Path, run_id: str) -> str:
         return ""
     state = state_mod.load_verified(canonical_repo, run_id)
     if state_mod.is_program_state(state):
+        program = state.get("program") or {}
+        # v0.9.1+: a whole-product (program_final) repair build is owned
+        # by no individual CP.  Never silently attribute the repair to
+        # the first packet work unit — surface the typed program-final
+        # marker so build_finalize can authorize the whole-packet repair
+        # membership check explicitly.
+        if program.get("review_scope") == program_mod.REVIEW_SCOPE_PROGRAM_FINAL:
+            return program_mod.PROGRAM_FINAL_REPAIR_WORK_UNIT_ID
         cp_id = _resolve_current_checkpoint(canonical_repo, run_id)
         cps = (meta.get("checkpoint_graph") or {}).get("checkpoints") or []
         for cp in cps:

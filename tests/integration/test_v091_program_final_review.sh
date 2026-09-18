@@ -32,7 +32,7 @@ sys.path.insert(0, str(ROOT / "tests"))
 
 from ownframework_loop import (
     approval, dispatch, git_checks, packet as packet_mod, program as program_mod,
-    receipts, state as state_mod, util, worktrees,
+    receipts, review_finalize, runtime_env, state as state_mod, util, worktrees,
 )
 from state_seed import seed_state
 
@@ -244,36 +244,6 @@ def advance_to_reviewing(repo, run_id, packet):
                         reason="build complete",
                         commit_sha=new_sha)
     # Claim review pass.
-    review_claim = program_mod.claim_review_pass(
-        canonical_repo=repo, run_id=run_id, packet=packet,
-    )
-    return cp_id, new_sha, review_claim
-    # Write a BUILD_RECEIPT and transition
-    approval_doc = approval.load_approval(repo, run_id)
-    receipt = {
-        "schema": "ownframework-loop-build-receipt/v1",
-        "run_id": run_id, "candidate_sha": new_sha,
-        "candidate_branch": candidate_branch,
-        "packet_sha256": approval_doc["packet_sha256"],
-        "approval_sha256": approval.approval_artifact_sha256(approval_doc),
-        "baseline_sha": approval_doc["baseline_sha"],
-        "build_pass_number": claim["cp_pass_number"],
-        "checkpoint_id": cp_id, "work_unit_id": "UNIT-1",
-        "outcome": "completed",
-        "files_changed": ["src/_ofloop_marker.txt"],
-        "summary": f"build {claim['cp_pass_number']}",
-        "completion_evidence": "ok",
-        "produced_at": "2026-09-17T00:00:00Z",
-    }
-    receipts.write_receipt(repo, run_id, receipt)
-    # Programmatic transition BUILDING -> READY_FOR_REVIEW using the same
-    # path as build_finalize.
-    cur = state_mod.load(repo, run_id)
-    assert cur.get("state") == "BUILDING", cur.get("state")
-    state_mod.transition(repo, run_id, to_state="READY_FOR_REVIEW", actor="of-builder",
-                        reason="build complete",
-                        commit_sha=new_sha)
-    # Claim review pass
     review_claim = program_mod.claim_review_pass(
         canonical_repo=repo, run_id=run_id, packet=packet,
     )
@@ -1030,6 +1000,443 @@ prog_final = state_final.get("program") or {}
 assert prog_final.get("review_scope") == "program_final", \
     f"M: scope must persist across the must-fix, got {prog_final.get('review_scope')!r}"
 print("TEST_M_CROSS_LAYER_DEFECT_DETECTED=PASS")
+
+# ============================================================
+# TEST N: real end-to-end program_final repair via the production
+#         build prepare / claim / finalize chain.  No hand-written
+#         BUILD_RECEIPT.  Verifies:
+#           - final review CHANGES_REQUESTED funds repair
+#           - real build_prepare returns PROGRAM-FINAL work_unit_id
+#           - real build_finalize accepts empty current_checkpoints
+#             under program_final scope
+#           - real repair build -> new candidate SHA
+#           - final review re-binds verdict to the new SHA
+#           - stale verdict for old SHA cannot approve new SHA
+# ============================================================
+import json as _json_mod
+from ownframework_loop import build_prepare as build_prepare_mod, build_finalize as build_finalize_mod
+
+pkt_n, baseline_n = materialise_program(repo, "run-N", work_unit_count=1,
+                                        max_repair=1, cp_build=3, cp_review=3)
+# Drive CP-1 to REVIEWING and APPROVED (this advances to CP-2).
+cid_n1, sha_n1, _ = advance_to_reviewing(repo, "run-N", pkt_n)
+approve_finalize_review(repo, "run-N", pkt_n, sha_n1,
+                        make_assessment_path(repo, "run-N"))
+# Drive CP-2 to REVIEWING and APPROVED so the run enters program_final.
+cid_n2, sha_n2, _ = advance_to_reviewing(repo, "run-N", pkt_n)
+approve_finalize_review(repo, "run-N", pkt_n, sha_n2,
+                        make_assessment_path(repo, "run-N"))
+state_pre_final = state_mod.load(repo, "run-N")
+assert state_pre_final.get("state") == "READY_FOR_REVIEW", state_pre_final
+prog_pre_final = state_pre_final.get("program") or {}
+assert prog_pre_final.get("review_scope") == "program_final", prog_pre_final
+sha_n_pre_repair = sha_n2
+
+# Final review returns CHANGES_REQUESTED so we can drive the repair.
+program_mod.claim_review_pass(canonical_repo=repo, run_id="run-N", packet=pkt_n)
+verdict_n_mustfix = approve_finalize_review(
+    repo, "run-N", pkt_n, sha_n_pre_repair,
+    make_assessment_path(repo, "run-N"),
+    recommended="CHANGES_REQUESTED",
+    must_fix=[{
+        "finding_id": "F-N-1", "severity": "high",
+        "classification": "must_fix",
+        "title": "synthetic must-fix for program_final repair",
+        "description": "real-path repair test",
+        "file": "src/cli.py", "line": 1,
+    }],
+)
+state_after_mustfix = state_mod.load(repo, "run-N")
+prog_after_mustfix = state_after_mustfix.get("program") or {}
+# scope must persist across the must-fix; otherwise the next
+# claim_build_pass would be classified as a fresh CP work unit
+if prog_after_mustfix.get("review_scope") != "program_final":
+    raise RuntimeError("N: scope fail")
+
+# Claim the repair BUILD via the production program claim owner.
+repair_claim = program_mod.claim_build_pass(
+    canonical_repo=repo, run_id="run-N", packet=pkt_n,
+)
+assert repair_claim["cp_id"] == "", \
+    f"N: program_final repair claim must have empty cp_id, got {repair_claim['cp_id']!r}"
+
+# Real build_prepare: must surface PROGRAM-FINAL marker, not the first
+# packet work unit (the deterministic core must never fake first-unit
+# ownership for a whole-product repair).
+prep_n = build_prepare_mod.prepare(canonical_repo=repo, run_id="run-N")
+assert prep_n["cp_id"] == "", prep_n["cp_id"]
+assert prep_n["work_unit_id"] == program_mod.PROGRAM_FINAL_REPAIR_WORK_UNIT_ID, \
+    f"N: build_prepare work_unit_id must be {program_mod.PROGRAM_FINAL_REPAIR_WORK_UNIT_ID!r}, " \
+    f"got {prep_n['work_unit_id']!r}"
+# Full packet acceptance authority is the correct scope for the repair
+# (whole-program, not scoped to a single checkpoint).
+assert set(prep_n["acceptance_criterion_ids"]) == {"AC-1", "AC-2"}
+
+wt_n = repo / ".worktrees" / "ownframework-loop" / "run-N" / "builder"
+(wt_n / "src").mkdir(exist_ok=True)
+(wt_n / "src" / "cli.py").write_text(
+    "def cli_main():\n    return 'cli repaired'\n"
+)
+subprocess.run(["git", "-C", str(wt_n), "add", "src/cli.py"], check=True, capture_output=True)
+subprocess.run(["git", "-C", str(wt_n), "commit", "-qm", "fix: program_final real-path repair"],
+               check=True, capture_output=True)
+new_sha_n = subprocess.check_output(["git", "-C", str(wt_n), "rev-parse", "HEAD"], text=True).strip()
+assert new_sha_n != sha_n_pre_repair, "N: repair commit must advance candidate SHA"
+
+# Fill the agent_result with the typed program-final work_unit_id so
+# build_finalize accepts it as authoritative whole-product ownership.
+agent_result_path_n = Path(prep_n["agent_result_path"])
+from ownframework_loop import build_agent as build_agent_mod
+build_agent_mod.write_skeleton(canonical_repo=repo, run_id="run-N")
+agent_doc_n = _json_mod.loads(agent_result_path_n.read_text())
+agent_doc_n.update({
+    "summary": "real-path program_final repair",
+    "outcome_requested": "candidate_ready",
+    "unit_ids_completed": [],
+    "acceptance_addressed": ["AC-1"],
+    "work_unit_id": program_mod.PROGRAM_FINAL_REPAIR_WORK_UNIT_ID,
+})
+agent_result_path_n.write_text(_json_mod.dumps(agent_doc_n, indent=2, sort_keys=True) + "\n")
+
+# Real build_finalize: must accept empty current_checkpoints under
+# program_final scope and write a deterministic BUILD_RECEIPT.
+build_finalize_mod.finalize_build(
+    canonical_repo=repo, run_id="run-N",
+    agent_result_path=agent_result_path_n, actor="of-builder",
+)
+state_after_repair = state_mod.load(repo, "run-N")
+assert state_after_repair.get("state") == "READY_FOR_REVIEW", \
+    f"N: repair build must land at READY_FOR_REVIEW, got {state_after_repair.get('state')!r}"
+prog_after_repair = state_after_repair.get("program") or {}
+assert prog_after_repair.get("review_scope") == "program_final", \
+    "N: scope must remain program_final across the real-path repair"
+
+# Authoritative BUILD_RECEIPT was written by build_finalize, not by hand.
+receipt_n = _json_mod.loads((repo / ".ownframework-loop" / "run-N" / "BUILD_RECEIPT.json").read_text())
+assert receipt_n["candidate_sha"] == new_sha_n, receipt_n
+# The whole-product repair's typed work-unit identity must surface in
+# the receipt, not a fake first-work-unit.
+assert receipt_n.get("work_unit_id") == program_mod.PROGRAM_FINAL_REPAIR_WORK_UNIT_ID, \
+    f"N: BUILD_RECEIPT work_unit_id must be {program_mod.PROGRAM_FINAL_REPAIR_WORK_UNIT_ID!r}, got {receipt_n.get('work_unit_id')!r}"
+
+# Final re-review on the new SHA APPROVES — the exact identity binding
+# proves stale evidence (old SHA) cannot approve the new SHA.
+program_mod.claim_review_pass(canonical_repo=repo, run_id="run-N", packet=pkt_n)
+verdict_n_final = approve_finalize_review(
+    repo, "run-N", pkt_n, new_sha_n, make_assessment_path(repo, "run-N"),
+)
+assert verdict_n_final.get("verdict") == "APPROVED", verdict_n_final
+assert verdict_n_final.get("candidate_sha_reviewed") == new_sha_n, \
+    f"N: final verdict must bind to new SHA, got {verdict_n_final.get('candidate_sha_reviewed')!r}"
+assert verdict_n_final.get("review_scope") == "program_final", verdict_n_final
+state_n_terminal = state_mod.load(repo, "run-N")
+assert state_n_terminal.get("state") == "APPROVED", \
+    f"N: terminal state should be APPROVED, got {state_n_terminal.get('state')!r}"
+print("TEST_N_REAL_PROGRAM_FINAL_REPAIR=PASS")
+
+# ============================================================
+# TEST O: final review validation set includes the previously-completed
+#         checkpoint-local validations against the exact final SHA.
+#         A final repair that mutates shared source so CP-1 validation
+#         would fail must prevent PROGRAM APPROVED.
+# ============================================================
+from ownframework_loop import program as program_resolve
+repo_o = make_repo("run-O-validation", root)
+subprocess.run(["git", "-C", str(repo_o), "config", "user.name", "test"], check=True, capture_output=True)
+subprocess.run(["git", "-C", str(repo_o), "config", "user.email", "t@t.invalid"], check=True, capture_output=True)
+run_o = "run-O"
+run_dir_o = repo_o / ".ownframework-loop" / run_o
+run_dir_o.mkdir(parents=True)
+pkt_o = {
+    "schema": "ownframework-work-packet/v3",
+    "packet_id": "v091-validation-set",
+    "created_at": "2026-09-17T00:00:00Z",
+    "work_class": "HARDENING",
+    "risk_class": "low",
+    "title": "validation rerun",
+    "target": {"repo": str(repo_o.resolve(strict=False)), "branch": "master", "classification": "local_only"},
+    "execution_mode": "program",
+    "checkpoint_graph": {
+        "execution_order": ["CP-1", "CP-2"],
+        "checkpoints": [
+            {"id": "CP-1", "title": "alpha", "scope": "src/",
+             "depends_on": [],
+             "acceptance_criterion_ids": ["AC-1"],
+             "required_validation": [{
+                 "name": "alpha_check", "command": "test -f src/alpha_marker",
+                 "kind": "fast", "expected_exit_code": 0,
+             }],
+             "risk_budget": {"max_build_passes": 4, "max_review_passes": 4, "max_repair_rounds": 1}},
+            {"id": "CP-2", "title": "beta", "scope": "src/",
+             "depends_on": ["CP-1"],
+             "acceptance_criterion_ids": ["AC-2"],
+             "required_validation": [{
+                 "name": "beta_check", "command": "test -f src/beta_marker",
+                 "kind": "fast", "expected_exit_code": 0,
+             }],
+             "risk_budget": {"max_build_passes": 4, "max_review_passes": 4, "max_repair_rounds": 1}},
+        ],
+    },
+    "promotion_policy": "human_gate",
+    "acceptance_criteria": [
+        {"id": "AC-1", "text": "alpha"}, {"id": "AC-2", "text": "beta"},
+    ],
+    "non_goals": [],
+    "allowed_paths": ["src/"],
+    "protected_paths": [".ownframework-loop/"],
+    "work_units": [
+        {"id": "UNIT-1", "title": "alpha", "scope": "src/", "acceptance": ["AC-1"]},
+        {"id": "UNIT-2", "title": "beta", "scope": "src/", "acceptance": ["AC-2"]},
+    ],
+    "required_validation": [{
+        "name": "global_check", "command": "test -f src/global_marker",
+        "kind": "fast", "expected_exit_code": 0,
+    }],
+    "merge_authority": "human_only",
+    "deploy_authority": "human_only",
+    "push_authority": "human_only",
+    "external_action_authority": "none",
+    "risk_budget": {"max_build_passes": 10, "max_review_passes": 10,
+                     "max_repair_rounds": 2, "max_files_changed": 100,
+                     "max_diff_lines": 5000},
+}
+baseline_o = subprocess.check_output(
+    ["git", "-C", str(repo_o), "rev-parse", "HEAD"], text=True,
+).strip()
+(run_dir_o / "WORK_PACKET.md").write_text(
+    "```json\n" + _json_mod.dumps(pkt_o, indent=2, sort_keys=True) + "\n```\n"
+)
+state_o_initial = state_mod.initial_state(run_o)
+prog_o_initial = program_mod.materialise_initial_program_state(
+    pkt_o, baseline_sha=baseline_o, candidate_branch=f"factory/candidate/{run_o}",
+)
+state_o_initial["program"] = prog_o_initial
+state_o_initial["schema"] = state_mod.PROGRAM_STATE_SCHEMA_VERSION
+seed_state(repo_o, run_o, state_o_initial, reason="O fixture materialization")
+# Transition to READY_TO_BUILD (the program-final seam needs the run to
+# be in a buildable state, just like the existing materialise_program
+# helper does for run-A/B/...).
+state_mod.transition(repo_o, run_o, to_state="READY_TO_BUILD", actor="test",
+                    reason="O fixture approved")
+sha_pkt_o = __import__("hashlib").sha256((run_dir_o / "WORK_PACKET.md").read_bytes()).hexdigest()
+approval_o = {
+    "schema": "ownframework-loop-approval/v1",
+    "run_id": run_o, "packet_sha256": sha_pkt_o,
+    "approved_at": "2026-09-17T00:00:00Z", "approved_actor": "test",
+    "canonical_repo": str(repo_o.resolve(strict=False)),
+    "baseline_branch": "master", "baseline_sha": baseline_o,
+    "candidate_branch": f"factory/candidate/{run_o}",
+    "packet_schema": "ownframework-work-packet/v3",
+    "approval_method": "tty_confirmation",
+    "confirmation_token": approval.derive_confirmation_token(sha_pkt_o),
+}
+(run_dir_o / "APPROVAL.json").write_text(_json_mod.dumps(approval_o, indent=2, sort_keys=True))
+import os as _os_mod
+_os_mod.chmod(run_dir_o / "APPROVAL.json", 0o600)
+# The validation executor requires an authoritative capability binding
+# (v0.9.1+ production seam).  Provision it explicitly so TEST O does
+# not depend on the test runner's commissioning flow.
+from ownframework_loop import capabilities, capability_binding, runner_profiles
+_resolution_o = capabilities.resolve_capabilities(
+    [], canonical_repo=repo_o, role="builder",
+    repo_cache_root=runtime_env.repo_tool_cache_dir(repo_o),
+    ephemeral_cache_root=runtime_env.runtime_cache_dir(repo_o, run_o, "validation") / "capability-cache",
+    packet_network_allowlist=[],
+)
+_profile_o = runner_profiles.resolve_profile("default", provider="claude-code")
+runner_profiles.verify_profile_integrity(_profile_o)
+capability_binding.ensure_run_binding(
+    repo_o, run_o, _resolution_o, _profile_o, allow_create=True,
+)
+
+# Build CP-A: claim, then prepare (which creates the builder worktree),
+# then mutate inside the worktree, then finalize.  This uses the REAL
+# production build claim / prepare / finalize chain (no hand-written
+# BUILD_RECEIPT).
+program_mod.claim_build_pass(canonical_repo=repo_o, run_id=run_o, packet=pkt_o)
+prep_a = build_prepare_mod.prepare(canonical_repo=repo_o, run_id=run_o)
+wt_o = Path(prep_a["builder_worktree"])
+(wt_o / "src").mkdir(exist_ok=True)
+(wt_o / "src" / "alpha_marker").write_text("alpha\n")
+(wt_o / "src" / "global_marker").write_text("global\n")
+subprocess.run(["git", "-C", str(wt_o), "add", "src/alpha_marker", "src/global_marker"],
+               check=True, capture_output=True)
+subprocess.run(["git", "-C", str(wt_o), "commit", "-qm", "CP-A build"], check=True, capture_output=True)
+sha_a = subprocess.check_output(["git", "-C", str(wt_o), "rev-parse", "HEAD"], text=True).strip()
+agent_a_path = Path(prep_a["agent_result_path"])
+from ownframework_loop import build_agent as build_agent_mod
+build_agent_mod.write_skeleton(canonical_repo=repo_o, run_id=run_o)
+agent_a = _json_mod.loads(agent_a_path.read_text())
+agent_a.update({
+    "summary": "CP-A build",
+    "outcome_requested": "candidate_ready",
+    "unit_ids_completed": ["UNIT-1"],
+    "acceptance_addressed": ["AC-1"],
+})
+agent_a_path.write_text(_json_mod.dumps(agent_a, indent=2, sort_keys=True) + "\n")
+build_finalize_mod.finalize_build(
+    canonical_repo=repo_o, run_id=run_o,
+    agent_result_path=agent_a_path, actor="of-builder",
+)
+program_mod.claim_review_pass(canonical_repo=repo_o, run_id=run_o, packet=pkt_o)
+approve_finalize_review(repo_o, run_o, pkt_o, sha_a, make_assessment_path(repo_o, run_o))
+
+# Build CP-B: add beta_marker AND delete alpha_marker so CP-A validation
+# would fail against the resulting exact SHA if the final review trusted
+# stale evidence.
+program_mod.claim_build_pass(canonical_repo=repo_o, run_id=run_o, packet=pkt_o)
+prep_b = build_prepare_mod.prepare(canonical_repo=repo_o, run_id=run_o)
+wt_o = Path(prep_b["builder_worktree"])
+(wt_o / "src").mkdir(exist_ok=True)
+(wt_o / "src" / "beta_marker").write_text("beta\n")
+if (wt_o / "src" / "alpha_marker").exists():
+    (wt_o / "src" / "alpha_marker").unlink()
+subprocess.run(["git", "-C", str(wt_o), "add", "-A"], check=True, capture_output=True)
+subprocess.run(["git", "-C", str(wt_o), "commit", "-qm", "CP-B build deletes alpha_marker"],
+               check=True, capture_output=True)
+sha_b = subprocess.check_output(["git", "-C", str(wt_o), "rev-parse", "HEAD"], text=True).strip()
+assert sha_b != sha_a, "O: CP-B build must advance candidate SHA"
+agent_b_path = Path(prep_b["agent_result_path"])
+build_agent_mod.write_skeleton(canonical_repo=repo_o, run_id=run_o)
+agent_b = _json_mod.loads(agent_b_path.read_text())
+agent_b.update({
+    "summary": "CP-B build",
+    "outcome_requested": "candidate_ready",
+    "unit_ids_completed": ["UNIT-2"],
+    "acceptance_addressed": ["AC-2"],
+})
+agent_b_path.write_text(_json_mod.dumps(agent_b, indent=2, sort_keys=True) + "\n")
+build_finalize_mod.finalize_build(
+    canonical_repo=repo_o, run_id=run_o,
+    agent_result_path=agent_b_path, actor="of-builder",
+)
+program_mod.claim_review_pass(canonical_repo=repo_o, run_id=run_o, packet=pkt_o)
+approve_finalize_review(repo_o, run_o, pkt_o, sha_b, make_assessment_path(repo_o, run_o))
+
+# State should now be in program_final scope, READY_FOR_REVIEW.
+state_o_after_cp = state_mod.load(repo_o, run_o)
+prog_o_after_cp = state_o_after_cp.get("program") or {}
+assert prog_o_after_cp.get("review_scope") == "program_final", prog_o_after_cp
+assert state_o_after_cp.get("state") == "READY_FOR_REVIEW", state_o_after_cp.get("state")
+
+# Resolve the effective final-review validation set; it must include
+# top-level global_check AND CP-A's alpha_check AND CP-B's beta_check,
+# deduplicated deterministically.
+state_o_for_resolve = state_mod.load(repo_o, run_o)
+resolved = program_resolve.resolve_effective_required_validation(
+    pkt_o, state_o_for_resolve,
+)
+resolved_names = sorted(v.get("name") for v in resolved)
+assert resolved_names == ["alpha_check", "beta_check", "global_check"], \
+    f"O: expected alpha+beta+global dedup'd, got {resolved_names}"
+
+# Confirm CP-A's alpha_check WOULD fail on this exact final SHA: the
+# builder deleted src/alpha_marker.  A real final reviewer that obeys
+# the deterministic validation evidence MUST refuse APPROVED.  Drive
+# the must-fix verdict and assert the run is gated at CHANGES_REQUESTED.
+tmp_check = wt_o.parent / "O_validation_replay"
+import shutil as _shutil_mod
+if tmp_check.exists():
+    _shutil_mod.rmtree(tmp_check)
+_shutil_mod.copytree(wt_o, tmp_check)
+import subprocess as _sp_mod
+alpha_exit = _sp_mod.run(["bash", "-c", "test -f src/alpha_marker"],
+                         cwd=str(tmp_check), capture_output=True, text=True).returncode
+assert alpha_exit != 0, (
+    "O: setup error — alpha_marker should be missing at final SHA so "
+    "the final reviewer can prove the rerun matters"
+)
+program_mod.claim_review_pass(canonical_repo=repo_o, run_id=run_o, packet=pkt_o)
+make_assessment_path(repo_o, run_o).parent.mkdir(parents=True, exist_ok=True)
+make_assessment_path(repo_o, run_o).write_text(_json_mod.dumps({
+    "schema": "ownframework-loop-review-agent-assessment/v1",
+    "run_id": run_o,
+    "review_scope": "program_final",
+    "candidate_sha_claimed": sha_b,
+    "validation_results": [
+        {"name": "alpha_check", "command": "test -f src/alpha_marker",
+         "kind": "fast", "expected_exit_code": 0, "exit_code": alpha_exit,
+         "validation_status": "FAIL",
+         "evidence": "alpha_marker absent at final SHA; CP-A validation evidence stale"},
+        {"name": "beta_check", "command": "test -f src/beta_marker",
+         "kind": "fast", "expected_exit_code": 0, "exit_code": 0,
+         "validation_status": "PASS"},
+        {"name": "global_check", "command": "test -f src/global_marker",
+         "kind": "fast", "expected_exit_code": 0, "exit_code": 0,
+         "validation_status": "PASS"},
+    ],
+    "acceptance_results": [{"id": "AC-1", "result": "pass", "evidence": "ok"},
+                          {"id": "AC-2", "result": "pass", "evidence": "ok"}],
+    "non_goal_results": [],
+    "findings": [{
+        "finding_id": "F-O-stale-validation",
+        "severity": "high",
+        "classification": "must_fix",
+        "title": "CP-A validation fails on final SHA",
+        "description": (
+            "src/alpha_marker was deleted by the CP-B build.  The exact "
+            "final candidate fails CP-A's authoritative validation; the "
+            "final review must surface this."
+        ),
+        "file": "src/alpha_marker", "line": 1,
+    }],
+    "recommended_verdict": "CHANGES_REQUESTED",
+}, indent=2, sort_keys=True) + "\n")
+verdict_o_mustfix = approve_finalize_review(
+    repo_o, run_o, pkt_o, sha_b, make_assessment_path(repo_o, run_o),
+    recommended="CHANGES_REQUESTED",
+    must_fix=[{
+        "finding_id": "F-O-stale-validation",
+        "severity": "high",
+        "classification": "must_fix",
+        "title": "CP-A validation fails on final SHA",
+        "description": (
+            "src/alpha_marker was deleted by the CP-B build.  The exact "
+            "final candidate fails CP-A's authoritative validation."
+        ),
+        "file": "src/alpha_marker", "line": 1,
+    }],
+)
+state_o_after_validation = state_mod.load(repo_o, run_o)
+assert state_o_after_validation.get("state") == "CHANGES_REQUESTED", \
+    f"O: stale-validation must-fix must prevent APPROVED, got {state_o_after_validation.get('state')!r}"
+
+# After a real-path repair that restores alpha_marker, the validation
+# set rerun passes and the final review must APPROVE the new SHA.
+program_mod.claim_build_pass(canonical_repo=repo_o, run_id=run_o, packet=pkt_o)
+prep_o_repair = build_prepare_mod.prepare(canonical_repo=repo_o, run_id=run_o)
+wt_o = Path(prep_o_repair["builder_worktree"])
+(wt_o / "src").mkdir(exist_ok=True)
+(wt_o / "src" / "alpha_marker").write_text("alpha restored\n")
+subprocess.run(["git", "-C", str(wt_o), "add", "src/alpha_marker"], check=True, capture_output=True)
+subprocess.run(["git", "-C", str(wt_o), "commit", "-qm", "final repair: restore alpha_marker"],
+               check=True, capture_output=True)
+sha_o_repair = subprocess.check_output(["git", "-C", str(wt_o), "rev-parse", "HEAD"], text=True).strip()
+agent_o_repair_path = Path(prep_o_repair["agent_result_path"])
+build_agent_mod.write_skeleton(canonical_repo=repo_o, run_id=run_o)
+agent_o_repair = _json_mod.loads(agent_o_repair_path.read_text())
+agent_o_repair.update({
+    "summary": "final repair restores alpha",
+    "outcome_requested": "candidate_ready",
+    "unit_ids_completed": [],
+    "acceptance_addressed": ["AC-1", "AC-2"],
+    "work_unit_id": program_mod.PROGRAM_FINAL_REPAIR_WORK_UNIT_ID,
+})
+agent_o_repair_path.write_text(_json_mod.dumps(agent_o_repair, indent=2, sort_keys=True) + "\n")
+build_finalize_mod.finalize_build(
+    canonical_repo=repo_o, run_id=run_o,
+    agent_result_path=agent_o_repair_path, actor="of-builder",
+)
+program_mod.claim_review_pass(canonical_repo=repo_o, run_id=run_o, packet=pkt_o)
+verdict_o_final = approve_finalize_review(
+    repo_o, run_o, pkt_o, sha_o_repair, make_assessment_path(repo_o, run_o),
+)
+assert verdict_o_final.get("verdict") == "APPROVED", verdict_o_final
+assert verdict_o_final.get("candidate_sha_reviewed") == sha_o_repair, verdict_o_final
+state_o_terminal = state_mod.load(repo_o, run_o)
+assert state_o_terminal.get("state") == "APPROVED", \
+    f"O: terminal state should be APPROVED after successful final repair, got {state_o_terminal.get('state')!r}"
+print("TEST_O_FINAL_VALIDATION_RERUN=PASS")
 
 print("ALL_V091_PROGRAM_FINAL_REVIEW=PASS")
 PY

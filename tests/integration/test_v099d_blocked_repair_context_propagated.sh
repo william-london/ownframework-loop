@@ -426,7 +426,7 @@ packet = {
     'work_units': [{'id': 'UNIT-1', 'title': 'u', 'scope': 'src/'}],
     'merge_authority': 'human_only', 'deploy_authority': 'human_only',
     'push_authority': 'human_only', 'external_action_authority': 'none',
-    'risk_budget': {'max_build_passes': 6, 'max_review_passes': 7,
+    'risk_budget': {'max_build_passes': 7, 'max_review_passes': 7,
                      'max_repair_rounds': 5, 'max_files_changed': 500,
                      'max_diff_lines': 30000},
 }

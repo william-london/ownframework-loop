@@ -37,7 +37,7 @@ packet = {
     "work_units": [{"id": "UNIT-5", "title": "predecessor", "scope": "src/", "acceptance": ["AC-5"]},
                     {"id": "UNIT-6", "title": "repair", "scope": "src/", "acceptance": ["AC-6"]}],
     "merge_authority": "human_only", "deploy_authority": "human_only", "push_authority": "human_only",
-    "external_action_authority": "none", "risk_budget": {"max_build_passes": 6, "max_review_passes": 7,
+    "external_action_authority": "none", "risk_budget": {"max_build_passes": 7, "max_review_passes": 7,
     "max_repair_rounds": 4, "max_files_changed": 20, "max_diff_lines": 1000}}
 p.write_text("```json\n" + json.dumps(packet, sort_keys=True) + "\n```\n")
 PY

@@ -275,6 +275,12 @@ def _resolve_current_work_unit_id(canonical_repo: Path, run_id: str) -> str:
 
     if state_mod.is_program_state(state):
         program = state.get("program") or {}
+        # v0.9.1+: a whole-product (program_final) repair build is owned
+        # by no individual CP; surface the typed program-final marker
+        # so the agent skeleton never fakes ownership of the first
+        # packet work unit.
+        if program.get("review_scope") == program_mod.REVIEW_SCOPE_PROGRAM_FINAL:
+            return program_mod.PROGRAM_FINAL_REPAIR_WORK_UNIT_ID
         current_cps = program.get("current_checkpoints") or []
         if current_cps:
             cp_id = current_cps[0]

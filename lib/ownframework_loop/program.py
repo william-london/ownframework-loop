@@ -52,6 +52,12 @@ GLOBAL_MAX_BASELINE_TO_FINAL_DIFF_LINES = 30000
 # after all checkpoints have finalized- APPROVED.
 REVIEW_SCOPE_CHECKPOINT = "checkpoint"
 REVIEW_SCOPE_PROGRAM_FINAL = "program_final"
+# Stable identity for a whole-product repair build that no individual
+# checkpoint owns.  Surfaced by build_prepare / build_agent and accepted
+# by build_finalize when program_state.review_scope == program_final;
+# the actual repair may legitimately span interfaces owned by several
+# prior work units.
+PROGRAM_FINAL_REPAIR_WORK_UNIT_ID = "PROGRAM-FINAL"
 _REVIEW_SCOPE_VALUES = frozenset(
     {None, REVIEW_SCOPE_CHECKPOINT, REVIEW_SCOPE_PROGRAM_FINAL}
 )
@@ -200,8 +206,13 @@ def resolve_effective_required_validation(
 
     v0.9.1+: when the durable ``program.review_scope == "program_final"`` the
     run is in REVIEWING awaiting the mandatory final whole-product review.
-    There is no current checkpoint; the effective validation set is the
-    full top-level contract (no per-checkpoint extensions).
+    Prior checkpoint-local validations are authoritative packet evidence
+    for those checkpoint outcomes; later checkpoints may have altered
+    shared source since the local validation last ran, so the final exact
+    SHA must deterministically re-prove every completed checkpoint's
+    local validation set against the assembled candidate.  Duplicates
+    that match the top-level contract are removed deterministically so
+    the same authoritative command is never run twice.
     """
     effective = list(packet.get("required_validation") or [])
     if not is_program_state(state):
@@ -209,7 +220,37 @@ def resolve_effective_required_validation(
 
     program_state = state.get("program") or {}
     if program_state.get("review_scope") == REVIEW_SCOPE_PROGRAM_FINAL:
-        return effective
+        finalized_ids: set[str] = set()
+        for fc in program_state.get("finalized_checkpoints") or []:
+            if isinstance(fc, dict):
+                cid = fc.get("id")
+                if isinstance(cid, str) and cid:
+                    finalized_ids.add(cid)
+        dedup: dict[tuple, dict[str, Any]] = {}
+        for v in effective:
+            if not isinstance(v, dict):
+                continue
+            key = _validation_dedup_key(v)
+            dedup.setdefault(key, v)
+        for checkpoint in (
+            (packet.get("checkpoint_graph") or {}).get("checkpoints") or []
+        ):
+            if not isinstance(checkpoint, dict):
+                continue
+            cid = checkpoint.get("id")
+            if cid not in finalized_ids:
+                continue
+            local = checkpoint.get("required_validation") or []
+            if not isinstance(local, list):
+                raise ProgramStateError(
+                    f"checkpoint {cid} required_validation must be a list"
+                )
+            for v in local:
+                if not isinstance(v, dict):
+                    continue
+                key = _validation_dedup_key(v)
+                dedup.setdefault(key, v)
+        return list(dedup.values())
     current = list(program_state.get("current_checkpoints") or [])
     if not current:
         raise ProgramStateError("PROGRAM state has no current checkpoint")
@@ -225,6 +266,22 @@ def resolve_effective_required_validation(
             effective.extend(local)
             return effective
     raise ProgramStateError(f"current checkpoint {cp_id!r} missing from packet graph")
+
+
+def _validation_dedup_key(v: dict[str, Any]) -> tuple:
+    """Stable identity for deduping authoritative validations by packet contract.
+
+    Two validations are duplicates when their command + kind + expected exit
+    code + name match.  Other declared fields (timeout, capabilities) are
+    transport details that must NOT cause a duplicate authoritative command
+    to be run twice on the same final SHA.
+    """
+    return (
+        str(v.get("command") or ""),
+        str(v.get("kind") or ""),
+        int(v.get("expected_exit_code") if isinstance(v.get("expected_exit_code"), int) else 0),
+        str(v.get("name") or ""),
+    )
 
 
 def validate_checkpoint_graph(packet: dict[str, Any]) -> list[str]:
@@ -461,6 +518,18 @@ def validate_checkpoint_graph(packet: dict[str, Any]) -> list[str]:
                     f"mandatory final whole-product review across {n_cps} "
                     f"checkpoints; need >= {needed_final}"
                 )
+        # The mandatory final whole-product review may legitimately
+        # return CHANGES_REQUESTED.  Its automatic bounded repair is
+        # itself a BUILD claim that no individual CP owns; the global
+        # envelope must fund it without widening per-CP authority.
+        if isinstance(gb, int):
+            needed_final_build = n_cps + (gp if isinstance(gp, int) and gp > 0 else 0) + 1
+            if gb < needed_final_build:
+                errors.append(
+                    f"packet-level max_build_passes={gb} cannot fund the "
+                    f"mandatory final-repair build across {n_cps} "
+                    f"checkpoints; need >= {needed_final_build}"
+                )
     return errors
 
 
@@ -530,10 +599,18 @@ def materialise_initial_program_state(
             f"packet-level max_review_passes={global_review_cap} cannot accommodate {n_cps} checkpoints (need >=1 review per CP)"
         )
 
+    # The cumulative_ceilings ceiling is the operator's whole-PROGRAM
+    # authority envelope, not the sum of CP-local caps. Checkpoint-local
+    # caps continue bounding checkpoint-local work in _bump_counter_one /
+    # _bump_counter_program_final; the global cap naturally absorbs the
+    # post-checkpoint (program_final) phase that no individual CP owns.
+    # When the operator omits a packet-level value, the cumulative
+    # ceiling still inherits the sum-of-CPs ceiling so legacy packets
+    # behave identically.
     cumulative = {
-        "max_build_passes": min(global_build_cap, sum_build) if global_build_cap else sum_build,
-        "max_review_passes": min(global_review_cap, sum_review) if global_review_cap else sum_review,
-        "max_repair_rounds": min(global_repair_cap, sum_repair) if global_repair_cap else sum_repair,
+        "max_build_passes": global_build_cap if global_build_cap else sum_build,
+        "max_review_passes": global_review_cap if global_review_cap else sum_review,
+        "max_repair_rounds": global_repair_cap if global_repair_cap else sum_repair,
     }
     sc = packet["checkpoint_graph"].get("global_source_ceilings") or {}
     cumulative["max_unique_changed_files"] = int(
@@ -1089,6 +1166,54 @@ def repair_entitlement(
     }
 
 
+def program_final_repair_entitlement(
+    program_state: dict[str, Any],
+    *,
+    packet: dict[str, Any],
+) -> dict[str, Any]:
+    """Repair entitlement for a whole-product (program_final) repair build.
+
+    No individual CP owns the work — the assembled candidate spans the
+    whole packet.  The decision keys off the program-wide cumulative
+    repair counter and the packet-level ``max_repair_rounds`` (which is
+    the only cap that legitimately applies once all checkpoints have
+    finalized; per-CP caps have already been satisfied).
+
+    Returns the same typed evidence dict as ``repair_entitlement`` with
+    ``cp_id=""`` and the program-wide numbers used in place of the
+    per-checkpoint values, so callers can keep their evidence shape
+    uniform.
+    """
+    counter = "repair_round_count"
+    cap_key = "max_repair_rounds"
+    cumulative_used = int(
+        (program_state.get("cumulative_counters") or {}).get(counter, 0) or 0
+    )
+    global_rb = (packet.get("risk_budget") or {}) if isinstance(packet, dict) else {}
+    cumulative_cap = int(
+        (program_state.get("cumulative_ceilings") or {}).get(cap_key, 0) or 0
+    )
+    if not cumulative_cap:
+        # Materialize against the packet envelope when the durable cap
+        # is missing (legacy state loaded without materialized ceiling).
+        cumulative_cap = int(global_rb.get(cap_key, 0) or 0)
+
+    eligible = cumulative_used < cumulative_cap
+    reason = "" if eligible else (
+        f"program-wide repair cap reached: {cumulative_used}/{cumulative_cap}"
+    )
+    return {
+        "eligible": eligible,
+        "cp_id": "",
+        "checkpoint_used": cumulative_used,
+        "checkpoint_cap": cumulative_cap,
+        "cumulative_used": cumulative_used,
+        "cumulative_cap": cumulative_cap,
+        "reason": reason,
+        "work_unit_id": PROGRAM_FINAL_REPAIR_WORK_UNIT_ID,
+    }
+
+
 class ClaimRefused(ProgramStateError):
     """A deterministic PROGRAM pass claim was refused."""
 
@@ -1618,4 +1743,6 @@ __all__ = [
     "is_program_terminal", "program_terminal_reason",
     "source_tree_accounting",
     "ClaimCapExhausted",
+    "PROGRAM_FINAL_REPAIR_WORK_UNIT_ID",
+    "program_final_repair_entitlement",
 ]

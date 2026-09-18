@@ -295,28 +295,55 @@ def finalize_build(
             )
 
         if state_mod.is_program_state(state):
-            current_cps = ((state.get("program") or {}).get("current_checkpoints") or [])
-            if not current_cps:
+            program_state = state.get("program") or {}
+            current_cps = list(program_state.get("current_checkpoints") or [])
+            review_scope = program_state.get("review_scope")
+            # v0.9.1+: a whole-product (program_final) repair build is
+            # owned by no individual CP — current_checkpoints is empty by
+            # design.  Authorize the typed PROGRAM-FINAL work-unit marker
+            # and accept any packet-level work unit the builder may have
+            # documented (the repair may legitimately span interfaces
+            # owned by several prior work units).  The agent result must
+            # still be a string and must not be silently empty.
+            if not current_cps and review_scope != program_mod.REVIEW_SCOPE_PROGRAM_FINAL:
                 raise RuntimeError("PROGRAM build has no current checkpoint")
-            cp_id = current_cps[0]
-            cp_meta = next(
-                (cp for cp in (meta.get("checkpoint_graph") or {}).get("checkpoints", [])
-                 if cp.get("id") == cp_id),
-                None,
-            )
-            if cp_meta is None:
-                raise RuntimeError(f"current checkpoint {cp_id} missing from packet")
-            allowed_units: set[str] = set()
-            for unit in cp_meta.get("work_units") or []:
-                if isinstance(unit, str):
-                    allowed_units.add(unit)
-                elif isinstance(unit, dict) and isinstance(unit.get("id"), str):
-                    allowed_units.add(unit["id"])
-            if allowed_units and agent_result.get("work_unit_id") not in allowed_units:
-                raise RuntimeError(
-                    f"agent result work_unit_id {agent_result.get('work_unit_id')!r} "
-                    f"is not in current checkpoint {cp_id} units {sorted(allowed_units)}"
+            if review_scope == program_mod.REVIEW_SCOPE_PROGRAM_FINAL:
+                allowed_units = {
+                    program_mod.PROGRAM_FINAL_REPAIR_WORK_UNIT_ID,
+                }
+                packet_units = (meta.get("work_units") or [])
+                for unit in packet_units:
+                    if isinstance(unit, dict) and isinstance(unit.get("id"), str):
+                        allowed_units.add(unit["id"])
+                    elif isinstance(unit, str):
+                        allowed_units.add(unit)
+                agent_unit = agent_result.get("work_unit_id") or ""
+                if agent_unit not in allowed_units:
+                    raise RuntimeError(
+                        f"agent result work_unit_id {agent_unit!r} is not a "
+                        f"recognized program-final repair identity; expected "
+                        f"one of {sorted(allowed_units)}"
+                    )
+            else:
+                cp_id = current_cps[0]
+                cp_meta = next(
+                    (cp for cp in (meta.get("checkpoint_graph") or {}).get("checkpoints", [])
+                     if cp.get("id") == cp_id),
+                    None,
                 )
+                if cp_meta is None:
+                    raise RuntimeError(f"current checkpoint {cp_id} missing from packet")
+                allowed_units = set()
+                for unit in cp_meta.get("work_units") or []:
+                    if isinstance(unit, str):
+                        allowed_units.add(unit)
+                    elif isinstance(unit, dict) and isinstance(unit.get("id"), str):
+                        allowed_units.add(unit["id"])
+                if allowed_units and agent_result.get("work_unit_id") not in allowed_units:
+                    raise RuntimeError(
+                        f"agent result work_unit_id {agent_result.get('work_unit_id')!r} "
+                        f"is not in current checkpoint {cp_id} units {sorted(allowed_units)}"
+                    )
 
     # 5. Resolve candidate SHA and branch.
     candidate_sha = git_checks.current_head(builder_wt)
@@ -560,25 +587,37 @@ def finalize_build(
         and program_source_check.get("result") == "pass"
         and state_mod.is_program_state(state)
     ):
-        cp_id = str(((state.get("program") or {}).get("current_checkpoints") or [""])[0])
-        cp_meta = next(
-            (cp for cp in (meta.get("checkpoint_graph") or {}).get("checkpoints", [])
-             if isinstance(cp, dict) and cp.get("id") == cp_id),
-            None,
-        )
-        if cp_meta is None:
-            raise RuntimeError(f"current checkpoint {cp_id!r} missing from packet")
-        # Repair-entitlement decision MUST use the canonical program-level
-        # helper (cp-local + cumulative caps), not the cumulative mirror
-        # against the checkpoint-local cap (the historical bug). The atomic
-        # owner in state.transition_funded_repair -> program._bump_counter_one
-        # uses the same authority; consistency here guarantees the protected-
-        # drift recovery path agrees with later repair funding.
-        entitlement = program_mod.repair_entitlement(
-            state.get("program") or {},
-            cp_id=cp_id,
-            packet_cp=cp_meta,
-        )
+        program_state = state.get("program") or {}
+        review_scope = program_state.get("review_scope")
+        if review_scope == program_mod.REVIEW_SCOPE_PROGRAM_FINAL:
+            # Whole-product (program_final) repair: no CP owns the
+            # protected-drift recovery anchor.  Use the program-wide
+            # entitlement helper, which keys off the cumulative repair
+            # cap that already accommodates the post-checkpoint phase.
+            entitlement = program_mod.program_final_repair_entitlement(
+                program_state, packet=meta,
+            )
+            cp_id = ""
+        else:
+            cp_id = str(((state.get("program") or {}).get("current_checkpoints") or [""])[0])
+            cp_meta = next(
+                (cp for cp in (meta.get("checkpoint_graph") or {}).get("checkpoints", [])
+                 if isinstance(cp, dict) and cp.get("id") == cp_id),
+                None,
+            )
+            if cp_meta is None:
+                raise RuntimeError(f"current checkpoint {cp_id!r} missing from packet")
+            # Repair-entitlement decision MUST use the canonical program-level
+            # helper (cp-local + cumulative caps), not the cumulative mirror
+            # against the checkpoint-local cap (the historical bug). The atomic
+            # owner in state.transition_funded_repair -> program._bump_counter_one
+            # uses the same authority; consistency here guarantees the protected-
+            # drift recovery path agrees with later repair funding.
+            entitlement = program_mod.repair_entitlement(
+                state.get("program") or {},
+                cp_id=cp_id,
+                packet_cp=cp_meta,
+            )
         if entitlement["eligible"]:
             try:
                 protected_drift_recovery = protected_recovery.recover_candidate_only_protected_drift(
@@ -790,17 +829,23 @@ def finalize_build(
         )
         if clean_for_source_ceiling_repair and state_mod.is_program_state(state):
             program_state = state.get("program") or {}
-            cp_id = (program_state.get("current_checkpoints") or [None])[0]
-            cp_meta = next(
-                (cp for cp in (meta.get("checkpoint_graph") or {}).get("checkpoints", [])
-                 if isinstance(cp, dict) and cp.get("id") == cp_id),
-                None,
-            )
-            if cp_meta is None:
-                raise RuntimeError(f"current checkpoint {cp_id!r} missing from packet")
-            entitlement = program_mod.repair_entitlement(
-                program_state, cp_id=cp_id, packet_cp=cp_meta,
-            )
+            review_scope = program_state.get("review_scope")
+            if review_scope == program_mod.REVIEW_SCOPE_PROGRAM_FINAL:
+                entitlement = program_mod.program_final_repair_entitlement(
+                    program_state, packet=meta,
+                )
+            else:
+                cp_id = (program_state.get("current_checkpoints") or [None])[0]
+                cp_meta = next(
+                    (cp for cp in (meta.get("checkpoint_graph") or {}).get("checkpoints", [])
+                     if isinstance(cp, dict) and cp.get("id") == cp_id),
+                    None,
+                )
+                if cp_meta is None:
+                    raise RuntimeError(f"current checkpoint {cp_id!r} missing from packet")
+                entitlement = program_mod.repair_entitlement(
+                    program_state, cp_id=cp_id, packet_cp=cp_meta,
+                )
             if entitlement["eligible"]:
                 next_state = "CHANGES_REQUESTED"
             else:
@@ -824,19 +869,25 @@ def finalize_build(
         # terminal rather than exposing an unfunded CHANGES_REQUESTED state.
         if state_mod.is_program_state(state):
             program_state = state.get("program") or {}
-            cp_id = (program_state.get("current_checkpoints") or [None])[0]
-            cp_meta = next(
-                (cp for cp in (meta.get("checkpoint_graph") or {}).get("checkpoints", [])
-                 if isinstance(cp, dict) and cp.get("id") == cp_id),
-                None,
-            )
-            if cp_meta is None:
-                raise RuntimeError(f"current checkpoint {cp_id!r} missing from packet")
-            entitlement = program_mod.repair_entitlement(
-                program_state,
-                cp_id=cp_id,
-                packet_cp=cp_meta,
-            )
+            review_scope = program_state.get("review_scope")
+            if review_scope == program_mod.REVIEW_SCOPE_PROGRAM_FINAL:
+                entitlement = program_mod.program_final_repair_entitlement(
+                    program_state, packet=meta,
+                )
+            else:
+                cp_id = (program_state.get("current_checkpoints") or [None])[0]
+                cp_meta = next(
+                    (cp for cp in (meta.get("checkpoint_graph") or {}).get("checkpoints", [])
+                     if isinstance(cp, dict) and cp.get("id") == cp_id),
+                    None,
+                )
+                if cp_meta is None:
+                    raise RuntimeError(f"current checkpoint {cp_id!r} missing from packet")
+                entitlement = program_mod.repair_entitlement(
+                    program_state,
+                    cp_id=cp_id,
+                    packet_cp=cp_meta,
+                )
             if not entitlement["eligible"]:
                 next_state = "BLOCKED"
         else:
@@ -853,19 +904,25 @@ def finalize_build(
         next_state = "CHANGES_REQUESTED"
         if state_mod.is_program_state(state):
             program_state = state.get("program") or {}
-            cp_id = (program_state.get("current_checkpoints") or [None])[0]
-            cp_meta = next(
-                (cp for cp in (meta.get("checkpoint_graph") or {}).get("checkpoints", [])
-                 if isinstance(cp, dict) and cp.get("id") == cp_id),
-                None,
-            )
-            if cp_meta is None:
-                raise RuntimeError(f"current checkpoint {cp_id!r} missing from packet")
-            entitlement = program_mod.repair_entitlement(
-                program_state,
-                cp_id=cp_id,
-                packet_cp=cp_meta,
-            )
+            review_scope = program_state.get("review_scope")
+            if review_scope == program_mod.REVIEW_SCOPE_PROGRAM_FINAL:
+                entitlement = program_mod.program_final_repair_entitlement(
+                    program_state, packet=meta,
+                )
+            else:
+                cp_id = (program_state.get("current_checkpoints") or [None])[0]
+                cp_meta = next(
+                    (cp for cp in (meta.get("checkpoint_graph") or {}).get("checkpoints", [])
+                     if isinstance(cp, dict) and cp.get("id") == cp_id),
+                    None,
+                )
+                if cp_meta is None:
+                    raise RuntimeError(f"current checkpoint {cp_id!r} missing from packet")
+                entitlement = program_mod.repair_entitlement(
+                    program_state,
+                    cp_id=cp_id,
+                    packet_cp=cp_meta,
+                )
             if not entitlement["eligible"]:
                 next_state = "BLOCKED"
         else:
