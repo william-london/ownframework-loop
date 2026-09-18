@@ -43,7 +43,6 @@ checks above. Any model-supplied ``next_state`` field is ignored.
 
 from __future__ import annotations
 
-import json
 import re
 from pathlib import Path
 from typing import Any
@@ -88,13 +87,19 @@ def _repair_blocked_by_no_progress(
     )
 
 
-def _read_json(path: Path, default: Any = None) -> Any:
-    if not path.exists():
-        return default
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        return default
+# Shared deterministic proof primitives now live in finalize_proof.py.
+# Thin compatibility shims keep the historical private underscore
+# names available inside this module so its own internal call sites
+# do not need to change.  The new module owns the canonical
+# implementations.
+from . import finalize_proof as _proof
+_read_json = _proof.read_json
+_candidate_branch_contains = _proof.candidate_branch_contains
+_ancestor_of = _proof.ancestor_of
+_classify_path_against_packet = _proof.classify_path_against_packet
+_path_in_list = _proof.path_in_list
+_strict_ceiling = _proof.strict_ceiling
+# End of compatibility shims.
 
 
 def _changed_paths_between(worktree: Path, baseline_sha: str, candidate_sha: str) -> list[str]:

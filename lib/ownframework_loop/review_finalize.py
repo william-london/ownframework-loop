@@ -52,7 +52,6 @@ ignored.
 
 from __future__ import annotations
 
-import json
 import re
 from pathlib import Path
 from typing import Any
@@ -81,53 +80,19 @@ ASSESSMENT_ALLOWED_VERDICTS = {
 }
 
 
-def _read_json(path: Path, default: Any = None) -> Any:
-    if not path.exists():
-        return default
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        return default
+# Compatibility shims for the shared deterministic proof primitives
+# that previously lived duplicated in this module.  The canonical
+# implementations are in finalize_proof.py.
+from . import finalize_proof as _proof
+_read_json = _proof.read_json
+_ancestor_of = _proof.ancestor_of
+_candidate_branch_contains = _proof.candidate_branch_contains
+_classify_path_against_packet = _proof.classify_path_against_packet
+_path_in_list = _proof.path_in_list
 
 
 def _validation_shape_ok(cmd: dict[str, Any]) -> bool:
     return isinstance(cmd, dict) and "command" in cmd and "name" in cmd
-
-
-def _ancestor_of(canonical_repo: Path, candidate_sha: str, baseline_sha: str) -> bool:
-    r = util.run_subprocess(
-        ["git", "-C", str(canonical_repo), "merge-base", "--is-ancestor", baseline_sha, candidate_sha],
-        timeout=10,
-    )
-    return r.returncode == 0
-
-
-def _candidate_branch_contains(canonical_repo: Path, candidate_branch: str, candidate_sha: str) -> bool:
-    r = util.run_subprocess(
-        ["git", "-C", str(canonical_repo), "merge-base", "--is-ancestor", candidate_sha, candidate_branch],
-        timeout=10,
-    )
-    return r.returncode == 0
-
-
-def _classify_path_against_packet(packet: dict[str, Any], path: str) -> str:
-    if packet_mod.is_protected_path(packet, path):
-        return "protected"
-    if packet_mod.is_allowed_path(packet, path):
-        return "allowed"
-    elevated = packet.get("elevated_allowed_paths") or []
-    if any(_path_in_list(path, p) for p in elevated):
-        return "elevated"
-    sensitive = packet.get("sensitive_paths") or []
-    if any(_path_in_list(path, p) for p in sensitive):
-        return "sensitive"
-    return "out_of_scope"
-
-
-def _path_in_list(path: str, prefix: str) -> bool:
-    # Keep reviewer elevated/sensitive classification identical to packet
-    # allowed/protected semantics, including the supported dir/** spelling.
-    return packet_mod.path_matches_scope_entry(path, prefix)
 
 
 def _must_fix_fingerprint(must_fix: list[dict[str, Any]]) -> str:

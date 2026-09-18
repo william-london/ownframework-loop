@@ -130,3 +130,4 @@ tests/unit/test_v096_legacy_anchor_event_contract.sh
 tests/integration/test_v091m_commissioning_identity_adversarial.sh
 tests/integration/test_v091n_commissioning_lifecycle_failure_paths.sh
 tests/integration/test_v10a_install_helpers.sh
+tests/integration/test_v10b_finalize_proof.sh
