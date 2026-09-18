@@ -553,6 +553,16 @@ if launchctl print "$DOMAIN/$LABEL" >/dev/null 2>&1; then
   fi
 fi
 
+# 6.5 Receipt preflight: when the canonical label is currently loaded
+#     under a different plist (the stale-fixture condition), the
+#     launcher that produced the existing receipt was running a
+#     different runtime generation.  Delete any prior receipt so the
+#     receipt-wait below only succeeds when THIS install's launcher
+#     writes a fresh receipt for THIS install's activation id.
+if launchctl print "$DOMAIN/$LABEL" >/dev/null 2>&1; then
+  rm -f "$STATE_ROOT/supervisor-activation.json" "$STATE_ROOT/activation-record.json"
+fi
+
 if ! launchctl bootstrap "$DOMAIN" "$PLIST"; then
   rollback="none"
   if [[ "$HAD_OLD_PLIST" == "1" ]]; then
