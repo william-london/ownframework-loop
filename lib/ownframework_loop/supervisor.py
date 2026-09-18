@@ -612,24 +612,37 @@ def _cleanup_done_runtime_caches(db_path: Path | None = None) -> list[dict[str, 
 
 
 def _publish_startup_ready_attestation(db_path: Path | None) -> None:
-    """Write the durable supervisor's startup-ready attestation (Seam 2).
+    """Write the durable supervisor's startup-ready attestation.
 
     The launcher (pre-exec) wrote an activation receipt that proves
     the launcher's pre-exec identity.  That receipt alone does NOT
     prove the durable supervisor actually entered its scheduler
-    loop.  This helper writes a fresh attestation at the canonical
-    state-root path that the installer verifies separately,
-    binding the durable supervisor's PID to the same activation_id
-    the launcher minted.
+    loop.  This helper derives the durable supervisor's own
+    post-exec identity independently from the receipt (Seam 1 of
+    the residual-closure) and publishes a startup-ready attestation
+    only when the durable process's own observations match the
+    receipt.  Any mismatch fails closed; the supervisor logs the
+    refusal to stderr and the launchd installer — the load-bearing
+    authority for SUPERVISOR_INSTALL verification — observes a
+    missing/mismatched attestation and REFUSES PASS.
 
-    Failure modes are intentionally non-fatal at the supervisor
-    level: a missing or unreadable activation receipt is logged to
-    stderr and the durable supervisor continues.  The launchd
-    installer is the load-bearing authority for SUPERVISOR_INSTALL
-    verification — it refuses PASS when the attestation is missing
-    or mismatched.  Silent success here would let the receipt alone
-    publish false "active" truth, which is the architectural defect
-    this whole module exists to close.
+    Independent derivation sources:
+
+    - ``ofloop_bin`` and ``runtime_root``: ``sys.argv`` of THIS
+      post-exec supervisor (it was exec'd with the ofloop binary as
+      argv[0]).
+    - ``runtime_generation``: recomputed through the same
+      ``runtime_identity.runtime_generation_for_root`` against the
+      runtime root THIS supervisor observes.  ``env_fallback`` is
+      not accepted at commissioning time (Seam 2).
+    - ``supervisor_db``: the ``db_path`` this serve() instance is
+      bound to, canonicalized.  When ``db_path`` is None, the
+      canonical ``default_db_path()`` is used.
+    - ``ledger_marker``: derived from the canonical state root the
+      durable supervisor reads from.
+    - ``activation_id`` and ``label``: read from the launchd env
+      (commissioned activation context), exact-matched against the
+      receipt.
     """
     from . import service_identity  # local import to avoid startup cycles
 
@@ -655,14 +668,32 @@ def _publish_startup_ready_attestation(db_path: Path | None) -> None:
             file=sys.stderr,
         )
         return
+    # Resolve canonical state root for ledger_marker derivation.
+    # The supervisor's own canonical db path provides this.  When
+    # ``db_path`` is None we fall through to ``default_db_path()``
+    # which honours XDG_STATE_HOME the same way the launcher did.
+    if db_path is None:
+        actual_db = default_db_path()
+    else:
+        actual_db = Path(db_path).expanduser().resolve(strict=False)
+    # state_root: the parent directory of ``ownframework-loop/`` that
+    # contains ``supervisor.sqlite3`` (mirrors the launcher's
+    # ``default_receipt_path`` derivation).
+    actual_db_path = Path(actual_db).expanduser().resolve(strict=False)
+    actual_state_root = actual_db_path.parent.parent  # ../.. from <state>/ownframework-loop/supervisor.sqlite3
+
     try:
         attestation = service_identity.derive_startup_ready(
             receipt=receipt,
             ready_pid=os.getpid(),
+            actual_argv=list(sys.argv),
+            actual_env=os.environ,
+            actual_db_path=actual_db_path,
+            actual_state_root=actual_state_root,
         )
     except ValueError as exc:
         print(
-            "SUPERVISOR_STARTUP_READY=skipped reason=derivation_failed detail="
+            "SUPERVISOR_STARTUP_READY=refused reason=durable_identity_mismatch detail="
             + str(exc),
             file=sys.stderr,
         )

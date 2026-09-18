@@ -140,11 +140,28 @@ recover_pending_transaction() {
     echo "SUPERVISOR_INSTALL=REFUSED reason=transaction_recovery_manager_unavailable" >&2
     return 15
   fi
-  if launchctl print "$DOMAIN/$LABEL" >/dev/null 2>&1; then
-    if ! launchctl bootout "$DOMAIN" "$PLIST" >/dev/null 2>&1; then
-      echo "SUPERVISOR_INSTALL=REFUSED reason=transaction_recovery_stop_failed" >&2
-      return 15
-    fi
+  # Seam 6: use the same lifecycle primitive as the installer's
+  # stop-by-label path.  Removal uses canonical-label authority,
+  # not plist-origin.  PROVE absence after removal: a stale
+  # transaction + stale same-label registration (different plist
+  # origin) must not wedge the recovery.
+  REMOVE_OUT="$(PYTHONPATH="$ROOT/lib" "$PYTHON_BIN" -B - "$DOMAIN" "$LABEL" "$PLIST" <<'PY'
+import sys
+from ownframework_loop import macos_service_lifecycle
+domain = sys.argv[1]
+label = sys.argv[2]
+plist = sys.argv[3]
+if macos_service_lifecycle.probe_canonical_label(label, domain):
+    macos_service_lifecycle.remove_canonical_label(label, domain, plist)
+    if not macos_service_lifecycle.prove_canonical_label_absent(label, domain):
+        print("reason=transaction_recovery_stale_label_removal_failed")
+        sys.exit(1)
+sys.exit(0)
+PY
+)"
+  if [[ "$REMOVE_OUT" == *"reason=transaction_recovery_stale_label_removal_failed"* ]]; then
+    echo "SUPERVISOR_INSTALL=REFUSED reason=transaction_recovery_stale_label_removal_failed" >&2
+    return 15
   fi
   if [[ -f "$TXN_DIR/had-plist" ]]; then
     cp "$TXN_DIR/old.plist" "$PLIST"; chmod 0600 "$PLIST"
@@ -161,12 +178,10 @@ recover_pending_transaction() {
   else
     rm -f "$SERVICE_ENV"
   fi
-  if [[ -f "$TXN_DIR/had-plist" ]]; then
-    if ! launchctl bootstrap "$DOMAIN" "$PLIST" >/dev/null 2>&1; then
-      echo "SUPERVISOR_INSTALL=REFUSED reason=transaction_recovery_bootstrap_failed" >&2
-      return 15
-    fi
-  fi
+  # Seam 7: do NOT rebootstrap the prior service during recovery.
+  # Recovery restores on-disk configuration bytes (for evidence /
+  # retry) but leaves the canonical label absent unless the
+  # restored active service can pass the same identity proof.
   rm -rf "$TXN_DIR"
   echo "SUPERVISOR_INSTALL_RECOVERY=recovered_incomplete_transaction"
 }
@@ -362,7 +377,7 @@ env_vars = {
     "OFLOOP_RUNTIME_ROOT": str(Path(ofloop_bin).resolve(strict=False).parent.parent),
     "XDG_STATE_HOME": state_base,
     # Per-installation activation id and the canonical receipt path the
-    # launcher writes before exec'ing into the supervisor.  The receipt
+    # launcher writes before exec into the supervisor.  The receipt
     # is the load-bearing active-identity proof the installer verifies
     # before emitting SUPERVISOR_INSTALL=PASS.
     "OFLOOP_ACTIVATION_ID": activation_id,
@@ -517,43 +532,48 @@ fi
 #    label. The commissioned Loop label therefore MUST be owned by this
 #    installer via service-identity, not accidental plist origin.
 #
-#    Seam 3 of the architectural addendum: ``kickstart -k`` does not
-#    prove removal — it force-restarts the loaded service.  Removal
-#    must end in PROVEN absence.  Sequence:
-#      (a) probe: is the canonical label loaded?
-#      (b) stop: ``launchctl bootout "$DOMAIN" "$PLIST"`` (plist target)
-#      (c) stop: ``launchctl bootout "$DOMAIN/$LABEL"`` (label target)
-#      (d) RE-PROBE: ``launchctl print "$DOMAIN/$LABEL"`` must exit nonzero
-#          (label genuinely unloaded).  If still loaded, REFUSE.
-#    A successful bootout return code is necessary but not sufficient;
-#    real launchd can return rc=0 from a bootout that found no job to
-#    unload, so the re-probe is the load-bearing authority.
-if launchctl print "$DOMAIN/$LABEL" >/dev/null 2>&1; then
-  launchctl bootout "$DOMAIN" "$PLIST" >/dev/null 2>&1 || true
-  launchctl bootout "$DOMAIN/$LABEL" >/dev/null 2>&1 || true
-  # Re-probe canonical service target.  A residual-loaded label is the
-  # stale-fixture condition; refuse before publishing a new receipt.
-  if launchctl print "$DOMAIN/$LABEL" >/dev/null 2>&1; then
-    rollback="none"
-    if [[ "$HAD_OLD_PLIST" == "1" ]]; then
-      cp "$OLD_PLIST_BACKUP" "$PLIST"; chmod 0600 "$PLIST"
-      if [[ "$HAD_OLD_PROVENANCE" == "1" ]]; then
-        cp "$OLD_PROVENANCE_BACKUP" "$RUNTIME_PROVENANCE"; chmod 0600 "$RUNTIME_PROVENANCE"
-      else
-        rm -f "$RUNTIME_PROVENANCE"
-      fi
-      if [[ "$HAD_OLD_SERVICE_ENV" == "1" ]]; then
-        cp "$OLD_SERVICE_ENV_BACKUP" "$SERVICE_ENV"; chmod 0600 "$SERVICE_ENV"
-      else
-        rm -f "$SERVICE_ENV"
-      fi
+#    Seam 3 + Seam 4 + Seam 6 of the residual-closure: removal must end
+#    in PROVEN absence (postcondition: ``launchctl print "$DOMAIN/$LABEL"``
+#    exits nonzero).  Use the single macOS service-lifecycle primitive
+#    so this logic is shared with recover_pending_transaction and
+#    uninstall, with no plist-origin assumption.
+REMOVE_OUT="$(PYTHONPATH="$INSTALL_ROOT/lib" "$PYTHON_BIN" -B - "$DOMAIN" "$LABEL" "$PLIST" <<'PY'
+import os, sys
+from ownframework_loop import macos_service_lifecycle
+domain = sys.argv[1]
+label = sys.argv[2]
+plist = sys.argv[3]
+if macos_service_lifecycle.probe_canonical_label(label, domain):
+    macos_service_lifecycle.remove_canonical_label(label, domain, plist)
+    if not macos_service_lifecycle.prove_canonical_label_absent(label, domain):
+        print("reason=stale_label_removal_failed")
+        sys.exit(1)
+sys.exit(0)
+PY
+)"
+if [[ "$REMOVE_OUT" == *"reason=stale_label_removal_failed"* ]]; then
+  # Canonical label still loaded after removal attempt.  Restore
+  # prior on-disk configuration bytes (for evidence / retry) but
+  # DO NOT rebootstrap — an unverified restored service must not be
+  # left executing (Seam 7).  Leave canonical label absent.
+  if [[ "$HAD_OLD_PLIST" == "1" ]]; then
+    cp "$OLD_PLIST_BACKUP" "$PLIST"; chmod 0600 "$PLIST"
+    if [[ "$HAD_OLD_PROVENANCE" == "1" ]]; then
+      cp "$OLD_PROVENANCE_BACKUP" "$RUNTIME_PROVENANCE"; chmod 0600 "$RUNTIME_PROVENANCE"
     else
-      rm -f "$PLIST" "$RUNTIME_PROVENANCE" "$SERVICE_ENV"
+      rm -f "$RUNTIME_PROVENANCE"
     fi
-    rm -rf "$TXN_DIR"
-    echo "SUPERVISOR_INSTALL=REFUSED reason=stale_label_removal_failed rollback=$rollback" >&2
-    exit 14
+    if [[ "$HAD_OLD_SERVICE_ENV" == "1" ]]; then
+      cp "$OLD_SERVICE_ENV_BACKUP" "$SERVICE_ENV"; chmod 0600 "$SERVICE_ENV"
+    else
+      rm -f "$SERVICE_ENV"
+    fi
+  else
+    rm -f "$PLIST" "$RUNTIME_PROVENANCE" "$SERVICE_ENV"
   fi
+  rm -rf "$TXN_DIR"
+  echo "SUPERVISOR_INSTALL=REFUSED reason=stale_label_removal_failed rollback=bytes_restored_label_absent" >&2
+  exit 14
 fi
 
 # 6.5 Receipt preflight: after proven removal (label genuinely
@@ -573,7 +593,10 @@ rm -f "$STATE_ROOT/supervisor-activation.json" \
       "$STATE_ROOT/supervisor-startup-ready.json"
 
 if ! launchctl bootstrap "$DOMAIN" "$PLIST"; then
-  rollback="none"
+  # Seam 7: an unverified restored service must NOT be left
+  # executing.  Restore on-disk configuration bytes for evidence /
+  # retry but DO NOT rebootstrap the prior service.  Leave canonical
+  # label absent and let the operator explicitly retry.
   if [[ "$HAD_OLD_PLIST" == "1" ]]; then
     cp "$OLD_PLIST_BACKUP" "$PLIST"
     chmod 0600 "$PLIST"
@@ -589,23 +612,10 @@ if ! launchctl bootstrap "$DOMAIN" "$PLIST"; then
     else
       rm -f "$SERVICE_ENV"
     fi
-    # Seam 5: do not claim ``restored_previous_service`` unless the
-    # restored service is also proven via receipt+attestation.
-    # On-disk bytes restore, the prior plist can be re-bootstrapped,
-    # but the restored service has no fresh receipt.  Calling that
-    # "restored" would falsely publish active truth; surface it as
-    # ``previous_service_reloaded_unverified`` so operators can see
-    # the label is held by an unverified configuration.
-    if launchctl bootstrap "$DOMAIN" "$PLIST" >/dev/null 2>&1; then
-      rollback="previous_service_reloaded_unverified"
-      rm -rf "$TXN_DIR"
-    else
-      rollback="previous_service_restore_failed"
-    fi
+    rollback="previous_config_bytes_restored_label_absent"
   else
     rm -f "$PLIST" "$RUNTIME_PROVENANCE" "$SERVICE_ENV"
-    rollback="removed_failed_new_service"
-    rm -rf "$TXN_DIR"
+    rollback="new_config_removed_label_absent"
   fi
   # Receipt+attestation artifacts MUST be removed on failure — a
   # stale receipt from this install attempt cannot satisfy a future
@@ -613,6 +623,14 @@ if ! launchctl bootstrap "$DOMAIN" "$PLIST"; then
   rm -f "$STATE_ROOT/supervisor-activation.json" \
         "$STATE_ROOT/supervisor-startup-ready.json" \
         "$STATE_ROOT/activation-record.json"
+  rm -rf "$TXN_DIR"
+  # Use the same lifecycle primitive to prove canonical label absent
+  # is the postcondition here.
+  PYTHONPATH="$INSTALL_ROOT/lib" "$PYTHON_BIN" -B - "$DOMAIN" "$LABEL" "$PLIST" <<'PY'
+import sys
+from ownframework_loop import macos_service_lifecycle
+macos_service_lifecycle.remove_canonical_label(sys.argv[1], sys.argv[2], sys.argv[3])
+PY
   echo "SUPERVISOR_INSTALL=REFUSED reason=bootstrap_failed rollback=$rollback" >&2
   exit 14
 fi
@@ -729,8 +747,29 @@ if startup_ready is None:
     print("reason=startup_ready_missing attempts=" + str(startup_max_attempts) + " detail=" + str(startup_last_err), file=sys.stderr)
     sys.exit(14)
 
+# Seam 3: receipt PID must equal startup-ready PID.  The launcher uses
+# ``exec`` so PID continuity is an invariant.  Two PIDs that differ
+# mean either the receipt was written by one process and the
+# attestation by another (no PID continuity), or the durable
+# supervisor was replaced (unacceptable).  Reject immediately.
+receipt_pid = int(receipt.get("pid", 0))
+ready_pid = int(startup_ready.get("ready_pid", 0))
+if receipt_pid <= 0 or ready_pid <= 0:
+    print(
+        "reason=invalid_pid receipt_pid=" + str(receipt_pid) + " ready_pid=" + str(ready_pid),
+        file=sys.stderr,
+    )
+    sys.exit(14)
+if receipt_pid != ready_pid:
+    print(
+        "reason=receipt_ready_pid_mismatch receipt_pid=" + str(receipt_pid)
+        + " ready_pid=" + str(ready_pid),
+        file=sys.stderr,
+    )
+    sys.exit(14)
+
 ready_expected = {
-    "pid": int(startup_ready.get("ready_pid", 0)),
+    "pid": receipt_pid,
     "label": label,
     "runtime_generation": exp_runtime_generation,
     "runtime_root": exp_runtime_root,
@@ -743,26 +782,66 @@ if not ok2:
     print("reason=" + reason2, file=sys.stderr)
     sys.exit(14)
 
-# Service-manager label proof: the canonical label must be loaded
-# AND (when launchd exposes a pid) the launchd-reported pid must
-# equal either the receipt pid or the startup-ready pid.  Both
-# belong to the same live process at one instant when launchd
-# reports the loaded service.
-proc = subprocess.run(
-    ["launchctl", "print", domain + "/" + label],
-    check=False, capture_output=True, text=True,
-)
-if proc.returncode != 0:
-    print("reason=label_not_loaded launchctl_rc=" + str(proc.returncode), file=sys.stderr)
+# Seam 2 generation_source must be ``recomputed_from_payload``.  The
+# receipt own generation_source is not enough: the durable
+# supervisor independently re-derives its generation from payload
+# bytes (see supervisor._publish_startup_ready_attestation).  Either
+# receipt or attestation failing this check fails commissioning
+# closed.
+def _gen_source(obj):
+    val = obj.get("generation_source") if isinstance(obj, dict) else ""
+    return str(val or "")
+
+if _gen_source(receipt) != "recomputed_from_payload":
+    print(
+        "reason=active_runtime_generation_unproven source="
+        + _gen_source(receipt),
+        file=sys.stderr,
+    )
     sys.exit(14)
-m = re.search(r"^\tpid\s*=\s*(\d+)\s*$", proc.stdout, re.MULTILINE)
-if m is None:
-    print("reason=active_identity_proven label_pid_unreported")
-    sys.exit(0)
-launchd_pid = int(m.group(1))
-receipt_pid = int(receipt["pid"])
-ready_pid = int(startup_ready["ready_pid"])
-if launchd_pid != receipt_pid and launchd_pid != ready_pid:
+if _gen_source(startup_ready) != "recomputed_from_payload":
+    print(
+        "reason=active_runtime_generation_unproven source="
+        + _gen_source(startup_ready),
+        file=sys.stderr,
+    )
+    sys.exit(14)
+
+# Service-manager label proof: the canonical label must be loaded
+# AND the launchd-reported pid MUST equal the single receipt/ready
+# pid (Seam 3).  ``label_pid_unreported`` is NOT acceptable — if
+# launchd does not expose a pid within a bounded retry window,
+# commissioning REFUSES with reason=loaded_service_pid_unproven.
+label_pid_unreported_attempts = int(os.environ.get("LABEL_PID_MAX_ATTEMPTS") or "30")
+label_pid_attempt_sleep = float(os.environ.get("LABEL_PID_ATTEMPT_SLEEP") or "0.5")
+launchd_pid = None
+last_print_stdout = ""
+last_print_rc = None
+for _ in range(label_pid_unreported_attempts):
+    proc = subprocess.run(
+        ["launchctl", "print", domain + "/" + label],
+        check=False, capture_output=True, text=True,
+    )
+    last_print_stdout = proc.stdout
+    last_print_rc = proc.returncode
+    if proc.returncode != 0:
+        print(
+            "reason=label_not_loaded launchctl_rc=" + str(proc.returncode),
+            file=sys.stderr,
+        )
+        sys.exit(14)
+    m = re.search(r"^\tpid\s*=\s*(\d+)\s*$", proc.stdout, re.MULTILINE)
+    if m is not None:
+        launchd_pid = int(m.group(1))
+        break
+    time.sleep(label_pid_attempt_sleep)
+if launchd_pid is None:
+    print(
+        "reason=loaded_service_pid_unproven attempts=" + str(label_pid_unreported_attempts),
+        file=sys.stderr,
+    )
+    sys.exit(14)
+if launchd_pid != receipt_pid:
     print(
         "reason=label_pid_mismatch launchd_pid=" + str(launchd_pid)
         + " receipt_pid=" + str(receipt_pid)
@@ -781,15 +860,15 @@ set -e
 if [[ "$ACTIVATION_RC" -ne 0 ]]; then
   # Active identity could not be proven.  Tear down the just-bootstrapped
   # service so the canonical label is not silently held by an
-  # unverified configuration.  Restore the previous service if there
-  # was one; otherwise leave the canonical label genuinely absent.
-  launchctl bootout "$DOMAIN" "$PLIST" >/dev/null 2>&1 || true
-  launchctl bootout "$DOMAIN/$LABEL" >/dev/null 2>&1 || true
-  rollback="none"
-  # Seam 5: re-probe before classifying "restored" or "removed".
-  # The previous service's bytes are restored to disk, but unless
-  # the canonical label is again unloaded we have not achieved a
-  # clean rollback; we still hold an unverified configuration.
+  # unverified configuration.  Use the lifecycle primitive so the
+  # canonical-label removal invariant is shared with recover and
+  # uninstall.  Restore on-disk configuration bytes for evidence /
+  # retry but DO NOT rebootstrap the prior service (Seam 7).
+  PYTHONPATH="$INSTALL_ROOT/lib" "$PYTHON_BIN" -B - "$DOMAIN" "$LABEL" "$PLIST" <<'PY'
+import sys
+from ownframework_loop import macos_service_lifecycle
+macos_service_lifecycle.remove_canonical_label(sys.argv[1], sys.argv[2], sys.argv[3])
+PY
   if [[ "$HAD_OLD_PLIST" == "1" ]]; then
     cp "$OLD_PLIST_BACKUP" "$PLIST"; chmod 0600 "$PLIST"
     if [[ "$HAD_OLD_PROVENANCE" == "1" ]]; then
@@ -802,19 +881,10 @@ if [[ "$ACTIVATION_RC" -ne 0 ]]; then
     else
       rm -f "$SERVICE_ENV"
     fi
-    if launchctl bootstrap "$DOMAIN" "$PLIST" >/dev/null 2>&1; then
-      # On-disk artifacts restored, label re-loaded.  Active
-      # identity of the restored service is NOT proven by this
-      # path (no receipt wait); surface this honestly rather than
-      # claim "restored_previous_service" which would falsely
-      # suggest identity was re-verified.
-      rollback="previous_service_reloaded_unverified"
-    else
-      rollback="previous_service_restore_failed"
-    fi
+    rollback="previous_config_bytes_restored_label_absent"
   else
     rm -f "$PLIST" "$RUNTIME_PROVENANCE" "$SERVICE_ENV"
-    rollback="removed_unverified_new_service"
+    rollback="new_config_removed_label_absent"
   fi
   # Receipt+attestation artifacts MUST be removed on failure
   # regardless of which rollback branch ran — a stale receipt from

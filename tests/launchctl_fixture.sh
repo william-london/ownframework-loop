@@ -155,13 +155,27 @@ if override_generation:
     receipt["runtime_generation"] = override_generation
 service_identity.write_receipt_atomic(receipt, Path(receipt_path))
 
-# Now write the startup-ready attestation from the same receipt.
-# Use the same shim pid (this fixture is what real launchd would
-# load; the post-exec process would normally inherit this pid).
+# Now write the startup-ready attestation.  Seam 8 of the residual
+# closure: exercise the REAL durable-attestation owner with INDEPENDENT
+# actual runtime context.  In production the launcher exec's into the
+# durable supervisor with argv ``[<ofloop>, "supervisor", "serve"]``;
+# the supervisor's startup attestation derives everything from its own
+# post-exec context and compares to the receipt.  The shim simulates
+# that exact flow: it derives the post-exec argv from the plist's
+# ProgramArguments (dropping the launcher preamble), the post-exec
+# env from the plist's EnvironmentVariables, and the post-exec db
+# path from the receipt-supervisor_db override (or canonical default).
+post_exec_argv = argv_list[2:] if len(argv_list) > 2 else argv_list
+actual_db = supervisor_db if supervisor_db else None
+actual_ledger = ledger_marker if ledger_marker else None
 try:
     attestation = service_identity.derive_startup_ready(
         receipt=receipt,
         ready_pid=int(os.getpid()),
+        actual_argv=post_exec_argv,
+        actual_env=env,
+        actual_db_path=actual_db,
+        actual_state_root=None,
     )
 except ValueError as exc:
     print("SHIM=REFUSED reason=" + str(exc), file=sys.stderr)

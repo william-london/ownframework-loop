@@ -131,55 +131,181 @@ def derive_startup_ready(
     receipt: Mapping[str, Any],
     ready_pid: int,
     now: float | None = None,
+    *,
+    actual_argv: list[str] | None = None,
+    actual_env: Mapping[str, str] | None = None,
+    actual_db_path: Path | str | None = None,
+    actual_state_root: Path | str | None = None,
+    default_db_path_resolver: Any = None,
+    runtime_generation_resolver: Any = None,
 ) -> dict[str, Any]:
-    """Build a startup-ready attestation from an observed activation receipt.
+    """Build a startup-ready attestation by independently deriving the
+    durable supervisor's own post-exec identity, then comparing to the
+    receipt.
 
-    The durable supervisor reads the receipt the launcher wrote, then
-    mints a fresh attestation that re-asserts every receipt field
-    with the post-exec supervisor's own PID.  The installer verifies
-    this attestation separately: receipt PID == launchd PID,
-    startup-ready PID == launchd PID too (both bind the same
-    launchd-loaded process to the canonical label, even though one
-    is the pre-exec launcher and the other is the durable
-    supervisor).
+    Seam 1 of the residual-closure: the durable supervisor must NOT
+    copy fields from the receipt.  Every field the durable process
+    can independently derive is computed from actual post-exec
+    context:
 
-    The post-exec supervisor must independently derive its own
-    runtime_root/ofloop_bin from its own argv (the durable supervisor
-    was exec'd by the launcher with ``args.ofloop`` as its first
-    argv after the launcher) — see ``read_runtime_context_from_argv``.
+    - ``ofloop_bin`` and ``runtime_root`` from the supervisor's own
+      argv (via ``read_runtime_context_from_argv``).
+    - ``runtime_generation`` recomputed through the same
+      ``runtime_identity.runtime_generation_for_root`` the launcher
+      used, against the runtime root the supervisor itself observes.
+    - ``supervisor_db`` from the actual db path this supervisor will
+      use: ``actual_db_path`` when supplied, otherwise the canonical
+      ``default_db_path()`` (resolvable through
+      ``default_db_path_resolver`` to avoid a hard import cycle).
+    - ``ledger_marker`` derived from ``actual_state_root`` /
+      ``actual_db_path`` (sibling of supervisor.sqlite3, the same
+      convention the installer and launcher use).
+    - ``activation_id`` / ``label`` come from the commissioned
+      activation context (env) and must exact-match the receipt —
+      they are service-manager identity commitments, not
+      independently observable.
+
+    The function then compares every independently-derived field to
+    the receipt.  Any mismatch raises ``ValueError`` so the caller
+    refuses to publish startup-ready.  No copy-from-receipt field
+    may end up in the published attestation unless the durable
+    process independently observed the same value.
+
+    For backwards compatibility with older call sites that do not
+    pass actual context, the function raises ``ValueError`` rather
+    than silently falling back to receipt fields.  The caller's
+    actual context is the only acceptable input.
     """
     activation_id = str(receipt.get("activation_id") or "")
     if not activation_id:
-        raise ValueError("cannot derive startup-ready attestation without activation_id")
-    label = str(receipt.get("label") or "")
-    if not label:
-        raise ValueError("cannot derive startup-ready attestation without label")
-    runtime_generation = str(receipt.get("runtime_generation") or "")
-    if not runtime_generation:
-        raise ValueError("cannot derive startup-ready attestation without runtime_generation")
-    runtime_root = str(receipt.get("runtime_root") or "")
-    if not runtime_root:
-        raise ValueError("cannot derive startup-ready attestation without runtime_root")
-    ofloop_bin = str(receipt.get("ofloop_bin") or "")
-    if not ofloop_bin:
-        raise ValueError("cannot derive startup-ready attestation without ofloop_bin")
-    supervisor_db = str(receipt.get("supervisor_db") or "")
-    if not supervisor_db:
-        raise ValueError("cannot derive startup-ready attestation without supervisor_db")
-    ledger_marker = str(receipt.get("ledger_marker") or "")
-    if not ledger_marker:
-        raise ValueError("cannot derive startup-ready attestation without ledger_marker")
+        raise ValueError("cannot derive startup-ready attestation without receipt activation_id")
+    receipt_label = str(receipt.get("label") or "")
+    if not receipt_label:
+        raise ValueError("cannot derive startup-ready attestation without receipt label")
+
+    if actual_argv is None or actual_env is None:
+        raise ValueError(
+            "startup_ready requires actual post-exec argv and env; refusing to copy receipt "
+            "fields into a durable attestation"
+        )
+    if actual_db_path is None and default_db_path_resolver is None:
+        raise ValueError(
+            "startup_ready requires actual_db_path or a default_db_path_resolver; refusing "
+            "to copy receipt fields into a durable attestation"
+        )
+
+    # Independently derive the durable supervisor's own runtime
+    # context from its argv and env.  ``read_runtime_context_from_argv``
+    # already enforces argv vs env mismatch refusal; we do not
+    # tolerate either the receipt's values or env fallbacks here.
+    runtime_ctx = read_runtime_context_from_argv(list(actual_argv), dict(actual_env))
+    actual_ofloop_bin = runtime_ctx.get("ofloop_bin") or ""
+    actual_runtime_root = runtime_ctx.get("runtime_root") or ""
+    if not actual_ofloop_bin:
+        raise ValueError("startup_ready: actual post-exec ofloop_bin undetermined")
+    if not actual_runtime_root:
+        raise ValueError("startup_ready: actual post-exec runtime_root undetermined")
+
+    # ACTUAL_RUNTIME_GENERATION — recompute through the single
+    # authoritative runtime_identity implementation.  ``env_fallback``
+    # is NEVER acceptable for commissioned active-runtime proof
+    # (Seam 2): if the payload cannot recompute its own generation,
+    # commissioning must fail closed.  The helper is injectable so
+    # tests can pass a stub.
+    actual_runtime_generation = ""
+    actual_generation_source = ""
+    if runtime_generation_resolver is not None:
+        actual_runtime_generation = str(runtime_generation_resolver(actual_runtime_root))
+        actual_generation_source = "recomputed_from_payload"
+    else:
+        try:
+            from ownframework_loop import runtime_identity  # type: ignore
+            from ownframework_loop import __version__  # type: ignore
+        except Exception as exc:
+            raise ValueError(
+                "startup_ready: runtime_identity module unavailable; cannot independently "
+                "recompute runtime_generation from actual payload: " + str(exc)
+            )
+        actual_runtime_generation = str(
+            runtime_identity.runtime_generation_for_root(Path(actual_runtime_root), str(__version__))
+        )
+        actual_generation_source = "recomputed_from_payload"
+    if actual_generation_source != "recomputed_from_payload":
+        # Defense in depth: never publish an attestation whose
+        # generation came from anywhere but the payload.
+        raise ValueError(
+            "startup_ready: generation_source=" + actual_generation_source
+            + " not acceptable for commissioned active-runtime proof"
+        )
+
+    # ACTUAL_SUPERVISOR_DB — the actual db path this serve() instance
+    # will use.  ``default_db_path_resolver`` is injectable for
+    # tests; production callers pass the canonical resolver.
+    if actual_db_path is None:
+        actual_supervisor_db = str(default_db_path_resolver())
+    else:
+        actual_supervisor_db = str(Path(actual_db_path).expanduser().resolve(strict=False))
+
+    # ACTUAL_LEDGER_MARKER — derived from the same state root the
+    # supervisor will read its DB from.  ``actual_state_root`` lets
+    # the caller supply the canonical state base (XDG_STATE_HOME or
+    # HOME/.local/state) when the db path does not encode it; when
+    # only the db path is supplied, the marker is the db path's
+    # sibling.
+    if actual_state_root is None:
+        actual_ledger_marker = str(
+            Path(actual_supervisor_db).with_name("ledger-incarnation.json")
+        )
+    else:
+        actual_ledger_marker = str(
+            Path(actual_state_root).expanduser().resolve(strict=False)
+            / "ownframework-loop"
+            / "ledger-incarnation.json"
+        )
+
+    # Compare independently-derived identity against the receipt.
+    # Any mismatch refuses publication; the installer will see a
+    # missing attestation and fail closed.
+    actual_label = str(actual_env.get("LABEL") or "").strip()
+    actual_activation_id = str(actual_env.get("OFLOOP_ACTIVATION_ID") or "").strip()
+
+    def _field_mismatch(field: str, actual: str, expected: str) -> str:
+        return (
+            "startup_ready_field=" + field
+            + " actual=" + repr(actual)
+            + " receipt=" + repr(expected)
+            + " — durable post-exec identity disagrees with receipt"
+        )
+
+    if actual_activation_id and actual_activation_id != activation_id:
+        raise ValueError(_field_mismatch("activation_id", actual_activation_id, activation_id))
+    if actual_label and actual_label != receipt_label:
+        raise ValueError(_field_mismatch("label", actual_label, receipt_label))
+    if actual_ofloop_bin != str(receipt.get("ofloop_bin") or ""):
+        raise ValueError(_field_mismatch("ofloop_bin", actual_ofloop_bin, str(receipt.get("ofloop_bin") or "")))
+    if actual_runtime_root != str(receipt.get("runtime_root") or ""):
+        raise ValueError(_field_mismatch("runtime_root", actual_runtime_root, str(receipt.get("runtime_root") or "")))
+    if actual_runtime_generation != str(receipt.get("runtime_generation") or ""):
+        raise ValueError(
+            _field_mismatch("runtime_generation", actual_runtime_generation, str(receipt.get("runtime_generation") or ""))
+        )
+    if actual_supervisor_db != str(receipt.get("supervisor_db") or ""):
+        raise ValueError(_field_mismatch("supervisor_db", actual_supervisor_db, str(receipt.get("supervisor_db") or "")))
+    if actual_ledger_marker != str(receipt.get("ledger_marker") or ""):
+        raise ValueError(_field_mismatch("ledger_marker", actual_ledger_marker, str(receipt.get("ledger_marker") or "")))
+
     return {
         "schema": STARTUP_READY_SCHEMA,
         "activation_id": activation_id,
         "ready_pid": int(ready_pid),
-        "label": label,
-        "runtime_generation": runtime_generation,
-        "runtime_root": runtime_root,
-        "ofloop_bin": ofloop_bin,
-        "supervisor_db": supervisor_db,
-        "ledger_marker": ledger_marker,
+        "label": receipt_label,
+        "runtime_generation": actual_runtime_generation,
+        "runtime_root": actual_runtime_root,
+        "ofloop_bin": actual_ofloop_bin,
+        "supervisor_db": actual_supervisor_db,
+        "ledger_marker": actual_ledger_marker,
         "ready_at": float(now if now is not None else time.time()),
+        "generation_source": actual_generation_source,
     }
 
 
@@ -322,46 +448,48 @@ def read_runtime_context_from_argv(argv: list[str], env: Mapping[str, str]) -> d
 def _recompute_runtime_generation(runtime_root: Path, env_value: str) -> tuple[str, str]:
     """Recompute runtime generation from actual payload bytes.
 
-    Returns ``(value, source)`` where ``source`` is one of
-    ``"recomputed_from_payload"`` or ``"env_fallback"``.  When the
-    recomputation fails the env value is NOT trusted silently: the
-    helper raises ``ValueError`` so the launcher fails the
-    activation rather than mint a misleading receipt.
+    Seam 2 of the residual-closure: ``env_fallback`` is NOT
+    acceptable for commissioned active-runtime proof.  The receipt
+    must derive its generation from the actual payload bytes; if
+    the payload cannot recompute its own generation, the launcher
+    refuses to mint a receipt at all (commissioning fails closed
+    with ``ACTIVE_RUNTIME_GENERATION_UNPROVEN``).
+
+    Returns ``(value, source)`` where ``source`` is always
+    ``"recomputed_from_payload"``.  The ``env_value`` parameter is
+    retained only so older call sites compile; it is NEVER used to
+    construct the returned value.
     """
     try:
         from ownframework_loop import runtime_identity  # type: ignore
-    except Exception:
-        if env_value:
-            return env_value, "env_fallback"
+    except Exception as exc:
         raise ValueError(
-            "runtime_generation unavailable: runtime_identity module could not be "
-            "imported and OFLOOP_RUNTIME_GENERATION env was not set"
+            "ACTIVE_RUNTIME_GENERATION_UNPROVEN: runtime_identity module could not be "
+            "imported by the launcher; cannot independently derive generation from the "
+            "installed payload bytes: " + str(exc)
         )
-    version = ""
     try:
         from ownframework_loop import __version__  # type: ignore
         version = str(__version__)
-    except Exception:
-        # Best-effort; runtime_generation_for_root needs a version
-        # string.  When unavailable the helper raises and we fall
-        # back to the env.
-        pass
-    if not version:
-        if env_value:
-            return env_value, "env_fallback"
+    except Exception as exc:
         raise ValueError(
-            "runtime_generation unavailable: cannot determine installed version and "
-            "OFLOOP_RUNTIME_GENERATION env was not set"
+            "ACTIVE_RUNTIME_GENERATION_UNPROVEN: cannot determine installed __version__ "
+            "from runtime_identity path; commissioning cannot publish a payload-derived "
+            "generation: " + str(exc)
+        )
+    if not version:
+        raise ValueError(
+            "ACTIVE_RUNTIME_GENERATION_UNPROVEN: installed __version__ is empty; "
+            "refusing to mint a receipt without a payload-derived generation"
         )
     try:
-        return runtime_identity.runtime_generation_for_root(runtime_root, version), "recomputed_from_payload"
+        value = runtime_identity.runtime_generation_for_root(runtime_root, version)
     except Exception as exc:
-        if env_value:
-            return env_value, "env_fallback"
         raise ValueError(
-            "runtime_generation unavailable: payload recomputation failed and "
-            "OFLOOP_RUNTIME_GENERATION env was not set; detail=" + str(exc)
+            "ACTIVE_RUNTIME_GENERATION_UNPROVEN: payload recomputation failed for runtime_root="
+            + str(runtime_root) + " version=" + version + ": " + str(exc)
         )
+    return value, "recomputed_from_payload"
 
 
 def derive_active_identity(
