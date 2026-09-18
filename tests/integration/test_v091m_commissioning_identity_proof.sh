@@ -747,8 +747,8 @@ grep -Fq "bootstrap_failed" "$TMP/case-f.install.out" \
 # "restored_previous_service" because the restored service is not
 # proven via receipt+attestation.  The plist/provenance bytes are
 # restored, but the loaded service is unverified.
-grep -Fq "rollback=previous_service_reloaded_unverified" "$TMP/case-f.install.out" \
-  || fail "Case F: missing previous_service_reloaded_unverified rollback: $(cat "$TMP/case-f.install.out")"
+grep -Fq "rollback=previous_config_bytes_restored_label_absent" "$TMP/case-f.install.out" \
+  || fail "Case F: missing previous_config_bytes_restored_label_absent rollback: $(cat "$TMP/case-f.install.out")"
 [[ "$(cat "$HOME_F/Library/LaunchAgents/com.ownframework.loop-supervisor.plist")" == "$PRIOR_PLIST_BYTES" ]] \
   || fail "Case F: prior plist bytes mutated on bootstrap failure"
 [[ "$(cat "$STATE_F/ownframework-loop/runtime-provenance.json")" == "$PRIOR_PROV_BYTES" ]] \

@@ -288,12 +288,12 @@ IOUT="$(HOME="$IHOME" XDG_STATE_HOME="$IXDG" PATH="$SHIMS:$PATH" LC_COUNT="$TMP/
 IRC=$?
 set -e
 [[ "$IRC" -eq 14 ]] || fail "T8 expected bootstrap refusal rc14, got rc=$IRC out=$IOUT"
-# Seam 5 of the architectural addendum: rollback no longer claims
-# "restored_previous_service" because the restored service is not
-# proven via receipt+attestation.  Surface the honest rollback
-# marker; plist/provenance bytes are restored to the previous
-# committed state, but the loaded service is unverified.
-assert_contains "$IOUT" "rollback=previous_service_reloaded_unverified" "T8 previous supervisor restored (unverified)"
+# Seam 5 + Seam 7 of the residual-closure: an unverified restored
+# service must NOT be left executing.  On rollback the prior
+# configuration bytes are restored for evidence/retry but the
+# canonical label is left absent (no rebootstrap).  The honest
+# marker is ``previous_config_bytes_restored_label_absent``.
+assert_contains "$IOUT" "rollback=previous_config_bytes_restored_label_absent" "T8 prior bytes restored, label absent"
 [[ "$(cat "$IPLIST")" == "OLD-PLIST" ]] || fail "T8 plist rollback failed"
 [[ "$(cat "$IPROV")" == "OLD-PROVENANCE" ]] || fail "T8 provenance rollback failed"
 pass "T8 supervisor replacement rolls back on bootstrap failure"
