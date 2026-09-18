@@ -396,11 +396,16 @@ from pathlib import Path
 def runtime_generation_for_root(root: Path, version: str) -> str:
     return f"ofloop-{version}@test-stub"
 PY
-  # Symlink the real service_identity.py into the fake install so the
-  # launcher stub (and the installer's receipt-verifier block) imports
-  # the real module.
-  ln -sf "$ROOT_DIR/lib/ownframework_loop/service_identity.py" \
-         "$install_root/lib/ownframework_loop/service_identity.py"
+  # Symlink the REAL ownframework_loop modules into the fake install
+  # so the launcher stub AND the installer's macos_service_lifecycle
+  # imports both succeed.  The runtime_identity.py stub OVERRIDES the
+  # real one with a deterministic version-keyed stub for the receipt.
+  for src in "$ROOT_DIR/lib/ownframework_loop/"*.py "$ROOT_DIR/lib/ownframework_loop/locking"; do
+    [[ -e "$src" ]] || continue
+    base="$(basename "$src")"
+    [[ "$base" == "__init__.py" || "$base" == "runtime_identity.py" ]] && continue
+    ln -sf "$src" "$install_root/lib/ownframework_loop/$base"
+  done
   printf '__version__ = "%s"\n' "$version" > "$install_root/lib/ownframework_loop/__init__.py"
   echo "$install_root"
 }

@@ -27,14 +27,21 @@ PY
 GUARD_MARKER="$TMP/ledger-incarnation.json"
 printf '{"schema":"ownframework-loop-ledger-incarnation/v1"}\n' > "$GUARD_MARKER"
 chmod 0600 "$GUARD_MARKER"
-# Use the real repo's ofloop binary as the post-exec exec target so
-# runtime_identity can derive a generation from a real, walkable
-# runtime_root.  The dummy path used previously caused runtime_identity
-# to walk the restricted $TMP filesystem, which Seam 2's stricter
-# fail-closed derivation now refuses.  The launcher's Python-preservation
-# invariant is unaffected: it exec's into the commissioned Python
-# interpreter regardless of what --ofloop points at.
-DUMMY="$ROOT_DIR/bin/ofloop"
+# Build a minimal install layout that runtime_identity can walk
+# cleanly.  The dummy ofloop is just a Python stub that records the
+# argv (so the launcher test can assert "supervisor serve" was
+# received) without actually entering a real supervisor loop.
+FAKE_CORE="$TMP/fake-core"
+mkdir -p "$FAKE_CORE/bin" "$FAKE_CORE/lib/ownframework_loop"
+cat > "$FAKE_CORE/bin/ofloop" <<'PY'
+import sys
+assert sys.argv[1:] == ["supervisor", "serve"], sys.argv
+print(sys.executable)
+PY
+# Minimal payload: one tiny Python file so runtime_identity's
+# payload-tree digest has something deterministic to walk.
+echo "VALUE=1" > "$FAKE_CORE/lib/ownframework_loop/x.py"
+DUMMY="$FAKE_CORE/bin/ofloop"
 BADBIN="$TMP/badbin"; mkdir -p "$BADBIN"
 cat > "$BADBIN/python3" <<'SH'
 #!/bin/sh
@@ -45,7 +52,7 @@ chmod +x "$BADBIN/python3"
 OUT="$(env -i \
   PATH="$BADBIN:$PATH" \
   OFLOOP_ACTIVATION_ID="test-activation-id" \
-  OFLOOP_RUNTIME_ROOT="$ROOT_DIR" \
+  OFLOOP_RUNTIME_ROOT="$FAKE_CORE" \
   OFLOOP_BIN="$DUMMY" \
   OFLOOP_RUNTIME_GENERATION="test" \
   LABEL="com.ownframework.loop-supervisor" \
