@@ -112,56 +112,6 @@ chmod 0700 "$STUB_STATE_DIR"
 # service_identity code path.
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../launchctl_fixture.sh"
 write_launchctl_fixture "$STUB_BIN_DIR"
-# The mac_runtime_provenance test synthesizes a launchd print body
-# from environment variables (rather than the stub's synthesized
-# body).  Re-add the emit_body helper here since some subtests want
-# the full text body for body-matching assertions.
-emit_body() {
-  local state_base="${XDG_STATE_HOME:-${HOME}/.local/state}"
-  local state_root="$state_base/ownframework-loop"
-  local db="$state_root/supervisor.sqlite3"
-  local stdout_log="$state_root/supervisor.stdout.log"
-  local stderr_log="$state_root/supervisor.stderr.log"
-  local ofloop="${OFLOOP_BIN:-/bin/ofloop}"
-  local python_bin="${PYTHON_BIN:-/usr/bin/python3}"
-  ofloop="$(python3 -B -c "from pathlib import Path; import sys; print(Path(sys.argv[1]).resolve(strict=False))" "$ofloop")"
-  python_bin="$(python3 -B -c "from pathlib import Path; import sys; print(Path(sys.argv[1]).resolve(strict=False))" "$python_bin")"
-  local runtime_root
-  runtime_root="$(python3 -B -c "from pathlib import Path; import sys; print(Path(sys.argv[1]).parent.parent.resolve(strict=False))" "$ofloop")"
-  cat <<BODY
-gui/501/com.ownframework.loop-supervisor = {
-	state = running
-
-	program = ${python_bin}
-	arguments = {
-		${python_bin}
-		-B
-		${runtime_root}/scripts/launch-commissioned-supervisor.py
-		--db
-		${db}
-		--ledger-marker
-		${state_root}/ledger-incarnation.json
-		--probe
-		${runtime_root}/scripts/probe-supervisor-runtime-dependencies.py
-		--ofloop
-		${ofloop}
-	}
-
-	working directory = /Users/test/Library/LaunchAgents
-	environment = {
-		PATH => /usr/bin:/bin
-		OFLOOP_RUNTIME_ROOT => ${runtime_root}
-		OFLOOP_BIN => ${ofloop}
-		PYTHON_BIN => ${python_bin}
-		XDG_STATE_HOME => ${state_base}
-	}
-
-	domain = gui/501
-	stdout path = ${stdout_log}
-	stderr path = ${stderr_log}
-}
-BODY
-}
 
 # Run the installer with controlled env. Uses env -i to ensure no
 
