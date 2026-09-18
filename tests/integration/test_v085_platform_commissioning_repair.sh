@@ -27,12 +27,14 @@ PY
 GUARD_MARKER="$TMP/ledger-incarnation.json"
 printf '{"schema":"ownframework-loop-ledger-incarnation/v1"}\n' > "$GUARD_MARKER"
 chmod 0600 "$GUARD_MARKER"
-DUMMY="$TMP/dummy-ofloop.py"
-cat > "$DUMMY" <<'PY'
-import sys
-assert sys.argv[1:] == ["supervisor", "serve"], sys.argv
-print(sys.executable)
-PY
+# Use the real repo's ofloop binary as the post-exec exec target so
+# runtime_identity can derive a generation from a real, walkable
+# runtime_root.  The dummy path used previously caused runtime_identity
+# to walk the restricted $TMP filesystem, which Seam 2's stricter
+# fail-closed derivation now refuses.  The launcher's Python-preservation
+# invariant is unaffected: it exec's into the commissioned Python
+# interpreter regardless of what --ofloop points at.
+DUMMY="$ROOT_DIR/bin/ofloop"
 BADBIN="$TMP/badbin"; mkdir -p "$BADBIN"
 cat > "$BADBIN/python3" <<'SH'
 #!/bin/sh
