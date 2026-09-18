@@ -325,7 +325,7 @@ SOURCE_VERSION="$SOURCE_VERSION" \
 RUNTIME_GENERATION="$RUNTIME_GENERATION" \
 LABEL="$LABEL" \
 "$PYTHON_BIN" - <<'PY'
-import json, os, plistlib, sys
+import json, os, plistlib, sys, uuid
 from pathlib import Path
 
 plist = Path(os.environ["PLIST"])
@@ -350,6 +350,9 @@ source_version = os.environ.get("SOURCE_VERSION") or None
 runtime_generation = os.environ.get("RUNTIME_GENERATION") or None
 label = os.environ["LABEL"]
 
+activation_id = str(uuid.uuid4())
+receipt_path = str(Path(state_root) / "supervisor-activation.json")
+
 env_vars = {
     "PATH": service_path,
     "PYTHONUNBUFFERED": "1",
@@ -358,6 +361,14 @@ env_vars = {
     "OFLOOP_BIN": ofloop_bin,
     "OFLOOP_RUNTIME_ROOT": str(Path(ofloop_bin).resolve(strict=False).parent.parent),
     "XDG_STATE_HOME": state_base,
+    # Per-installation activation id and the canonical receipt path the
+    # launcher writes before exec'ing into the supervisor.  The receipt
+    # is the load-bearing active-identity proof the installer verifies
+    # before emitting SUPERVISOR_INSTALL=PASS.
+    "OFLOOP_ACTIVATION_ID": activation_id,
+    "OFLOOP_RECEIPT_PATH": receipt_path,
+    "OFLOOP_RUNTIME_GENERATION": runtime_generation or "",
+    "LABEL": label,
 }
 # CRITICAL: only export OFLOOP_CLAUDE_BIN when a Claude binary was
 # actually commissioned. Writing a bogus path here would let the
@@ -397,6 +408,8 @@ payload = {
         "--ledger-marker", ledger_marker,
         "--probe", probe_script,
         "--ofloop", ofloop_bin,
+        "--activation-id", activation_id,
+        "--receipt-path", receipt_path,
     ],
     "EnvironmentVariables": env_vars,
     "RunAtLoad": True,
@@ -471,6 +484,19 @@ provenance = {
 }
 provenance_path.parent.mkdir(parents=True, exist_ok=True)
 write_private_json(provenance_path, provenance)
+# Persist the activation id (and its expected receipt path) in a
+# dedicated file so the bash-side active-identity proof can find
+# them deterministically without parsing the plist.  The receipt
+# itself is written by the launcher; this file only carries the
+# commissioning-side commitment.
+activation_record = {
+    "schema": "ownframework-loop-supervisor-activation-record/v1",
+    "activation_id": activation_id,
+    "receipt_path": receipt_path,
+    "expected_pid": None,
+}
+activation_record_path = Path(state_root) / "activation-record.json"
+write_private_json(activation_record_path, activation_record)
 test_abort_after("provenance")
 PY
 
@@ -482,7 +508,51 @@ if command -v plutil >/dev/null 2>&1; then
   fi
 fi
 
-launchctl bootout "$DOMAIN" "$PLIST" >/dev/null 2>&1 || true
+# 7. Stop the canonical-label service by identity, not by source plist.
+#    The loaded canonical-label job may have originated from a different
+#    plist path (the documented stale-fixture condition exposed by mature
+#    R2 cert). Targeting bootout at $PLIST alone is insufficient: when the
+#    loaded job came from another plist, plist-targeted bootout is a
+#    no-op and the stale foreign registration persists under the same
+#    label. The commissioned Loop label therefore MUST be owned by this
+#    installer via service-identity, not accidental plist origin.
+#
+#    Sequence:
+#      (a) probe: is the canonical label loaded?
+#      (b) force-stop: kickstart -k on the canonical label
+#      (c) bootout: by plist target first, then by label target
+#    Both bootout targets are tried in order.  A successful bootout
+#    is authoritative proof of removal: real launchd never returns
+#    rc=0 from a bootout that did not actually remove the loaded job.
+#    A failure of both bootout targets is REFUSED, never silently
+#    ignored.
+if launchctl print "$DOMAIN/$LABEL" >/dev/null 2>&1; then
+  launchctl kickstart -k "$DOMAIN/$LABEL" >/dev/null 2>&1 || true
+  if ! launchctl bootout "$DOMAIN" "$PLIST" >/dev/null 2>&1; then
+    if ! launchctl bootout "$DOMAIN/$LABEL" >/dev/null 2>&1; then
+      rollback="none"
+      if [[ "$HAD_OLD_PLIST" == "1" ]]; then
+        cp "$OLD_PLIST_BACKUP" "$PLIST"; chmod 0600 "$PLIST"
+        if [[ "$HAD_OLD_PROVENANCE" == "1" ]]; then
+          cp "$OLD_PROVENANCE_BACKUP" "$RUNTIME_PROVENANCE"; chmod 0600 "$RUNTIME_PROVENANCE"
+        else
+          rm -f "$RUNTIME_PROVENANCE"
+        fi
+        if [[ "$HAD_OLD_SERVICE_ENV" == "1" ]]; then
+          cp "$OLD_SERVICE_ENV_BACKUP" "$SERVICE_ENV"; chmod 0600 "$SERVICE_ENV"
+        else
+          rm -f "$SERVICE_ENV"
+        fi
+      else
+        rm -f "$PLIST" "$RUNTIME_PROVENANCE" "$SERVICE_ENV"
+      fi
+      rm -rf "$TXN_DIR"
+      echo "SUPERVISOR_INSTALL=REFUSED reason=stale_label_removal_failed rollback=$rollback" >&2
+      exit 14
+    fi
+  fi
+fi
+
 if ! launchctl bootstrap "$DOMAIN" "$PLIST"; then
   rollback="none"
   if [[ "$HAD_OLD_PLIST" == "1" ]]; then
@@ -515,6 +585,157 @@ if ! launchctl bootstrap "$DOMAIN" "$PLIST"; then
   exit 14
 fi
 launchctl enable "$DOMAIN/$LABEL" >/dev/null 2>&1 || true
+
+# 8. ACTIVE-IDENTITY PROOF — load-bearing postcondition for
+#    SUPERVISOR_INSTALL=PASS.  Configuration artifacts (plist, provenance)
+#    can lie about what launchd actually loaded.  This step waits for
+#    the launcher to write an activation receipt at the canonical
+#    receipt path, then verifies the receipt against the configured
+#    commissioning truth.  The receipt is the active-runtime-truth
+#    authority surface: the launcher derives every value from its own
+#    argv/env/pid before exec-ing into the durable supervisor.
+#
+#    A small "launchctl print gui/$UID/$LABEL" check follows, used
+#    only to bind the canonical service-manager label to the
+#    receipt's PID (when launchd exposes it).  An arbitrary manually
+#    launched process can write a receipt, but it cannot be bound to
+#    the canonical label.
+set +e
+ACTIVATION_RC=0
+ACTIVATION_REASON=""
+ACTIVATION_OUT="$(LABEL="$LABEL" DOMAIN="$DOMAIN" \
+  SUPERVISOR_DB="$SUPERVISOR_DB" \
+  LEDGER_MARKER="$LEDGER_MARKER" \
+  OFLOOP_BIN="$OFLOOP_BIN" \
+  PYTHON_BIN="$PYTHON_BIN" \
+  INSTALL_ROOT="$INSTALL_ROOT" \
+  STATE_BASE="$STATE_BASE" \
+  STATE_ROOT="$STATE_ROOT" \
+  RUNTIME_GENERATION="$RUNTIME_GENERATION" \
+  ACTIVATION_RECORD_PATH="$STATE_ROOT/activation-record.json" \
+  RECEIPT_MAX_ATTEMPTS="${OFLOOP_ACTIVATION_RECEIPT_MAX_ATTEMPTS:-30}" \
+  RECEIPT_ATTEMPT_SLEEP="${OFLOOP_ACTIVATION_RECEIPT_ATTEMPT_SLEEP:-0.1}" \
+  PYTHONPATH="$INSTALL_ROOT/lib" \
+  "$PYTHON_BIN" -B - <<'PY' 2>&1
+import json, os, re, subprocess, sys, time
+from pathlib import Path as _Path
+
+activation_record_path = os.environ["ACTIVATION_RECORD_PATH"]
+label = os.environ["LABEL"]
+domain = os.environ["DOMAIN"]
+exp_db = os.environ["SUPERVISOR_DB"]
+exp_ledger = os.environ["LEDGER_MARKER"]
+exp_runtime_root = os.environ["INSTALL_ROOT"]
+exp_ofloop_bin = os.environ["OFLOOP_BIN"]
+exp_runtime_generation = os.environ.get("RUNTIME_GENERATION") or ""
+max_attempts = int(os.environ.get("RECEIPT_MAX_ATTEMPTS") or "30")
+attempt_sleep = float(os.environ.get("RECEIPT_ATTEMPT_SLEEP") or "0.1")
+
+try:
+    with open(activation_record_path, "r", encoding="utf-8") as fh:
+        activation_record = json.load(fh)
+except (OSError, ValueError) as exc:
+    print("reason=activation_record_unavailable detail=" + str(exc), file=sys.stderr)
+    sys.exit(14)
+activation_id = activation_record.get("activation_id") or ""
+receipt_path = activation_record.get("receipt_path") or ""
+if not activation_id or not receipt_path:
+    print("reason=activation_record_invalid detail=missing_activation_id_or_receipt_path", file=sys.stderr)
+    sys.exit(14)
+
+from ownframework_loop import service_identity
+receipt = None
+last_err = None
+for _ in range(max_attempts):
+    try:
+        receipt = service_identity.load_receipt(_Path(receipt_path))
+        break
+    except FileNotFoundError:
+        pass
+    except (ValueError, OSError) as exc:
+        last_err = exc
+    time.sleep(attempt_sleep)
+if receipt is None:
+    print("reason=activation_receipt_missing attempts=" + str(max_attempts) + " detail=" + str(last_err), file=sys.stderr)
+    sys.exit(14)
+
+expected = {
+    "pid": int(receipt.get("pid", 0)),
+    "label": label,
+    "runtime_generation": exp_runtime_generation,
+    "runtime_root": exp_runtime_root,
+    "ofloop_bin": exp_ofloop_bin,
+    "supervisor_db": exp_db,
+    "ledger_marker": exp_ledger,
+}
+ok, reason = service_identity.verify_active_identity(receipt, activation_id, expected)
+if not ok:
+    print("reason=" + reason, file=sys.stderr)
+    sys.exit(14)
+
+# Service-manager label proof: the canonical label must be loaded
+# AND (when launchd exposes a pid) the launchd-reported pid must
+# equal the receipt pid.  This binds the receipt to the launchd
+# label.
+proc = subprocess.run(
+    ["launchctl", "print", domain + "/" + label],
+    check=False, capture_output=True, text=True,
+)
+if proc.returncode != 0:
+    print("reason=label_not_loaded launchctl_rc=" + str(proc.returncode), file=sys.stderr)
+    sys.exit(14)
+m = re.search(r"^\tpid\s*=\s*(\d+)\s*$", proc.stdout, re.MULTILINE)
+if m is None:
+    print("reason=active_identity_proven label_pid_unreported")
+    sys.exit(0)
+launchd_pid = int(m.group(1))
+if launchd_pid != int(receipt["pid"]):
+    print("reason=label_pid_mismatch launchd_pid=" + str(launchd_pid) + " receipt_pid=" + str(receipt["pid"]), file=sys.stderr)
+    sys.exit(14)
+print("reason=active_identity_proven")
+sys.exit(0)
+PY
+)"
+ACTIVATION_RC=$?
+ACTIVATION_REASON="$ACTIVATION_OUT"
+set -e
+
+if [[ "$ACTIVATION_RC" -ne 0 ]]; then
+  # Active identity could not be proven.  Tear down the just-bootstrapped
+  # service so the canonical label is not silently held by an
+  # unverified configuration.  Restore the previous service if there
+  # was one; otherwise leave the canonical label genuinely absent.
+  launchctl bootout "$DOMAIN" "$PLIST" >/dev/null 2>&1 || true
+  launchctl bootout "$DOMAIN/$LABEL" >/dev/null 2>&1 || true
+  rollback="none"
+  if [[ "$HAD_OLD_PLIST" == "1" ]]; then
+    cp "$OLD_PLIST_BACKUP" "$PLIST"; chmod 0600 "$PLIST"
+    if [[ "$HAD_OLD_PROVENANCE" == "1" ]]; then
+      cp "$OLD_PROVENANCE_BACKUP" "$RUNTIME_PROVENANCE"; chmod 0600 "$RUNTIME_PROVENANCE"
+    else
+      rm -f "$RUNTIME_PROVENANCE"
+    fi
+    if [[ "$HAD_OLD_SERVICE_ENV" == "1" ]]; then
+      cp "$OLD_SERVICE_ENV_BACKUP" "$SERVICE_ENV"; chmod 0600 "$SERVICE_ENV"
+    else
+      rm -f "$SERVICE_ENV"
+    fi
+    if launchctl bootstrap "$DOMAIN" "$PLIST" >/dev/null 2>&1; then
+      rollback="restored_previous_service"
+    else
+      rollback="previous_service_restore_failed"
+    fi
+  else
+    rm -f "$PLIST" "$RUNTIME_PROVENANCE" "$SERVICE_ENV" \
+          "$STATE_ROOT/supervisor-activation.json" \
+          "$STATE_ROOT/activation-record.json"
+    rollback="removed_unverified_new_service"
+  fi
+  rm -rf "$TXN_DIR"
+  echo "SUPERVISOR_INSTALL=REFUSED reason=active_identity_unproven_or_mismatch detail=${ACTIVATION_REASON} rollback=$rollback" >&2
+  exit 14
+fi
+
 rm -rf "$TXN_DIR"
 
 echo "SUPERVISOR_INSTALL=PASS"

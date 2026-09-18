@@ -284,7 +284,102 @@ echo Darwin
 SH
 cat > "$S2SHIMS/launchctl" <<'SH'
 #!/bin/bash
-exit 0
+state_dir="${OFLOOP_TEST_STUB_STATE_DIR:-}"
+case "${1:-}" in
+  print)
+    target="${2:-}"
+    label=""
+    if [[ "$target" =~ ^gui/[0-9]+/(com\.ownframework\.loop-supervisor)$ ]]; then
+      label="${BASH_REMATCH[1]}"
+    fi
+    if [[ -n "$label" && -n "$state_dir" && -f "$state_dir/$label" ]]; then
+      # Synthesize a state=running body that matches the installer's
+      # expected values, so the installer's active-identity proof can
+      # verify identity after a successful bootstrap.  Resolve paths
+      # the same way the installer does (via Path().resolve()).
+      PYTHON_BIN_PATH="${OFLOOP_TEST_STUB_PYTHON_BIN:-${PYTHON_BIN:-python3}}"
+      "$PYTHON_BIN_PATH" - "$target" <<'PY'
+import os, sys
+from pathlib import Path
+target = sys.argv[1]
+state_root = os.environ.get("XDG_STATE_HOME", os.path.expanduser("~/.local/state"))
+ofloop = os.environ.get("OFLOOP_BIN", "/bin/ofloop")
+python_bin = os.environ.get("PYTHON_BIN", "/usr/bin/python3")
+ofloop = str(Path(ofloop).resolve(strict=False))
+python_bin = str(Path(python_bin).resolve(strict=False))
+runtime_root = str(Path(ofloop).parent.parent.resolve(strict=False))
+print(f"{target} = {{")
+print("\tstate = running")
+print(f"\tprogram = {python_bin}")
+print("\targuments = {")
+print(f"\t\t{python_bin}")
+print("\t\t-B")
+print(f"\t\t{runtime_root}/scripts/launch-commissioned-supervisor.py")
+print("\t\t--db")
+print(f"\t\t{state_root}/ownframework-loop/supervisor.sqlite3")
+print("\t\t--ledger-marker")
+print(f"\t\t{state_root}/ownframework-loop/ledger-incarnation.json")
+print("\t\t--probe")
+print(f"\t\t{runtime_root}/scripts/probe-supervisor-runtime-dependencies.py")
+print("\t\t--ofloop")
+print(f"\t\t{ofloop}")
+print("\t}")
+print("\tenvironment = {")
+print("\t\tPATH => /usr/bin:/bin")
+print(f"\t\tOFLOOP_RUNTIME_ROOT => {runtime_root}")
+print(f"\t\tOFLOOP_BIN => {ofloop}")
+print(f"\t\tPYTHON_BIN => {python_bin}")
+print(f"\t\tXDG_STATE_HOME => {state_root}")
+print("\t}")
+print(f"\tstdout path = {state_root}/ownframework-loop/supervisor.stdout.log")
+print(f"\tstderr path = {state_root}/ownframework-loop/supervisor.stderr.log")
+print("}")
+PY
+      # Override pid with the receipt's pid if present.
+      receipt_path="${OFLOOP_TEST_STUB_RECEIPT_PATH:-}"
+      if [[ -n "$receipt_path" && -f "$receipt_path" ]]; then
+        receipt_pid="$("$PYTHON_BIN_PATH" -c "import json,sys; print(json.load(open(sys.argv[1]))['pid'])" "$receipt_path" 2>/dev/null || true)"
+        if [[ -n "$receipt_pid" ]]; then
+          printf '\tpid = %s\n' "$receipt_pid"
+        fi
+      fi
+      exit 0
+    fi
+    echo "Could not find service" >&2
+    exit 1
+    ;;
+  kickstart) exit 0 ;;
+  bootout)
+    if [[ -n "$state_dir" ]]; then
+      rm -f "$state_dir/com.ownframework.loop-supervisor"
+    fi
+    exit 0
+    ;;
+  bootstrap)
+    PYTHON_BIN_PATH="${OFLOOP_TEST_STUB_PYTHON_BIN:-${PYTHON_BIN:-python3}}"
+    if [[ -n "$state_dir" ]]; then
+      : > "$state_dir/com.ownframework.loop-supervisor"
+    fi
+    # Model real launchd: after a successful bootstrap, the loaded
+    # service runs its ProgramArguments.  Parse the plist and exec
+    # the launcher so the activation receipt is written.
+    if [[ -n "${OFLOOP_TEST_STUB_PLIST:-}" && -f "${OFLOOP_TEST_STUB_PLIST}" ]]; then
+      "$PYTHON_BIN_PATH" - "${OFLOOP_TEST_STUB_PLIST}" <<'PYINV'
+import json, os, plistlib, subprocess, sys
+with open(sys.argv[1], "rb") as fh:
+    payload = plistlib.load(fh)
+argv = payload.get("ProgramArguments", [])
+env = payload.get("EnvironmentVariables", {})
+merged = dict(os.environ)
+merged.update({k: str(v) for k, v in env.items()})
+sys.exit(subprocess.call([str(a) for a in argv], env=merged))
+PYINV
+    fi
+    exit 0
+    ;;
+  enable) exit 0 ;;
+  *) exit 0 ;;
+esac
 SH
 chmod +x "$S2SHIMS/uname" "$S2SHIMS/launchctl"
 S2HOME="$TMP/s2-home"; S2XDG="$TMP/s2-xdg"
@@ -300,12 +395,19 @@ echo "2.1.251 (Claude Code)"
 SH
 chmod +x "$S2FAKECLAUDE"
 mkdir -p "$S2HOME/.claude"
+mkdir -p "$TMP/s2-stub-state"
+S2_PYTHON_BIN="${PYTHON_BIN:-$(command -v python3)}"
 HOME="$S2HOME" XDG_STATE_HOME="$S2XDG" PATH="$S2SHIMS:$PATH" \
   OFLOOP_BIN="$ROOT_DIR/bin/ofloop" \
+  PYTHON_BIN="$S2_PYTHON_BIN" \
   CLAUDE_BIN="$S2FAKECLAUDE" \
   ANTHROPIC_AUTH_TOKEN="sk-test-auth-token-capture" \
   ANTHROPIC_BASE_URL="https://api.example.invalid/anthropic" \
   ANTHROPIC_MODEL="claude-test-model" \
+  OFLOOP_TEST_STUB_STATE_DIR="$TMP/s2-stub-state" \
+  OFLOOP_TEST_STUB_PLIST="$S2HOME/Library/LaunchAgents/com.ownframework.loop-supervisor.plist" \
+  OFLOOP_TEST_STUB_RECEIPT_PATH="$S2XDG/ownframework-loop/supervisor-activation.json" \
+  OFLOOP_TEST_STUB_PYTHON_BIN="$S2_PYTHON_BIN" \
   bash "$ROOT_DIR/scripts/supervisor/install-macos.sh" >/dev/null 2>&1 \
   || fail "T8b macOS supervisor install failed"
 [[ -f "$S2PLIST" ]] || fail "T8b plist not written"
@@ -357,7 +459,7 @@ NCSERVICE_ENV="$NCXDG/ownframework-loop/service-env.json"
 HOME="$NCHOME" XDG_STATE_HOME="$NCXDG" PATH="$MINIMAL_PATH:$NCSHIMS" \
   OFLOOP_BIN="$ROOT_DIR/bin/ofloop" \
   ANTHROPIC_AUTH_TOKEN="sk-leaked" \
-  bash "$ROOT_DIR/scripts/supervisor/install-macos.sh" >/dev/null 2>&1 \
+  bash "$ROOT_DIR/scripts/supervisor/install-macos.sh" > /tmp/v082-t8b.out 2>&1 \
   || fail "T8b idle-only macOS supervisor install failed"
 [[ -f "$NCPLIST" ]] || fail "T8b idle-only plist not written"
 NCPLIST_ENV="$(python3 -c "import plistlib,sys; d=plistlib.load(open(sys.argv[1],'rb')); print('\n'.join(f'{k}={v}' for k,v in d.get('EnvironmentVariables',{}).items()))" "$NCPLIST" 2>/dev/null || true)"

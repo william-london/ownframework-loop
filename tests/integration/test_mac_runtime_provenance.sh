@@ -94,11 +94,128 @@ OFLOOP_FAKE="$(write_fake_symlink ofloop "$REAL_OFLOOP")"
 CLAUDE_FAKE="$(write_fake_symlink claude "$REAL_CLAUDE")"
 
 # Stub launchctl so the installer doesn't touch the real macOS service.
+# The stub tracks service-loaded state in a marker file keyed by the
+# canonical label: print returns rc=0 with a state=running body only
+# when the canonical service is loaded; otherwise it returns rc=1
+# ("Could not find service").  This models real launchd semantics so
+# the installer's active-identity proof can prove identity after a
+# successful bootstrap, and detect a stale same-label registration
+# across reinstalls.  The print body is synthesized from the freshly
+# written plist (if any) so the installer's active-identity proof sees
+# matching --db, --ofloop, and environment values.
 STUB_BIN_DIR="$SANDBOX/stub-bin"
-mkdir -p "$STUB_BIN_DIR"
+STUB_STATE_DIR="$SANDBOX/stub-state"
+mkdir -p "$STUB_BIN_DIR" "$STUB_STATE_DIR"
+chmod 0700 "$STUB_STATE_DIR"
 cat > "$STUB_BIN_DIR/launchctl" <<'STUB_EOF'
 #!/usr/bin/env bash
-exit 0
+state_dir="${OFLOOP_TEST_STUB_STATE_DIR:-}"
+cmd="${1:-}"
+emit_body() {
+  local state_base="${XDG_STATE_HOME:-${HOME}/.local/state}"
+  local state_root="$state_base/ownframework-loop"
+  local db="$state_root/supervisor.sqlite3"
+  local stdout_log="$state_root/supervisor.stdout.log"
+  local stderr_log="$state_root/supervisor.stderr.log"
+  local ofloop="${OFLOOP_BIN:-/bin/ofloop}"
+  local python_bin="${PYTHON_BIN:-/usr/bin/python3}"
+  # Canonicalize paths the same way the installer does.
+  ofloop="$(python3 -B -c "from pathlib import Path; import sys; print(Path(sys.argv[1]).resolve(strict=False))" "$ofloop")"
+  python_bin="$(python3 -B -c "from pathlib import Path; import sys; print(Path(sys.argv[1]).resolve(strict=False))" "$python_bin")"
+  local runtime_root
+  runtime_root="$(python3 -B -c "from pathlib import Path; import sys; print(Path(sys.argv[1]).parent.parent.resolve(strict=False))" "$ofloop")"
+  cat <<BODY
+gui/501/com.ownframework.loop-supervisor = {
+	state = running
+
+	program = ${python_bin}
+	arguments = {
+		${python_bin}
+		-B
+		${runtime_root}/scripts/launch-commissioned-supervisor.py
+		--db
+		${db}
+		--ledger-marker
+		${state_root}/ledger-incarnation.json
+		--probe
+		${runtime_root}/scripts/probe-supervisor-runtime-dependencies.py
+		--ofloop
+		${ofloop}
+	}
+
+	working directory = /Users/test/Library/LaunchAgents
+	environment = {
+		PATH => /usr/bin:/bin
+		OFLOOP_RUNTIME_ROOT => ${runtime_root}
+		OFLOOP_BIN => ${ofloop}
+		PYTHON_BIN => ${python_bin}
+		XDG_STATE_HOME => ${state_base}
+	}
+
+	domain = gui/501
+	stdout path = ${stdout_log}
+	stderr path = ${stderr_log}
+}
+BODY
+}
+case "$cmd" in
+  print)
+    target="${2:-}"
+    label=""
+    if [[ "$target" =~ ^gui/[0-9]+/(com\.ownframework\.loop-supervisor)$ ]]; then
+      label="${BASH_REMATCH[1]}"
+    fi
+    if [[ -n "$label" && -n "$state_dir" && -f "$state_dir/$label" ]]; then
+      emit_body
+      # Override pid with the receipt's pid so the installer's
+      # label-pid binding succeeds.
+      receipt_path="${OFLOOP_TEST_STUB_RECEIPT_PATH:-}"
+      if [[ -n "$receipt_path" && -f "$receipt_path" ]]; then
+        receipt_pid="$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['pid'])" "$receipt_path" 2>/dev/null || true)"
+        if [[ -n "$receipt_pid" ]]; then
+          printf '\tpid = %s\n' "$receipt_pid"
+        fi
+      fi
+      exit 0
+    fi
+    echo "Could not find service" >&2
+    exit 1
+    ;;
+  kickstart) exit 0 ;;
+  bootout)
+    if [[ -n "$state_dir" ]]; then
+      rm -f "$state_dir/com.ownframework.loop-supervisor"
+    fi
+    exit 0
+    ;;
+  bootstrap)
+    # The installer passes `bootstrap gui/UID /path/to/plist` (the
+    # label is the label embedded in the plist, which we treat as the
+    # canonical Loop label).
+    if [[ -n "$state_dir" ]]; then
+      : > "$state_dir/com.ownframework.loop-supervisor"
+    fi
+    # Model real launchd: after a successful bootstrap, the loaded
+    # service runs its ProgramArguments.  Parse the plist and exec the
+    # launcher so the activation receipt is written.
+    if [[ -n "${OFLOOP_TEST_STUB_PLIST:-}" && -f "${OFLOOP_TEST_STUB_PLIST}" && \
+          "${OFLOOP_TEST_STUB_NO_LAUNCH:-0}" != "1" ]]; then
+      python3 - "${OFLOOP_TEST_STUB_PLIST}" <<'PY'
+import json, os, plistlib, subprocess, sys
+with open(sys.argv[1], "rb") as fh:
+    payload = plistlib.load(fh)
+argv = payload.get("ProgramArguments", [])
+env = payload.get("EnvironmentVariables", {})
+merged = dict(os.environ)
+merged.update({k: str(v) for k, v in env.items()})
+sys.exit(subprocess.call([str(a) for a in argv], env=merged))
+PY
+    fi
+    exit 0
+    ;;
+  enable) exit 0 ;;
+  *) exit 0 ;;
+esac
 STUB_EOF
 chmod +x "$STUB_BIN_DIR/launchctl"
 
@@ -113,6 +230,9 @@ run_installer() {
     OFLOOP_BIN="$OFLOOP_FAKE" \
     CLAUDE_BIN="${CLAUDE_BIN:-}" \
     XDG_STATE_HOME="${XDG_STATE_HOME:-}" \
+    OFLOOP_TEST_STUB_STATE_DIR="$STUB_STATE_DIR" \
+    OFLOOP_TEST_STUB_PLIST="$HOME/Library/LaunchAgents/com.ownframework.loop-supervisor.plist" \
+    OFLOOP_TEST_STUB_RECEIPT_PATH="${XDG_STATE_HOME:-$HOME/.local/state}/ownframework-loop/supervisor-activation.json" \
     bash "$INSTALLER" 2>&1)
 }
 
@@ -315,6 +435,9 @@ ln -sf "$REAL_OFLOOP" "$IDLE_FAKEBIN_DIR/ofloop"
   PYTHON_BIN="$PYTHON_FAKE" \
   OFLOOP_BIN="$OFLOOP_FAKE" \
   XDG_STATE_HOME="$IDLE_XDG" \
+  OFLOOP_TEST_STUB_STATE_DIR="$STUB_STATE_DIR" \
+  OFLOOP_TEST_STUB_PLIST="$IDLE_HOME/Library/LaunchAgents/com.ownframework.loop-supervisor.plist" \
+  OFLOOP_TEST_STUB_RECEIPT_PATH="$IDLE_XDG/ownframework-loop/supervisor-activation.json" \
   bash "$INSTALLER" > /tmp/t4.out 2>&1 || true)
 IDLE_PROV="$IDLE_XDG/ownframework-loop/runtime-provenance.json"
 IDLE_SERVICE_ENV="$IDLE_XDG/ownframework-loop/service-env.json"
@@ -404,6 +527,9 @@ mkdir -p "$DEF_HOME"
   PYTHON_BIN="$PYTHON_FAKE" \
   OFLOOP_BIN="$OFLOOP_FAKE" \
   CLAUDE_BIN="$CLAUDE_FAKE" \
+  OFLOOP_TEST_STUB_STATE_DIR="$STUB_STATE_DIR" \
+  OFLOOP_TEST_STUB_PLIST="$DEF_HOME/Library/LaunchAgents/com.ownframework.loop-supervisor.plist" \
+  OFLOOP_TEST_STUB_RECEIPT_PATH="$DEF_HOME/.local/state/ownframework-loop/supervisor-activation.json" \
   bash "$INSTALLER" > /tmp/t6.out 2>&1 || true)
 DEF_PROV="$DEF_HOME/.local/state/ownframework-loop/runtime-provenance.json"
 [[ -f "$DEF_PROV" ]] || { fail "T6: default provenance not written. out=$(cat /tmp/t6.out)"; }
@@ -464,10 +590,38 @@ if [[ -f "$PLIST8" ]]; then
   EXPECTED_DB="$SANDBOX/xdg8/ownframework-loop/supervisor.sqlite3"
   EXPECTED_MARKER="$SANDBOX/xdg8/ownframework-loop/ledger-incarnation.json"
   PROG=$(read_plist_key "$PLIST8" "ProgramArguments")
-  EXPECTED_PROG="['$EXPECTED_PY', '-B', '$EXPECTED_HELPER', '--db', '$EXPECTED_DB', '--ledger-marker', '$EXPECTED_MARKER', '--probe', '$EXPECTED_PROBE', '--ofloop', '$EXPECTED_OFLOOP']"
-  [[ "$PROG" == "$EXPECTED_PROG" ]] \
+  # The activation id and receipt path are randomized per install; the
+  # postcondition asserts each required flag is present and exact-valued
+  # for the deterministic args.
+  python3 -B - "$PLIST8" "$EXPECTED_PY" "$EXPECTED_HELPER" "$EXPECTED_DB" \
+      "$EXPECTED_MARKER" "$EXPECTED_PROBE" "$EXPECTED_OFLOOP" <<'PY' \
     && pass "T8: ProgramArguments execute through exact commissioned Python + ledger guard" \
-    || fail "T8: ProgramArguments=$PROG expected=$EXPECTED_PROG"
+    || fail "T8: ProgramArguments verification failed: $PROG"
+import plistlib, sys
+plist = sys.argv[1]
+expected_py = sys.argv[2]
+expected_helper = sys.argv[3]
+expected_db = sys.argv[4]
+expected_marker = sys.argv[5]
+expected_probe = sys.argv[6]
+expected_ofloop = sys.argv[7]
+with open(plist, "rb") as fh:
+    argv = plistlib.load(fh).get("ProgramArguments", [])
+assert argv[0] == expected_py, argv[0]
+assert argv[1] == "-B"
+assert argv[2] == expected_helper
+assert "--db" in argv, argv
+assert argv[argv.index("--db") + 1] == expected_db
+assert "--ledger-marker" in argv
+assert argv[argv.index("--ledger-marker") + 1] == expected_marker
+assert "--probe" in argv
+assert argv[argv.index("--probe") + 1] == expected_probe
+assert "--ofloop" in argv
+assert argv[argv.index("--ofloop") + 1] == expected_ofloop
+assert "--activation-id" in argv
+assert "--receipt-path" in argv
+assert argv[argv.index("--receipt-path") + 1].endswith("supervisor-activation.json")
+PY
   if command -v plutil >/dev/null 2>&1; then
     plutil -lint "$PLIST8" >/dev/null \
       && pass "T8: emitted plist passes plutil validation" \

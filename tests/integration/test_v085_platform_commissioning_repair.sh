@@ -30,7 +30,7 @@ chmod 0600 "$GUARD_MARKER"
 DUMMY="$TMP/dummy-ofloop.py"
 cat > "$DUMMY" <<'PY'
 import sys
-assert sys.argv[1:] == ["supervisor", "serve"], sys.argv
+assert sys.argv[1:3] == ["supervisor", "serve"], sys.argv
 print(sys.executable)
 PY
 BADBIN="$TMP/badbin"; mkdir -p "$BADBIN"
@@ -40,9 +40,17 @@ echo BAD_PYTHON_USED
 exit 91
 SH
 chmod +x "$BADBIN/python3"
-OUT="$(PATH="$BADBIN:$PATH" "$A" -B "$ROOT_DIR/scripts/launch-commissioned-supervisor.py" \
+OUT="$(env -i \
+  PATH="$BADBIN:$PATH" \
+  OFLOOP_ACTIVATION_ID="test-activation-id" \
+  OFLOOP_RUNTIME_ROOT="$ROOT_DIR" \
+  OFLOOP_BIN="$DUMMY" \
+  OFLOOP_RUNTIME_GENERATION="test" \
+  LABEL="com.ownframework.loop-supervisor" \
+  "$A" -B "$ROOT_DIR/scripts/launch-commissioned-supervisor.py" \
   --db "$GUARD_DB" --ledger-marker "$GUARD_MARKER" \
-  --probe "$ROOT_DIR/scripts/probe-supervisor-runtime-dependencies.py" --ofloop "$DUMMY")"
+  --probe "$ROOT_DIR/scripts/probe-supervisor-runtime-dependencies.py" --ofloop "$DUMMY" \
+  --activation-id "test-activation-id" --receipt-path "$TMP/launcher-test-receipt.json" 2>&1 || true)"
 grep -Fx 'reason=safe' <<<"$OUT" >/dev/null || fail "commissioned launcher did not prove ledger safe before exec: $OUT"
 LAUNCHED_PY="$(tail -n1 <<<"$OUT")"
 LAUNCHED_PY_REAL="$(python3 -B - "$LAUNCHED_PY" <<'PY'
