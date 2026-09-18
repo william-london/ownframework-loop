@@ -28,65 +28,13 @@ if [[ "${1:-}" == "-s" ]]; then echo Darwin; else /usr/bin/uname "$@"; fi
 EOF
 chmod +x "$FAKEBIN/uname"
 
-cat > "$FAKEBIN/launchctl" <<'EOF'
-#!/usr/bin/env bash
 # v0.9.1 closure m: shim models launchd's post-bootstrap process startup
 # WITHOUT exec'ing the real launcher (which would start a real
-# supervisor).  We parse the plist, derive a receipt from the
-# launcher's argv + plist env, write the receipt, and exit.
-state_dir="${OFLOOP_TEST_STUB_STATE_DIR:-}"
-case "${1:-}" in
-  print)
-    if [[ -n "${OFLOOP_TEST_STUB_PLIST:-}" && -f "${OFLOOP_TEST_STUB_PLIST}" && \
-          -n "${OFLOOP_TEST_STUB_RECEIPT_PATH:-}" && -f "${OFLOOP_TEST_STUB_RECEIPT_PATH}" ]]; then
-      receipt_pid="$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['pid'])" "${OFLOOP_TEST_STUB_RECEIPT_PATH}" 2>/dev/null || echo "")"
-      printf 'gui/501/com.ownframework.loop-supervisor = {\n'
-      printf '\tstate = running\n'
-      printf '\tpid = %s\n' "$receipt_pid"
-      printf '}\n'
-      exit 0
-    fi
-    exit 1
-    ;;
-  kickstart) exit 0 ;;
-  bootout) exit 0 ;;
-  bootstrap)
-    if [[ -n "$state_dir" ]]; then
-      : > "$state_dir/com.ownframework.loop-supervisor"
-    fi
-    if [[ -n "${OFLOOP_TEST_STUB_PLIST:-}" && -f "${OFLOOP_TEST_STUB_PLIST}" && \
-          -n "${OFLOOP_TEST_STUB_RECEIPT_PATH:-}" ]]; then
-      python3 - "${OFLOOP_TEST_STUB_PLIST}" "${OFLOOP_TEST_STUB_RECEIPT_PATH}" \
-          "${OFLOOP_TEST_STUB_INSTALL_ROOT:-}" "${OFLOOP_TEST_STUB_LIB_ROOT:-${OFLOOP_TEST_STUB_INSTALL_ROOT:-}}" <<'PYINV'
-import json, os, plistlib, sys
-from pathlib import Path
-plist = Path(sys.argv[1])
-receipt_path = Path(sys.argv[2])
-install_root = Path(sys.argv[3]) if len(sys.argv) > 3 and sys.argv[3] else plist.parent.parent
-lib_root = Path(sys.argv[4]) if len(sys.argv) > 4 and sys.argv[4] else install_root
-with open(plist, "rb") as fh:
-    payload = plistlib.load(fh)
-argv = payload.get("ProgramArguments", [])
-env = payload.get("EnvironmentVariables", {})
-sys.path.insert(0, str(lib_root / "lib"))
-from ownframework_loop import service_identity
-argv_list = [sys.executable, str(install_root / "scripts" / "launch-commissioned-supervisor.py")] + argv[1:]
-receipt = service_identity.derive_active_identity(
-    launcher_argv=argv_list,
-    launcher_env=env,
-    launcher_pid=int(os.getpid()),
-)
-service_identity.write_receipt_atomic(receipt, receipt_path)
-sys.exit(0)
-PYINV
-    fi
-    exit 0
-    ;;
-  enable) exit 0 ;;
-  *) exit 0 ;;
-esac
-EOF
-chmod +x "$FAKEBIN/launchctl"
+# supervisor).  Source the consolidated launchctl fixture helper so
+# the receipt + startup-ready attestation are written through the
+# real service_identity code path.
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../launchctl_fixture.sh"
+write_launchctl_fixture "$FAKEBIN"
 
 cat > "$FAKEBIN/claude" <<'EOF'
 #!/usr/bin/env bash
@@ -128,6 +76,8 @@ env HOME="$HOME_EXISTING" PATH="$FAKEBIN:/usr/local/bin:/usr/bin:/bin" \
   OFLOOP_TEST_STUB_STATE_DIR="$TMP/stub-state-existing" \
   OFLOOP_TEST_STUB_PLIST="$HOME_EXISTING/Library/LaunchAgents/com.ownframework.loop-supervisor.plist" \
   OFLOOP_TEST_STUB_RECEIPT_PATH="$HOME_EXISTING/.local/state/ownframework-loop/supervisor-activation.json" \
+  OFLOOP_TEST_STUB_SUPERVISOR_DB="$HOME_EXISTING/.local/state/ownframework-loop/supervisor.sqlite3" \
+  OFLOOP_TEST_STUB_LEDGER_MARKER="$HOME_EXISTING/.local/state/ownframework-loop/ledger-incarnation.json" \
   OFLOOP_TEST_STUB_INSTALL_ROOT="$CORE" \
   OFLOOP_TEST_STUB_LIB_ROOT="$CORE" \
   "$CORE/scripts/supervisor/refresh.sh" "$CORE" "$SRC" >"$OUT" 2>&1

@@ -159,6 +159,40 @@ merged = dict(os.environ)
 merged.update({k: str(v) for k, v in env.items()})
 sys.exit(subprocess.call([str(a) for a in argv], env=merged))
 PYINV
+          # Seam 2: also write the durable supervisor's startup-ready
+          # attestation from the receipt the launcher just wrote. The
+          # post-exec supervisor normally writes this itself; here
+          # the test shim writes it because the launcher stub exits
+          # before the durable supervisor can take over.
+          if [[ -n "${OFLOOP_TEST_LAUNCHCTL_RECEIPT_PATH:-}" && \
+                -f "${OFLOOP_TEST_LAUNCHCTL_RECEIPT_PATH}" ]]; then
+            if [[ "${OFLOOP_TEST_LAUNCHCTL_SKIP_STARTUP_READY:-0}" != "1" ]]; then
+              python3 - "$OFLOOP_TEST_LAUNCHCTL_RECEIPT_PATH" <<'READYPY'
+import json, os, sys
+from pathlib import Path
+receipt_path = Path(sys.argv[1])
+ready_path = receipt_path.with_name("supervisor-startup-ready.json")
+with open(receipt_path, "r", encoding="utf-8") as fh:
+    body = json.load(fh)
+attestation = {
+    "schema": "ownframework-loop-supervisor-startup-ready/v1",
+    "activation_id": body["activation_id"],
+    "ready_pid": body["pid"],
+    "label": body["label"],
+    "runtime_generation": body["runtime_generation"],
+    "runtime_root": body["runtime_root"],
+    "ofloop_bin": body["ofloop_bin"],
+    "supervisor_db": body["supervisor_db"],
+    "ledger_marker": body["ledger_marker"],
+    "ready_at": body.get("started_at", 0.0),
+}
+tmp = ready_path.with_name(ready_path.name + ".tmp")
+with open(tmp, "w", encoding="utf-8") as fh:
+    json.dump(attestation, fh, indent=2, sort_keys=True)
+os.replace(tmp, ready_path)
+READYPY
+            fi
+          fi
           # For Case C: after the launcher writes a fresh receipt,
           # overwrite it with a stale one to simulate a leftover
           # from a prior activation.  For Case G: tamper with a
@@ -178,9 +212,27 @@ receipt = {
     "supervisor_db": "/stale/db",
     "ledger_marker": "/stale/ledger",
     "started_at": time.time(),
+    "generation_source": "env_fallback",
 }
 with open(sys.argv[1], "w", encoding="utf-8") as fh:
     json.dump(receipt, fh, indent=2, sort_keys=True)
+import pathlib
+ready = pathlib.Path(sys.argv[1]).with_name("supervisor-startup-ready.json")
+if ready.exists():
+    ready_body = {
+        "schema": "ownframework-loop-supervisor-startup-ready/v1",
+        "activation_id": "00000000-0000-0000-0000-000000000000",
+        "ready_pid": int(os.getpid()),
+        "label": "com.ownframework.loop-supervisor",
+        "runtime_generation": "stale",
+        "runtime_root": "/stale",
+        "ofloop_bin": "/stale/ofloop",
+        "supervisor_db": "/stale/db",
+        "ledger_marker": "/stale/ledger",
+        "ready_at": time.time(),
+    }
+    with open(ready, "w", encoding="utf-8") as fh:
+        json.dump(ready_body, fh, indent=2, sort_keys=True)
 STALEPY
             elif [[ -n "${OFLOOP_TEST_LAUNCHCTL_TAMPER_RECEIPT_FIELD:-}" ]]; then
               python3 - "$OFLOOP_TEST_LAUNCHCTL_RECEIPT_PATH" "$OFLOOP_TEST_LAUNCHCTL_TAMPER_RECEIPT_FIELD" <<'TAMPERPY'
@@ -430,12 +482,15 @@ write_print_body "$PRINT_V2" \
   "$STATE_A/ownframework-loop/supervisor.stderr.log"
 : > "$CALLLOG"
 run_installer "$HOME_A" "$STATE_A" "$CORE_A_ROOT" "$SHIM" "$PRINT_V2" "$CALLLOG" "$TMP/case-a2.install.out" "$TMP/case-a.state" || true
-grep -Fq "SUPERVISOR_INSTALL=PASS" "$TMP/case-a.install.out" \
-  || fail "Case A: stale same-label replacement did not emit PASS: $(cat "$TMP/case-a.install.out")"
-grep -Fq "kickstart" "$CALLLOG" \
-  || fail "Case A: kickstart not invoked on stale same-label replacement: $(cat "$CALLLOG")"
+grep -Fq "SUPERVISOR_INSTALL=PASS" "$TMP/case-a2.install.out" \
+  || fail "Case A: stale same-label replacement did not emit PASS: $(cat "$TMP/case-a2.install.out")"
+# Seam 3: removal uses bootout (NOT kickstart -k).  The call log
+# must show at least one bootout invocation against the canonical
+# label OR plist target.
 grep -Fq "bootout" "$CALLLOG" \
   || fail "Case A: bootout not invoked on stale same-label replacement: $(cat "$CALLLOG")"
+grep -Fq "bootstrap" "$CALLLOG" \
+  || fail "Case A: bootstrap not invoked on stale same-label replacement: $(cat "$CALLLOG")"
 pass "Case A: stale same-label replacement is removed and re-bootstrapped"
 
 ##########################################################################
@@ -688,8 +743,12 @@ grep -Fq "SUPERVISOR_INSTALL=REFUSED" "$TMP/case-f.install.out" \
   || fail "Case F: bootstrap failure did not REFUSE: $(cat "$TMP/case-f.install.out")"
 grep -Fq "bootstrap_failed" "$TMP/case-f.install.out" \
   || fail "Case F: missing bootstrap_failed marker: $(cat "$TMP/case-f.install.out")"
-grep -Fq "rollback=restored_previous_service" "$TMP/case-f.install.out" \
-  || fail "Case F: missing restored_previous_service rollback: $(cat "$TMP/case-f.install.out")"
+# Seam 5 of the architectural addendum: rollback no longer claims
+# "restored_previous_service" because the restored service is not
+# proven via receipt+attestation.  The plist/provenance bytes are
+# restored, but the loaded service is unverified.
+grep -Fq "rollback=previous_service_reloaded_unverified" "$TMP/case-f.install.out" \
+  || fail "Case F: missing previous_service_reloaded_unverified rollback: $(cat "$TMP/case-f.install.out")"
 [[ "$(cat "$HOME_F/Library/LaunchAgents/com.ownframework.loop-supervisor.plist")" == "$PRIOR_PLIST_BYTES" ]] \
   || fail "Case F: prior plist bytes mutated on bootstrap failure"
 [[ "$(cat "$STATE_F/ownframework-loop/runtime-provenance.json")" == "$PRIOR_PROV_BYTES" ]] \

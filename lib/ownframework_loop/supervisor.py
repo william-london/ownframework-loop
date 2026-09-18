@@ -611,6 +611,80 @@ def _cleanup_done_runtime_caches(db_path: Path | None = None) -> list[dict[str, 
     ]
 
 
+def _publish_startup_ready_attestation(db_path: Path | None) -> None:
+    """Write the durable supervisor's startup-ready attestation (Seam 2).
+
+    The launcher (pre-exec) wrote an activation receipt that proves
+    the launcher's pre-exec identity.  That receipt alone does NOT
+    prove the durable supervisor actually entered its scheduler
+    loop.  This helper writes a fresh attestation at the canonical
+    state-root path that the installer verifies separately,
+    binding the durable supervisor's PID to the same activation_id
+    the launcher minted.
+
+    Failure modes are intentionally non-fatal at the supervisor
+    level: a missing or unreadable activation receipt is logged to
+    stderr and the durable supervisor continues.  The launchd
+    installer is the load-bearing authority for SUPERVISOR_INSTALL
+    verification — it refuses PASS when the attestation is missing
+    or mismatched.  Silent success here would let the receipt alone
+    publish false "active" truth, which is the architectural defect
+    this whole module exists to close.
+    """
+    from . import service_identity  # local import to avoid startup cycles
+
+    activation_id = os.environ.get("OFLOOP_ACTIVATION_ID", "").strip()
+    if not activation_id:
+        # No active commissioning attempt.  The supervisor may have
+        # been launched directly (e.g. ``ofloop supervisor serve``
+        # from an operator's shell).  Nothing to attest.
+        return
+    receipt_path_env = os.environ.get("OFLOOP_RECEIPT_PATH", "").strip()
+    if not receipt_path_env:
+        print(
+            "SUPERVISOR_STARTUP_READY=skipped reason=receipt_path_unset",
+            file=sys.stderr,
+        )
+        return
+    try:
+        receipt = service_identity.load_receipt(Path(receipt_path_env))
+    except (FileNotFoundError, ValueError, OSError) as exc:
+        print(
+            "SUPERVISOR_STARTUP_READY=skipped reason=receipt_unreadable detail="
+            + str(exc),
+            file=sys.stderr,
+        )
+        return
+    try:
+        attestation = service_identity.derive_startup_ready(
+            receipt=receipt,
+            ready_pid=os.getpid(),
+        )
+    except ValueError as exc:
+        print(
+            "SUPERVISOR_STARTUP_READY=skipped reason=derivation_failed detail="
+            + str(exc),
+            file=sys.stderr,
+        )
+        return
+    ready_path = Path(receipt_path_env).with_name("supervisor-startup-ready.json")
+    try:
+        service_identity.write_receipt_atomic(attestation, ready_path)
+    except OSError as exc:
+        print(
+            "SUPERVISOR_STARTUP_READY=skipped reason=write_failed detail="
+            + str(exc),
+            file=sys.stderr,
+        )
+        return
+    print(
+        "SUPERVISOR_STARTUP_READY=ATTESTED",
+        f"activation_id={attestation['activation_id']}",
+        f"ready_pid={attestation['ready_pid']}",
+        f"attestation={ready_path}",
+    )
+
+
 def _slug_repo(canonical_repo: Path) -> str:
     p = str(Path(canonical_repo).resolve(strict=False))
     import hashlib
@@ -6156,6 +6230,7 @@ def serve(
     """Run the durable execution clock. Idle iterations make zero model calls."""
     _load_service_env_file()
     _cleanup_done_runtime_caches(db_path)
+    _publish_startup_ready_attestation(db_path)
     if once:
         return run_one(db_path=db_path, timeout_seconds=timeout_seconds)
     last_emit: float = 0.0

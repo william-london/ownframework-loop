@@ -228,14 +228,36 @@ cat > "$SHIMS/uname" <<'SH'
 #!/bin/sh
 echo Darwin
 SH
+# T8's launchctl shim models the proven-removal contract required
+# by Seam 3 of the architectural addendum.  After a successful
+# bootout, the shim unloads the label so the installer's re-probe
+# (Seam 3) can confirm the label is genuinely unloaded.  Bootstrap
+# fails on the first call (LC_COUNT counts the attempts).
+LC_STATE="${LC_STATE:-$TMP/lc-state}"
+[[ -f "$LC_STATE" ]] || printf 'loaded\n' > "$LC_STATE"
 cat > "$SHIMS/launchctl" <<'SH'
 #!/bin/bash
 case "$1" in
-  bootout|enable) exit 0 ;;
+  print)
+    target="${2:-}"
+    if [[ "$target" == gui/*/com.ownframework.loop-supervisor ]]; then
+      if [[ -f "$LC_STATE" ]]; then
+        exit 0
+      fi
+      exit 1
+    fi
+    exit 0
+    ;;
+  bootout)
+    rm -f "$LC_STATE"
+    exit 0
+    ;;
+  enable) exit 0 ;;
   bootstrap)
     n=0; [[ -f "$LC_COUNT" ]] && n="$(cat "$LC_COUNT")"
     n=$((n+1)); echo "$n" > "$LC_COUNT"
     [[ "$n" -eq 1 ]] && exit 44
+    printf 'loaded\n' > "$LC_STATE"
     exit 0
     ;;
 esac
@@ -266,7 +288,12 @@ IOUT="$(HOME="$IHOME" XDG_STATE_HOME="$IXDG" PATH="$SHIMS:$PATH" LC_COUNT="$TMP/
 IRC=$?
 set -e
 [[ "$IRC" -eq 14 ]] || fail "T8 expected bootstrap refusal rc14, got rc=$IRC out=$IOUT"
-assert_contains "$IOUT" "rollback=restored_previous_service" "T8 previous supervisor restored"
+# Seam 5 of the architectural addendum: rollback no longer claims
+# "restored_previous_service" because the restored service is not
+# proven via receipt+attestation.  Surface the honest rollback
+# marker; plist/provenance bytes are restored to the previous
+# committed state, but the loaded service is unverified.
+assert_contains "$IOUT" "rollback=previous_service_reloaded_unverified" "T8 previous supervisor restored (unverified)"
 [[ "$(cat "$IPLIST")" == "OLD-PLIST" ]] || fail "T8 plist rollback failed"
 [[ "$(cat "$IPROV")" == "OLD-PROVENANCE" ]] || fail "T8 provenance rollback failed"
 pass "T8 supervisor replacement rolls back on bootstrap failure"
@@ -278,128 +305,11 @@ if [[ "$(uname -s)" != "Darwin" ]]; then
   pass "T8b private service auth material (skipped on non-Darwin)"
 else
 S2SHIMS="$TMP/s2-shims"; mkdir -p "$S2SHIMS"
-cat > "$S2SHIMS/uname" <<'SH'
-#!/bin/sh
-echo Darwin
-SH
-cat > "$S2SHIMS/launchctl" <<'SH'
-#!/bin/bash
-state_dir="${OFLOOP_TEST_STUB_STATE_DIR:-}"
-case "${1:-}" in
-  print)
-    target="${2:-}"
-    label=""
-    if [[ "$target" =~ ^gui/[0-9]+/(com\.ownframework\.loop-supervisor)$ ]]; then
-      label="${BASH_REMATCH[1]}"
-    fi
-    if [[ -n "$label" && -n "$state_dir" && -f "$state_dir/$label" ]]; then
-      # Synthesize a state=running body that matches the installer's
-      # expected values, so the installer's active-identity proof can
-      # verify identity after a successful bootstrap.  Resolve paths
-      # the same way the installer does (via Path().resolve()).
-      PYTHON_BIN_PATH="${OFLOOP_TEST_STUB_PYTHON_BIN:-${PYTHON_BIN:-python3}}"
-      "$PYTHON_BIN_PATH" - "$target" <<'PY'
-import os, sys
-from pathlib import Path
-target = sys.argv[1]
-state_root = os.environ.get("XDG_STATE_HOME", os.path.expanduser("~/.local/state"))
-ofloop = os.environ.get("OFLOOP_BIN", "/bin/ofloop")
-python_bin = os.environ.get("PYTHON_BIN", "/usr/bin/python3")
-ofloop = str(Path(ofloop).resolve(strict=False))
-python_bin = str(Path(python_bin).resolve(strict=False))
-runtime_root = str(Path(ofloop).parent.parent.resolve(strict=False))
-print(f"{target} = {{")
-print("\tstate = running")
-print(f"\tprogram = {python_bin}")
-print("\targuments = {")
-print(f"\t\t{python_bin}")
-print("\t\t-B")
-print(f"\t\t{runtime_root}/scripts/launch-commissioned-supervisor.py")
-print("\t\t--db")
-print(f"\t\t{state_root}/ownframework-loop/supervisor.sqlite3")
-print("\t\t--ledger-marker")
-print(f"\t\t{state_root}/ownframework-loop/ledger-incarnation.json")
-print("\t\t--probe")
-print(f"\t\t{runtime_root}/scripts/probe-supervisor-runtime-dependencies.py")
-print("\t\t--ofloop")
-print(f"\t\t{ofloop}")
-print("\t}")
-print("\tenvironment = {")
-print("\t\tPATH => /usr/bin:/bin")
-print(f"\t\tOFLOOP_RUNTIME_ROOT => {runtime_root}")
-print(f"\t\tOFLOOP_BIN => {ofloop}")
-print(f"\t\tPYTHON_BIN => {python_bin}")
-print(f"\t\tXDG_STATE_HOME => {state_root}")
-print("\t}")
-print(f"\tstdout path = {state_root}/ownframework-loop/supervisor.stdout.log")
-print(f"\tstderr path = {state_root}/ownframework-loop/supervisor.stderr.log")
-print("}")
-PY
-      # Override pid with the receipt's pid if present.
-      receipt_path="${OFLOOP_TEST_STUB_RECEIPT_PATH:-}"
-      if [[ -n "$receipt_path" && -f "$receipt_path" ]]; then
-        receipt_pid="$("$PYTHON_BIN_PATH" -c "import json,sys; print(json.load(open(sys.argv[1]))['pid'])" "$receipt_path" 2>/dev/null || true)"
-        if [[ -n "$receipt_pid" ]]; then
-          printf '\tpid = %s\n' "$receipt_pid"
-        fi
-      fi
-      exit 0
-    fi
-    echo "Could not find service" >&2
-    exit 1
-    ;;
-  kickstart) exit 0 ;;
-  bootout)
-    if [[ -n "$state_dir" ]]; then
-      rm -f "$state_dir/com.ownframework.loop-supervisor"
-    fi
-    exit 0
-    ;;
-  bootstrap)
-    PYTHON_BIN_PATH="${OFLOOP_TEST_STUB_PYTHON_BIN:-${PYTHON_BIN:-python3}}"
-    if [[ -n "$state_dir" ]]; then
-      : > "$state_dir/com.ownframework.loop-supervisor"
-    fi
-    # Model real launchd: after a successful bootstrap, the loaded
-    # service runs its ProgramArguments.  Parse the plist and exec
-    # the launcher so the activation receipt is written.
-    if [[ -n "${OFLOOP_TEST_STUB_PLIST:-}" && -f "${OFLOOP_TEST_STUB_PLIST}" ]]; then
-      "$PYTHON_BIN_PATH" - "${OFLOOP_TEST_STUB_PLIST}" "${OFLOOP_TEST_STUB_RECEIPT_PATH:-}" "${OFLOOP_TEST_STUB_INSTALL_ROOT:-}" "${OFLOOP_TEST_STUB_LIB_ROOT:-${OFLOOP_TEST_STUB_INSTALL_ROOT:-}}" <<'PYINV'
-import json, os, plistlib, sys
-from pathlib import Path
-plist = Path(sys.argv[1])
-receipt_path = Path(sys.argv[2]) if len(sys.argv) > 2 and sys.argv[2] else None
-install_root = Path(sys.argv[3]) if len(sys.argv) > 3 and sys.argv[3] else None
-lib_root = Path(sys.argv[4]) if len(sys.argv) > 4 and sys.argv[4] else None
-if install_root is None:
-    install_root = plist.parent.parent
-if lib_root is None:
-    lib_root = install_root
-with open(plist, "rb") as fh:
-    payload = plistlib.load(fh)
-argv = payload.get("ProgramArguments", [])
-env = payload.get("EnvironmentVariables", {})
-if receipt_path is None:
-    receipt_path = install_root / "supervisor-activation.json"
-sys.path.insert(0, str(lib_root / "lib"))
-from ownframework_loop import service_identity
-argv_list = [sys.executable, str(install_root / "scripts" / "launch-commissioned-supervisor.py")] + argv[1:]
-receipt = service_identity.derive_active_identity(
-    launcher_argv=argv_list,
-    launcher_env=env,
-    launcher_pid=int(os.getpid()),
-)
-service_identity.write_receipt_atomic(receipt, receipt_path)
-sys.exit(0)
-PYINV
-    fi
-    exit 0
-    ;;
-  enable) exit 0 ;;
-  *) exit 0 ;;
-esac
-SH
-chmod +x "$S2SHIMS/uname" "$S2SHIMS/launchctl"
+# T8b uses the consolidated launchctl fixture helper so the receipt
+# + startup-ready attestation are written through the real
+# service_identity code path.
+. "$HERE/../launchctl_fixture.sh"
+write_launchctl_fixture "$S2SHIMS"
 S2HOME="$TMP/s2-home"; S2XDG="$TMP/s2-xdg"
 rm -rf "$S2HOME" "$S2XDG"
 mkdir -p "$S2HOME/Library/LaunchAgents" "$S2XDG/ownframework-loop"
@@ -425,6 +335,8 @@ HOME="$S2HOME" XDG_STATE_HOME="$S2XDG" PATH="$S2SHIMS:$PATH" \
   OFLOOP_TEST_STUB_STATE_DIR="$TMP/s2-stub-state" \
   OFLOOP_TEST_STUB_PLIST="$S2HOME/Library/LaunchAgents/com.ownframework.loop-supervisor.plist" \
   OFLOOP_TEST_STUB_RECEIPT_PATH="$S2XDG/ownframework-loop/supervisor-activation.json" \
+  OFLOOP_TEST_STUB_SUPERVISOR_DB="$S2XDG/ownframework-loop/supervisor.sqlite3" \
+  OFLOOP_TEST_STUB_LEDGER_MARKER="$S2XDG/ownframework-loop/ledger-incarnation.json" \
   OFLOOP_TEST_STUB_INSTALL_ROOT="$ROOT_DIR" \
   OFLOOP_TEST_STUB_LIB_ROOT="$ROOT_DIR" \
   OFLOOP_TEST_STUB_PYTHON_BIN="$S2_PYTHON_BIN" \

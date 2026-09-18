@@ -107,10 +107,15 @@ STUB_BIN_DIR="$SANDBOX/stub-bin"
 STUB_STATE_DIR="$SANDBOX/stub-state"
 mkdir -p "$STUB_BIN_DIR" "$STUB_STATE_DIR"
 chmod 0700 "$STUB_STATE_DIR"
-cat > "$STUB_BIN_DIR/launchctl" <<'STUB_EOF'
-#!/usr/bin/env bash
-state_dir="${OFLOOP_TEST_STUB_STATE_DIR:-}"
-cmd="${1:-}"
+# Use the consolidated launchctl fixture helper so the receipt +
+# startup-ready attestation are written through the real
+# service_identity code path.
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../launchctl_fixture.sh"
+write_launchctl_fixture "$STUB_BIN_DIR"
+# The mac_runtime_provenance test synthesizes a launchd print body
+# from environment variables (rather than the stub's synthesized
+# body).  Re-add the emit_body helper here since some subtests want
+# the full text body for body-matching assertions.
 emit_body() {
   local state_base="${XDG_STATE_HOME:-${HOME}/.local/state}"
   local state_root="$state_base/ownframework-loop"
@@ -119,7 +124,6 @@ emit_body() {
   local stderr_log="$state_root/supervisor.stderr.log"
   local ofloop="${OFLOOP_BIN:-/bin/ofloop}"
   local python_bin="${PYTHON_BIN:-/usr/bin/python3}"
-  # Canonicalize paths the same way the installer does.
   ofloop="$(python3 -B -c "from pathlib import Path; import sys; print(Path(sys.argv[1]).resolve(strict=False))" "$ofloop")"
   python_bin="$(python3 -B -c "from pathlib import Path; import sys; print(Path(sys.argv[1]).resolve(strict=False))" "$python_bin")"
   local runtime_root
@@ -158,82 +162,8 @@ gui/501/com.ownframework.loop-supervisor = {
 }
 BODY
 }
-case "$cmd" in
-  print)
-    target="${2:-}"
-    label=""
-    if [[ "$target" =~ ^gui/[0-9]+/(com\.ownframework\.loop-supervisor)$ ]]; then
-      label="${BASH_REMATCH[1]}"
-    fi
-    if [[ -n "$label" && -n "$state_dir" && -f "$state_dir/$label" ]]; then
-      emit_body
-      # Override pid with the receipt's pid so the installer's
-      # label-pid binding succeeds.
-      receipt_path="${OFLOOP_TEST_STUB_RECEIPT_PATH:-}"
-      if [[ -n "$receipt_path" && -f "$receipt_path" ]]; then
-        receipt_pid="$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['pid'])" "$receipt_path" 2>/dev/null || true)"
-        if [[ -n "$receipt_pid" ]]; then
-          printf '\tpid = %s\n' "$receipt_pid"
-        fi
-      fi
-      exit 0
-    fi
-    echo "Could not find service" >&2
-    exit 1
-    ;;
-  kickstart) exit 0 ;;
-  bootout)
-    if [[ -n "$state_dir" ]]; then
-      rm -f "$state_dir/com.ownframework.loop-supervisor"
-    fi
-    exit 0
-    ;;
-  bootstrap)
-    # The installer passes `bootstrap gui/UID /path/to/plist` (the
-    # label is the label embedded in the plist, which we treat as the
-    # canonical Loop label).
-    if [[ -n "$state_dir" ]]; then
-      : > "$state_dir/com.ownframework.loop-supervisor"
-    fi
-    # Model the launcher's activation-receipt behavior without exec'ing
-    # the real launcher (which would start a real supervisor).  Parse
-    # the plist, derive a receipt from the launcher's argv + plist env,
-    # write the receipt, and exit.  This matches the launcher contract
-    # for tests without starting a real durable supervisor process.
-    if [[ -n "${OFLOOP_TEST_STUB_PLIST:-}" && -f "${OFLOOP_TEST_STUB_PLIST}" && \
-          -n "${OFLOOP_TEST_STUB_RECEIPT_PATH:-}" && \
-          "${OFLOOP_TEST_STUB_NO_LAUNCH:-0}" != "1" ]]; then
-      python3 - "${OFLOOP_TEST_STUB_PLIST}" "${OFLOOP_TEST_STUB_RECEIPT_PATH}" \
-          "${OFLOOP_TEST_STUB_INSTALL_ROOT:-}" "${OFLOOP_TEST_STUB_LIB_ROOT:-${OFLOOP_TEST_STUB_INSTALL_ROOT:-}}" <<'PYINV'
-import json, os, plistlib, sys
-from pathlib import Path
-plist = Path(sys.argv[1])
-receipt_path = Path(sys.argv[2])
-install_root = Path(sys.argv[3]) if len(sys.argv) > 3 and sys.argv[3] else plist.parent.parent
-lib_root = Path(sys.argv[4]) if len(sys.argv) > 4 and sys.argv[4] else install_root
-with open(plist, "rb") as fh:
-    payload = plistlib.load(fh)
-argv = payload.get("ProgramArguments", [])
-env = payload.get("EnvironmentVariables", {})
-sys.path.insert(0, str(lib_root / "lib"))
-from ownframework_loop import service_identity
-argv_list = [sys.executable, str(install_root / "scripts" / "launch-commissioned-supervisor.py")] + argv[1:]
-receipt = service_identity.derive_active_identity(
-    launcher_argv=argv_list,
-    launcher_env=env,
-    launcher_pid=int(os.getpid()),
-)
-service_identity.write_receipt_atomic(receipt, receipt_path)
-sys.exit(0)
-PYINV
-    fi
-    exit 0
-    ;;
-  enable) exit 0 ;;
-  *) exit 0 ;;
-esac
-STUB_EOF
-chmod +x "$STUB_BIN_DIR/launchctl"
+
+# Run the installer with controlled env. Uses env -i to ensure no
 
 # Run the installer with controlled env. Uses env -i to ensure no
 # operator-side env leaks into the install.

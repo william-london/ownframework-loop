@@ -178,65 +178,19 @@ CORE_OUT="$(bash "$ROOT_DIR/install.sh")"
 CORE_ROOT="$(sed -n 's/^CORE_ROOT=//p' <<<"$CORE_OUT" | tail -n1)"
 TX_ROOT="$TX_STATE/ownframework-loop"
 if [[ "$(uname -s)" == "Darwin" ]]; then
-  cat > "$TX_FAKE/launchctl" <<'SH'
-#!/bin/sh
-if [ "${1:-}" = print ]; then
-  case "${2:-}" in
-    gui/*/com.ownframework.loop-supervisor)
-      # After the receipt is written (post-bootstrap), report the
-      # receipt's pid back as if launchd loaded the service.  Before
-      # bootstrap, exit 1 (service absent).
-      if [ -n "${OFLOOP_TEST_STUB_RECEIPT_PATH:-}" ] && [ -f "${OFLOOP_TEST_STUB_RECEIPT_PATH}" ]; then
-        receipt_pid=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['pid'])" "${OFLOOP_TEST_STUB_RECEIPT_PATH}" 2>/dev/null || echo "")
-        printf 'gui/501/com.ownframework.loop-supervisor = {\n'
-        printf '\tstate = running\n'
-        printf '\tpid = %s\n' "$receipt_pid"
-        printf '}\n'
-        exit 0
-      fi
-      exit 1
-      ;;
-    gui/*) exit 0 ;;
-  esac
-fi
-if [ "${1:-}" = bootstrap ] && [ -n "${OFLOOP_TEST_STUB_PLIST:-}" ] && [ -f "${OFLOOP_TEST_STUB_PLIST}" ]; then
-  python3 - "${OFLOOP_TEST_STUB_PLIST}" "${OFLOOP_TEST_STUB_RECEIPT_PATH:-}" "${OFLOOP_TEST_STUB_INSTALL_ROOT:-}" "${OFLOOP_TEST_STUB_LIB_ROOT:-${OFLOOP_TEST_STUB_INSTALL_ROOT:-}}" <<'PYINV'
-import json, os, plistlib, sys
-from pathlib import Path
-plist = Path(sys.argv[1])
-receipt_path = Path(sys.argv[2]) if len(sys.argv) > 2 and sys.argv[2] else None
-install_root = Path(sys.argv[3]) if len(sys.argv) > 3 and sys.argv[3] else None
-lib_root = Path(sys.argv[4]) if len(sys.argv) > 4 and sys.argv[4] else None
-if install_root is None:
-    install_root = plist.parent.parent
-if lib_root is None:
-    lib_root = install_root
-sys.path.insert(0, str(lib_root / "lib"))
-with open(plist, "rb") as fh:
-    payload = plistlib.load(fh)
-argv = payload.get("ProgramArguments", [])
-env = payload.get("EnvironmentVariables", {})
-if receipt_path is None:
-    receipt_path = install_root / "supervisor-activation.json"
-from ownframework_loop import service_identity
-argv_list = [sys.executable, str(install_root / "scripts" / "launch-commissioned-supervisor.py")] + argv[1:]
-receipt = service_identity.derive_active_identity(
-    launcher_argv=argv_list,
-    launcher_env=env,
-    launcher_pid=int(os.getpid()),
-)
-service_identity.write_receipt_atomic(receipt, receipt_path)
-sys.exit(0)
-PYINV
-fi
-exit 0
-SH
-  chmod +x "$TX_FAKE/launchctl"
+  # Use the consolidated launchctl fixture helper so receipt +
+  # startup-ready attestation are written through the real
+  # service_identity code path.
+  . "$ROOT_DIR/tests/launchctl_fixture.sh"
+  write_launchctl_fixture "$TX_FAKE"
   PATH_TX="$TX_BIN:$TX_FAKE:/usr/local/bin:/usr/bin:/bin"
   TX_PLIST="$TX_HOME/Library/LaunchAgents/com.ownframework.loop-supervisor.plist"
   HOME="$TX_HOME" XDG_STATE_HOME="$TX_STATE" PATH="$PATH_TX" PYTHON_BIN="$A" OFLOOP_BIN="$CORE_ROOT/bin/ofloop" \
+    OFLOOP_TEST_STUB_STATE_DIR="$TX_STATE" \
     OFLOOP_TEST_STUB_PLIST="$TX_PLIST" \
     OFLOOP_TEST_STUB_RECEIPT_PATH="$TX_ROOT/supervisor-activation.json" \
+    OFLOOP_TEST_STUB_SUPERVISOR_DB="$TX_ROOT/supervisor.sqlite3" \
+    OFLOOP_TEST_STUB_LEDGER_MARKER="$TX_ROOT/ledger-incarnation.json" \
     OFLOOP_TEST_STUB_INSTALL_ROOT="$CORE_ROOT" \
     OFLOOP_TEST_STUB_LIB_ROOT="$ROOT_DIR" \
     bash "$CORE_ROOT/bin/install-supervisor" > "$TMP/tx-first.out"
@@ -255,8 +209,11 @@ SH
     if [[ "$stage" -ge 3 ]]; then printf '{"broken":true}\n' > "$ART3"; fi
     printf 'prepared\n' > "$TXN/state"
     PATH="$PATH_TX" PYTHON_BIN="$A" OFLOOP_BIN="$CORE_ROOT/bin/ofloop" \
+      OFLOOP_TEST_STUB_STATE_DIR="$TX_STATE" \
       OFLOOP_TEST_STUB_PLIST="$TX_PLIST" \
       OFLOOP_TEST_STUB_RECEIPT_PATH="$TX_ROOT/supervisor-activation.json" \
+      OFLOOP_TEST_STUB_SUPERVISOR_DB="$TX_ROOT/supervisor.sqlite3" \
+      OFLOOP_TEST_STUB_LEDGER_MARKER="$TX_ROOT/ledger-incarnation.json" \
       OFLOOP_TEST_STUB_INSTALL_ROOT="$CORE_ROOT" \
       OFLOOP_TEST_STUB_LIB_ROOT="$ROOT_DIR" \
       bash "$CORE_ROOT/bin/install-supervisor" > "$TMP/tx-recover-$stage.out"

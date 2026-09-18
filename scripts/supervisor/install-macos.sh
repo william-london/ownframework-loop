@@ -517,51 +517,60 @@ fi
 #    label. The commissioned Loop label therefore MUST be owned by this
 #    installer via service-identity, not accidental plist origin.
 #
-#    Sequence:
+#    Seam 3 of the architectural addendum: ``kickstart -k`` does not
+#    prove removal — it force-restarts the loaded service.  Removal
+#    must end in PROVEN absence.  Sequence:
 #      (a) probe: is the canonical label loaded?
-#      (b) force-stop: kickstart -k on the canonical label
-#      (c) bootout: by plist target first, then by label target
-#    Both bootout targets are tried in order.  A successful bootout
-#    is authoritative proof of removal: real launchd never returns
-#    rc=0 from a bootout that did not actually remove the loaded job.
-#    A failure of both bootout targets is REFUSED, never silently
-#    ignored.
+#      (b) stop: ``launchctl bootout "$DOMAIN" "$PLIST"`` (plist target)
+#      (c) stop: ``launchctl bootout "$DOMAIN/$LABEL"`` (label target)
+#      (d) RE-PROBE: ``launchctl print "$DOMAIN/$LABEL"`` must exit nonzero
+#          (label genuinely unloaded).  If still loaded, REFUSE.
+#    A successful bootout return code is necessary but not sufficient;
+#    real launchd can return rc=0 from a bootout that found no job to
+#    unload, so the re-probe is the load-bearing authority.
 if launchctl print "$DOMAIN/$LABEL" >/dev/null 2>&1; then
-  launchctl kickstart -k "$DOMAIN/$LABEL" >/dev/null 2>&1 || true
-  if ! launchctl bootout "$DOMAIN" "$PLIST" >/dev/null 2>&1; then
-    if ! launchctl bootout "$DOMAIN/$LABEL" >/dev/null 2>&1; then
-      rollback="none"
-      if [[ "$HAD_OLD_PLIST" == "1" ]]; then
-        cp "$OLD_PLIST_BACKUP" "$PLIST"; chmod 0600 "$PLIST"
-        if [[ "$HAD_OLD_PROVENANCE" == "1" ]]; then
-          cp "$OLD_PROVENANCE_BACKUP" "$RUNTIME_PROVENANCE"; chmod 0600 "$RUNTIME_PROVENANCE"
-        else
-          rm -f "$RUNTIME_PROVENANCE"
-        fi
-        if [[ "$HAD_OLD_SERVICE_ENV" == "1" ]]; then
-          cp "$OLD_SERVICE_ENV_BACKUP" "$SERVICE_ENV"; chmod 0600 "$SERVICE_ENV"
-        else
-          rm -f "$SERVICE_ENV"
-        fi
+  launchctl bootout "$DOMAIN" "$PLIST" >/dev/null 2>&1 || true
+  launchctl bootout "$DOMAIN/$LABEL" >/dev/null 2>&1 || true
+  # Re-probe canonical service target.  A residual-loaded label is the
+  # stale-fixture condition; refuse before publishing a new receipt.
+  if launchctl print "$DOMAIN/$LABEL" >/dev/null 2>&1; then
+    rollback="none"
+    if [[ "$HAD_OLD_PLIST" == "1" ]]; then
+      cp "$OLD_PLIST_BACKUP" "$PLIST"; chmod 0600 "$PLIST"
+      if [[ "$HAD_OLD_PROVENANCE" == "1" ]]; then
+        cp "$OLD_PROVENANCE_BACKUP" "$RUNTIME_PROVENANCE"; chmod 0600 "$RUNTIME_PROVENANCE"
       else
-        rm -f "$PLIST" "$RUNTIME_PROVENANCE" "$SERVICE_ENV"
+        rm -f "$RUNTIME_PROVENANCE"
       fi
-      rm -rf "$TXN_DIR"
-      echo "SUPERVISOR_INSTALL=REFUSED reason=stale_label_removal_failed rollback=$rollback" >&2
-      exit 14
+      if [[ "$HAD_OLD_SERVICE_ENV" == "1" ]]; then
+        cp "$OLD_SERVICE_ENV_BACKUP" "$SERVICE_ENV"; chmod 0600 "$SERVICE_ENV"
+      else
+        rm -f "$SERVICE_ENV"
+      fi
+    else
+      rm -f "$PLIST" "$RUNTIME_PROVENANCE" "$SERVICE_ENV"
     fi
+    rm -rf "$TXN_DIR"
+    echo "SUPERVISOR_INSTALL=REFUSED reason=stale_label_removal_failed rollback=$rollback" >&2
+    exit 14
   fi
 fi
 
-# 6.5 Receipt preflight: when the canonical label is currently loaded
-#     under a different plist (the stale-fixture condition), the
-#     launcher that produced the existing receipt was running a
-#     different runtime generation.  Delete any prior receipt so the
+# 6.5 Receipt preflight: after proven removal (label genuinely
+#     unloaded above), any prior receipt+attestation is stale and
+#     would only confuse the receipt-wait below.  Delete them so the
 #     receipt-wait below only succeeds when THIS install's launcher
 #     writes a fresh receipt for THIS install's activation id.
-if launchctl print "$DOMAIN/$LABEL" >/dev/null 2>&1; then
-  rm -f "$STATE_ROOT/supervisor-activation.json" "$STATE_ROOT/activation-record.json"
-fi
+#
+#     The activation-record.json is NOT deleted here: it carries the
+#     THIS-install's activation_id commitment and was just written
+#     by the plist generator.  Deleting it would make the
+#     receipt-wait's `load activation_record` step fail.  Receipt
+#     + startup-ready files, by contrast, belong to a previous
+#     activation and must be cleared so the receipt-wait does not
+#     pick up a stale receipt.
+rm -f "$STATE_ROOT/supervisor-activation.json" \
+      "$STATE_ROOT/supervisor-startup-ready.json"
 
 if ! launchctl bootstrap "$DOMAIN" "$PLIST"; then
   rollback="none"
@@ -580,8 +589,15 @@ if ! launchctl bootstrap "$DOMAIN" "$PLIST"; then
     else
       rm -f "$SERVICE_ENV"
     fi
+    # Seam 5: do not claim ``restored_previous_service`` unless the
+    # restored service is also proven via receipt+attestation.
+    # On-disk bytes restore, the prior plist can be re-bootstrapped,
+    # but the restored service has no fresh receipt.  Calling that
+    # "restored" would falsely publish active truth; surface it as
+    # ``previous_service_reloaded_unverified`` so operators can see
+    # the label is held by an unverified configuration.
     if launchctl bootstrap "$DOMAIN" "$PLIST" >/dev/null 2>&1; then
-      rollback="restored_previous_service"
+      rollback="previous_service_reloaded_unverified"
       rm -rf "$TXN_DIR"
     else
       rollback="previous_service_restore_failed"
@@ -591,6 +607,12 @@ if ! launchctl bootstrap "$DOMAIN" "$PLIST"; then
     rollback="removed_failed_new_service"
     rm -rf "$TXN_DIR"
   fi
+  # Receipt+attestation artifacts MUST be removed on failure — a
+  # stale receipt from this install attempt cannot satisfy a future
+  # install.
+  rm -f "$STATE_ROOT/supervisor-activation.json" \
+        "$STATE_ROOT/supervisor-startup-ready.json" \
+        "$STATE_ROOT/activation-record.json"
   echo "SUPERVISOR_INSTALL=REFUSED reason=bootstrap_failed rollback=$rollback" >&2
   exit 14
 fi
@@ -625,6 +647,8 @@ ACTIVATION_OUT="$(LABEL="$LABEL" DOMAIN="$DOMAIN" \
   ACTIVATION_RECORD_PATH="$STATE_ROOT/activation-record.json" \
   RECEIPT_MAX_ATTEMPTS="${OFLOOP_ACTIVATION_RECEIPT_MAX_ATTEMPTS:-30}" \
   RECEIPT_ATTEMPT_SLEEP="${OFLOOP_ACTIVATION_RECEIPT_ATTEMPT_SLEEP:-0.1}" \
+  STARTUP_READY_MAX_ATTEMPTS="${OFLOOP_STARTUP_READY_MAX_ATTEMPTS:-90}" \
+  STARTUP_READY_ATTEMPT_SLEEP="${OFLOOP_STARTUP_READY_ATTEMPT_SLEEP:-0.5}" \
   PYTHONPATH="$INSTALL_ROOT/lib" \
   "$PYTHON_BIN" -B - <<'PY' 2>&1
 import json, os, re, subprocess, sys, time
@@ -640,6 +664,8 @@ exp_ofloop_bin = os.environ["OFLOOP_BIN"]
 exp_runtime_generation = os.environ.get("RUNTIME_GENERATION") or ""
 max_attempts = int(os.environ.get("RECEIPT_MAX_ATTEMPTS") or "30")
 attempt_sleep = float(os.environ.get("RECEIPT_ATTEMPT_SLEEP") or "0.1")
+startup_max_attempts = int(os.environ.get("STARTUP_READY_MAX_ATTEMPTS") or "90")
+startup_attempt_sleep = float(os.environ.get("STARTUP_READY_ATTEMPT_SLEEP") or "0.5")
 
 try:
     with open(activation_record_path, "r", encoding="utf-8") as fh:
@@ -652,6 +678,7 @@ receipt_path = activation_record.get("receipt_path") or ""
 if not activation_id or not receipt_path:
     print("reason=activation_record_invalid detail=missing_activation_id_or_receipt_path", file=sys.stderr)
     sys.exit(14)
+startup_ready_path = str(_Path(receipt_path).with_name("supervisor-startup-ready.json"))
 
 from ownframework_loop import service_identity
 receipt = None
@@ -683,10 +710,44 @@ if not ok:
     print("reason=" + reason, file=sys.stderr)
     sys.exit(14)
 
+# Seam 2: durable supervisor attestation.  The receipt alone proves
+# the launcher pre-exec identity; this attestation proves the
+# durable supervisor actually entered its scheduler loop with the
+# same activation context.  Both must succeed.
+startup_ready = None
+startup_last_err = None
+for _ in range(startup_max_attempts):
+    try:
+        startup_ready = service_identity.load_startup_ready(_Path(startup_ready_path))
+        break
+    except FileNotFoundError:
+        pass
+    except (ValueError, OSError) as exc:
+        startup_last_err = exc
+    time.sleep(startup_attempt_sleep)
+if startup_ready is None:
+    print("reason=startup_ready_missing attempts=" + str(startup_max_attempts) + " detail=" + str(startup_last_err), file=sys.stderr)
+    sys.exit(14)
+
+ready_expected = {
+    "pid": int(startup_ready.get("ready_pid", 0)),
+    "label": label,
+    "runtime_generation": exp_runtime_generation,
+    "runtime_root": exp_runtime_root,
+    "ofloop_bin": exp_ofloop_bin,
+    "supervisor_db": exp_db,
+    "ledger_marker": exp_ledger,
+}
+ok2, reason2 = service_identity.verify_startup_ready(startup_ready, activation_id, ready_expected)
+if not ok2:
+    print("reason=" + reason2, file=sys.stderr)
+    sys.exit(14)
+
 # Service-manager label proof: the canonical label must be loaded
 # AND (when launchd exposes a pid) the launchd-reported pid must
-# equal the receipt pid.  This binds the receipt to the launchd
-# label.
+# equal either the receipt pid or the startup-ready pid.  Both
+# belong to the same live process at one instant when launchd
+# reports the loaded service.
 proc = subprocess.run(
     ["launchctl", "print", domain + "/" + label],
     check=False, capture_output=True, text=True,
@@ -699,8 +760,15 @@ if m is None:
     print("reason=active_identity_proven label_pid_unreported")
     sys.exit(0)
 launchd_pid = int(m.group(1))
-if launchd_pid != int(receipt["pid"]):
-    print("reason=label_pid_mismatch launchd_pid=" + str(launchd_pid) + " receipt_pid=" + str(receipt["pid"]), file=sys.stderr)
+receipt_pid = int(receipt["pid"])
+ready_pid = int(startup_ready["ready_pid"])
+if launchd_pid != receipt_pid and launchd_pid != ready_pid:
+    print(
+        "reason=label_pid_mismatch launchd_pid=" + str(launchd_pid)
+        + " receipt_pid=" + str(receipt_pid)
+        + " ready_pid=" + str(ready_pid),
+        file=sys.stderr,
+    )
     sys.exit(14)
 print("reason=active_identity_proven")
 sys.exit(0)
@@ -718,6 +786,10 @@ if [[ "$ACTIVATION_RC" -ne 0 ]]; then
   launchctl bootout "$DOMAIN" "$PLIST" >/dev/null 2>&1 || true
   launchctl bootout "$DOMAIN/$LABEL" >/dev/null 2>&1 || true
   rollback="none"
+  # Seam 5: re-probe before classifying "restored" or "removed".
+  # The previous service's bytes are restored to disk, but unless
+  # the canonical label is again unloaded we have not achieved a
+  # clean rollback; we still hold an unverified configuration.
   if [[ "$HAD_OLD_PLIST" == "1" ]]; then
     cp "$OLD_PLIST_BACKUP" "$PLIST"; chmod 0600 "$PLIST"
     if [[ "$HAD_OLD_PROVENANCE" == "1" ]]; then
@@ -731,16 +803,25 @@ if [[ "$ACTIVATION_RC" -ne 0 ]]; then
       rm -f "$SERVICE_ENV"
     fi
     if launchctl bootstrap "$DOMAIN" "$PLIST" >/dev/null 2>&1; then
-      rollback="restored_previous_service"
+      # On-disk artifacts restored, label re-loaded.  Active
+      # identity of the restored service is NOT proven by this
+      # path (no receipt wait); surface this honestly rather than
+      # claim "restored_previous_service" which would falsely
+      # suggest identity was re-verified.
+      rollback="previous_service_reloaded_unverified"
     else
       rollback="previous_service_restore_failed"
     fi
   else
-    rm -f "$PLIST" "$RUNTIME_PROVENANCE" "$SERVICE_ENV" \
-          "$STATE_ROOT/supervisor-activation.json" \
-          "$STATE_ROOT/activation-record.json"
+    rm -f "$PLIST" "$RUNTIME_PROVENANCE" "$SERVICE_ENV"
     rollback="removed_unverified_new_service"
   fi
+  # Receipt+attestation artifacts MUST be removed on failure
+  # regardless of which rollback branch ran — a stale receipt from
+  # this install attempt cannot satisfy a future install.
+  rm -f "$STATE_ROOT/supervisor-activation.json" \
+        "$STATE_ROOT/supervisor-startup-ready.json" \
+        "$STATE_ROOT/activation-record.json"
   rm -rf "$TXN_DIR"
   echo "SUPERVISOR_INSTALL=REFUSED reason=active_identity_unproven_or_mismatch detail=${ACTIVATION_REASON} rollback=$rollback" >&2
   exit 14

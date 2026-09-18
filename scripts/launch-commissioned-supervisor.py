@@ -72,10 +72,12 @@ def main() -> int:
         )
         return proc.returncode
 
-    # Pass activation id + receipt path through argv to the post-exec
-    # supervisor too, so the supervisor can refresh its own runtime
-    # identity record if it chooses.  This is intentionally additive:
-    # the durable supervisor remains free to ignore these flags.
+    # Derive the activation receipt from the launcher's own argv +
+    # env + pid.  The actual ``--ofloop`` argv is the authoritative
+    # source for ``ofloop_bin`` (Seam 1 of the architectural
+    # addendum); runtime_root is computed from that binary path, and
+    # runtime_generation is recomputed from the payload bytes at the
+    # computed runtime root — never silently echoed from env.
     derived = service_identity.derive_active_identity(
         launcher_argv=[
             sys.executable,
@@ -93,7 +95,7 @@ def main() -> int:
     )
     try:
         service_identity.write_receipt_atomic(derived, Path(args.receipt_path))
-    except OSError as exc:
+    except (ValueError, OSError) as exc:
         print(
             f"SUPERVISOR_START=REFUSED reason=activation_receipt_write_failed detail={exc}",
             file=sys.stderr,
@@ -105,11 +107,17 @@ def main() -> int:
         f"activation_id={derived['activation_id']}",
         f"pid={derived['pid']}",
         f"receipt={args.receipt_path}",
+        f"generation_source={derived['generation_source']}",
     )
     # The post-exec supervisor inherits the activation context via
     # environment variables that the installer's plist exported
-    # (OFLOOP_ACTIVATION_ID, OFLOOP_RECEIPT_PATH).  No extra argv
-    # flags are needed; the receipt is the durable artifact.
+    # (OFLOOP_ACTIVATION_ID, OFLOOP_RECEIPT_PATH, OFLOOP_BIN,
+    # OFLOOP_RUNTIME_ROOT, LABEL).  The durable supervisor reads
+    # these + the receipt the launcher just wrote, and emits a
+    # startup-ready attestation at supervisor-startup-ready.json
+    # once it has actually entered its scheduler loop.  The
+    # installer verifies BOTH artifacts before declaring PASS, so
+    # the receipt alone can never publish false active truth.
     os.execv(
         sys.executable,
         [
