@@ -86,7 +86,9 @@ packet_md = ("""```json
   "risk_budget": {
     "max_files_changed": 25,
     "max_diff_lines": 1000,
-    "max_repair_rounds": MAX_ROUNDS
+    "max_repair_rounds": MAX_ROUNDS,
+    "max_build_passes": PASS_CAP,
+    "max_review_passes": PASS_CAP
   },
   "checkpoint_graph": {
     "execution_order": ["CP-1"],
@@ -110,7 +112,7 @@ packet_md = ("""```json
   },
   "work_units": [{"id": "UNIT-1", "title": "single unit", "scope": "src/"}]
 }
-```""").replace("REPO", str(repo)).replace("MAX_ROUNDS", str(max_rounds)).replace("PASS_CAP", str(max(3, max_rounds + 1)))
+```""").replace("REPO", str(repo)).replace("MAX_ROUNDS", str(max_rounds)).replace("PASS_CAP", str(max(4, 1 + max_rounds + 1)))
 
 run_id = "run-repair-" + str(max_rounds)
 run_dir = repo / ".ownframework-loop" / run_id

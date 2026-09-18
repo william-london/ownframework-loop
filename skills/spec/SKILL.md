@@ -192,6 +192,38 @@ Before a v3 PROGRAM is considered ready:
   it, no wall-clock ceiling applies and the run is bounded only by its
   semantic pass/repair/no-progress protections.
 
+### Whole-program lifetime includes the final whole-product review
+
+PROGRAM lifetime is ordinary checkpoints **plus** the mandatory final
+whole-product review that runs after the last checkpoint finalizes.
+The capability envelope must be sized for the complete lifecycle,
+not merely the first checkpoint. When the SPEC adapter infers
+capabilities from the repository/deliverable, the inference must
+reason about what the final reviewer will materially need to prove
+on the assembled product, in addition to per-checkpoint work:
+
+- CLI / package / library work — the existing toolchain capability
+  the ordinary checkpoint lifecycle already requires;
+- rendered or generated artifacts — only when the repository's
+  intended deliverable makes materially inspecting them a lawful
+  part of the final review (no automatic browser / Docker
+  capability inference);
+- generated documents / reports — a renderer / toolchain
+  capability only when materially required and safely supported by
+  existing trusted commissioning;
+- local-service topology — a supported local-service / container
+  capability only when the final reviewer would materially inspect
+  the running service to prove the assembled product.
+
+Do NOT automatically add a browser, Docker, or web surface
+capability. The semantic inference belongs to the SPEC adapter;
+it must not encode product-type rules into deterministic Python.
+
+If proving a material final-review requirement would need
+unsupported authority or unavailable credentials, the SPEC
+adapter must fail honestly before launch — the sealed
+capability binding cannot be widened after the first execution.
+
 A packet that can only discover an impossible deterministic ceiling after a
 model has already done work is a spec defect and must not be startable.
 

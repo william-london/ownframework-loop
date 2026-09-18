@@ -34,6 +34,8 @@ from ownframework_loop import (
     approval, dispatch, git_checks, packet as packet_mod, program as program_mod,
     receipts, review_finalize, runtime_env, state as state_mod, util, worktrees,
 )
+import json as _json_mod
+from ownframework_loop import build_prepare as build_prepare_mod, build_finalize as build_finalize_mod
 from state_seed import seed_state
 
 
@@ -586,6 +588,162 @@ assert int(prog_h["cumulative_counters"]["review_pass_count"]) == 2, \
 print("TEST_H_FINAL_REVIEW_USES_BUDGET_SLOT=PASS")
 
 # ============================================================
+# TEST H2: real final-repair cap exhaustion fails CLOSED through
+# the production claim owner, lands BLOCKED via deterministic
+# terminal semantics, launches ZERO provider work after exhaustion.
+# max_repair_rounds=1 cumulative means the final review's must-fix
+# already consumed the only legal repair round; the second
+# final-review must-fix MUST be refused with ClaimCapExhausted
+# (build claim) and a refused final review must NOT launch a worker.
+# ============================================================
+repo_h2 = make_repo("final-review-H2-cap", root)
+packet_h2, _ = materialise_program(
+    repo_h2, "run-H2", max_repair=1, cum_repair=1,
+    cum_build=10, cum_review=10,
+)
+# Drive both CPs through approval to reach program_final scope.
+cid_h2a, sha_h2a, _ = advance_to_reviewing(repo_h2, "run-H2", packet_h2)
+approve_finalize_review(repo_h2, "run-H2", packet_h2, sha_h2a,
+                        make_assessment_path(repo_h2, "run-H2"))
+cid_h2b, sha_h2b, _ = advance_to_reviewing(repo_h2, "run-H2", packet_h2)
+approve_finalize_review(repo_h2, "run-H2", packet_h2, sha_h2b,
+                        make_assessment_path(repo_h2, "run-H2"))
+state_h2_pre = state_mod.load(repo_h2, "run-H2")
+assert state_h2_pre.get("state") == "READY_FOR_REVIEW", state_h2_pre
+prog_h2_pre = state_h2_pre.get("program") or {}
+assert prog_h2_pre.get("review_scope") == "program_final", prog_h2_pre
+
+# First final review returns CHANGES_REQUESTED.  This consumes the
+# only legal global repair round (max_repair_rounds=1).
+program_mod.claim_review_pass(canonical_repo=repo_h2, run_id="run-H2", packet=packet_h2)
+verdict_h2_first = approve_finalize_review(
+    repo_h2, "run-H2", packet_h2, sha_h2b,
+    make_assessment_path(repo_h2, "run-H2"),
+    recommended="CHANGES_REQUESTED",
+    must_fix=[{
+        "finding_id": "F-H2-1", "severity": "high",
+        "classification": "must_fix",
+        "title": "synthetic must-fix to fund the only final repair round",
+        "description": "exhaust the global repair cap",
+        "file": "src/cli.py", "line": 1,
+    }],
+)
+state_h2_post_first = state_mod.load(repo_h2, "run-H2")
+assert state_h2_post_first.get("state") == "CHANGES_REQUESTED", state_h2_post_first
+prog_h2_post_first = state_h2_post_first.get("program") or {}
+assert int(prog_h2_post_first["cumulative_counters"]["repair_round_count"]) == 1, \
+    prog_h2_post_first["cumulative_counters"]
+
+# The first final-repair build consumes the last legal build slot too
+# (cumulative build count = n_cps(2) + gp(1) = 3, cap = 10 leaves room
+# for legitimate work).  After this build, cap exhaustion must trigger
+# on the NEXT final-review must-fix.
+repair_claim_h2 = program_mod.claim_build_pass(
+    canonical_repo=repo_h2, run_id="run-H2", packet=packet_h2,
+)
+assert repair_claim_h2["cp_id"] == "", repair_claim_h2
+prep_h2_repair = build_prepare_mod.prepare(canonical_repo=repo_h2, run_id="run-H2")
+wt_h2 = Path(prep_h2_repair["builder_worktree"])
+(wt_h2 / "src").mkdir(exist_ok=True)
+(wt_h2 / "src" / "cli.py").write_text("def cli_main():\n    return 'first final repair'\n")
+subprocess.run(["git", "-C", str(wt_h2), "add", "src/cli.py"], check=True, capture_output=True)
+subprocess.run(["git", "-C", str(wt_h2), "commit", "-qm", "first final repair"],
+               check=True, capture_output=True)
+sha_h2_repaired = subprocess.check_output(
+    ["git", "-C", str(wt_h2), "rev-parse", "HEAD"], text=True,
+).strip()
+agent_h2_repair_path = Path(prep_h2_repair["agent_result_path"])
+from ownframework_loop import build_agent as build_agent_mod_h2
+build_agent_mod_h2.write_skeleton(canonical_repo=repo_h2, run_id="run-H2")
+agent_h2_repair = _json_mod.loads(agent_h2_repair_path.read_text())
+agent_h2_repair.update({
+    "summary": "first final repair",
+    "outcome_requested": "candidate_ready",
+    "unit_ids_completed": [],
+    "acceptance_addressed": ["AC-1", "AC-2"],
+    "work_unit_id": program_mod.PROGRAM_FINAL_REPAIR_WORK_UNIT_ID,
+})
+agent_h2_repair_path.write_text(
+    _json_mod.dumps(agent_h2_repair, indent=2, sort_keys=True) + "\n"
+)
+build_finalize_mod.finalize_build(
+    canonical_repo=repo_h2, run_id="run-H2",
+    agent_result_path=agent_h2_repair_path, actor="of-builder",
+)
+state_h2_after_repair = state_mod.load(repo_h2, "run-H2")
+assert state_h2_after_repair.get("state") == "READY_FOR_REVIEW", \
+    state_h2_after_repair
+
+# Second final review returns CHANGES_REQUESTED again.  The build
+# claim owner must refuse with ClaimCapExhausted — no worker
+# invocation, no QUARANTINE ceremony.  cap_exhausted seals BLOCKED
+# through the supported BLOCKED terminal seam (not QUARANTINED).
+program_mod.claim_review_pass(
+    canonical_repo=repo_h2, run_id="run-H2", packet=packet_h2,
+)
+verdict_h2_second = approve_finalize_review(
+    repo_h2, "run-H2", packet_h2, sha_h2_repaired,
+    make_assessment_path(repo_h2, "run-H2"),
+    recommended="CHANGES_REQUESTED",
+    must_fix=[{
+        "finding_id": "F-H2-2", "severity": "high",
+        "classification": "must_fix",
+        "title": "second must-fix that must exhaust the cap",
+        "description": "cap exhaustion must fail closed",
+        "file": "src/cli.py", "line": 1,
+    }],
+)
+state_h2_after_exhaust = state_mod.load(repo_h2, "run-H2")
+assert state_h2_after_exhaust.get("state") == "BLOCKED", \
+    f"H2: cap exhaustion must seal BLOCKED, got {state_h2_after_exhaust.get('state')!r}"
+prog_h2_after_exhaust = state_h2_after_exhaust.get("program") or {}
+assert int(prog_h2_after_exhaust["cumulative_counters"]["repair_round_count"]) == 1, \
+    prog_h2_after_exhaust["cumulative_counters"]
+# Verify the mirror invariant: top-level repair_round must equal
+# the cumulative counter; no drift allowed.
+assert int(state_h2_after_exhaust.get("repair_round", 0)) == \
+    int(prog_h2_after_exhaust["cumulative_counters"]["repair_round_count"]), \
+    (state_h2_after_exhaust.get("repair_round"),
+     prog_h2_after_exhaust["cumulative_counters"]["repair_round_count"])
+
+# Now any subsequent BUILD claim must fail closed.  Cap exhaustion
+# already sealed BLOCKED at the funding level so the claim owner
+# refuses on a non-buildable state; the failure type is
+# ClaimRefused (not ClaimCapExhausted, which only fires for
+# buildable-state-with-cap-reached).  Either refusal class is
+# acceptable; the contract is that ZERO worker invocation happens
+# and the run stays BLOCKED.
+from ownframework_loop.program import ClaimRefused
+try:
+    program_mod.claim_build_pass(
+        canonical_repo=repo_h2, run_id="run-H2", packet=packet_h2,
+    )
+except (ClaimRefused,) as exc:
+    pass
+except Exception as exc:
+    raise AssertionError(
+        f"H2: claim_build_pass refused unexpected exception: "
+        f"{type(exc).__name__}: {exc}"
+    )
+else:
+    raise AssertionError("H2: claim_build_pass must refuse after cap exhaustion")
+
+# Also verify review claim refuses on a BLOCKED run.
+try:
+    program_mod.claim_review_pass(
+        canonical_repo=repo_h2, run_id="run-H2", packet=packet_h2,
+    )
+except (ClaimRefused,) as exc:
+    pass
+except Exception as exc:
+    # Other ClaimRefused subclasses are also acceptable as the
+    # terminal seam; only QUARANTINE creation is forbidden.
+    assert "claim" in type(exc).__name__.lower(), type(exc).__name__
+else:
+    raise AssertionError("H2: claim_review_pass must refuse after cap exhaustion")
+print("TEST_H2_TRUE_FINAL_BUDGET_EXHAUSTION_FAIL_CLOSED=PASS")
+
+# ============================================================
 # TEST I: SINGLE mode unchanged — review_scope never set.
 # ============================================================
 # Build a single-mode run and drive it to APPROVED; assert no program field.
@@ -1013,9 +1171,6 @@ print("TEST_M_CROSS_LAYER_DEFECT_DETECTED=PASS")
 #           - final review re-binds verdict to the new SHA
 #           - stale verdict for old SHA cannot approve new SHA
 # ============================================================
-import json as _json_mod
-from ownframework_loop import build_prepare as build_prepare_mod, build_finalize as build_finalize_mod
-
 pkt_n, baseline_n = materialise_program(repo, "run-N", work_unit_count=1,
                                         max_repair=1, cp_build=3, cp_review=3)
 # Drive CP-1 to REVIEWING and APPROVED (this advances to CP-2).
@@ -1437,6 +1592,557 @@ state_o_terminal = state_mod.load(repo_o, run_o)
 assert state_o_terminal.get("state") == "APPROVED", \
     f"O: terminal state should be APPROVED after successful final repair, got {state_o_terminal.get('state')!r}"
 print("TEST_O_FINAL_VALIDATION_RERUN=PASS")
+
+# ============================================================
+# TEST P: pre-execution underfunded-packet refusal.  A PROGRAM
+# packet whose explicit global caps cannot fund the mandatory
+# final whole-product review must be refused at admission, before
+# any semantic work has been launched.  This is the load-bearing
+# preflight rule: packet validates -> legitimate CP work consumes
+# lawful authority -> final review later proves impossible.
+# ============================================================
+from ownframework_loop import packet as packet_mod_for_p, program as program_mod_for_p
+# Case P1: explicit global max_review_passes too small to fund
+# n_cps + gp + 1.
+pkt_p1 = {
+    "schema": "ownframework-work-packet/v3",
+    "packet_id": "v091-underfunded-review",
+    "created_at": "2026-09-17T00:00:00Z",
+    "work_class": "HARDENING",
+    "risk_class": "low",
+    "title": "underfunded program",
+    "target": {"repo": str(repo_o.resolve(strict=False)), "branch": "master", "classification": "local_only"},
+    "execution_mode": "program",
+    "checkpoint_graph": {
+        "execution_order": ["CP-1", "CP-2"],
+        "checkpoints": [
+            {"id": "CP-1", "title": "one", "scope": "src/", "depends_on": [],
+             "risk_budget": {"max_build_passes": 2, "max_review_passes": 2, "max_repair_rounds": 1}},
+            {"id": "CP-2", "title": "two", "scope": "src/", "depends_on": ["CP-1"],
+             "risk_budget": {"max_build_passes": 2, "max_review_passes": 2, "max_repair_rounds": 1}},
+        ],
+    },
+    "promotion_policy": "human_gate",
+    "acceptance_criteria": [
+        {"id": "AC-1", "text": "one"}, {"id": "AC-2", "text": "two"},
+    ],
+    "non_goals": [],
+    "allowed_paths": ["src/"],
+    "protected_paths": [".ownframework-loop/"],
+    "work_units": [
+        {"id": "UNIT-1", "title": "u1", "scope": "src/", "acceptance": ["AC-1"]},
+        {"id": "UNIT-2", "title": "u2", "scope": "src/", "acceptance": ["AC-2"]},
+    ],
+    "merge_authority": "human_only",
+    "deploy_authority": "human_only",
+    "push_authority": "human_only",
+    "external_action_authority": "none",
+    # n_cps=2, gp=1 -> REVIEW needs >= 2+1+1=4. gr=3 underfunds the
+    # mandatory final review.
+    "risk_budget": {"max_build_passes": 10, "max_review_passes": 3,
+                     "max_repair_rounds": 1, "max_files_changed": 100,
+                     "max_diff_lines": 5000},
+}
+p1_errors = packet_mod_for_p.validate_packet_for_approval(pkt_p1)
+assert any("cannot fund the mandatory final whole-product review" in e for e in p1_errors), p1_errors
+
+# Case P2: explicit global max_build_passes too small (would over-
+# reserve if we double-counted final repair as a build beyond R).
+pkt_p2 = {
+    "schema": "ownframework-work-packet/v3",
+    "packet_id": "v091-underfunded-build",
+    "created_at": "2026-09-17T00:00:00Z",
+    "work_class": "HARDENING",
+    "risk_class": "low",
+    "title": "underfunded program",
+    "target": {"repo": str(repo_o.resolve(strict=False)), "branch": "master", "classification": "local_only"},
+    "execution_mode": "program",
+    "checkpoint_graph": {
+        "execution_order": ["CP-1", "CP-2"],
+        "checkpoints": [
+            {"id": "CP-1", "title": "one", "scope": "src/", "depends_on": [],
+             "risk_budget": {"max_build_passes": 2, "max_review_passes": 2, "max_repair_rounds": 1}},
+            {"id": "CP-2", "title": "two", "scope": "src/", "depends_on": ["CP-1"],
+             "risk_budget": {"max_build_passes": 2, "max_review_passes": 2, "max_repair_rounds": 1}},
+        ],
+    },
+    "promotion_policy": "human_gate",
+    "acceptance_criteria": [
+        {"id": "AC-1", "text": "one"}, {"id": "AC-2", "text": "two"},
+    ],
+    "non_goals": [],
+    "allowed_paths": ["src/"],
+    "protected_paths": [".ownframework-loop/"],
+    "work_units": [
+        {"id": "UNIT-1", "title": "u1", "scope": "src/", "acceptance": ["AC-1"]},
+        {"id": "UNIT-2", "title": "u2", "scope": "src/", "acceptance": ["AC-2"]},
+    ],
+    "merge_authority": "human_only",
+    "deploy_authority": "human_only",
+    "push_authority": "human_only",
+    "external_action_authority": "none",
+    # n_cps=2, gp=1 -> BUILD needs >= 3. gb=2 underfunds.
+    "risk_budget": {"max_build_passes": 2, "max_review_passes": 10,
+                     "max_repair_rounds": 1, "max_files_changed": 100,
+                     "max_diff_lines": 5000},
+}
+p2_errors = packet_mod_for_p.validate_packet_for_approval(pkt_p2)
+assert any("cannot realize max_repair_rounds" in e for e in p2_errors), p2_errors
+
+# Case P3: omitted global caps fail closed at admission.
+pkt_p3 = {
+    "schema": "ownframework-work-packet/v3",
+    "packet_id": "v091-omitted-globals",
+    "created_at": "2026-09-17T00:00:00Z",
+    "work_class": "HARDENING",
+    "risk_class": "low",
+    "title": "omitted globals",
+    "target": {"repo": str(repo_o.resolve(strict=False)), "branch": "master", "classification": "local_only"},
+    "execution_mode": "program",
+    "checkpoint_graph": {
+        "execution_order": ["CP-1"],
+        "checkpoints": [
+            {"id": "CP-1", "title": "one", "scope": "src/", "depends_on": [],
+             "risk_budget": {"max_build_passes": 2, "max_review_passes": 2, "max_repair_rounds": 1}},
+        ],
+    },
+    "promotion_policy": "human_gate",
+    "acceptance_criteria": [{"id": "AC-1", "text": "one"}],
+    "non_goals": [],
+    "allowed_paths": ["src/"],
+    "protected_paths": [".ownframework-loop/"],
+    "work_units": [{"id": "UNIT-1", "title": "u", "scope": "src/", "acceptance": ["AC-1"]}],
+    "merge_authority": "human_only",
+    "deploy_authority": "human_only",
+    "push_authority": "human_only",
+    "external_action_authority": "none",
+    # Deliberately omit max_build_passes / max_review_passes /
+    # max_repair_rounds from the top-level risk_budget.
+    "risk_budget": {"max_files_changed": 100, "max_diff_lines": 5000},
+}
+p3_errors = packet_mod_for_p.validate_packet_for_approval(pkt_p3)
+assert any("must explicitly declare" in e for e in p3_errors), p3_errors
+
+# Case P4: minimal clean PROGRAM passes admission.
+pkt_p4 = {
+    "schema": "ownframework-work-packet/v3",
+    "packet_id": "v091-minimal-clean",
+    "created_at": "2026-09-17T00:00:00Z",
+    "work_class": "HARDENING",
+    "risk_class": "low",
+    "title": "minimal clean",
+    "target": {"repo": str(repo_o.resolve(strict=False)), "branch": "master", "classification": "local_only"},
+    "execution_mode": "program",
+    "checkpoint_graph": {
+        "execution_order": ["CP-1", "CP-2"],
+        "checkpoints": [
+            {"id": "CP-1", "title": "one", "scope": "src/", "depends_on": [],
+             "acceptance_criterion_ids": ["AC-1"],
+             "risk_budget": {"max_build_passes": 2, "max_review_passes": 2, "max_repair_rounds": 1}},
+            {"id": "CP-2", "title": "two", "scope": "src/", "depends_on": ["CP-1"],
+             "acceptance_criterion_ids": ["AC-2"],
+             "risk_budget": {"max_build_passes": 2, "max_review_passes": 2, "max_repair_rounds": 1}},
+        ],
+    },
+    "promotion_policy": "human_gate",
+    "acceptance_criteria": [
+        {"id": "AC-1", "text": "one"}, {"id": "AC-2", "text": "two"},
+    ],
+    "non_goals": [],
+    "allowed_paths": ["src/"],
+    "protected_paths": [".ownframework-loop/"],
+    "work_units": [
+        {"id": "UNIT-1", "title": "u1", "scope": "src/", "acceptance": ["AC-1"]},
+        {"id": "UNIT-2", "title": "u2", "scope": "src/", "acceptance": ["AC-2"]},
+    ],
+    "merge_authority": "human_only",
+    "deploy_authority": "human_only",
+    "push_authority": "human_only",
+    "external_action_authority": "none",
+    # n_cps=2, gp=1 -> BUILD >= 3, REVIEW >= 4.
+    "risk_budget": {"max_build_passes": 3, "max_review_passes": 4,
+                     "max_repair_rounds": 1, "max_files_changed": 100,
+                     "max_diff_lines": 5000},
+}
+p4_errors = packet_mod_for_p.validate_packet_for_approval(pkt_p4)
+assert p4_errors == [], p4_errors
+print("TEST_P_UNDERFUNDED_PACKET_REFUSED_PRE_EXECUTION=PASS")
+
+# ============================================================
+# TEST Q: final-validation dedup must preserve semantic contract
+# (e.g., two packet-authoritative validations sharing command/
+# name/kind/exit but requiring different markers are NOT equivalent).
+# ============================================================
+from ownframework_loop import program as program_mod_for_q
+_repo_q = make_repo("final-review-Q-dedup", root)
+_run_q = "run-Q"
+_run_dir_q = _repo_q / ".ownframework-loop" / _run_q
+_run_dir_q.mkdir(parents=True)
+_pkt_q = {
+    "schema": "ownframework-work-packet/v3",
+    "packet_id": "v091-dedup-marker",
+    "created_at": "2026-09-17T00:00:00Z",
+    "work_class": "HARDENING",
+    "risk_class": "low",
+    "title": "dedup marker distinct",
+    "target": {"repo": str(_repo_q.resolve(strict=False)), "branch": "master",
+               "classification": "local_only"},
+    "execution_mode": "program",
+    "checkpoint_graph": {
+        "execution_order": ["CP-1", "CP-2"],
+        "checkpoints": [
+            {"id": "CP-1", "title": "alpha", "scope": "src/", "depends_on": [],
+             "acceptance_criterion_ids": ["AC-1"],
+             "required_validation": [{
+                 "name": "shared_name", "command": "test -f src/marker",
+                 "kind": "fast", "expected_exit_code": 0,
+                 "expected_marker": "MARKER_A",
+             }],
+             "risk_budget": {"max_build_passes": 3, "max_review_passes": 4,
+                              "max_repair_rounds": 1}},
+            {"id": "CP-2", "title": "beta", "scope": "src/", "depends_on": ["CP-1"],
+             "acceptance_criterion_ids": ["AC-2"],
+             "required_validation": [{
+                 "name": "shared_name", "command": "test -f src/marker",
+                 "kind": "fast", "expected_exit_code": 0,
+                 "expected_marker": "MARKER_B",
+             }],
+             "risk_budget": {"max_build_passes": 3, "max_review_passes": 4,
+                              "max_repair_rounds": 1}},
+        ],
+    },
+    "promotion_policy": "human_gate",
+    "acceptance_criteria": [
+        {"id": "AC-1", "text": "alpha"}, {"id": "AC-2", "text": "beta"},
+    ],
+    "non_goals": [],
+    "allowed_paths": ["src/"],
+    "protected_paths": [".ownframework-loop/"],
+    "work_units": [
+        {"id": "UNIT-1", "title": "alpha", "scope": "src/", "acceptance": ["AC-1"]},
+        {"id": "UNIT-2", "title": "beta", "scope": "src/", "acceptance": ["AC-2"]},
+    ],
+    "required_validation": [{
+        "name": "shared_name", "command": "test -f src/marker",
+        "kind": "fast", "expected_exit_code": 0,
+        "expected_marker": "MARKER_A",
+    }],
+    "merge_authority": "human_only",
+    "deploy_authority": "human_only",
+    "push_authority": "human_only",
+    "external_action_authority": "none",
+    "risk_budget": {"max_build_passes": 5, "max_review_passes": 5,
+                     "max_repair_rounds": 1, "max_files_changed": 100,
+                     "max_diff_lines": 5000},
+}
+_pkt_q_path = _run_dir_q / "WORK_PACKET.md"
+_pkt_q_path.write_text(
+    "```json\n" + _json_mod.dumps(_pkt_q, indent=2, sort_keys=True) + "\n```\n"
+)
+# Synthesize a durable program state with both CPs finalized.
+_state_q = state_mod.initial_state(_run_q)
+_state_q["schema"] = state_mod.PROGRAM_STATE_SCHEMA_VERSION
+_prog_q = program_mod_for_q.materialise_initial_program_state(
+    _pkt_q, baseline_sha="f" * 40,
+    candidate_branch=f"factory/candidate/{_run_q}",
+)
+# Stamp both CPs as finalized and put the run in program_final scope.
+for _cp in _prog_q["checkpoints"]:
+    _cp["terminal"] = "APPROVED"
+    _cp["candidate_sha"] = "a" * 40
+_prog_q["finalized_checkpoints"] = [
+    {"id": cp["id"], "terminal_state": "APPROVED",
+     "evidence_sha256": "b" * 64, "finalized_at": "2026-09-17T00:00:00Z"}
+    for cp in _prog_q["checkpoints"]
+]
+_prog_q["current_checkpoints"] = []
+_prog_q["review_scope"] = program_mod_for_q.REVIEW_SCOPE_PROGRAM_FINAL
+_state_q["program"] = _prog_q
+seed_state(_repo_q, _run_q, _state_q, reason="Q fixture materialization")
+# Reload state and resolve the final-review effective validation set.
+_state_q_loaded = state_mod.load(_repo_q, _run_q)
+_resolved_q = program_mod_for_q.resolve_effective_required_validation(
+    _pkt_q, _state_q_loaded,
+)
+_resolved_markers = sorted(
+    str(v.get("expected_marker") or "")
+    for v in _resolved_q
+)
+# Three authoritative validations exist (top-level MARKER_A + CP-1
+# MARKER_A + CP-2 MARKER_B).  Dedup keeps one MARKER_A and one
+# MARKER_B — it does NOT silently drop MARKER_B even though the
+# top-level + CP-1 validations share command/kind/exit_code/name.
+assert _resolved_markers == ["MARKER_A", "MARKER_B"], _resolved_markers
+print("TEST_Q_EXPECTED_MARKER_DISTINCT_VALIDATION_PROVEN=PASS")
+
+# ============================================================
+# TEST R: program-final protected-drift recovery uses the exact
+# pre-final-review candidate SHA as the durable safe anchor and
+# rejects the entire violating final repair (no source salvage).
+# ============================================================
+from ownframework_loop import build_finalize as build_finalize_mod_r, build_prepare as build_prepare_mod_r
+from ownframework_loop import protected_recovery, build_agent as build_agent_mod_r
+_repo_r = make_repo("final-review-R-recovery", root)
+_run_r = "run-R"
+_run_dir_r = _repo_r / ".ownframework-loop" / _run_r
+_run_dir_r.mkdir(parents=True)
+_pkt_r = {
+    "schema": "ownframework-work-packet/v3",
+    "packet_id": "v091-pf-protected-recovery",
+    "created_at": "2026-09-17T00:00:00Z",
+    "work_class": "HARDENING",
+    "risk_class": "low",
+    "title": "pf protected drift",
+    "target": {"repo": str(_repo_r.resolve(strict=False)), "branch": "master",
+               "classification": "local_only"},
+    "execution_mode": "program",
+    "checkpoint_graph": {
+        "execution_order": ["CP-1", "CP-2"],
+        "checkpoints": [
+            {"id": "CP-1", "title": "one", "scope": "src/", "depends_on": [],
+             "acceptance_criterion_ids": ["AC-1"],
+             "risk_budget": {"max_build_passes": 3, "max_review_passes": 4,
+                              "max_repair_rounds": 1}},
+            {"id": "CP-2", "title": "two", "scope": "src/", "depends_on": ["CP-1"],
+             "acceptance_criterion_ids": ["AC-2"],
+             "risk_budget": {"max_build_passes": 3, "max_review_passes": 4,
+                              "max_repair_rounds": 1}},
+        ],
+    },
+    "promotion_policy": "human_gate",
+    "acceptance_criteria": [
+        {"id": "AC-1", "text": "one"}, {"id": "AC-2", "text": "two"},
+    ],
+    "non_goals": [],
+    "allowed_paths": ["src/"],
+    "protected_paths": ["docs/protected.md", ".ownframework-loop/"],
+    "work_units": [
+        {"id": "UNIT-1", "title": "u1", "scope": "src/", "acceptance": ["AC-1"]},
+        {"id": "UNIT-2", "title": "u2", "scope": "src/", "acceptance": ["AC-2"]},
+    ],
+    "required_validation": [],
+    "merge_authority": "human_only",
+    "deploy_authority": "human_only",
+    "push_authority": "human_only",
+    "external_action_authority": "none",
+    "risk_budget": {"max_build_passes": 5, "max_review_passes": 5,
+                     "max_repair_rounds": 2, "max_files_changed": 100,
+                     "max_diff_lines": 5000},
+}
+baseline_r = subprocess.check_output(
+    ["git", "-C", str(_repo_r), "rev-parse", "HEAD"], text=True,
+).strip()
+(_run_dir_r / "WORK_PACKET.md").write_text(
+    "```json\n" + _json_mod.dumps(_pkt_r, indent=2, sort_keys=True) + "\n```\n"
+)
+(_repo_r / "docs").mkdir(exist_ok=True)
+(_repo_r / "docs" / "protected.md").write_text("safe baseline\n")
+_proc_add = subprocess.run(
+    ["git", "-C", str(_repo_r), "add", "docs/protected.md"],
+    capture_output=True, text=True,
+)
+if _proc_add.returncode != 0:
+    raise RuntimeError(
+        f"git add docs/protected.md failed: "
+        f"rc={_proc_add.returncode} stdout={_proc_add.stdout!r} "
+        f"stderr={_proc_add.stderr!r} status=\n"
+        + subprocess.check_output(["git", "-C", str(_repo_r), "status"], text=True)
+    )
+subprocess.run(["git", "-C", str(_repo_r), "commit", "-qm", "protected baseline"],
+               check=True, capture_output=True)
+baseline_r = subprocess.check_output(
+    ["git", "-C", str(_repo_r), "rev-parse", "HEAD"], text=True,
+).strip()
+# Materialise the program state; finalize both CPs via APPROVED;
+# the final-review must-find funds the program-final repair.
+_state_r = state_mod.initial_state(_run_r)
+_state_r["schema"] = state_mod.PROGRAM_STATE_SCHEMA_VERSION
+_prog_r = program_mod.materialise_initial_program_state(
+    _pkt_r, baseline_sha=baseline_r,
+    candidate_branch=f"factory/candidate/{_run_r}",
+)
+_state_r["program"] = _prog_r
+seed_state(_repo_r, _run_r, _state_r, reason="R fixture materialization")
+# Authoring an APPROVAL.json so build_prepare can resolve the
+# approval-binding seam deterministically.
+import os as _os_r
+_pkt_sha_r = __import__("hashlib").sha256(
+    (_run_dir_r / "WORK_PACKET.md").read_bytes()
+).hexdigest()
+_approval_r = {
+    "schema": "ownframework-loop-approval/v1",
+    "run_id": _run_r, "packet_sha256": _pkt_sha_r,
+    "approved_at": "2026-09-17T00:00:00Z", "approved_actor": "test",
+    "canonical_repo": str(_repo_r.resolve(strict=False)),
+    "baseline_branch": "master", "baseline_sha": baseline_r,
+    "candidate_branch": f"factory/candidate/{_run_r}",
+    "packet_schema": "ownframework-work-packet/v3",
+    "approval_method": "tty_confirmation",
+    "confirmation_token": approval.derive_confirmation_token(_pkt_sha_r),
+}
+(_run_dir_r / "APPROVAL.json").write_text(
+    _json_mod.dumps(_approval_r, indent=2, sort_keys=True)
+)
+_os_r.chmod(_run_dir_r / "APPROVAL.json", 0o600)
+state_mod.transition(_repo_r, _run_r, to_state="READY_TO_BUILD", actor="test",
+                    reason="R fixture approved")
+# Drive both CPs to APPROVED using the production build
+# claim/prepare/finalize chain (the advance_to_reviewing helper
+# relies on a worktree-shape assumption that this protected-drift
+# recovery test specifically challenges).
+program_mod.claim_build_pass(canonical_repo=_repo_r, run_id=_run_r, packet=_pkt_r)
+prep_r1 = build_prepare_mod_r.prepare(canonical_repo=_repo_r, run_id=_run_r)
+wt_r1 = Path(prep_r1["builder_worktree"])
+(wt_r1 / "src").mkdir(exist_ok=True)
+(wt_r1 / "src" / "first_repair.py").write_text("# CP-1\n")
+subprocess.run(["git", "-C", str(wt_r1), "add", "src/first_repair.py"], check=True, capture_output=True)
+subprocess.run(["git", "-C", str(wt_r1), "commit", "-qm", "CP-1"], check=True, capture_output=True)
+sha_r1 = subprocess.check_output(["git", "-C", str(wt_r1), "rev-parse", "HEAD"], text=True).strip()
+agent_r1_path = Path(prep_r1["agent_result_path"])
+build_agent_mod_r.write_skeleton(canonical_repo=_repo_r, run_id=_run_r)
+agent_r1 = _json_mod.loads(agent_r1_path.read_text())
+agent_r1.update({
+    "summary": "CP-1", "outcome_requested": "candidate_ready",
+    "unit_ids_completed": ["UNIT-1"], "acceptance_addressed": ["AC-1"],
+    "work_unit_id": "UNIT-1",
+})
+agent_r1_path.write_text(_json_mod.dumps(agent_r1, indent=2, sort_keys=True) + "\n")
+build_finalize_mod_r.finalize_build(
+    canonical_repo=_repo_r, run_id=_run_r,
+    agent_result_path=agent_r1_path, actor="of-builder",
+)
+program_mod.claim_review_pass(canonical_repo=_repo_r, run_id=_run_r, packet=_pkt_r)
+approve_finalize_review(_repo_r, _run_r, _pkt_r, sha_r1,
+                        make_assessment_path(_repo_r, _run_r))
+
+program_mod.claim_build_pass(canonical_repo=_repo_r, run_id=_run_r, packet=_pkt_r)
+prep_r2 = build_prepare_mod_r.prepare(canonical_repo=_repo_r, run_id=_run_r)
+wt_r2 = Path(prep_r2["builder_worktree"])
+(wt_r2 / "src").mkdir(exist_ok=True)
+(wt_r2 / "src" / "second_repair.py").write_text("# CP-2\n")
+subprocess.run(["git", "-C", str(wt_r2), "add", "src/second_repair.py"], check=True, capture_output=True)
+subprocess.run(["git", "-C", str(wt_r2), "commit", "-qm", "CP-2"], check=True, capture_output=True)
+sha_r2 = subprocess.check_output(["git", "-C", str(wt_r2), "rev-parse", "HEAD"], text=True).strip()
+agent_r2_path = Path(prep_r2["agent_result_path"])
+build_agent_mod_r.write_skeleton(canonical_repo=_repo_r, run_id=_run_r)
+agent_r2 = _json_mod.loads(agent_r2_path.read_text())
+agent_r2.update({
+    "summary": "CP-2", "outcome_requested": "candidate_ready",
+    "unit_ids_completed": ["UNIT-2"], "acceptance_addressed": ["AC-2"],
+    "work_unit_id": "UNIT-2",
+})
+agent_r2_path.write_text(_json_mod.dumps(agent_r2, indent=2, sort_keys=True) + "\n")
+build_finalize_mod_r.finalize_build(
+    canonical_repo=_repo_r, run_id=_run_r,
+    agent_result_path=agent_r2_path, actor="of-builder",
+)
+program_mod.claim_review_pass(canonical_repo=_repo_r, run_id=_run_r, packet=_pkt_r)
+approve_finalize_review(_repo_r, _run_r, _pkt_r, sha_r2,
+                        make_assessment_path(_repo_r, _run_r))
+_state_r_after_cp = state_mod.load(_repo_r, _run_r)
+assert _state_r_after_cp.get("state") == "READY_FOR_REVIEW"
+assert _state_r_after_cp.get("program", {}).get("review_scope") == "program_final"
+assert _state_r_after_cp.get("last_candidate_sha") == sha_r2
+# First final review CHANGES_REQUESTED so the program-final repair
+# entitlement is funded (must-fix on the protected path).
+program_mod.claim_review_pass(canonical_repo=_repo_r, run_id=_run_r, packet=_pkt_r)
+approve_finalize_review(
+    _repo_r, _run_r, _pkt_r, sha_r2,
+    make_assessment_path(_repo_r, _run_r),
+    recommended="CHANGES_REQUESTED",
+    must_fix=[{
+        "finding_id": "F-R-1", "severity": "high",
+        "classification": "must_fix",
+        "title": "force a final repair that touches the protected path",
+        "description": "expose the program-final protected-drift recovery seam",
+        "file": "docs/protected.md", "line": 1,
+    }],
+)
+_state_r_after_mustfix = state_mod.load(_repo_r, _run_r)
+assert _state_r_after_mustfix.get("state") == "CHANGES_REQUESTED"
+# Real program-final repair build that violates the protected path.
+repair_claim_r = program_mod.claim_build_pass(
+    canonical_repo=_repo_r, run_id=_run_r, packet=_pkt_r,
+)
+assert repair_claim_r["cp_id"] == "", repair_claim_r
+prep_r_final = build_prepare_mod_r.prepare(canonical_repo=_repo_r, run_id=_run_r)
+wt_r = Path(prep_r_final["builder_worktree"])
+(wt_r / "src").mkdir(exist_ok=True)
+(wt_r / "src" / "first_repair.py").write_text("print('first repair')\n")
+# Deliberately touch the protected path: this is what must trigger
+# the program-final protected-drift recovery.
+(wt_r / "docs" / "protected.md").write_text("VIOLATING FINAL REPAIR\n")
+subprocess.run(["git", "-C", str(wt_r), "add", "-A"], check=True, capture_output=True)
+subprocess.run(["git", "-C", str(wt_r), "commit", "-qm", "first final repair (violates protected)"],
+               check=True, capture_output=True)
+sha_r_violating = subprocess.check_output(
+    ["git", "-C", str(wt_r), "rev-parse", "HEAD"], text=True,
+).strip()
+# Write the agent_result skeleton so build_finalize can read it.
+agent_r_path = Path(prep_r_final["agent_result_path"])
+from ownframework_loop import build_agent as build_agent_mod_r
+build_agent_mod_r.write_skeleton(canonical_repo=_repo_r, run_id=_run_r)
+agent_r = _json_mod.loads(agent_r_path.read_text())
+agent_r.update({
+    "summary": "first final repair (violates protected path)",
+    "outcome_requested": "candidate_ready",
+    "unit_ids_completed": [],
+    "acceptance_addressed": ["AC-1", "AC-2"],
+    "work_unit_id": program_mod.PROGRAM_FINAL_REPAIR_WORK_UNIT_ID,
+})
+agent_r_path.write_text(
+    _json_mod.dumps(agent_r, indent=2, sort_keys=True) + "\n"
+)
+# Finalize: must trigger program-final protected-drift recovery,
+# NOT raise an empty-checkpoint error.  The violating commit is
+# discarded; recovery returns the safe anchor tree.
+build_finalize_mod_r.finalize_build(
+    canonical_repo=_repo_r, run_id=_run_r,
+    agent_result_path=agent_r_path, actor="of-builder",
+)
+_state_r_after_repair = state_mod.load(_repo_r, _run_r)
+# v0.9.1+: protected-drift recovery is autonomous and funds another
+# repair round atomically.  The run is in CHANGES_REQUESTED (not
+# READY_FOR_REVIEW); a fresh builder pass is expected to consume the
+# newly-funded repair entitlement against the safe anchor tree.
+assert _state_r_after_repair.get("state") == "CHANGES_REQUESTED", \
+    _state_r_after_repair
+# Verify the recovery receipt carries the program-final identity
+# (checkpoint_id="") and the safe anchor is the exact pre-repair
+# final-review candidate SHA.
+_recovery_receipts = list(
+    (_run_dir_r / "protected-drift-recovery").glob("*.json")
+)
+assert len(_recovery_receipts) == 1, (
+    f"R: expected exactly one protected-drift recovery receipt, "
+    f"got {len(_recovery_receipts)}"
+)
+_recovery_receipt = _json_mod.loads(_recovery_receipts[0].read_text())
+assert _recovery_receipt.get("checkpoint_id") == "", \
+    f"R: program-final protected-drift receipt must stamp empty checkpoint_id, got {_recovery_receipt.get('checkpoint_id')!r}"
+assert _recovery_receipt.get("violating_candidate_sha") == sha_r_violating, \
+    _recovery_receipt
+assert _recovery_receipt.get("checkpoint_entry_candidate_sha") == sha_r2, \
+    f"R: safe anchor must be the pre-final-review candidate SHA, " \
+    f"expected {sha_r2!r}, got {_recovery_receipt.get('checkpoint_entry_candidate_sha')!r}"
+# The recovery commit must be a child of the violating commit
+# (whole-attempt discard semantics), with the safe anchor's tree.
+_recovery_sha = _recovery_receipt.get("recovery_commit_sha")
+assert _recovery_sha, _recovery_receipt
+_recovery_tree = subprocess.check_output(
+    ["git", "-C", str(_repo_r), "rev-parse", f"{_recovery_sha}^{{tree}}"],
+    text=True,
+).strip()
+_safe_anchor_tree = subprocess.check_output(
+    ["git", "-C", str(_repo_r), "rev-parse", f"{sha_r2}^{{tree}}"],
+    text=True,
+).strip()
+assert _recovery_tree == _safe_anchor_tree, (
+    f"R: recovery tree ({_recovery_tree}) must equal safe-anchor tree "
+    f"({_safe_anchor_tree}); program-final protected drift must "
+    "discard the entire violating repair attempt"
+)
+print("TEST_R_PROGRAM_FINAL_PROTECTED_DRIFT_RECOVERY=PASS")
 
 print("ALL_V091_PROGRAM_FINAL_REVIEW=PASS")
 PY

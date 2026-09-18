@@ -91,6 +91,8 @@ def main(argv: list[str]) -> int:
         "risk_budget": {
             "max_files_changed": 100,
             "max_diff_lines": 5000,
+            "max_build_passes": cum_build,
+            "max_review_passes": cum_review,
             "max_repair_rounds": max(cum_repair, cp_repair),
         },
     }

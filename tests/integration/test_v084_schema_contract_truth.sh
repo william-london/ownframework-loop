@@ -174,7 +174,8 @@ base={
  "allowed_paths":["src/"],"protected_paths":[".ownframework-loop/"],
  "work_units":[{"id":"UNIT-1","title":"program","scope":"src/"}],
  "merge_authority":"human_only","deploy_authority":"human_only",
- "push_authority":"human_only","external_action_authority":"none"
+ "push_authority":"human_only","external_action_authority":"none",
+ "risk_budget":{"max_build_passes":3,"max_review_passes":4,"max_repair_rounds":1}
 }
 assert schema_validate.validate_packet(base) == [], schema_validate.validate_packet(base)
 assert packet_mod.validate_packet_for_approval(base) == [], packet_mod.validate_packet_for_approval(base)

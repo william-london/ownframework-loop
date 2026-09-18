@@ -40,7 +40,11 @@ def make_repo(name):
     return p
 
 def make_program(repo, rid):
-    subprocess.run(["python3", str(setup), str(repo), rid, "2", "10", "10", "10", "3", "3", "1"], check=True)
+    # v0.9.1+: packet-global caps must fund n_cps + gp + 1 review
+    # passes (CP reviews + repair reviews + mandatory final whole-
+    # product review).  Use generous caps so the test exercises the
+    # dispatch hold seam, not the budget-admission seam.
+    subprocess.run(["python3", str(setup), str(repo), rid, "2", "30", "30", "20", "3", "3", "1"], check=True)
 
 def make_boundary(repo, rid):
     doc = state_mod.load(repo, rid)

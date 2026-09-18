@@ -15,7 +15,9 @@ Core invariants:
   - packet-bound checkpoint order and budgets
   - checkpoint-local build/review/repair counters
   - bounded per-checkpoint and cumulative pass ceilings
-  - cumulative caps == min(human-approved global envelope, checkpoint-cap sum)
+  - cumulative caps == operator-declared global envelope (falls back to
+    sum of checkpoint-cap values when the operator omits the packet-level
+    value); per-checkpoint caps continue bounding checkpoint-local work
   - no post-approval widening (graph SHA frozen at program start)
   - one candidate branch per run, shared across all checkpoints
   - immutable checkpoint evidence
@@ -271,16 +273,25 @@ def resolve_effective_required_validation(
 def _validation_dedup_key(v: dict[str, Any]) -> tuple:
     """Stable identity for deduping authoritative validations by packet contract.
 
-    Two validations are duplicates when their command + kind + expected exit
-    code + name match.  Other declared fields (timeout, capabilities) are
-    transport details that must NOT cause a duplicate authoritative command
-    to be run twice on the same final SHA.
+    Two validations are duplicates only when their full semantic contract
+    matches: command, kind, expected exit code, name, and any other field
+    that changes the authoritative pass/fail outcome (notably
+    ``expected_marker`` which the validation executor inspects at runtime
+    to decide PASS/FAIL).  Two validations sharing command/name/kind/exit
+    but requiring different markers are NOT equivalent; dropping one would
+    silently weaken the final whole-product validation contract.
+
+    Runtime-only transport details (timeout, required capabilities,
+    sandboxing) do NOT participate in the dedup identity and must not
+    defeat useful deduplication.
     """
+    marker = v.get("expected_marker")
     return (
         str(v.get("command") or ""),
         str(v.get("kind") or ""),
         int(v.get("expected_exit_code") if isinstance(v.get("expected_exit_code"), int) else 0),
         str(v.get("name") or ""),
+        "" if marker is None else str(marker),
     )
 
 
@@ -484,52 +495,74 @@ def validate_checkpoint_graph(packet: dict[str, Any]) -> list[str]:
         gb = rb_global.get("max_build_passes")
         gr = rb_global.get("max_review_passes")
         gp = rb_global.get("max_repair_rounds")
-        if isinstance(gb, int) and gb < n_cps:
+        # v0.9.1+ PROGRAM budget mathematics:
+        #   The same global repair counter funds checkpoint repairs AND
+        #   the optional whole-product final-review repair.  Every funded
+        #   repair consumes one BUILD claim and one subsequent REVIEW
+        #   claim.  The mandatory final whole-product review is one
+        #   additional REVIEW claim with NO matching BUILD (it is a
+        #   review of the assembled candidate, not a fresh build).
+        #
+        #   Legitimate lawful pass requirement:
+        #     REVIEW >= n_cps + gp + 1   (n_cps checkpoint reviews +
+        #                                  gp repair reviews + 1 final)
+        #     BUILD  >= n_cps + gp       (n_cps checkpoint builds +
+        #                                  gp repair builds; final repair
+        #                                  consumes one of the gp)
+        #
+        #   Omitted packet-global caps are explicit fail-closed: a new
+        #   PROGRAM cannot execute without explicit operator-declared
+        #   whole-PROGRAM authority.  The per-CP caps are bounded
+        #   evidence of CP-local work, not a substitute for the global
+        #   envelope that funds the post-checkpoint phase.
+        any_global_omitted = (
+            not isinstance(gb, int)
+            or not isinstance(gr, int)
+            or not isinstance(gp, int)
+        )
+        if any_global_omitted:
+            errors.append(
+                "packet-level risk_budget must explicitly declare "
+                f"max_build_passes (got {gb!r}), max_review_passes "
+                f"(got {gr!r}), and max_repair_rounds (got {gp!r}); "
+                "omitted PROGRAM-global caps are fail-closed so the "
+                "mandatory final whole-product phase cannot be silently "
+                "underfunded after execution begins."
+            )
+            return errors
+        if gb < n_cps:
             errors.append(
                 f"packet-level max_build_passes={gb} cannot accommodate {n_cps} checkpoints"
             )
-        if isinstance(gr, int) and gr < n_cps:
+        if gr < n_cps:
             errors.append(
                 f"packet-level max_review_passes={gr} cannot accommodate {n_cps} checkpoints"
             )
-        if isinstance(gp, int) and gp > 0:
-            needed = n_cps + gp
-            if isinstance(gb, int) and gb < needed:
-                errors.append(
-                    f"packet-level max_build_passes={gb} cannot realize "
-                    f"max_repair_rounds={gp} across {n_cps} checkpoints; need >= {needed}"
-                )
-            if isinstance(gr, int) and gr < needed:
-                errors.append(
-                    f"packet-level max_review_passes={gr} cannot realize "
-                    f"max_repair_rounds={gp} across {n_cps} checkpoints; need >= {needed}"
-                )
-        # Mandatory final whole-product review requires one additional
-        # review pass beyond the sum of n_cps initial reviews and gp
-        # repair rounds (builds are unaffected — the final pass is a
-        # review, not a build). This is funded from the existing global
-        # risk_budget envelope, not from any new authority; the packet's
-        # deliberate budget declaration remains the operator's contract.
-        if isinstance(gr, int):
-            needed_final = n_cps + (gp if isinstance(gp, int) and gp > 0 else 0) + 1
-            if gr < needed_final:
-                errors.append(
-                    f"packet-level max_review_passes={gr} cannot fund the "
-                    f"mandatory final whole-product review across {n_cps} "
-                    f"checkpoints; need >= {needed_final}"
-                )
-        # The mandatory final whole-product review may legitimately
-        # return CHANGES_REQUESTED.  Its automatic bounded repair is
-        # itself a BUILD claim that no individual CP owns; the global
-        # envelope must fund it without widening per-CP authority.
-        if isinstance(gb, int):
-            needed_final_build = n_cps + (gp if isinstance(gp, int) and gp > 0 else 0) + 1
-            if gb < needed_final_build:
-                errors.append(
-                    f"packet-level max_build_passes={gb} cannot fund the "
-                    f"mandatory final-repair build across {n_cps} "
-                    f"checkpoints; need >= {needed_final_build}"
-                )
+        # n_cps + gp builds fund every checkpoint + every funded repair
+        # (each repair consumes one of the gp global repair rounds).
+        needed = n_cps + gp
+        if gb < needed:
+            errors.append(
+                f"packet-level max_build_passes={gb} cannot realize "
+                f"max_repair_rounds={gp} across {n_cps} checkpoints; need >= {needed}"
+            )
+        if gr < needed:
+            errors.append(
+                f"packet-level max_review_passes={gr} cannot realize "
+                f"max_repair_rounds={gp} across {n_cps} checkpoints; need >= {needed}"
+            )
+        # Mandatory final whole-product review: one additional REVIEW pass
+        # beyond n_cps checkpoint reviews + gp repair reviews.  This is
+        # funded from the existing global risk_budget envelope, not from
+        # any new authority; the packet's deliberate budget declaration
+        # remains the operator's contract.
+        needed_final_review = n_cps + gp + 1
+        if gr < needed_final_review:
+            errors.append(
+                f"packet-level max_review_passes={gr} cannot fund the "
+                f"mandatory final whole-product review across {n_cps} "
+                f"checkpoints; need >= {needed_final_review}"
+            )
     return errors
 
 
@@ -655,7 +688,10 @@ def materialise_initial_program_state(
             "baseline_sha": baseline_sha,
             "candidate_branch": candidate_branch,
             "captured_at": utc_now_iso(),
-            "envelope_source": "min(global_packet_cap, sum_checkpoint_caps)",
+            "envelope_source": (
+                "packet_global_cap (falls back to sum_checkpoint_caps when "
+                "packet-level value is omitted)"
+            ),
             "packet_global_cap": {
                 "max_build_passes": global_build_cap,
                 "max_review_passes": global_review_cap,
@@ -733,6 +769,45 @@ def checkpoint_entry_candidate_sha(
     if cp_id == (packet.get("checkpoint_graph") or {}).get("execution_order", [None])[0]:
         return None
     return None
+
+
+def program_final_safe_repair_anchor(
+    *,
+    state_doc: dict[str, Any],
+    cp_id: str = "",
+) -> str:
+    """Return the durable safe anchor for a PROGRAM-final repair build.
+
+    No individual checkpoint owns a whole-product repair.  The natural
+    authority is the exact assembled candidate that the immediately
+    preceding final review rejected, persisted on top-level
+    ``state.last_candidate_sha`` by the atomic
+    ``transition_review_rejection_with_repair`` owner.  Branch tips,
+    reflogs, and working-tree guesses are deliberately never used.
+
+    Returns the exact 40-character SHA, or ``""`` when no durable
+    anchor is provable.  ``""`` is a deliberate sentinel that the
+    recovery owner treats as fail-closed (no fake anchor fabrication).
+    """
+    if cp_id:
+        # A program-final repair never carries a real checkpoint id;
+        # any non-empty value is a caller error and must be reported.
+        raise ProgramStateError(
+            "program_final_safe_repair_anchor called with non-empty cp_id "
+            f"({cp_id!r}); whole-product repair must use cp_id=\"\""
+        )
+    program_state = state_doc.get("program") or {}
+    if program_state.get("review_scope") != REVIEW_SCOPE_PROGRAM_FINAL:
+        raise ProgramStateError(
+            "program_final_safe_repair_anchor called when durable "
+            f"review_scope is not program_final (got {program_state.get('review_scope')!r})"
+        )
+    anchor = str(state_doc.get("last_candidate_sha") or "")
+    if anchor and not re.fullmatch(r"[0-9a-f]{40}", anchor):
+        raise ProgramStateError(
+            "last_candidate_sha is not a 40-character SHA"
+        )
+    return anchor
 
 
 def ready_to_claim(cp_state: dict[str, Any], packet_cp: dict[str, Any]) -> tuple[bool, str]:
@@ -1745,4 +1820,5 @@ __all__ = [
     "ClaimCapExhausted",
     "PROGRAM_FINAL_REPAIR_WORK_UNIT_ID",
     "program_final_repair_entitlement",
+    "program_final_safe_repair_anchor",
 ]

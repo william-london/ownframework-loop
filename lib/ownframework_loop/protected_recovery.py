@@ -44,6 +44,21 @@ def _anchor_sha(
     cp_id: str,
 ) -> str:
     ps = current.get("program") or {}
+    # v0.9.1+ program-final repair has no CP-owned safe anchor; the
+    # durable authority is the exact assembled candidate the immediately
+    # preceding final review rejected, persisted on top-level
+    # ``state.last_candidate_sha``.  Never fabricate a CP id or invent
+    # a tree.
+    if not cp_id and ps.get("review_scope") == program.REVIEW_SCOPE_PROGRAM_FINAL:
+        anchor = program.program_final_safe_repair_anchor(
+            state_doc=current, cp_id="",
+        )
+        if not anchor:
+            raise ProtectedDriftRecoveryError(
+                "no durable program-final repair anchor (last_candidate_sha "
+                "missing or malformed on durable state)"
+            )
+        return anchor
     candidate = program.checkpoint_entry_candidate_sha(
         packet=packet, program_state=ps, cp_id=cp_id, events=_events(repo, run_id)
     )

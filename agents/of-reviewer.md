@@ -145,8 +145,29 @@ checkpoint:
   inspect that output directly. Do not rely on internal implementation
   evidence when a real deliverable inspection is authorized and relevant.
 - Do NOT reopen intentionally deferred work (packet `non_goals`). Do NOT
-  demand visual polish, aesthetic refactors, or speculative improvements.
-  The bar is merge-ready, not perfect.
+  block on subjective style preference, optional beautification, or
+  perfectionism. The bar is merge-ready, not perfect.
+- Concrete externally visible unfinishedness on a surface that is
+  materially part of the packet's intended deliverable may be a
+  legitimate must-fix. Generic examples include:
+  - clipping / overflow / truncation that harms intended use;
+  - placeholder / debug / synthetic content presented as finished truth;
+  - internal engineering / protocol vocabulary leaking into the
+    intended user / operator output;
+  - missing or broken primary states;
+  - contradictory or stale public / operator-facing output;
+  - structurally unfinished generated artifacts;
+  - obvious presentation defects that materially impair comprehension
+    or professional readiness under the packet's own product intent.
+- These are examples of where blocking may be legitimate, not
+  deterministic rules. The semantic reviewer decides relevance.
+- A backend daemon with no meaningful visual surface should receive
+  no visual-design effort. A CLI's relevant experience may be its
+  commands / help / errors. A library's may be its public API. A
+  report generator's may be the generated report. A visual product's
+  may include its rendered states. The product as a whole remains the
+  priority — do not prioritize one surface merely because it happens
+  to exist.
 - Distinguish concrete must-fix defects from advisory improvements. A
   must-fix finding must name a concrete consequence: broken behavior,
   contradictory behavior, unsafe behavior, materially-incomplete intended

@@ -1049,7 +1049,26 @@ def transition_funded_repair(
                 raise ValueError("typed owner field 'program_block' must be a non-empty dict")
             if not is_program_state(current):
                 raise ValueError("program_block supplied for a non-PROGRAM run")
-            new["program"] = program_block
+            # Atomic merge: caller-supplied program_block carries absolute
+            # PROGRAM source-accounting updates (files_changed_unique,
+            # diff_lines_total).  This funding owner owns the repair
+            # counter mutation; merging the caller's source-accounting
+            # updates without erasing the just-incremented repair counter
+            # keeps the top-level <-> cumulative mirror invariant intact.
+            # A blind overwrite would leave top-level repair_round = N+1
+            # while program.cumulative_counters.repair_round_count = N
+            # and break the next claim's mirror-drift refusal.
+            merged = dict(program_block)
+            if "cumulative_counters" in new.get("program", {}) and "cumulative_counters" in merged:
+                owner_cum = new["program"]["cumulative_counters"]
+                merged_cum = dict(merged["cumulative_counters"])
+                # Owner-owned: repair_round_count is the only field this
+                # owner authoritatively mutates; caller-owned source
+                # accounting wins for every other key.
+                if "repair_round_count" in owner_cum:
+                    merged_cum["repair_round_count"] = owner_cum["repair_round_count"]
+                merged["cumulative_counters"] = merged_cum
+            new["program"] = merged
         # Owner-owned: preserve the finalizer's candidate-convergence result
         # inside the same atomic funding mutation. A missing value retains the
         # historical fresh-context default for callers without a candidate
