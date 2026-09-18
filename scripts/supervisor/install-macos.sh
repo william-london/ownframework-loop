@@ -145,7 +145,13 @@ recover_pending_transaction() {
   # not plist-origin.  PROVE absence after removal: a stale
   # transaction + stale same-label registration (different plist
   # origin) must not wedge the recovery.
-  REMOVE_OUT="$(PYTHONPATH="$ROOT/lib" "$PYTHON_BIN" -B - "$DOMAIN" "$LABEL" "$PLIST" <<'PY'
+  #
+  # Defect B1: preserve BOTH helper stdout/stderr AND return code.
+  # An unexpected nonzero from the lifecycle helper (import failure,
+  # exception, malformed env, etc.) MUST fail closed — never be
+  # swallowed by `|| true`.
+  set +e
+  REMOVE_OUT="$(PYTHONPATH="$ROOT/lib" "$PYTHON_BIN" -B - "$DOMAIN" "$LABEL" "$PLIST" <<'PY' 2>&1
 import sys
 from ownframework_loop import macos_service_lifecycle
 domain = sys.argv[1]
@@ -158,9 +164,18 @@ if macos_service_lifecycle.probe_canonical_label(label, domain):
         sys.exit(1)
 sys.exit(0)
 PY
-)" || true
-  if [[ "$REMOVE_OUT" == *"reason=transaction_recovery_stale_label_removal_failed"* ]]; then
+)"
+  REMOVE_RC=$?
+  set -e
+  if [[ "$REMOVE_RC" -eq 0 ]]; then
+    : # helper succeeded; continue
+  elif [[ "$REMOVE_OUT" == *"reason=transaction_recovery_stale_label_removal_failed"* ]]; then
     echo "SUPERVISOR_INSTALL=REFUSED reason=transaction_recovery_stale_label_removal_failed" >&2
+    return 15
+  else
+    # Defect B1: unexpected nonzero with no recognized typed marker.
+    # Fail closed; preserve diagnostic evidence; never continue.
+    echo "SUPERVISOR_INSTALL=REFUSED reason=transaction_recovery_lifecycle_helper_unexpected_nonzero rc=$REMOVE_RC detail=${REMOVE_OUT}" >&2
     return 15
   fi
   if [[ -f "$TXN_DIR/had-plist" ]]; then
@@ -537,7 +552,10 @@ fi
 #    exits nonzero).  Use the single macOS service-lifecycle primitive
 #    so this logic is shared with recover_pending_transaction and
 #    uninstall, with no plist-origin assumption.
-REMOVE_OUT="$(PYTHONPATH="$INSTALL_ROOT/lib" "$PYTHON_BIN" -B - "$DOMAIN" "$LABEL" "$PLIST" <<'PY'
+# Defect B1: preserve BOTH helper stdout/stderr AND return code.
+# An unexpected nonzero from the lifecycle helper MUST fail closed.
+set +e
+REMOVE_OUT="$(PYTHONPATH="$INSTALL_ROOT/lib" "$PYTHON_BIN" -B - "$DOMAIN" "$LABEL" "$PLIST" <<'PY' 2>&1
 import os, sys
 from ownframework_loop import macos_service_lifecycle
 domain = sys.argv[1]
@@ -550,12 +568,17 @@ if macos_service_lifecycle.probe_canonical_label(label, domain):
         sys.exit(1)
 sys.exit(0)
 PY
-)" || true
-if [[ "$REMOVE_OUT" == *"reason=stale_label_removal_failed"* ]]; then
+)"
+REMOVE_RC=$?
+set -e
+if [[ "$REMOVE_RC" -eq 0 ]]; then
+  : # helper succeeded; canonical label proven absent above; continue
+elif [[ "$REMOVE_OUT" == *"reason=stale_label_removal_failed"* ]]; then
   # Canonical label still loaded after removal attempt.  Restore
   # prior on-disk configuration bytes (for evidence / retry) but
   # DO NOT rebootstrap — an unverified restored service must not be
-  # left executing (Seam 7).  Leave canonical label absent.
+  # left executing (Seam 7).  Defect B2: do NOT claim
+  # `label_absent` here — we just proved the label is NOT absent.
   if [[ "$HAD_OLD_PLIST" == "1" ]]; then
     cp "$OLD_PLIST_BACKUP" "$PLIST"; chmod 0600 "$PLIST"
     if [[ "$HAD_OLD_PROVENANCE" == "1" ]]; then
@@ -572,7 +595,28 @@ if [[ "$REMOVE_OUT" == *"reason=stale_label_removal_failed"* ]]; then
     rm -f "$PLIST" "$RUNTIME_PROVENANCE" "$SERVICE_ENV"
   fi
   rm -rf "$TXN_DIR"
-  echo "SUPERVISOR_INSTALL=REFUSED reason=stale_label_removal_failed rollback=bytes_restored_label_absent" >&2
+  echo "SUPERVISOR_INSTALL=REFUSED reason=stale_label_removal_failed rollback=bytes_restored_label_presence_unproven" >&2
+  exit 14
+else
+  # Defect B1: unexpected nonzero with no recognized typed marker.
+  # Fail closed; preserve diagnostic evidence; never continue.
+  if [[ "$HAD_OLD_PLIST" == "1" ]]; then
+    cp "$OLD_PLIST_BACKUP" "$PLIST"; chmod 0600 "$PLIST"
+    if [[ "$HAD_OLD_PROVENANCE" == "1" ]]; then
+      cp "$OLD_PROVENANCE_BACKUP" "$RUNTIME_PROVENANCE"; chmod 0600 "$RUNTIME_PROVENANCE"
+    else
+      rm -f "$RUNTIME_PROVENANCE"
+    fi
+    if [[ "$HAD_OLD_SERVICE_ENV" == "1" ]]; then
+      cp "$OLD_SERVICE_ENV_BACKUP" "$SERVICE_ENV"; chmod 0600 "$SERVICE_ENV"
+    else
+      rm -f "$SERVICE_ENV"
+    fi
+  else
+    rm -f "$PLIST" "$RUNTIME_PROVENANCE" "$SERVICE_ENV"
+  fi
+  rm -rf "$TXN_DIR"
+  echo "SUPERVISOR_INSTALL=REFUSED reason=lifecycle_helper_unexpected_nonzero rc=$REMOVE_RC rollback=bytes_restored_label_presence_unproven detail=${REMOVE_OUT}" >&2
   exit 14
 fi
 
@@ -612,10 +656,10 @@ if ! launchctl bootstrap "$DOMAIN" "$PLIST"; then
     else
       rm -f "$SERVICE_ENV"
     fi
-    rollback="previous_config_bytes_restored_label_absent"
+    rollback_branch="previous_config_bytes_restored"
   else
     rm -f "$PLIST" "$RUNTIME_PROVENANCE" "$SERVICE_ENV"
-    rollback="new_config_removed_label_absent"
+    rollback_branch="new_config_removed"
   fi
   # Receipt+attestation artifacts MUST be removed on failure — a
   # stale receipt from this install attempt cannot satisfy a future
@@ -624,14 +668,39 @@ if ! launchctl bootstrap "$DOMAIN" "$PLIST"; then
         "$STATE_ROOT/supervisor-startup-ready.json" \
         "$STATE_ROOT/activation-record.json"
   rm -rf "$TXN_DIR"
-  # Use the same lifecycle primitive to prove canonical label absent
-  # is the postcondition here.
-  PYTHONPATH="$INSTALL_ROOT/lib" "$PYTHON_BIN" -B - "$DOMAIN" "$LABEL" "$PLIST" <<'PY'
+  # Defect B2: do NOT claim `label_absent` until the canonical
+  # service-lifecycle primitive has positively proven the label
+  # absent.  Distinguish CLEANUP_ABSENCE_PROVEN from
+  # CLEANUP_ABSENCE_UNPROVEN.  Preserve diagnostic evidence either
+  # way; correctness beats availability.
+  set +e
+  CLEANUP_OUT="$(PYTHONPATH="$INSTALL_ROOT/lib" "$PYTHON_BIN" -B - "$DOMAIN" "$LABEL" "$PLIST" <<'PY' 2>&1
 import sys
 from ownframework_loop import macos_service_lifecycle
-macos_service_lifecycle.remove_canonical_label(sys.argv[1], sys.argv[2], sys.argv[3])
+domain = sys.argv[1]
+label = sys.argv[2]
+plist = sys.argv[3]
+macos_service_lifecycle.remove_canonical_label(label, domain, plist)
+absent = macos_service_lifecycle.prove_canonical_label_absent(label, domain)
+if absent:
+    print("reason=cleanup_label_absence_proven")
+    sys.exit(0)
+print("reason=cleanup_label_absence_unproven")
+sys.exit(1)
 PY
-  echo "SUPERVISOR_INSTALL=REFUSED reason=bootstrap_failed rollback=$rollback" >&2
+)"
+  CLEANUP_RC=$?
+  set -e
+  if [[ "$CLEANUP_RC" -eq 0 && "$CLEANUP_OUT" == *"reason=cleanup_label_absence_proven"* ]]; then
+    rollback="${rollback_branch}_label_absent"
+    echo "SUPERVISOR_INSTALL=REFUSED reason=bootstrap_failed cleanup_label_absence_proven rollback=$rollback" >&2
+  elif [[ "$CLEANUP_OUT" == *"reason=cleanup_label_absence_unproven"* ]]; then
+    rollback="${rollback_branch}_label_presence_unproven"
+    echo "SUPERVISOR_INSTALL=REFUSED reason=bootstrap_failed cleanup_label_absence_unproven rollback=$rollback" >&2
+  else
+    rollback="${rollback_branch}_label_presence_unproven"
+    echo "SUPERVISOR_INSTALL=REFUSED reason=bootstrap_failed lifecycle_helper_unexpected_nonzero rc=$CLEANUP_RC rollback=$rollback detail=${CLEANUP_OUT}" >&2
+  fi
   exit 14
 fi
 launchctl enable "$DOMAIN/$LABEL" >/dev/null 2>&1 || true
@@ -869,11 +938,30 @@ if [[ "$ACTIVATION_RC" -ne 0 ]]; then
   # canonical-label removal invariant is shared with recover and
   # uninstall.  Restore on-disk configuration bytes for evidence /
   # retry but DO NOT rebootstrap the prior service (Seam 7).
-  PYTHONPATH="$INSTALL_ROOT/lib" "$PYTHON_BIN" -B - "$DOMAIN" "$LABEL" "$PLIST" <<'PY'
+  #
+  # Defect B2: do NOT claim `label_absent` until the canonical
+  # service-lifecycle primitive has positively proven the label
+  # absent.  Distinguish CLEANUP_ABSENCE_PROVEN from
+  # CLEANUP_ABSENCE_UNPROVEN.  Preserve diagnostic evidence either
+  # way; correctness beats availability.
+  set +e
+  CLEANUP_OUT="$(PYTHONPATH="$INSTALL_ROOT/lib" "$PYTHON_BIN" -B - "$DOMAIN" "$LABEL" "$PLIST" <<'PY' 2>&1
 import sys
 from ownframework_loop import macos_service_lifecycle
-macos_service_lifecycle.remove_canonical_label(sys.argv[1], sys.argv[2], sys.argv[3])
+domain = sys.argv[1]
+label = sys.argv[2]
+plist = sys.argv[3]
+macos_service_lifecycle.remove_canonical_label(label, domain, plist)
+absent = macos_service_lifecycle.prove_canonical_label_absent(label, domain)
+if absent:
+    print("reason=cleanup_label_absence_proven")
+    sys.exit(0)
+print("reason=cleanup_label_absence_unproven")
+sys.exit(1)
 PY
+)"
+  CLEANUP_RC=$?
+  set -e
   if [[ "$HAD_OLD_PLIST" == "1" ]]; then
     cp "$OLD_PLIST_BACKUP" "$PLIST"; chmod 0600 "$PLIST"
     if [[ "$HAD_OLD_PROVENANCE" == "1" ]]; then
@@ -886,10 +974,10 @@ PY
     else
       rm -f "$SERVICE_ENV"
     fi
-    rollback="previous_config_bytes_restored_label_absent"
+    rollback_branch="previous_config_bytes_restored"
   else
     rm -f "$PLIST" "$RUNTIME_PROVENANCE" "$SERVICE_ENV"
-    rollback="new_config_removed_label_absent"
+    rollback_branch="new_config_removed"
   fi
   # Receipt+attestation artifacts MUST be removed on failure
   # regardless of which rollback branch ran — a stale receipt from
@@ -898,7 +986,12 @@ PY
         "$STATE_ROOT/supervisor-startup-ready.json" \
         "$STATE_ROOT/activation-record.json"
   rm -rf "$TXN_DIR"
-  echo "SUPERVISOR_INSTALL=REFUSED reason=active_identity_unproven_or_mismatch detail=${ACTIVATION_REASON} rollback=$rollback" >&2
+  if [[ "$CLEANUP_RC" -eq 0 && "$CLEANUP_OUT" == *"reason=cleanup_label_absence_proven"* ]]; then
+    rollback="${rollback_branch}_label_absent"
+  else
+    rollback="${rollback_branch}_label_presence_unproven"
+  fi
+  echo "SUPERVISOR_INSTALL=REFUSED reason=active_identity_unproven_or_mismatch detail=${ACTIVATION_REASON} cleanup_rc=$CLEANUP_RC cleanup_detail=${CLEANUP_OUT} rollback=$rollback" >&2
   exit 14
 fi
 

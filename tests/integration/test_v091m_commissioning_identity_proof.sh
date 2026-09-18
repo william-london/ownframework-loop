@@ -753,8 +753,19 @@ grep -Fq "bootstrap_failed" "$TMP/case-f.install.out" \
 # "restored_previous_service" because the restored service is not
 # proven via receipt+attestation.  The plist/provenance bytes are
 # restored, but the loaded service is unverified.
+#
+# Defect B2 of the residual-closure: the bootstrap-failure cleanup
+# path proves canonical-label absence via the lifecycle primitive.
+# In this case the cleanup's bootout is shimmed to succeed, so the
+# label is genuinely absent after cleanup; the installer's
+# rollback=..._label_absent wording is correct (it is what the
+# lifecycle primitive actually proved).
 grep -Fq "rollback=previous_config_bytes_restored_label_absent" "$TMP/case-f.install.out" \
   || fail "Case F: missing previous_config_bytes_restored_label_absent rollback: $(cat "$TMP/case-f.install.out")"
+# Defect B1: cleanup_label_absence_proven marker must also be present
+# when the rollback claims label_absent.
+grep -Fq "cleanup_label_absence_proven" "$TMP/case-f.install.out" \
+  || fail "Case F: missing cleanup_label_absence_proven marker: $(cat "$TMP/case-f.install.out")"
 [[ "$(cat "$HOME_F/Library/LaunchAgents/com.ownframework.loop-supervisor.plist")" == "$PRIOR_PLIST_BYTES" ]] \
   || fail "Case F: prior plist bytes mutated on bootstrap failure"
 [[ "$(cat "$STATE_F/ownframework-loop/runtime-provenance.json")" == "$PRIOR_PROV_BYTES" ]] \
