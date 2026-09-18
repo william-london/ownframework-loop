@@ -14,5 +14,5 @@
 - key validation result: serve-time runtime_generation_mismatch protection correctly refused silent generation switch
 - reason for FAIL: bound run was for prior payload; the next payload's serve refused to rebind without explicit operator migration (supervisor resume)
 - fixture retirement date: 2026-09-18
-- fixture retirement path: /Users/mr.mrs.london/projects/ofloop-cert-mature-requests-20260917-r2
+- fixture retirement path: (retired-fixture-path)-r2
 - DB row preserved: jobs.id=67 (status QUARANTINED, no semantic attempts)

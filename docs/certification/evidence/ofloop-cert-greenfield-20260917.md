@@ -6,4 +6,4 @@
 - purpose: empty bootstrap baseline used as the starting point for fresh-clone certification flows
 - no associated supervisor job (greenfield fixture never enrolled as a runtime run)
 - fixture retirement date: 2026-09-18
-- fixture retirement path: /Users/mr.mrs.london/projects/ofloop-cert-greenfield-20260917
+- fixture retirement path: (retired-fixture-path)

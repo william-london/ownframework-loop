@@ -14,5 +14,5 @@
 - key validation result: packet schema validator rejected MATURE_FEATURE work_class before any semantic dispatch
 - reason for FAIL: schema mismatch between mature R3 packet and the validator enum at HEAD 9db9a37
 - fixture retirement date: 2026-09-18
-- fixture retirement path: /Users/mr.mrs.london/projects/ofloop-cert-mature-requests-20260917
+- fixture retirement path: (retired-fixture-path)
 - DB row preserved: jobs.id=65 (status QUARANTINED, no semantic attempts)
