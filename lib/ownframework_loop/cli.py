@@ -131,6 +131,24 @@ def cmd_spec_new(args: argparse.Namespace) -> None:
             exit_code=2,
             classification="RUN_BRANCH_COLLISION",
         )
+    # v0.9.1+ (closure n): detached HEAD is unsupported at spec-time.
+    # The spec_baseline_branch field on the durable state must carry a
+    # real named branch (not None) so the runtime can later detect the
+    # canonical source moving between spec and start.  Detect this BEFORE
+    # creating any run artifacts so a refusal leaves no partial STATE,
+    # EVENTS, run directory, branch, packet, or candidate behind.  A
+    # named local branch whose HEAD equals the exact pinned SHA is
+    # still an exact pinned baseline — attach a local branch first.
+    if git_checks.current_branch(repo) is None:
+        _emit_error(
+            "detached HEAD is unsupported at spec-time: "
+            "spec_baseline_branch must be a real named branch. "
+            "Attach a local branch at the exact pinned SHA first "
+            "(e.g. 'git checkout -b master <pinned-sha>'); the SPEC "
+            "adapter should refuse to author against detached HEAD.",
+            exit_code=2,
+            classification="DETACHED_HEAD_UNSUPPORTED",
+        )
     state_mod.run_dir(repo, run_id).mkdir(parents=True, exist_ok=True)
     initial = state_mod.initial_state(run_id)
     # v0.5.0: snapshot the source identity so first build start can refuse
