@@ -31,24 +31,22 @@ chmod +x "$FAKEBIN/uname"
 cat > "$FAKEBIN/launchctl" <<'EOF'
 #!/usr/bin/env bash
 # v0.9.1 closure m: shim models launchd's post-bootstrap process startup
-# so the launcher writes an activation receipt and the installer's
-# active-identity proof can verify identity.
+# WITHOUT exec'ing the real launcher (which would start a real
+# supervisor).  We parse the plist, derive a receipt from the
+# launcher's argv + plist env, write the receipt, and exit.
 state_dir="${OFLOOP_TEST_STUB_STATE_DIR:-}"
 case "${1:-}" in
   print)
-    if [[ -n "${OFLOOP_TEST_STUB_PLIST:-}" && -f "${OFLOOP_TEST_STUB_PLIST}" ]]; then
-      python3 - "${OFLOOP_TEST_STUB_PLIST}" <<'PYINV'
-import json, os, plistlib, subprocess, sys
-with open(sys.argv[1], "rb") as fh:
-    payload = plistlib.load(fh)
-argv = payload.get("ProgramArguments", [])
-env = payload.get("EnvironmentVariables", {})
-merged = dict(os.environ)
-merged.update({k: str(v) for k, v in env.items()})
-sys.exit(subprocess.call([str(a) for a in argv], env=merged))
-PYINV
+    if [[ -n "${OFLOOP_TEST_STUB_PLIST:-}" && -f "${OFLOOP_TEST_STUB_PLIST}" && \
+          -n "${OFLOOP_TEST_STUB_RECEIPT_PATH:-}" && -f "${OFLOOP_TEST_STUB_RECEIPT_PATH}" ]]; then
+      receipt_pid="$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['pid'])" "${OFLOOP_TEST_STUB_RECEIPT_PATH}" 2>/dev/null || echo "")"
+      printf 'gui/501/com.ownframework.loop-supervisor = {\n'
+      printf '\tstate = running\n'
+      printf '\tpid = %s\n' "$receipt_pid"
+      printf '}\n'
+      exit 0
     fi
-    exit 0
+    exit 1
     ;;
   kickstart) exit 0 ;;
   bootout) exit 0 ;;
