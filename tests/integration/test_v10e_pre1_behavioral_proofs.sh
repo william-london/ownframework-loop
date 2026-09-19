@@ -19,6 +19,7 @@ import sqlite3
 import subprocess
 import tempfile
 import time
+import types
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +29,8 @@ import ownframework_loop.program as program_mod
 import ownframework_loop.supervisor_attempts as attempts_mod
 import ownframework_loop.supervisor_db as db_mod
 import ownframework_loop.supervisor_recovery as recovery_mod
+import ownframework_loop.supervisor as supervisor_mod
+import ownframework_loop.supervisor_claims as claims_mod
 import ownframework_loop.integrity as integrity_mod
 import ownframework_loop.packet as packet_mod
 
@@ -842,6 +845,124 @@ print("\n=== B003 behavioral: single canonical _LOCAL_EXECUTION_LOCK ===")
 import ownframework_loop.supervisor_process as process_mod
 check("B003: db and process modules share the same lock object",
       db_mod._LOCAL_EXECUTION_LOCK is process_mod._LOCAL_EXECUTION_LOCK)
+
+
+# =========================================================================
+# A002 OWNER-LEVEL: supervisor computes timeout supplied to finalizer
+# =========================================================================
+print("\n=== A002 owner boundary: supervisor derives finalize timeout ===")
+
+def run_a002_owner_case(*, max_wall, clock_values):
+    root = Path(tempfile.mkdtemp(prefix="a002-owner-"))
+    dbp = root / "sup.sqlite3"
+    c = sqlite3.connect(str(dbp)); c.row_factory = sqlite3.Row
+    db_mod.bootstrap_schema(c)
+    c.execute("INSERT INTO jobs (repo,run_id,runner,status,created_at,updated_at,runtime_generation,max_wall_seconds) VALUES (?,?,'fake','QUEUED',1,1,'gen-test',?)", (str(root), "a002-owner-r", int(max_wall)))
+    c.commit(); c.close()
+    calls = []; ready_calls = {"n": 0}
+    wo = {"schema": dispatch_mod.SCHEMA, "decision": "BUILD", "role": "builder", "run_id": "a002-owner-r", "canonical_repo": str(root), "semantic_path": str(root / "AGENT.json"), "candidate_branch": "agent/a002-owner-r/builder", "baseline_sha": "d"*40}
+    class FakeRunner:
+        requires_capability_receipt = False
+        def run(self, *args, **kwargs):
+            return types.SimpleNamespace(ok=True,cost_known=True,tokens_known=True,returncode=0,cost_usd=0.0,input_tokens=0,output_tokens=0,cache_read_tokens=0,cache_creation_tokens=0,effective_model="",model_usage_json="",stderr="",stdout="")
+    def ready(_wo):
+        ready_calls["n"] += 1
+        return (False, "synthetic incomplete") if ready_calls["n"] == 1 else (True, "ok")
+    ticks = list(clock_values); last = ticks[-1] if ticks else 1000.0
+    def now(): return ticks.pop(0) if ticks else last
+    saved = (claims_mod._take_next_job, supervisor_mod._current_runtime_generation, supervisor_mod._register_local_execution, dispatch_mod.claim_next, dispatch_mod.semantic_result_ready, supervisor_mod._maybe_complete_semantic_artifact, supervisor_mod._runner_preflight, supervisor_mod._capability_binding_creation_allowed, supervisor_mod._reserve_semantic_attempt, supervisor_mod.packet_mod.parse_packet_file, supervisor_mod._ensure_execution_started, supervisor_mod._runner, supervisor_mod._account_attempt_cost, supervisor_mod._replay_candidate_sha, supervisor_mod._publish_semantic_acceptance, dispatch_mod.finalize_work_order, supervisor_mod.time)
+    try:
+        claims_mod._take_next_job = lambda conn: conn.execute("SELECT * FROM jobs WHERE run_id='a002-owner-r'").fetchone()
+        supervisor_mod._current_runtime_generation = lambda: "gen-test"
+        supervisor_mod._register_local_execution = lambda _j: None
+        dispatch_mod.claim_next = lambda **_k: dict(wo)
+        dispatch_mod.semantic_result_ready = ready
+        supervisor_mod._maybe_complete_semantic_artifact = lambda **_k: False
+        supervisor_mod._runner_preflight = lambda _n: types.SimpleNamespace(ready=True,classification="",reason="",retry_after_seconds=0.0,detail="")
+        supervisor_mod._capability_binding_creation_allowed = lambda *_a, **_k: True
+        supervisor_mod._reserve_semantic_attempt = lambda *_a, **_k: ("a002-att", (root/"stdout", root/"stderr"))
+        supervisor_mod.packet_mod.parse_packet_file = lambda _p: ({"risk_budget":{"max_pass_runtime_seconds":7200}}, "")
+        supervisor_mod._ensure_execution_started = lambda *_a, **_k: 1000.0
+        supervisor_mod._runner = lambda _n: FakeRunner()
+        supervisor_mod._account_attempt_cost = lambda *_a, **_k: 0.0
+        supervisor_mod._replay_candidate_sha = lambda **_k: "c"*40
+        supervisor_mod._publish_semantic_acceptance = lambda *_a, **_k: None
+        dispatch_mod.finalize_work_order = lambda _wo, *, timeout_seconds=0: (calls.append(int(timeout_seconds)) or {"finalized":True})
+        supervisor_mod.time = types.SimpleNamespace(time=now)
+        result = supervisor_mod.run_one(db_path=dbp)
+        c = sqlite3.connect(str(dbp)); c.row_factory = sqlite3.Row
+        row = c.execute("SELECT status,last_failure_class,last_failure_reason FROM jobs WHERE run_id='a002-owner-r'").fetchone(); c.close()
+        return result, calls, row
+    finally:
+        (claims_mod._take_next_job, supervisor_mod._current_runtime_generation, supervisor_mod._register_local_execution, dispatch_mod.claim_next, dispatch_mod.semantic_result_ready, supervisor_mod._maybe_complete_semantic_artifact, supervisor_mod._runner_preflight, supervisor_mod._capability_binding_creation_allowed, supervisor_mod._reserve_semantic_attempt, supervisor_mod.packet_mod.parse_packet_file, supervisor_mod._ensure_execution_started, supervisor_mod._runner, supervisor_mod._account_attempt_cost, supervisor_mod._replay_candidate_sha, supervisor_mod._publish_semantic_acceptance, dispatch_mod.finalize_work_order, supervisor_mod.time) = saved
+
+ra, ca, _ = run_a002_owner_case(max_wall=100, clock_values=[1040.0,1045.0])
+check("A002-owner-A: positive wall budget uses remaining value", ca == [55], detail=f"calls={ca!r} result={ra!r}")
+rb, cb, _ = run_a002_owner_case(max_wall=0, clock_values=[1001.0])
+check("A002-owner-B: zero wall ceiling uses fallback", cb == [supervisor_mod._DEFAULT_FINALIZER_TIMEOUT_SECONDS], detail=f"calls={cb!r}")
+rc, cc, rowc = run_a002_owner_case(max_wall=10, clock_values=[1001.0,1011.0])
+check("A002-owner-C: exhausted positive wall budget does not launch finalizer", cc == [], detail=f"calls={cc!r}")
+check("A002-owner-C: exhausted budget quarantines as usage ceiling", rc.get("action") == "QUARANTINED" and rc.get("reason") == "wall_clock_ceiling_before_finalization" and rowc["status"] == "QUARANTINED" and rowc["last_failure_class"] == "usage_ceiling" and rowc["last_failure_reason"] == "wall_clock_ceiling_before_finalization", detail=f"result={rc!r} row={dict(rowc)!r}")
+
+# =========================================================================
+# F007 REAL: actual state/journal machinery through load_verified
+# =========================================================================
+print("\n=== F007 behavioral: real STATE/journal recovery boundary ===")
+def f7_fixture(label):
+    r = Path(tempfile.mkdtemp(prefix=f"f007-{label}-")); rid = f"f007-{label}"; state_mod.run_dir(r,rid).mkdir(parents=True,exist_ok=True)
+    initial = state_mod.initial_state(rid); state_mod.save(r,rid,initial); prior = state_mod.load_verified(r,rid)
+    new = dict(prior); new["state"]="READY_TO_BUILD"; new["transitions_count"] = int(prior.get("transitions_count") or 0)+1; new["updated_at"]="2026-09-19T00:00:00Z"; new["last_actor"]="f007-test"
+    h=list(prior.get("state_history") or []); h.append({"from":prior.get("state"),"to":"READY_TO_BUILD","at":new["updated_at"],"actor":"f007-test","reason":"synthetic interrupted write"}); new["state_history"]=h
+    return r,rid,prior,new
+def f7_journal(r,rid,prior,new,txid):
+    sp=state_mod.state_path(r,rid); ep=state_mod.events_path(r,rid)
+    j={"schema":state_mod.STATE_TXN_SCHEMA,"run_id":rid,"txn_id":txid,"prior_state_sha256":integrity_mod.sha256_file(sp),"prior_event_chain_sha256":integrity_mod.get_event_chain_hash(ep) or "","new_state_sha256":state_mod._state_payload_sha(new),"new_state":new,"event":{"event_type":"state_transition","old_state":prior.get("state"),"new_state":new.get("state"),"actor":"f007-test","commit_sha":None,"reason":"synthetic interrupted write","extras":{}}}
+    state_mod.atomic_write_json(state_mod.state_txn_path(r,rid),j,mode=0o600)
+r,rid,prior,new=f7_fixture("a"); f7_journal(r,rid,prior,new,"txn-a"); state_mod.state_path(r,rid).write_text("{")
+try:
+    got=state_mod.load_verified(r,rid); check("F007-A: real torn STATE + valid journal recovers",got==new,detail=f"got={got!r}"); check("F007-A: recovery clears journal",not state_mod.state_txn_path(r,rid).exists())
+except Exception as exc: check("F007-A: real torn STATE + valid journal recovers",False,f"{type(exc).__name__}: {exc}")
+r,rid,prior,new=f7_fixture("b"); f7_journal(r,rid,prior,new,"txn-b"); bad=dict(prior); bad["last_actor"]="tampered"; state_mod.atomic_write_json(state_mod.state_path(r,rid),bad,mode=0o600)
+try:
+    state_mod.load_verified(r,rid); check("F007-B: parseable SHA mismatch is TamperingDetected",False,"no exception")
+except integrity_mod.StateTorn as exc: check("F007-B: parseable SHA mismatch is TamperingDetected",False,f"StateTorn: {exc}")
+except integrity_mod.TamperingDetected: check("F007-B: parseable SHA mismatch is TamperingDetected",True)
+check("F007-B: journal not laundered/cleared",state_mod.state_txn_path(r,rid).exists())
+r,rid,prior,new=f7_fixture("c"); state_mod.state_path(r,rid).write_text("{")
+try:
+    state_mod.load_verified(r,rid); check("F007-C: torn state without journal is StateTorn",False,"no exception")
+except integrity_mod.StateTorn: check("F007-C: torn state without journal is StateTorn",True)
+except Exception as exc: check("F007-C: torn state without journal is StateTorn",False,f"{type(exc).__name__}: {exc}")
+
+# =========================================================================
+# B002 SYMMETRIC: both sibling refusal paths persist only diagnostics
+# =========================================================================
+print("\n=== B002 behavioral: symmetric diagnostic persistence ===")
+r=Path(tempfile.mkdtemp(prefix="b002-sym-")); subprocess.run(["git","-C",str(r),"init","-q","--initial-branch=master"],check=True); subprocess.run(["git","-C",str(r),"config","user.email","test@x"],check=True); subprocess.run(["git","-C",str(r),"config","user.name","Test"],check=True); (r/".gitignore").write_text(".ownframework-loop/\n"); (r/"README").write_text("init\n"); subprocess.run(["git","-C",str(r),"add","."],check=True); subprocess.run(["git","-C",str(r),"commit","-q","-m","init"],check=True); subprocess.run(["git","-C",str(r),"checkout","-q","-b","agent/r/builder"],check=True)
+head=subprocess.run(["git","-C",str(r),"rev-parse","HEAD"],check=True,capture_output=True,text=True).stdout.strip(); semdir=state_mod.run_dir(r,"b002-r"); semdir.mkdir(parents=True,exist_ok=True); sem=semdir/"BUILD_AGENT_RESULT.json"; sem.write_text("{}")
+c=sqlite3.connect(":memory:"); c.row_factory=sqlite3.Row; c.executescript("""CREATE TABLE jobs(id INTEGER PRIMARY KEY,repo TEXT,run_id TEXT,status TEXT,latest_attempt_id TEXT,worker_attempt_id TEXT,infra_failures INTEGER DEFAULT 0,transient_failures INTEGER DEFAULT 0,transient_recovery_cycles INTEGER DEFAULT 0,total_cost_usd REAL DEFAULT 0,last_error TEXT,last_failure_class TEXT,last_failure_reason TEXT,next_attempt_at REAL DEFAULT 0,updated_at REAL DEFAULT 0,worker_pid INTEGER,worker_started_at REAL,worker_pgid INTEGER,worker_deadline_at REAL,worker_start_identity TEXT,worker_role TEXT); CREATE TABLE semantic_attempts(attempt_id TEXT PRIMARY KEY,job_id INTEGER,role TEXT,status TEXT,failure_class TEXT,failure_reason TEXT,cost_accounted INTEGER DEFAULT 0,cost_known INTEGER DEFAULT 0,cost_usd REAL DEFAULT 0,semantic_accepted INTEGER DEFAULT 0,accepted_semantic_sha256 TEXT,accepted_candidate_sha TEXT,effective_model TEXT,launch_gate_version INTEGER DEFAULT 1);"""); c.execute("INSERT INTO jobs(id,repo,run_id,status,latest_attempt_id,worker_attempt_id,worker_pid,worker_started_at,worker_pgid,worker_deadline_at,worker_start_identity,worker_role) VALUES(1,?,'b002-r','RUNNING','att-1','att-1',4242,10.5,4242,9999,'pid-start','builder')",(str(r),)); c.execute("INSERT INTO semantic_attempts(attempt_id,job_id,role,status) VALUES('att-1',1,'builder','COMPLETED')"); c.commit()
+cols=("status","worker_attempt_id","worker_pid","worker_started_at","worker_pgid","worker_deadline_at","worker_start_identity","worker_role")
+def snap():
+    x=c.execute("SELECT * FROM jobs WHERE id=1").fetchone(); return {k:x[k] for k in cols},x["last_error"]
+before,_=snap(); realpub=attempts_mod._publish_semantic_acceptance; realcomp=attempts_mod.build_agent_mod.semantically_complete_artifact; attempts_mod._publish_semantic_acceptance=lambda *_a,**_k: (_ for _ in ()).throw(RuntimeError("synthetic identity-drift sibling proof")); attempts_mod.build_agent_mod.semantically_complete_artifact=lambda **_k:{"completed":True}
+try:
+    attempts_mod._publish_acceptance_for_ready_artifact(conn=c,work_order={"canonical_repo":str(r),"candidate_branch":"agent/r/builder","semantic_path":str(sem)},job_id=1); after,e=snap(); check("B002-ready: cause persisted",e and "synthetic identity-drift" in e,detail=repr(e)); check("B002-ready: status/worker fields preserved",after==before,detail=f"before={before!r} after={after!r}")
+    c.execute("UPDATE jobs SET last_error=NULL WHERE id=1"); c.commit()
+    real_dirty=attempts_mod.git_checks.dirty_status; real_head=attempts_mod.git_checks.current_head; real_branch=attempts_mod.git_checks.current_branch; real_run=attempts_mod.util.run_subprocess
+    attempts_mod.git_checks.dirty_status=lambda _p:"clean"; attempts_mod.git_checks.current_head=lambda _p:head; attempts_mod.git_checks.current_branch=lambda _p:"agent/r/builder"; attempts_mod.util.run_subprocess=lambda *_a,**_k:types.SimpleNamespace(returncode=0,stdout=head,stderr="")
+    try:
+        ok=attempts_mod._maybe_complete_semantic_artifact(conn=c,work_order={"decision":"BUILD","canonical_repo":str(r),"run_id":"b002-r","worktree":str(r),"baseline_sha":head,"candidate_branch":"agent/r/builder","cp_id":"cp-1","role":"builder","semantic_path":str(sem)},semantic_reason="synthetic",job_id=1)
+    finally:
+        attempts_mod.git_checks.dirty_status=real_dirty; attempts_mod.git_checks.current_head=real_head; attempts_mod.git_checks.current_branch=real_branch; attempts_mod.util.run_subprocess=real_run
+    after,e=snap(); check("B002-maybe: sibling path exercised",ok is True); check("B002-maybe: cause persisted",e and "synthetic identity-drift" in e,detail=repr(e)); check("B002-maybe: status/worker fields preserved",after==before,detail=f"before={before!r} after={after!r}")
+    realdiag=db_mod._persist_job_last_error; db_mod._persist_job_last_error=lambda *_a,**_k: (_ for _ in ()).throw(TypeError("synthetic diagnostic persistence bug"))
+    try:
+        attempts_mod._publish_acceptance_for_ready_artifact(conn=c,work_order={"canonical_repo":str(r),"candidate_branch":"agent/r/builder","semantic_path":str(sem)},job_id=1); check("B002: programming error not swallowed",False,"no TypeError")
+    except TypeError as exc: check("B002: programming error not swallowed","synthetic diagnostic" in str(exc),detail=str(exc))
+    finally: db_mod._persist_job_last_error=realdiag
+finally:
+    attempts_mod._publish_semantic_acceptance=realpub; attempts_mod.build_agent_mod.semantically_complete_artifact=realcomp; c.close()
+
 
 # =========================================================================
 # SUMMARY

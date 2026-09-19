@@ -21,7 +21,7 @@ The post-Outlaw source is structurally sound. Every fail-closed gate the brief f
 - 1 B-grade defect promoted to A-grade and root-cause fixed: F003 (review-scope mismatch).
 - 4 B-grade defects root-cause fixed at base HEAD: B001, B002, B003, B009.
 - 1 hardening bug discovered and root-cause fixed during rigor closure:
-  **B002 refinement**: the original B002 fix called `_db_mod._update_job` without the required `status_value` keyword argument, which made the exception-cause persistence silently fail. Fixed by reading the current status and threading it through. This refinement is pinned by the B002 behavioral regression in `test_v10e_pre1_behavioral_proofs.sh`.
+  **B002 symmetric closure**: both semantic-acceptance recovery paths now share diagnostic-only persistence. It writes bounded `last_error` while preserving durable status and every worker-ownership field, rather than misusing lifecycle-transition `_update_job`. Diagnostic-persistence programming errors propagate instead of disappearing behind `except Exception: pass`. Both sibling paths are behaviorally pinned in `test_v10e_pre1_behavioral_proofs.sh`.
 - 50 B-grade defects re-adjudicated to C with concrete proof; remaining ~30 B-grade items accepted as bounded C-grade technical debt.
 - 0 B-grade debt accepted as bounded without downgrade proof.
 
@@ -222,8 +222,8 @@ LEDGER_RECONCILES = yes
 
 ### A002 — finalize CLI had no timeout when `max_wall==0`
 **Root cause:** `supervisor.py:2336-2343` called `dispatch_mod.finalize_work_order(work_order)` without `timeout_seconds` when the operator didn't declare `max_wall_seconds`.
-**Fix:** Added `_DEFAULT_FINALIZER_TIMEOUT_SECONDS = 3600`. Always thread a timeout (packet-derived if available, else default).
-**Regression:** test_v10d section A002 asserts the constant exists, is positive, and is bounded within the per-pass envelope.
+**Fix:** Added `_DEFAULT_FINALIZER_TIMEOUT_SECONDS = 3600`. With `max_wall_seconds > 0`, the supervisor supplies the remaining whole-run wall budget; with no declared wall ceiling / zero, it uses the 3600-second fallback. If a positive wall budget is exhausted before finalization, finalization is not launched and the existing usage-ceiling quarantine is used.
+**Regression:** test_v10d keeps the static constant guard; `test_v10e_pre1_behavioral_proofs.sh` proves positive remaining budget, zero/omitted fallback, and exhausted-budget no-launch quarantine at the supervisor owner boundary.
 **Fix file:** `lib/ownframework_loop/supervisor.py:467-483,2346-2360`.
 
 ### E004 — `_attempt_provenance_gate` allowed zero-cost replay after `cost_known=0`
@@ -246,9 +246,9 @@ LEDGER_RECONCILES = yes
 
 ### F007 — STATE.json torn write permanently blocked the run
 **Root cause:** `state.py:457-460` raised `TamperingDetected` on any verify failure; no recovery path. A torn write (disk-full mid-write) leaves the run permanently blocked.
-**Fix:** Added `integrity.StateTorn` subclass of `TamperingDetected`. `load_verified` distinguishes torn (file unreadable) from adversarial tampering (SHA mismatch with parseable bytes). On torn, retry pending-journal recovery; if still torn, raise `StateTorn`.
-**Regression:** test_v10d section F007 asserts `StateTorn` subclass exists and inherits from `TamperingDetected`.
-**Fix files:** `lib/ownframework_loop/integrity.py:46-58`, `lib/ownframework_loop/state.py:457-498`.
+**Fix:** Added `integrity.StateTorn` subclass of `TamperingDetected`. `load_verified` distinguishes unreadable/torn bytes from a parseable SHA mismatch. A valid pending journal may complete the exact declared state only when current STATE bytes are unreadable; parseable mismatched bytes remain `TamperingDetected`. Unreadable state without a recoverable journal raises `StateTorn`.
+**Regression:** `test_v10e_pre1_behavioral_proofs.sh` exercises the real state/journal machinery through `load_verified`: valid journal + torn STATE recovers, parseable mismatch raises `TamperingDetected`, and torn STATE without a valid recoverable journal raises `StateTorn`.
+**Fix files:** `lib/ownframework_loop/integrity.py`, `lib/ownframework_loop/state.py`, `tests/integration/test_v10e_pre1_behavioral_proofs.sh`.
 
 ### F022 — build_finalize empty effective validation list defaulted to PASS
 **Root cause:** `build_finalize.py:710` had `validation_pass = all(...) if validations else True`. An empty effective list defaulted to PASS even when the packet declared validations.
@@ -359,9 +359,9 @@ The timeout architecture is now coherent. Each timeout source has a documented a
 | Stuck-worker fuse (process termination) | SIGTERM grace 2s, SIGKILL after | n/a | `_terminate_owned_process_group` uses `time.monotonic()` for in-memory timing |
 | Wall-clock ceiling (`max_wall_seconds`) | packet max_runtime_seconds | operator declared 0 → unfunded | Whole-run envelope |
 
-**Invariant proven:** No nested timeout is shorter than its owner-level budget without a documented safety reason. The 3600s default for both claim CLI and finalize CLI matches the historical cli.py per-pass fallback (3600s), so no operator previously relying on that behavior loses wall budget authority.
+**Invariant proven:** Explicit authorized packet values such as 7200s or 28800s propagate directly; 3600s is only the fallback when the relevant pass-runtime/finalizer wall authority is omitted or zero. Under a positive whole-run wall ceiling, finalization uses the remaining wall budget and does not launch once that budget is exhausted. Explicit authorized long work is therefore not clamped by the fallback.
 
-**Regression proof:** test_v10d sections A001 and A002 assert the constants exist with bounded values within the per-pass envelope.
+**Regression proof:** test_v10d preserves the static timeout guards; `test_v10e_pre1_behavioral_proofs.sh` proves explicit 7200s/28800s claim propagation plus owner-level finalizer remaining-budget/fallback/exhaustion behavior.
 
 ---
 

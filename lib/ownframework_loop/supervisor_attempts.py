@@ -48,6 +48,7 @@ from . import packet as packet_mod
 from . import util
 from . import git_checks
 from . import state as state_mod
+from . import build_agent as build_agent_mod
 from . import capabilities as capabilities_mod
 from . import supervisor_db as _db_mod
 from . import supervisor_accounting as _accounting_mod
@@ -546,6 +547,21 @@ def _ensure_execution_started(conn: sqlite3.Connection, job_id: int) -> float:
 
 
 
+def _persist_semantic_acceptance_failure(
+    conn: sqlite3.Connection,
+    *,
+    job_id: int,
+    exc: RuntimeError,
+) -> None:
+    """Persist acceptance refusal without changing lifecycle ownership."""
+    _db_mod._persist_job_last_error(
+        conn,
+        int(job_id),
+        last_error=(f"semantic_acceptance_publication_failed: {exc}")[-4000:],
+    )
+
+
+
 
 def _maybe_complete_semantic_artifact(
     *,
@@ -677,23 +693,10 @@ def _maybe_complete_semantic_artifact(
                 candidate_sha=candidate_sha,
             )
         except RuntimeError as exc:
-            # v0.10.0-dev b002: narrow the catch from `except Exception` to
-            # `except RuntimeError as exc` and surface the actual cause on
-            # last_error so the downstream gate refusal carries diagnostic
-            # context for the operator. The gate below still rejects replay
-            # when semantic_accepted=0, but the operator sees the real cause
-            # (identity drift, missing attempt row, unaccounted cost) rather
-            # than the gate's opaque refusal reason.
-            try:
-                _db_mod._update_job(
-                    conn,
-                    int(job_id),
-                    last_error=(
-                        f"semantic_acceptance_publication_failed: {exc}"
-                    )[-4000:],
-                )
-            except Exception:
-                pass
+            # B002: diagnostic-only; preserve lifecycle and worker ownership.
+            _persist_semantic_acceptance_failure(
+                conn, job_id=int(job_id), exc=exc
+            )
     return True
 
 
@@ -750,32 +753,10 @@ def _publish_acceptance_for_ready_artifact(
             candidate_sha=candidate_sha,
         )
     except RuntimeError as exc:
-        # v0.10.0-dev b002: surface the actual cause on last_error so the
-        # downstream gate refusal carries diagnostic context. The gate still
-        # rejects replay when semantic_accepted=0, but the operator now sees
-        # the real reason (identity drift, missing attempt, unaccounted cost)
-        # rather than an opaque refusal.
-        # The helper reuses the existing job status (typically RUNNING); pass
-        # it through so _update_job's required status_value kwarg is satisfied.
-        try:
-            current_status = conn.execute(
-                "SELECT status FROM jobs WHERE id=?", (int(job_id),)
-            ).fetchone()
-            status_value = str(current_status["status"] or "RUNNING") if current_status else "RUNNING"
-            _db_mod._update_job(
-                conn,
-                int(job_id),
-                status_value=status_value,
-                last_error=(
-                    f"semantic_acceptance_publication_failed: {exc}"
-                )[-4000:],
-            )
-        except Exception:
-            # The surface-call must not mask a programming defect in the
-            # publication helper itself. Re-raising here would silently abort
-            # the recovery path; logging the cause is sufficient because
-            # the gate's downstream refusal already carries diagnostic context.
-            pass
+        # B002: symmetric diagnostic-only persistence.
+        _persist_semantic_acceptance_failure(
+            conn, job_id=int(job_id), exc=exc
+        )
 
 # NOTE: PRE_PROVIDER_FAILURE_REASONS is defined once at the top of this module
 # (line ~415). Do not re-define it here — a duplicate would silently shadow

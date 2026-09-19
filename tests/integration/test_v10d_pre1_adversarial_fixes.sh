@@ -239,12 +239,19 @@ echo "=== B002: v0.9.9-h recovery paths surface RuntimeError cause ==="
 PYTHONPATH="$ROOT_DIR/lib" "$PYTHON_BIN" -B -c "
 import inspect
 from ownframework_loop import supervisor_attempts
-# Both helpers must narrow to except RuntimeError and persist cause
+# Both siblings must narrow to RuntimeError and delegate to one shared
+# diagnostic-only owner. The owner must persist the bounded cause without
+# routing through _update_job (which is a lifecycle transition).
 for name in ('_maybe_complete_semantic_artifact', '_publish_acceptance_for_ready_artifact'):
     fn = getattr(supervisor_attempts, name)
     src = inspect.getsource(fn)
     assert 'except RuntimeError as exc' in src, f'B002: {name} must narrow except to RuntimeError'
-    assert 'semantic_acceptance_publication_failed' in src, f'B002: {name} must surface cause on last_error'
+    assert '_persist_semantic_acceptance_failure' in src, f'B002: {name} must delegate diagnostic persistence'
+helper_src = inspect.getsource(supervisor_attempts._persist_semantic_acceptance_failure)
+assert 'semantic_acceptance_publication_failed' in helper_src, 'B002: shared helper must persist the actual cause'
+assert '_persist_job_last_error' in helper_src, 'B002: shared helper must use diagnostic-only DB primitive'
+assert '_update_job' not in helper_src, 'B002: diagnostic helper must not perform lifecycle transition'
+assert 'except Exception' not in helper_src, 'B002: deterministic diagnostic programming errors must not be swallowed'
 print('ok')
 " || fail "B002 regression"
 pass "B002: RuntimeError cause surfaced on last_error"

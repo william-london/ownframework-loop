@@ -610,3 +610,27 @@ def _update_job(
         ),
     )
     conn.commit()
+
+
+def _persist_job_last_error(
+    conn: sqlite3.Connection,
+    job_id: int,
+    *,
+    last_error: str,
+) -> None:
+    """Persist a diagnostic without performing a job lifecycle transition.
+
+    Unlike `_update_job`, this preserves status, retry/counter state, and all
+    worker ownership fields. A missing row is an invariant/programming error.
+    """
+    import time as _time
+    cur = conn.execute(
+        "UPDATE jobs SET last_error=?, updated_at=? WHERE id=?",
+        (str(last_error), _time.time(), int(job_id)),
+    )
+    if cur.rowcount != 1:
+        conn.rollback()
+        raise RuntimeError(
+            f"diagnostic persistence lost job row authority: job_id={int(job_id)}"
+        )
+    conn.commit()

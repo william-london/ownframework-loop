@@ -307,9 +307,15 @@ def _recover_pending_state_txn_locked(
         atomic_write_json(sp, new_state, mode=0o600)
         current_sha = integrity.sha256_file(sp)
     elif current_sha != new_sha:
-        raise integrity.TamperingDetected(
-            "pending state transaction prior state binding mismatch"
-        )
+        # Only unreadable/torn bytes may be explained by this proven journal.
+        current_doc = read_json(sp, default=None) if sp.exists() else None
+        if current_doc is None:
+            atomic_write_json(sp, new_state, mode=0o600)
+            current_sha = integrity.sha256_file(sp)
+        else:
+            raise integrity.TamperingDetected(
+                "pending state transaction prior state binding mismatch"
+            )
     if current_sha != new_sha:
         raise integrity.TamperingDetected(
             "pending state transaction could not reproduce journaled state"
@@ -456,23 +462,9 @@ def load_verified(canonical_repo: Path, run_id: str) -> dict[str, Any]:
                     )
         ok, msg = integrity.verify_state_sha(sp, ep)
         if not ok:
-            # v0.10.0-dev f007: distinguish torn-write (STATE.json bytes do
-            # not parse as JSON OR do not match recorded SHA) from adversarial
-            # tampering. A torn write is recoverable: re-run the pending-journal
-            # recovery path under the same flock and return the recovered
-            # state. Adversarial tampering still raises TamperingDetected.
-            #
-            # The distinguishing signal: a torn file fails to parse as JSON
-            # (read_json returns the default) OR parses cleanly but the SHA
-            # does not match (msg starts with "state sha mismatch:").
-            #
-            # Strategy:
-            # 1. Read the file via read_json. If it returns the default,
-            #    the file is unreadable/torn → attempt journal recovery.
-            # 2. Otherwise parse the bytes (we already have a dict), but
-            #    the SHA didn't match. This is adversarial tampering; do
-            #    NOT attempt journal recovery (the journal is also under
-            #    the attacker's control).
+            # v0.10.0-dev f007: unreadable STATE bytes are torn; a
+            # parseable SHA mismatch is tampering. A valid pending journal may
+            # recover only the former; otherwise unreadable bytes are StateTorn.
             current_bytes = read_json(sp, default=None)
             if current_bytes is None:
                 # STATE.json is unreadable / truncated / malformed. Try to
