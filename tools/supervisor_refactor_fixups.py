@@ -279,4 +279,18 @@ if old_loop not in dep:
 dep = dep.replace(old_loop, new_loop, 1)
 dep_path.write_text(dep, encoding="utf-8")
 
+# Static distribution parity must inspect the canonical runtime owner after the
+# move. Keeping this regex pointed at supervisor.py would make the test itself
+# enforce the old monolith architecture.
+dist_path = ROOT / "tests" / "integration" / "test_v085_distribution_parity.sh"
+dist = dist_path.read_text(encoding="utf-8")
+dist = dist.replace("def from_supervisor_py():", "def from_runtime_owner():")
+dist = dist.replace(
+    'text = (root / "lib/ownframework_loop/supervisor.py").read_text()',
+    'text = (root / "lib/ownframework_loop/supervisor_runtime.py").read_text()',
+)
+dist = dist.replace("sur = from_supervisor_py()", "sur = from_runtime_owner()")
+dist = dist.replace("supervisor.py={sur}", "supervisor_runtime.py={sur}")
+dist_path.write_text(dist, encoding="utf-8")
+
 print("SUPERVISOR_REFACTOR_FIXUPS=APPLIED")
