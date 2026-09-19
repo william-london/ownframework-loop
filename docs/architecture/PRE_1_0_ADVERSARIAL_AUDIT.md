@@ -274,9 +274,9 @@ LEDGER_RECONCILES = yes
 
 ### B002 — v0.9.9-h recovery paths swallowed all exceptions silently
 **Root cause:** `_maybe_complete_semantic_artifact` and `_publish_acceptance_for_ready_artifact` wrapped `_publish_semantic_acceptance` in `except Exception: pass`. Operators lost the cause of any failure.
-**Fix:** Narrowed to `except RuntimeError as exc`; surface the cause via `_db_mod._update_job(... last_error=f"semantic_acceptance_publication_failed: {exc}")` so the downstream gate refusal carries diagnostic context.
-**Regression:** test_v10d section B002 asserts both helpers contain the narrowed except and the surfaced message.
-**Fix file:** `lib/ownframework_loop/supervisor_attempts.py:679-695,752-768`.
+**Fix:** Both sibling paths now catch the expected `RuntimeError` and delegate to one `_persist_semantic_acceptance_failure` owner. That helper uses `supervisor_db._persist_job_last_error` to update only bounded `last_error` plus `updated_at`, preserving durable status, retry/cost counters, and all worker-ownership fields. Missing job rows and deterministic diagnostic-persistence programming errors propagate instead of disappearing behind a broad catch.
+**Regression:** `test_v10d_pre1_adversarial_fixes.sh` requires the shared helper, the diagnostic-only DB primitive, no `_update_job` lifecycle mutation, and no broad swallow. `test_v10e_pre1_behavioral_proofs.sh` exercises both sibling paths through real SQLite, proves the injected cause is persisted, proves status/worker ownership is unchanged, and proves a diagnostic-persistence programming error propagates.
+**Fix files:** `lib/ownframework_loop/supervisor_db.py`, `lib/ownframework_loop/supervisor_attempts.py`, `tests/integration/test_v10d_pre1_adversarial_fixes.sh`, `tests/integration/test_v10e_pre1_behavioral_proofs.sh`.
 
 ### B003 — `_LOCAL_EXECUTION_LOCK` defined in two modules
 **Root cause:** `supervisor_db.py:89` defined `threading.Lock()`; `supervisor_process.py:17` defined a different `threading.Lock()`. Two locks guarding related state.
