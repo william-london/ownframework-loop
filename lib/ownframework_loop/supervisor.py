@@ -54,10 +54,13 @@ from . import (
 from .locking import flock_exclusive
 from . import supervisor_db as _db_mod
 from . import supervisor_holds as _holds_mod
+from . import supervisor_runner_io as _runner_io_mod
 
 SCHEMA = _db_mod.SCHEMA
 DISPATCH_HOLD_KIND = _holds_mod.DISPATCH_HOLD_KIND
 DISPATCH_HOLD_STATES = _holds_mod.DISPATCH_HOLD_STATES
+CLAUDE_PROVIDER_ENVELOPE_MAX_BYTES = _runner_io_mod.CLAUDE_PROVIDER_ENVELOPE_MAX_BYTES
+RUNNER_DIAGNOSTIC_MAX_CHARS = _runner_io_mod.RUNNER_DIAGNOSTIC_MAX_CHARS
 # Per-pass runaway fuse fallback. A semantic worker that neither declared a
 # packet budget nor got an operational narrowing is bounded to one hour so a
 # stuck worker cannot hold the single global execution slot indefinitely.
@@ -266,27 +269,18 @@ MIN_SECURE_CLAUDE_CODE_VERSION = (2, 1, 248)
 # spool it to disk, so bound every subsequent in-memory parse without regressing
 # legitimate >64 KiB responses. 8 MiB is intentionally far above diagnostic
 # retention while preventing accidental/malicious unbounded supervisor reads.
-CLAUDE_PROVIDER_ENVELOPE_MAX_BYTES = 8 * 1024 * 1024
-RUNNER_DIAGNOSTIC_MAX_CHARS = 65536
+# Canonical owners are in ``supervisor_runner_io``; the names below are
+# re-bindings so existing callers keep the same identifier.
 
 
 def _read_durable_provider_envelope(path: Path) -> str:
-    size = path.stat().st_size
-    if size > CLAUDE_PROVIDER_ENVELOPE_MAX_BYTES:
-        raise ValueError(
-            "claude provider envelope exceeds deterministic ceiling "
-            f"({size} > {CLAUDE_PROVIDER_ENVELOPE_MAX_BYTES} bytes)"
-        )
-    return path.read_text(encoding="utf-8", errors="replace")
+    """Thin delegate to ``supervisor_runner_io._read_durable_provider_envelope``."""
+    return _runner_io_mod._read_durable_provider_envelope(path)
 
 
 def _read_durable_diagnostic_tail(path: Path) -> str:
-    with path.open("rb") as fh:
-        fh.seek(0, os.SEEK_END)
-        size = fh.tell()
-        fh.seek(max(0, size - RUNNER_DIAGNOSTIC_MAX_CHARS), os.SEEK_SET)
-        data = fh.read(RUNNER_DIAGNOSTIC_MAX_CHARS)
-    return data.decode("utf-8", errors="replace")[-RUNNER_DIAGNOSTIC_MAX_CHARS:]
+    """Thin delegate to ``supervisor_runner_io._read_durable_diagnostic_tail``."""
+    return _runner_io_mod._read_durable_diagnostic_tail(path)
 
 # Extra arguments are operator convenience only. They must never be able to
 # replace the unattended worker's tool boundary, sandbox, project-root, or

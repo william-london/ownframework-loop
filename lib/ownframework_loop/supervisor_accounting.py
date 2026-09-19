@@ -59,11 +59,15 @@ def _read_envelope_payload(path: str | None) -> dict[str, Any] | None:
     try:
         # The provider envelope is a JSON envelope; the durable file
         # may contain a leading diagnostic tail.  We delegate to
-        # ``supervisor._read_durable_provider_envelope`` for the
-        # boundary handling.  Imported here as a lazy import so this
-        # module's import surface remains independent of supervisor.
-        from . import supervisor as _supervisor_mod
-        envelope_text = _supervisor_mod._read_durable_provider_envelope(p)
+        # ``supervisor_runner_io._read_durable_provider_envelope``
+        # for the bounded size + UTF-8 read.  Imported here as a
+        # lazy import so this module's import surface stays free of
+        # supervisor / supervisor_runner_io top-level imports
+        # (avoiding cycles).  supervisor_runner_io is the canonical
+        # provider-output primitive; we no longer reach upward to
+        # ``supervisor``.
+        from . import supervisor_runner_io as _runner_io_mod
+        envelope_text = _runner_io_mod._read_durable_provider_envelope(p)
         payload = json.loads(envelope_text)
     except (OSError, ValueError, json.JSONDecodeError):
         return None
