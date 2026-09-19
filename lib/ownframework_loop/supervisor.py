@@ -5308,7 +5308,8 @@ def run_one(*, db_path: Path | None = None, timeout_seconds: int = 0) -> dict[st
     """Execute at most one semantic BUILD/REVIEW action."""
     db = db_path or default_db_path()
     with _managed_connect(db) as conn:
-        job = _take_next_job(conn)
+        from . import supervisor_claims as _claims_mod
+        job = _claims_mod._take_next_job(conn)
         if job is None:
             return {"schema": SCHEMA, "ok": True, "action": "IDLE", "db_path": str(db)}
 
