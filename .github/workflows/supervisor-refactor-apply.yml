@@ -74,15 +74,17 @@ jobs:
           PY
       - name: Canonical validation
         run: ./validate.sh
-      - name: Release gate
-        env:
-          OFLOOP_RELEASE_GATE_EXPECTED_BRANCH: hardening/supervisor-core-finalize
-        run: ./release_gate.sh
-      - name: Commit proven refactor
+      - name: Commit validated refactor locally
         run: |
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add -A
           git diff --cached --quiet && { echo 'no changes to commit'; exit 1; }
           git commit -m 'v0.10.0-dev g6: finish supervisor dependency inversion'
-          git push origin HEAD:hardening/supervisor-core-finalize
+          test -z "$(git status --porcelain)"
+      - name: Release gate
+        env:
+          OFLOOP_RELEASE_GATE_EXPECTED_BRANCH: hardening/supervisor-core-finalize
+        run: ./release_gate.sh
+      - name: Push gated refactor
+        run: git push origin HEAD:hardening/supervisor-core-finalize
