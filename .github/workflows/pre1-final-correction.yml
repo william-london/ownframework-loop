@@ -26,12 +26,12 @@ jobs:
           python3 .github/pre1_final_correction.py
           python3 - <<'PY'
           from pathlib import Path
+
           p = Path('lib/ownframework_loop/supervisor_db.py')
           p.write_text(p.read_text().rstrip() + '\n')
 
-          # The sibling B002 proof is about acceptance-publication recovery,
-          # not git probe behavior. Pin only the deterministic preconditions
-          # required to reach that publication boundary, then restore them.
+          # B002 behavioral sibling fixture: pin only the git probes required
+          # to reach the publication boundary, then restore them.
           p = Path('tests/integration/test_v10e_pre1_behavioral_proofs.sh')
           t = p.read_text()
           start = '    c.execute("UPDATE jobs SET last_error=NULL WHERE id=1"); c.commit(); ok='
@@ -44,16 +44,28 @@ jobs:
           if t.count(end) != 1:
               raise SystemExit('B002 sibling fixture end marker mismatch')
           p.write_text(t.replace(end, repl_end, 1))
+
+          # B002 canonical static regression: preserve strict shape checking,
+          # but require the new shared diagnostic-only owner instead of the
+          # obsolete duplicated last_error implementation in each sibling.
+          p = Path('tests/integration/test_v10d_pre1_adversarial_fixes.sh')
+          t = p.read_text()
+          old = '''# Both helpers must narrow to except RuntimeError and persist cause\nfor name in ('_maybe_complete_semantic_artifact', '_publish_acceptance_for_ready_artifact'):\n    fn = getattr(supervisor_attempts, name)\n    src = inspect.getsource(fn)\n    assert 'except RuntimeError as exc' in src, f'B002: {name} must narrow except to RuntimeError'\n    assert 'semantic_acceptance_publication_failed' in src, f'B002: {name} must surface cause on last_error'\nprint('ok')\n'''
+          new = '''# Both siblings must narrow to RuntimeError and delegate to one shared\n# diagnostic-only owner. The owner must persist the bounded cause without\n# routing through _update_job (which is a lifecycle transition).\nfor name in ('_maybe_complete_semantic_artifact', '_publish_acceptance_for_ready_artifact'):\n    fn = getattr(supervisor_attempts, name)\n    src = inspect.getsource(fn)\n    assert 'except RuntimeError as exc' in src, f'B002: {name} must narrow except to RuntimeError'\n    assert '_persist_semantic_acceptance_failure' in src, f'B002: {name} must delegate diagnostic persistence'\nhelper_src = inspect.getsource(supervisor_attempts._persist_semantic_acceptance_failure)\nassert 'semantic_acceptance_publication_failed' in helper_src, 'B002: shared helper must persist the actual cause'\nassert '_persist_job_last_error' in helper_src, 'B002: shared helper must use diagnostic-only DB primitive'\nassert '_update_job' not in helper_src, 'B002: diagnostic helper must not perform lifecycle transition'\nassert 'except Exception' not in helper_src, 'B002: deterministic diagnostic programming errors must not be swallowed'\nprint('ok')\n'''
+          if t.count(old) != 1:
+              raise SystemExit('v10d B002 static regression marker mismatch')
+          p.write_text(t.replace(old, new, 1))
           PY
       - name: Inspect bounded diff
         run: |
           git diff --check
           CHANGED="$(git diff --name-only)"
           printf '%s\n' "$CHANGED"
-          test "$(printf '%s\n' "$CHANGED" | sed '/^$/d' | wc -l | tr -d ' ')" -eq 5
+          test "$(printf '%s\n' "$CHANGED" | sed '/^$/d' | wc -l | tr -d ' ')" -eq 6
           printf '%s\n' "$CHANGED" | grep -Fx 'lib/ownframework_loop/supervisor_db.py'
           printf '%s\n' "$CHANGED" | grep -Fx 'lib/ownframework_loop/supervisor_attempts.py'
           printf '%s\n' "$CHANGED" | grep -Fx 'lib/ownframework_loop/state.py'
+          printf '%s\n' "$CHANGED" | grep -Fx 'tests/integration/test_v10d_pre1_adversarial_fixes.sh'
           printf '%s\n' "$CHANGED" | grep -Fx 'tests/integration/test_v10e_pre1_behavioral_proofs.sh'
           printf '%s\n' "$CHANGED" | grep -Fx 'docs/architecture/PRE_1_0_ADVERSARIAL_AUDIT.md'
       - name: Focused behavioral proof
@@ -62,11 +74,7 @@ jobs:
         run: bash tests/integration/test_v10c_supervisor_dependency_direction.sh
       - name: Canonical validation
         run: ./validate.sh
-      - name: Release gate
-        env:
-          OFLOOP_RELEASE_GATE_EXPECTED_BRANCH: hardening/pre-1.0-adversarial-audit
-        run: ./release_gate.sh
-      - name: Commit bounded correction
+      - name: Create local candidate commit
         run: |
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
@@ -74,7 +82,14 @@ jobs:
             lib/ownframework_loop/supervisor_db.py \
             lib/ownframework_loop/supervisor_attempts.py \
             lib/ownframework_loop/state.py \
+            tests/integration/test_v10d_pre1_adversarial_fixes.sh \
             tests/integration/test_v10e_pre1_behavioral_proofs.sh \
             docs/architecture/PRE_1_0_ADVERSARIAL_AUDIT.md
           git commit -m 'v0.10.0-dev f: close final pre-1.0 proof gaps'
-          git push origin HEAD:hardening/pre-1.0-adversarial-audit
+          git checkout -B hardening/pre-1.0-adversarial-audit HEAD
+      - name: Release gate
+        env:
+          OFLOOP_RELEASE_GATE_EXPECTED_BRANCH: hardening/pre-1.0-adversarial-audit
+        run: ./release_gate.sh
+      - name: Push gated correction
+        run: git push origin HEAD:hardening/pre-1.0-adversarial-audit
