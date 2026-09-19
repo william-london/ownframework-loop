@@ -1838,137 +1838,51 @@ def _boot_time_unix() -> float | None:
 
 
 def _parse_cost_from_durable_stdout(path: str | None) -> float | None:
-    if not path:
-        return None
-    p = Path(path)
-    if not p.is_file():
-        return None
-    try:
-        payload = json.loads(_read_durable_provider_envelope(p))
-    except (OSError, ValueError, json.JSONDecodeError):
-        return None
-    if not isinstance(payload, dict) or "total_cost_usd" not in payload:
-        return None
-    try:
-        value = float(payload.get("total_cost_usd"))
-    except (TypeError, ValueError):
-        return None
-    return value if math.isfinite(value) and value >= 0 else None
+    # thin delegation: canonical implementation lives in
+    # supervisor_accounting.py.
+    from . import supervisor_accounting as _accounting_mod
+    return _accounting_mod.parse_cost_from_durable_stdout(path)
 
 
 def _parse_token_usage_from_durable_stdout(path: str | None) -> dict[str, int] | None:
-    """Recover provider-reported token usage from one durable JSON envelope.
-
-    Token telemetry is operational evidence, not engineering truth. Unknown
-    token usage is tolerated unless the operator explicitly enabled a token
-    ceiling for the job.
-    """
-    if not path:
-        return None
-    p = Path(path)
-    if not p.is_file():
-        return None
-    try:
-        payload = json.loads(_read_durable_provider_envelope(p))
-    except (OSError, ValueError, json.JSONDecodeError):
-        return None
-    if not isinstance(payload, dict):
-        return None
-    usage = payload.get("usage")
-    if not isinstance(usage, dict):
-        return None
-
-    keys = {
-        "input_tokens": "input_tokens",
-        "output_tokens": "output_tokens",
-        "cache_read_tokens": "cache_read_input_tokens",
-        "cache_creation_tokens": "cache_creation_input_tokens",
-    }
-    recovered: dict[str, int] = {}
-    observed = False
-    for out_key, source_key in keys.items():
-        if source_key not in usage:
-            recovered[out_key] = 0
-            continue
-        try:
-            value = int(usage.get(source_key) or 0)
-        except (TypeError, ValueError):
-            return None
-        if value < 0:
-            return None
-        recovered[out_key] = value
-        observed = True
-    return recovered if observed else None
+    # thin delegation: canonical implementation lives in
+    # supervisor_accounting.py.
+    from . import supervisor_accounting as _accounting_mod
+    return _accounting_mod.parse_token_usage_from_durable_stdout(path)
 
 
 def _durable_envelope_payload(path: str | None) -> dict[str, Any] | None:
-    if not path:
-        return None
-    p = Path(path)
-    if not p.is_file():
-        return None
-    try:
-        payload = json.loads(_read_durable_provider_envelope(p))
-    except (OSError, ValueError, json.JSONDecodeError):
-        return None
-    return payload if isinstance(payload, dict) else None
+    from . import supervisor_accounting as _accounting_mod
+    return _accounting_mod._durable_envelope_payload(path)
 
 
 def _extract_effective_model_from_durable_stdout(path: str | None) -> str:
-    """Recover the provider-reported effective model from one durable envelope."""
-    return _extract_effective_model(_durable_envelope_payload(path))
+    from . import supervisor_accounting as _accounting_mod
+    return _accounting_mod.extract_effective_model_from_durable_stdout(path)
 
 
 def _extract_model_usage_json_from_durable_stdout(path: str | None) -> str:
-    """Recover the FULL provider-reported model usage from one durable envelope."""
-    return _extract_model_usage_json(_durable_envelope_payload(path))
+    from . import supervisor_accounting as _accounting_mod
+    return _accounting_mod.extract_model_usage_json_from_durable_stdout(path)
 
 
 def _extract_effective_model(payload: dict[str, Any] | None) -> str:
-    """Return the model the provider provably reported, or "" when unprovable.
+    from . import supervisor_accounting as _accounting_mod
+    return _accounting_mod.extract_effective_model(payload)
 
-    The EFFECTIVE model is read from the provider envelope ONLY when it is
-    provable: an explicit `model` field, or a `modelUsage` with exactly one
-    model. When several models appear in usage the singular effective model
-    is NOT inferred (guessing would certify one provider-reported mix as a
-    single model). Empty string means "not provable from this envelope"; the
-    FULL provider-reported usage is preserved separately by
-    _extract_model_usage_json(). The effective model is always distinguished
-    from the runner profile's REQUESTED model so a substitution/downgrade is
-    never silently certified as the requested profile.
-    """
-    if not isinstance(payload, dict):
-        return ""
-    model = payload.get("model")
-    if isinstance(model, str) and model:
-        return model[:256]
-    usage = payload.get("modelUsage")
-    if isinstance(usage, dict) and len(usage) == 1:
-        return str(next(iter(usage.keys())))[:256]
-    return ""
+
+def _extract_model_usage_json(payload: dict[str, Any] | None) -> str:
+    from . import supervisor_accounting as _accounting_mod
+    return _accounting_mod.extract_model_usage_json(payload)
 
 
 def _strict_profile_model_violation(
     requested_model: str, *, result_ok: bool, effective_model: str
 ) -> str:
-    """Truth gate for quality-strict runner profiles (no inference, no mercy).
-
-    Returns the violation reason, or "" when the attempt may be certified at
-    the requested quality:
-
-      * a non-strict request (no explicit model) certifies anything;
-      * a strict request certifies ONLY a provably identical effective model;
-      * a provably different effective model is a substitution;
-      * an unprovable effective model under a strict request fails closed —
-        absence of proof is never certified as the requested profile.
-    """
-    if not result_ok or not requested_model:
-        return ""
-    if effective_model and effective_model != requested_model:
-        return "runner_profile_model_substitution"
-    if not effective_model:
-        return "runner_profile_quality_unproven"
-    return ""
+    from . import supervisor_accounting as _accounting_mod
+    return _accounting_mod.strict_profile_model_violation(
+        requested_model, result_ok=result_ok, effective_model=effective_model,
+    )
 
 
 def _replay_candidate_sha(
