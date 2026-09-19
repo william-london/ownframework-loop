@@ -44,3 +44,49 @@ or revise the unstarted specification. It must never compensate by reopening
 HOME, injecting host paths, weakening the sandbox, or inventing Docker/socket
 authority. Privileged capabilities are available only after explicit
 operator-owned canary commissioning.
+
+## Pre-v1 PROGRAM validation-scope closure
+
+The Taskbox source-isolated semantic certification against Loop
+`4a39633e564c81358268f06bb3c73a1b7b53b5f8` exposed one avoidable planning
+symptom: a validation that belonged to a later checkpoint had been authored in
+top-level `required_validation`, so the earlier checkpoint had to satisfy a
+future condition.
+
+The exact historical packet/adapter provenance is no longer available, so this
+document does not invent a producer. Current source at that exact Loop SHA
+already states the correct rule in both shipped SPEC adapters:
+
+- top-level `required_validation` is a global gate and must be satisfiable from
+  the first checkpoint onward;
+- a known later-only validation belongs in the owning checkpoint's
+  `required_validation` (and later checkpoints when continuous proof is
+  intended);
+- the rule is part of the PROGRAM readiness contract before enqueue.
+
+Arbitrary shell-command chronology is semantic. Deterministic core code must
+not pretend it can infer whether an arbitrary command becomes meaningful only
+at CP-N; doing so would create false refusals and operator friction. The
+correct owner is therefore the semantic SPEC-authoring boundary, while the
+core continues to enforce every mechanically knowable packet invariant before
+durable enqueue.
+
+`tests/test_run_adapter_conformance.sh` pins this contract across both
+`skills/spec/SKILL.md` and `.agents/skills/of-loop-spec/SKILL.md`. This is a
+static contract test deliberately: there is no sound behavioral validator for
+arbitrary command semantics. Removing or drifting the PROGRAM validation-scope
+rule from either shipped adapter now fails deterministic validation.
+
+Closure classification:
+
+```text
+B-SPEC-VALIDATION-SCOPE=REJECTED_AS_NOT_SOURCE_DEFECT
+HISTORICAL_ROOT_OWNER=UNPROVEN_ARTIFACTS_UNAVAILABLE
+CURRENT_SOURCE_OWNER=semantic SPEC-authoring boundary
+CORE_STATIC_SHELL_SEMANTIC_INFERENCE=not_added
+OPERATOR_CEREMONY_ADDED=no
+```
+
+This closure does not alter the historical Taskbox certification facts, does
+not claim that the missing packet has been reconstructed, and does not weaken
+fail-closed runtime behavior.
