@@ -149,12 +149,12 @@ find_upward(
 )
 
 # The remaining supervisor_* modules are still scaffolding
-# re-export facades (Stage A artifacts) — they import supervisor.
-# Stage B will flip them too.  supervisor_runner_registry is
-# already canonical-body-owned (e1 extraction) and does NOT
-# import supervisor.
+# re-export facades — they import supervisor.  Stage B will
+# flip them too.  supervisor_runner_registry is already
+# canonical-body-owned (e1 extraction) and does NOT import
+# supervisor.  supervisor_readmodel was flipped to canonical
+# body ownership in g2 (this stage).
 for m in [
-    "supervisor_readmodel",
     "supervisor_recovery",
     "supervisor_attempts",
     "supervisor_claims",
@@ -165,9 +165,22 @@ for m in [
         f"{m}: expected to remain a re-export facade "
         f"importing from supervisor (until Stage B)"
     )
-# supervisor_runner_registry is canonical body ownership — it
-# must NOT import supervisor.
-find_upward("supervisor_runner_registry", allowed_lazy=[])
+# supervisor_runner_registry + supervisor_readmodel +
+# supervisor_holds + supervisor_operator + supervisor_db +
+# supervisor_runner_io + supervisor_accounting +
+# supervisor_identity: canonical body ownership; they must NOT
+# import supervisor at module or function scope.
+for m in [
+    "supervisor_runner_registry",
+    "supervisor_readmodel",
+    "supervisor_holds",
+    "supervisor_operator",
+    "supervisor_db",
+    "supervisor_runner_io",
+    "supervisor_accounting",
+    "supervisor_identity",
+]:
+    find_upward(m, allowed_lazy=[])
 print("  PASS: dependency-direction invariants hold for inverted modules")
 
 # Step 4: supervisor.py is a composition facade that imports
@@ -183,6 +196,8 @@ required_imports = {
     "supervisor_runner_io",
     "supervisor_runner_registry",
     "supervisor_accounting",
+    "supervisor_readmodel",
+    "supervisor_identity",
 }
 for m in required_imports:
     assert (
