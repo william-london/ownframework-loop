@@ -53,10 +53,11 @@ from . import (
 )
 from .locking import flock_exclusive
 from . import supervisor_db as _db_mod
+from . import supervisor_holds as _holds_mod
 
 SCHEMA = _db_mod.SCHEMA
-DISPATCH_HOLD_KIND = "PROGRAM_CHECKPOINT_BOUNDARY"
-DISPATCH_HOLD_STATES = frozenset({"ARMED", "HELD", "RELEASED", "CANCELLED"})
+DISPATCH_HOLD_KIND = _holds_mod.DISPATCH_HOLD_KIND
+DISPATCH_HOLD_STATES = _holds_mod.DISPATCH_HOLD_STATES
 # Per-pass runaway fuse fallback. A semantic worker that neither declared a
 # packet budget nor got an operational narrowing is bounded to one hour so a
 # stuck worker cannot hold the single global execution slot indefinitely.
@@ -2394,40 +2395,28 @@ def _validate_dispatch_hold_request(
     previous_checkpoint_id: str | None,
     next_checkpoint_id: str | None,
 ) -> None:
-    supplied = (kind, previous_checkpoint_id, next_checkpoint_id)
-    if not any(value is not None for value in supplied):
-        return
-    if kind != DISPATCH_HOLD_KIND:
-        raise ValueError(f"unsupported dispatch hold kind: {kind!r}")
-    if not previous_checkpoint_id or not next_checkpoint_id:
-        raise ValueError("PROGRAM_CHECKPOINT_BOUNDARY requires previous and next checkpoint ids")
+    """Thin delegate to ``supervisor_holds._validate_dispatch_hold_request``."""
+    return _holds_mod._validate_dispatch_hold_request(
+        kind, previous_checkpoint_id, next_checkpoint_id
+    )
 
 
 def _hold_row(conn: sqlite3.Connection, job_id: int) -> sqlite3.Row | None:
-    return conn.execute(
-        "SELECT * FROM dispatch_holds WHERE job_id=?", (int(job_id),)
-    ).fetchone()
+    """Thin delegate to ``supervisor_holds._hold_row``."""
+    return _holds_mod._hold_row(conn, job_id)
 
 
 def _hold_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
-    return dict(row) if row is not None else None
+    """Thin delegate to ``supervisor_holds._hold_dict``."""
+    return _holds_mod._hold_dict(row)
 
 
 def _hold_matches_before_claim(
     conn: sqlite3.Connection,
     row: sqlite3.Row,
 ) -> tuple[sqlite3.Row | None, str]:
-    hold = _hold_row(conn, int(row["id"]))
-    if hold is None or str(hold["state"]) in {"RELEASED", "CANCELLED"}:
-        return hold, "NO_ACTIVE_HOLD"
-    if str(hold["state"]) not in DISPATCH_HOLD_STATES:
-        return hold, "invalid_hold_state"
-    if str(hold["state"]) == "HELD":
-        return hold, "HELD"
-    matches, reason = dispatch_hold_mod.engineering_boundary_matches(
-        repo=Path(str(row["repo"])), run_id=str(row["run_id"]), hold=hold
-    )
-    return hold, "MATCH" if matches else reason
+    """Thin delegate to ``supervisor_holds._hold_matches_before_claim``."""
+    return _holds_mod._hold_matches_before_claim(conn, row)
 
 
 @_serialize_run_lifecycle
@@ -2979,18 +2968,10 @@ def supervisor_config_get(*, db_path: Path | None = None) -> dict[str, Any]:
 
 def supervisor_config_set(*, max_concurrency: Any, db_path: Path | None = None) -> dict[str, Any]:
     """Persist the bounded operational execution capacity."""
-    value = _validate_max_concurrency(max_concurrency)
-    db = db_path or default_db_path()
-    now = time.time()
-    with _managed_connect(db) as conn:
-        conn.execute("BEGIN IMMEDIATE")
-        conn.execute(
-            """INSERT INTO supervisor_config(key, value, updated_at) VALUES (?, ?, ?)
-               ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at""",
-            (_CONFIG_MAX_CONCURRENCY, str(value), now),
-        )
-        conn.commit()
-    return {"schema": SCHEMA, "ok": True, "max_concurrency": value, "db_path": str(db)}
+    from . import supervisor_operator as _operator_mod
+    return _operator_mod.supervisor_config_set(
+        max_concurrency=max_concurrency, db_path=db_path
+    )
 
 
 def fleet_status(*, db_path: Path | None = None) -> dict[str, Any]:
@@ -3088,36 +3069,13 @@ def dispatch_hold_status(
     hold_id: str | None = None,
     db_path: Path | None = None,
 ) -> dict[str, Any]:
-    state_mod.validate_run_id(run_id)
-    repo = str(Path(canonical_repo).resolve(strict=False))
-    db = db_path or default_db_path()
-    if not Path(db).expanduser().is_file():
-        return {"schema": SCHEMA, "ok": False, "reason": "ledger_missing"}
-    with _managed_connect_readonly(db) as conn:
-        job, lookup_reason = _logical_job_row(conn, canonical_repo, run_id)
-        if job is None:
-            row = None
-        else:
-            row = conn.execute(
-                """SELECT h.*, j.status AS job_status, j.worker_pid,
-                          j.worker_role, j.worker_attempt_id
-                   FROM dispatch_holds h JOIN jobs j ON j.id=h.job_id
-                   WHERE h.job_id=?
-                     AND (? IS NULL OR h.hold_id=?)""",
-                (int(job["id"]), hold_id, hold_id),
-            ).fetchone()
-    if row is None:
-        return {
-            "schema": SCHEMA,
-            "ok": False,
-            "repo": repo,
-            "run_id": run_id,
-            "reason": "dispatch_hold_not_found",
-            "db_path": str(db),
-        }
-    result = dict(row)
-    result.update({"schema": SCHEMA, "ok": True, "db_path": str(db)})
-    return result
+    """Read-only operator view of one (or the active) dispatch hold."""
+    return _holds_mod.dispatch_hold_status(
+        canonical_repo=canonical_repo,
+        run_id=run_id,
+        hold_id=hold_id,
+        db_path=db_path,
+    )
 
 
 def release_dispatch_hold(
@@ -3127,46 +3085,13 @@ def release_dispatch_hold(
     hold_id: str,
     db_path: Path | None = None,
 ) -> dict[str, Any]:
-    state_mod.validate_run_id(run_id)
-    repo = str(Path(canonical_repo).resolve(strict=False))
-    db = db_path or default_db_path()
-    now = time.time()
-    with _managed_connect(db) as conn:
-        job, lookup_reason = _logical_job_row(conn, canonical_repo, run_id)
-        if job is None:
-            return {
-                "schema": SCHEMA, "ok": False,
-                "reason": lookup_reason or "dispatch_hold_not_found",
-            }
-        conn.execute("BEGIN IMMEDIATE")
-        row = conn.execute(
-            "SELECT * FROM dispatch_holds WHERE hold_id=? AND job_id=?",
-            (hold_id, int(job["id"])),
-        ).fetchone()
-        if row is None:
-            return {"schema": SCHEMA, "ok": False, "reason": "dispatch_hold_not_found"}
-        if row["state"] == "RELEASED":
-            out = _hold_dict(row) or {}
-            out.update({"schema": SCHEMA, "ok": True, "idempotent": True})
-            return out
-        if row["state"] != "HELD":
-            out = _hold_dict(row) or {}
-            out.update({"schema": SCHEMA, "ok": False, "reason": "release_requires_held"})
-            return out
-        cur = conn.execute(
-            """UPDATE dispatch_holds
-               SET state='RELEASED', released_at=?, updated_at=?
-               WHERE hold_id=? AND job_id=? AND state='HELD'""",
-            (now, now, hold_id, int(row["job_id"])),
-        )
-        if cur.rowcount != 1:
-            return {"schema": SCHEMA, "ok": False, "reason": "release_lost_hold_race"}
-        updated = conn.execute(
-            "SELECT * FROM dispatch_holds WHERE hold_id=?", (hold_id,)
-        ).fetchone()
-    out = _hold_dict(updated) or {}
-    out.update({"schema": SCHEMA, "ok": True, "released": True})
-    return out
+    """Release one HELD dispatch hold (idempotent on already-RELEASED)."""
+    return _holds_mod.release_dispatch_hold(
+        canonical_repo=canonical_repo,
+        run_id=run_id,
+        hold_id=hold_id,
+        db_path=db_path,
+    )
 
 
 def cancel_dispatch_hold(
@@ -3176,46 +3101,13 @@ def cancel_dispatch_hold(
     hold_id: str,
     db_path: Path | None = None,
 ) -> dict[str, Any]:
-    state_mod.validate_run_id(run_id)
-    repo = str(Path(canonical_repo).resolve(strict=False))
-    db = db_path or default_db_path()
-    now = time.time()
-    with _managed_connect(db) as conn:
-        job, lookup_reason = _logical_job_row(conn, canonical_repo, run_id)
-        if job is None:
-            return {
-                "schema": SCHEMA, "ok": False,
-                "reason": lookup_reason or "dispatch_hold_not_found",
-            }
-        conn.execute("BEGIN IMMEDIATE")
-        row = conn.execute(
-            "SELECT * FROM dispatch_holds WHERE hold_id=? AND job_id=?",
-            (hold_id, int(job["id"])),
-        ).fetchone()
-        if row is None:
-            return {"schema": SCHEMA, "ok": False, "reason": "dispatch_hold_not_found"}
-        if row["state"] == "CANCELLED":
-            out = _hold_dict(row) or {}
-            out.update({"schema": SCHEMA, "ok": True, "idempotent": True})
-            return out
-        if row["state"] == "RELEASED":
-            out = _hold_dict(row) or {}
-            out.update({"schema": SCHEMA, "ok": False, "reason": "cancel_refuses_released"})
-            return out
-        cur = conn.execute(
-            """UPDATE dispatch_holds
-               SET state='CANCELLED', cancelled_at=?, updated_at=?
-               WHERE hold_id=? AND job_id=? AND state IN ('ARMED','HELD')""",
-            (now, now, hold_id, int(row["job_id"])),
-        )
-        if cur.rowcount != 1:
-            return {"schema": SCHEMA, "ok": False, "reason": "cancel_lost_hold_race"}
-        updated = conn.execute(
-            "SELECT * FROM dispatch_holds WHERE hold_id=?", (hold_id,)
-        ).fetchone()
-    out = _hold_dict(updated) or {}
-    out.update({"schema": SCHEMA, "ok": True, "cancelled": True})
-    return out
+    """Cancel one ARMED/HELD dispatch hold (refuses RELEASED)."""
+    return _holds_mod.cancel_dispatch_hold(
+        canonical_repo=canonical_repo,
+        run_id=run_id,
+        hold_id=hold_id,
+        db_path=db_path,
+    )
 
 
 def _run_git_readonly(repo: Path, args: list[str], *, timeout: int = 10) -> dict[str, Any]:

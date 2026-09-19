@@ -50,20 +50,16 @@ from __future__ import annotations
 from .supervisor import (  # re-export facade
     status,
     supervisor_config_get,
-    supervisor_config_set,
     fleet_status,
+)
+from .supervisor_holds import (  # read-model hold projections
     dispatch_hold_status,
-    release_dispatch_hold,
-    cancel_dispatch_hold,
 )
 
 
 __all__ = [
     "status",
     "supervisor_config_get",
-    "supervisor_config_set",
     "fleet_status",
     "dispatch_hold_status",
-    "release_dispatch_hold",
-    "cancel_dispatch_hold",
 ]

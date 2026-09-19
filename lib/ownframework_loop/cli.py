@@ -42,6 +42,8 @@ from . import (
     branch_resolver, capabilities as capabilities_mod, commissioning as commissioning_mod, execution_start,
     dispatch as dispatch_mod, runner_profiles as runner_profiles_mod, runtime_env, supervisor as supervisor_mod,
     supervisor_readmodel as supervisor_readmodel_mod,
+    supervisor_holds as supervisor_holds_mod,
+    supervisor_operator as supervisor_operator_mod,
 )
 
 
@@ -1882,7 +1884,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     def cmd_supervisor_config_set(args: argparse.Namespace) -> None:
         try:
-            out = supervisor_readmodel_mod.supervisor_config_set(
+            out = supervisor_operator_mod.supervisor_config_set(
                 max_concurrency=args.value,
                 db_path=Path(args.db).expanduser() if args.db else None,
             )
@@ -1893,7 +1895,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     def cmd_supervisor_hold_status(args: argparse.Namespace) -> None:
         repo = _repo_path(args.repo)
-        out = supervisor_readmodel_mod.dispatch_hold_status(
+        out = supervisor_holds_mod.dispatch_hold_status(
             canonical_repo=repo,
             run_id=args.run_id,
             hold_id=args.hold_id,
@@ -1903,7 +1905,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     def cmd_supervisor_hold_release(args: argparse.Namespace) -> None:
         repo = _repo_path(args.repo)
-        out = supervisor_readmodel_mod.release_dispatch_hold(
+        out = supervisor_holds_mod.release_dispatch_hold(
             canonical_repo=repo,
             run_id=args.run_id,
             hold_id=args.hold_id,
@@ -1913,7 +1915,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     def cmd_supervisor_hold_cancel(args: argparse.Namespace) -> None:
         repo = _repo_path(args.repo)
-        out = supervisor_readmodel_mod.cancel_dispatch_hold(
+        out = supervisor_holds_mod.cancel_dispatch_hold(
             canonical_repo=repo,
             run_id=args.run_id,
             hold_id=args.hold_id,
