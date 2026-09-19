@@ -293,4 +293,96 @@ dist = dist.replace("sur = from_supervisor_py()", "sur = from_runtime_owner()")
 dist = dist.replace("supervisor.py={sur}", "supervisor_runtime.py={sur}")
 dist_path.write_text(dist, encoding="utf-8")
 
+# ClaudeCodeRunner now canonically owns subprocess.Popen in supervisor_runner.
+# Keep the unsafe-process static check narrow: add only that explicit owner to
+# the existing execution allowlist; do not weaken or disable the detector.
+static_path = LIB / "static_checks.py"
+static = static_path.read_text(encoding="utf-8")
+old_allow = '"process_runner.py", "supervisor.py", "validation_executor.py"'
+new_allow = '"process_runner.py", "supervisor.py", "supervisor_runner.py", "validation_executor.py"'
+if static.count(old_allow) != 1:
+    raise RuntimeError("static Popen allowlist drifted before runner extraction")
+static = static.replace(old_allow, new_allow, 1)
+static_path.write_text(static, encoding="utf-8")
+
+# Replace the stale/contradictory Stage-2 roadmap with the architecture that
+# this gated transformation actually publishes.  Historical Stage-A material
+# above the marker remains intact; only the now-obsolete BLOCKED/partial tail is
+# rewritten.
+doc_path = ROOT / "docs" / "architecture" / "IMPLEMENTATION_CONSOLIDATION.md"
+doc = doc_path.read_text(encoding="utf-8")
+marker = "## Stage 2 Inversion (post-Stage-A)\n"
+if doc.count(marker) != 1:
+    raise RuntimeError("implementation-consolidation Stage-2 marker drifted")
+head = doc.split(marker, 1)[0]
+final_stage = '''## Stage 2 Finalization (current architecture)
+
+The supervisor decomposition is complete at the named-owner boundary.  The
+composition facade remains intentionally broad because it owns orchestration,
+not because leaf authorities still depend upward on it.
+
+### Canonical body owners
+
+| Module | Canonical authority |
+|---|---|
+| `supervisor_db.py` | connection, schema, file-mode, lookup, validator, transition primitive |
+| `supervisor_holds.py` | dispatch-hold validation, persistence, matching, release/cancel, projection |
+| `supervisor_readmodel.py` | status/fleet/config read models and job/core visibility projection |
+| `supervisor_operator.py` | operator configuration mutation |
+| `supervisor_identity.py` | repository/workspace scheduling identity and packet execution mode |
+| `supervisor_accounting.py` | durable cost/token/model observation |
+| `supervisor_attempts.py` | semantic-attempt reservation, provenance, acceptance, completion, launch-failure lifecycle |
+| `supervisor_recovery.py` | stale-RUNNING recovery and durable failure/retry/quarantine policy |
+| `supervisor_claims.py` | enrollment, atomic claim, scheduler submission budget |
+| `supervisor_process.py` | local execution fence, PID/start identity, liveness, owned process-group termination |
+| `supervisor_runtime.py` | commissioned service environment, runtime generation, runtime-cache lifecycle |
+| `supervisor_prompts.py` | role prompt construction and immutable prompt provenance |
+| `supervisor_runner_io.py` | provider envelope/diagnostic readers and durable worker-log paths |
+| `supervisor_runner_registry.py` | generic runner result/readiness contract and registry |
+| `supervisor_runner.py` | Claude-specific provider execution, subprocess lifecycle, configuration and failure observation |
+
+`supervisor.py` composes these authorities and keeps compatibility delegates
+for established imports.  Cross-domain orchestration stays there: `run_one`,
+`serve`, `resume`, `retire`, PROGRAM continuation/protected recovery,
+startup-ready attestation, and `_apply_data_migrations` as the explicit
+persistence/identity migration callback.
+
+### Dependency direction
+
+`tests/integration/test_v10c_supervisor_dependency_direction.sh` rejects any
+module- or function-scope import of `supervisor.py` from a canonical
+`supervisor_*` owner.  There is no lazy-import exception list.  The facade may
+import downward; canonical owners may depend on lower/cohesive owners, but not
+back upward into the composition module.
+
+Compatibility tests patch the canonical owner consumed by the code under test.
+Production modules no longer import upward merely to preserve historical test
+monkey-patch behavior.
+
+### Runner extraction
+
+The previously blocked runner prerequisites are now explicit owners:
+`supervisor_process`, `supervisor_prompts`, and `supervisor_runtime`.
+`ClaudeCodeRunner` and `_RegisteredClaudeCodeRunner` live in
+`supervisor_runner.py`; provider-output paths live in `supervisor_runner_io`;
+retry/quarantine policy remains in `supervisor_recovery`.  `static_checks.py`
+permits `subprocess.Popen` in the explicit runner owner without weakening the
+unsafe-process detector elsewhere.
+
+### Consolidation invariants
+
+- zero canonical `supervisor_* -> supervisor.py` imports, including lazy imports;
+- zero duplicate canonical implementations or shadow top-level definitions in
+  `supervisor.py`;
+- runner/provider execution separated from durable recovery policy;
+- tests target canonical owners rather than forcing production dependency
+  inversions for monkey-patch compatibility;
+- `supervisor.py` is reduced from the original 6817-line monolith to a
+  composition/compatibility surface of roughly 3000 lines, with authority
+  bodies moved to named owners;
+- the one-shot transformation is published only after canonical validation and
+  the release gate succeed on the committed candidate.
+'''
+doc_path.write_text(head + final_stage, encoding="utf-8")
+
 print("SUPERVISOR_REFACTOR_FIXUPS=APPLIED")
