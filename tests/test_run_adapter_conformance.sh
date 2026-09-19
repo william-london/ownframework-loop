@@ -61,6 +61,33 @@ for command in (
 ):
     result = guards.classify_bash_command(command)
     assert result["severity"] == "forbidden", (command, result)
+
+# B-SPEC-VALIDATION-SCOPE (pre-v1 final deterministic closure): validation
+# chronology for arbitrary shell commands is semantic and therefore belongs at
+# the SPEC-authoring boundary, not in a fake deterministic shell-semantic
+# analyzer. Pin both shipped SPEC adapters to the same fail-before-enqueue
+# contract so future adapter drift cannot silently re-admit the Taskbox class:
+# a top-level validation is global from CP-1, and a known later-only gate must
+# remain checkpoint-local. The heading assertion keeps this rule inside the
+# complete PROGRAM readiness/pre-enqueue checklist rather than as detached
+# documentation.
+spec_contracts = (
+    root / "skills/spec/SKILL.md",
+    root / ".agents/skills/of-loop-spec/SKILL.md",
+)
+for spec_path in spec_contracts:
+    text = spec_path.read_text(encoding="utf-8")
+    required = (
+        "Before a v3 PROGRAM is considered ready:",
+        "top-level `required_validation` is a global gate",
+        "MUST be satisfiable from the first checkpoint onward",
+        "belongs in that checkpoint's",
+        "never place a known\n  later-only gate in the top-level list",
+    )
+    missing = [fragment for fragment in required if fragment not in text]
+    assert not missing, (
+        f"{spec_path}: PROGRAM validation-scope contract drift: missing={missing}"
+    )
 PY
 
 if grep -RInE '^\s*(from|import)\s+(anthropic|claude|openai|codex)(\.|\s|$)' lib/ownframework_loop --include='*.py'; then
