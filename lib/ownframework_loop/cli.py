@@ -41,6 +41,7 @@ from . import (
     integrity, limits as limits_mod, approval, build_finalize, review_finalize,
     branch_resolver, capabilities as capabilities_mod, commissioning as commissioning_mod, execution_start,
     dispatch as dispatch_mod, runner_profiles as runner_profiles_mod, runtime_env, supervisor as supervisor_mod,
+    supervisor_readmodel as supervisor_readmodel_mod,
 )
 
 
@@ -1860,7 +1861,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     def cmd_supervisor_status(args: argparse.Namespace) -> None:
         repo = _repo_path(args.repo)
-        out = supervisor_mod.status(
+        out = supervisor_readmodel_mod.status(
             canonical_repo=repo,
             run_id=args.run_id,
             db_path=Path(args.db).expanduser() if args.db else None,
@@ -1868,20 +1869,20 @@ def _build_parser() -> argparse.ArgumentParser:
         _emit(out, exit_code=0 if out.get("ok") else 2)
 
     def cmd_supervisor_fleet(args: argparse.Namespace) -> None:
-        out = supervisor_mod.fleet_status(
+        out = supervisor_readmodel_mod.fleet_status(
             db_path=Path(args.db).expanduser() if args.db else None,
         )
         _emit(out, exit_code=0 if out.get("ok") else 2)
 
     def cmd_supervisor_config_get(args: argparse.Namespace) -> None:
-        out = supervisor_mod.supervisor_config_get(
+        out = supervisor_readmodel_mod.supervisor_config_get(
             db_path=Path(args.db).expanduser() if args.db else None,
         )
         _emit(out, exit_code=0 if out.get("ok") else 2)
 
     def cmd_supervisor_config_set(args: argparse.Namespace) -> None:
         try:
-            out = supervisor_mod.supervisor_config_set(
+            out = supervisor_readmodel_mod.supervisor_config_set(
                 max_concurrency=args.value,
                 db_path=Path(args.db).expanduser() if args.db else None,
             )
@@ -1892,7 +1893,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     def cmd_supervisor_hold_status(args: argparse.Namespace) -> None:
         repo = _repo_path(args.repo)
-        out = supervisor_mod.dispatch_hold_status(
+        out = supervisor_readmodel_mod.dispatch_hold_status(
             canonical_repo=repo,
             run_id=args.run_id,
             hold_id=args.hold_id,
@@ -1902,7 +1903,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     def cmd_supervisor_hold_release(args: argparse.Namespace) -> None:
         repo = _repo_path(args.repo)
-        out = supervisor_mod.release_dispatch_hold(
+        out = supervisor_readmodel_mod.release_dispatch_hold(
             canonical_repo=repo,
             run_id=args.run_id,
             hold_id=args.hold_id,
@@ -1912,7 +1913,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     def cmd_supervisor_hold_cancel(args: argparse.Namespace) -> None:
         repo = _repo_path(args.repo)
-        out = supervisor_mod.cancel_dispatch_hold(
+        out = supervisor_readmodel_mod.cancel_dispatch_hold(
             canonical_repo=repo,
             run_id=args.run_id,
             hold_id=args.hold_id,
