@@ -22,7 +22,13 @@ jobs:
         with:
           python-version: '3.12'
       - name: Apply bounded source correction
-        run: python3 .github/pre1_final_correction.py
+        run: |
+          python3 .github/pre1_final_correction.py
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('lib/ownframework_loop/supervisor_db.py')
+          p.write_text(p.read_text().rstrip() + '\n')
+          PY
       - name: Inspect bounded diff
         run: |
           git diff --check
