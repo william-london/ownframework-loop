@@ -4744,7 +4744,8 @@ def _apply_failure_policy(
 
 
 def _take_next_job(conn: sqlite3.Connection) -> sqlite3.Row | None:
-    _recover_stale_running(conn)
+    from . import supervisor_recovery as _recovery_mod
+    _recovery_mod._recover_stale_running(conn)
     while True:
         now = time.time()
         candidates = conn.execute(
