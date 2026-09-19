@@ -17,6 +17,27 @@ if "_BOOT_TIME_CACHE: float | None = None" not in process:
     )
 process_path.write_text(process, encoding="utf-8")
 
+# supervisor_accounting intentionally exposes descriptive canonical names
+# (without the historical supervisor-private underscore).  Bind the extracted
+# consumers to that API rather than recreating compatibility aliases in the
+# lower-level accounting owner.
+recovery_path = LIB / "supervisor_recovery.py"
+recovery = recovery_path.read_text(encoding="utf-8")
+for old, new in {
+    "_accounting_mod._parse_cost_from_durable_stdout": "_accounting_mod.parse_cost_from_durable_stdout",
+    "_accounting_mod._parse_token_usage_from_durable_stdout": "_accounting_mod.parse_token_usage_from_durable_stdout",
+    "_accounting_mod._extract_effective_model_from_durable_stdout": "_accounting_mod.extract_effective_model_from_durable_stdout",
+    "_accounting_mod._extract_model_usage_json_from_durable_stdout": "_accounting_mod.extract_model_usage_json_from_durable_stdout",
+}.items():
+    recovery = recovery.replace(old, new)
+recovery_path.write_text(recovery, encoding="utf-8")
+
+runner_path = LIB / "supervisor_runner.py"
+runner = runner_path.read_text(encoding="utf-8")
+runner = runner.replace("_accounting_mod._extract_effective_model(", "_accounting_mod.extract_effective_model(")
+runner = runner.replace("_accounting_mod._extract_model_usage_json(", "_accounting_mod.extract_model_usage_json(")
+runner_path.write_text(runner, encoding="utf-8")
+
 # Preserve the exact historical compatibility signatures on the composition
 # facade. The canonical bodies live below it; these wrappers are intentionally
 # boring and signature-compatible.
