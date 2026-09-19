@@ -824,7 +824,7 @@ conn2.close()
 # =========================================================================
 print("\n=== B001 behavioral: PRE_PROVIDER_FAILURE_REASONS exactly one ===")
 import ast
-src = Path("/Users/mr.mrs.london/projects/ownframework-loop/lib/ownframework_loop/supervisor_attempts.py").read_text()
+src = Path("lib/ownframework_loop/supervisor_attempts.py").read_text()
 tree = ast.parse(src)
 count = 0
 for node in ast.walk(tree):
