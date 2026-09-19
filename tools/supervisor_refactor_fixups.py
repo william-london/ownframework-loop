@@ -298,11 +298,15 @@ dist_path.write_text(dist, encoding="utf-8")
 # the existing execution allowlist; do not weaken or disable the detector.
 static_path = LIB / "static_checks.py"
 static = static_path.read_text(encoding="utf-8")
-old_allow = '"process_runner.py", "supervisor.py", "validation_executor.py"'
-new_allow = '"process_runner.py", "supervisor.py", "supervisor_runner.py", "validation_executor.py"'
-if static.count(old_allow) != 1:
-    raise RuntimeError("static Popen allowlist drifted before runner extraction")
-static = static.replace(old_allow, new_allow, 1)
+if '"supervisor_runner.py"' not in static:
+    static_allow_anchor = '"supervisor.py", "validation_executor.py"'
+    if static.count(static_allow_anchor) != 1:
+        raise RuntimeError("static Popen allowlist drifted before runner extraction")
+    static = static.replace(
+        static_allow_anchor,
+        '"supervisor.py", "supervisor_runner.py", "validation_executor.py"',
+        1,
+    )
 static_path.write_text(static, encoding="utf-8")
 
 # Replace the stale/contradictory Stage-2 roadmap with the architecture that
