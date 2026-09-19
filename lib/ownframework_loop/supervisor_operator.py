@@ -35,8 +35,7 @@ def supervisor_config_set(
     *, max_concurrency: Any, db_path: Path | None = None
 ) -> dict[str, Any]:
     """Persist the bounded operational execution capacity."""
-    from . import supervisor as _supervisor_mod
-    value = _supervisor_mod._validate_max_concurrency(max_concurrency)
+    value = _db_mod._validate_max_concurrency(max_concurrency)
     db = db_path or _db_mod.default_db_path()
     now = time.time()
     with _db_mod._managed_connect(db) as conn:

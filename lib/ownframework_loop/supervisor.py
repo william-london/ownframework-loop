@@ -55,6 +55,7 @@ from .locking import flock_exclusive
 from . import supervisor_db as _db_mod
 from . import supervisor_holds as _holds_mod
 from . import supervisor_runner_io as _runner_io_mod
+from . import supervisor_identity as _identity_mod
 
 SCHEMA = _db_mod.SCHEMA
 DISPATCH_HOLD_KIND = _holds_mod.DISPATCH_HOLD_KIND
@@ -772,14 +773,8 @@ _PROGRAM_READY_STATE = next(
 
 
 def _repository_scheduling_identity(repo: Path) -> tuple[str, bool]:
-    """Return Git-common-dir repository identity for aliases/worktrees."""
-    resolved = Path(repo).expanduser().resolve(strict=False)
-    common = git_checks.git_common_dir(resolved)
-    if common is not None:
-        return str(common), True
-    if (resolved / ".git").exists():
-        return f"unproven-git:{resolved}", False
-    return f"path:{resolved}", resolved.exists()
+    """Thin delegate to ``supervisor_identity._repository_scheduling_identity``."""
+    return _identity_mod._repository_scheduling_identity(repo)
 
 
 def _workspace_scheduling_identity(
@@ -789,48 +784,17 @@ def _workspace_scheduling_identity(
     repository_key: str,
     repository_proven: bool,
 ) -> tuple[str, str, bool]:
-    """Return candidate branch, workspace key, and proof status.
-
-    Git common-dir remains repository provenance, not a global execution mutex.
-    Concurrent ownership is isolated by the run-frozen candidate branch, so
-    different branches/worktrees in one repository may execute in parallel.
-    """
-    if not repository_proven or not repository_key:
-        return "", "", False
-    try:
-        approval_doc = approval_mod.load_approval(repo, run_id)
-        if isinstance(approval_doc, dict) and approval_doc.get("candidate_branch"):
-            branch = branch_resolver_mod.resolve_candidate_branch(repo, run_id)
-        else:
-            packet_path = state_mod.run_dir(repo, run_id) / "WORK_PACKET.md"
-            packet_meta = None
-            if packet_path.exists():
-                packet_meta, _ = packet_mod.parse_packet_file(packet_path)
-            branch = branch_resolver_mod.resolve_candidate_branch(
-                repo, run_id, packet=packet_meta
-            )
-    except Exception:
-        return "", "", False
-    if not isinstance(branch, str) or not branch.strip():
-        return "", "", False
-    branch = branch.strip()
-    key = json.dumps(
-        {"repository": repository_key, "candidate_branch": branch},
-        separators=(",", ":"),
-        sort_keys=True,
+    """Thin delegate to ``supervisor_identity._workspace_scheduling_identity``."""
+    return _identity_mod._workspace_scheduling_identity(
+        repo, run_id,
+        repository_key=repository_key,
+        repository_proven=repository_proven,
     )
-    return branch, key, True
 
 
 def _packet_execution_mode(repo: Path, run_id: str) -> str:
-    packet_path = state_mod.run_dir(repo, run_id) / "WORK_PACKET.md"
-    if not packet_path.exists():
-        return "SINGLE"
-    try:
-        meta, _ = packet_mod.parse_packet_file(packet_path)
-    except (OSError, ValueError):
-        return "SINGLE"
-    return "PROGRAM" if str(meta.get("execution_mode") or "").lower() == "program" else "SINGLE"
+    """Thin delegate to ``supervisor_identity._packet_execution_mode``."""
+    return _identity_mod._packet_execution_mode(repo, run_id)
 
 
 def _continuation_path(canonical_repo: Path, run_id: str, continuation_id: str) -> Path:
@@ -1216,19 +1180,8 @@ def continue_program(
 
 
 def _validate_max_concurrency(value: Any) -> int:
-    if isinstance(value, bool):
-        raise ValueError("max_concurrency must be an integer >= 1")
-    try:
-        parsed = int(value)
-    except (TypeError, ValueError) as exc:
-        raise ValueError("max_concurrency must be an integer >= 1") from exc
-    if str(value).strip() != str(parsed):
-        raise ValueError("max_concurrency must be an integer >= 1")
-    if parsed < 1 or parsed > IMPLEMENTATION_MAX_CONCURRENCY:
-        raise ValueError(
-            f"max_concurrency must be between 1 and {IMPLEMENTATION_MAX_CONCURRENCY}"
-        )
-    return parsed
+    """Thin delegate to ``supervisor_db._validate_max_concurrency``."""
+    return _db_mod._validate_max_concurrency(value)
 
 
 def _apply_data_migrations(conn: sqlite3.Connection) -> None:
@@ -2817,31 +2770,8 @@ def _logical_job_row(
     canonical_repo: Path,
     run_id: str,
 ) -> tuple[sqlite3.Row | None, str | None]:
-    """Resolve one enrollment by exact path, else Git common-dir + run id.
-
-    Historical stored repo paths are never rewritten. Ambiguous logical
-    enrollments fail closed rather than guessing which row an operator meant.
-    """
-    requested = str(Path(canonical_repo).expanduser().resolve(strict=False))
-    exact = conn.execute(
-        "SELECT * FROM jobs WHERE repo=? AND run_id=?", (requested, run_id)
-    ).fetchone()
-    if exact is not None:
-        return exact, None
-    key, proven = _repository_scheduling_identity(Path(requested))
-    if not proven:
-        return None, "repository_identity_unproven"
-    rows = conn.execute(
-        """SELECT * FROM jobs
-             WHERE repository_scheduling_key=? AND run_id=?
-             ORDER BY id""",
-        (key, run_id),
-    ).fetchall()
-    if len(rows) == 1:
-        return rows[0], None
-    if len(rows) > 1:
-        return None, "logical_job_ambiguous"
-    return None, "not_enqueued"
+    """Thin delegate to ``supervisor_db._logical_job_row``."""
+    return _db_mod._logical_job_row(conn, canonical_repo, run_id)
 
 def status(
     *,

@@ -62,6 +62,8 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
+from . import supervisor_identity as _identity_mod
+
 
 # Schema identity + persistence constants.  These are the
 # canonical owners; ``supervisor.py`` re-exports them so existing
@@ -446,3 +448,84 @@ def _managed_connect_readonly(path: Path) -> Iterator[sqlite3.Connection]:
         yield conn
     finally:
         conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Lookup helpers.
+#
+# The lookup helpers below depend on supervisor_identity for the
+# repository-scheduling key derivation.  They live in this module
+# because they execute SQL against the durable ledger; the identity
+# derivation is a parameter to the lookup, not a policy decision
+# made by the DB owner.
+# ---------------------------------------------------------------------------
+
+def _logical_job_row(
+    conn: sqlite3.Connection,
+    canonical_repo: Path,
+    run_id: str,
+) -> tuple[Any, str | None]:
+    """Resolve one enrollment by exact path, else Git common-dir + run id.
+
+    Historical stored repo paths are never rewritten.  Ambiguous
+    logical enrollments fail closed rather than guessing which row
+    an operator meant.
+
+    This is a PERSISTENCE lookup: it joins on the durable
+    ``repository_scheduling_key`` column and returns either a row
+    or a typed ``reason`` string.  The repository-identity
+    derivation (Git common-dir vs. path fallback) is delegated to
+    ``supervisor_identity`` so this module stays policy-thin.
+    """
+    requested = str(Path(canonical_repo).expanduser().resolve(strict=False))
+    exact = conn.execute(
+        "SELECT * FROM jobs WHERE repo=? AND run_id=?", (requested, run_id)
+    ).fetchone()
+    if exact is not None:
+        return exact, None
+    key, proven = _identity_mod._repository_scheduling_identity(Path(requested))
+    if not proven:
+        return None, "repository_identity_unproven"
+    rows = conn.execute(
+        """SELECT * FROM jobs
+             WHERE repository_scheduling_key=? AND run_id=?
+             ORDER BY id""",
+        (key, run_id),
+    ).fetchall()
+    if len(rows) == 1:
+        return rows[0], None
+    if len(rows) > 1:
+        return None, "logical_job_ambiguous"
+    return None, "not_enqueued"
+
+
+# ---------------------------------------------------------------------------
+# Persisted config-value validation.
+# ---------------------------------------------------------------------------
+
+def _validate_max_concurrency(value: Any) -> int:
+    """Validate a ``max_concurrency`` persisted-config value.
+
+    The bounded ceiling is part of the durable supervisor-config
+    contract: an operator who sets a value above the
+    ``IMPLEMENTATION_MAX_CONCURRENCY`` ceiling is asking the
+    supervisor to schedule more concurrent runs than the
+    implementation can sustain, which would break the bounded
+    capacity invariant.
+
+    Mirrors the historical validation sequence (bool rejection,
+    integer parse, exact-string round-trip, range check).
+    """
+    if isinstance(value, bool):
+        raise ValueError("max_concurrency must be an integer >= 1")
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("max_concurrency must be an integer >= 1") from exc
+    if str(value).strip() != str(parsed):
+        raise ValueError("max_concurrency must be an integer >= 1")
+    if parsed < 1 or parsed > IMPLEMENTATION_MAX_CONCURRENCY:
+        raise ValueError(
+            f"max_concurrency must be between 1 and {IMPLEMENTATION_MAX_CONCURRENCY}"
+        )
+    return parsed

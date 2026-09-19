@@ -108,8 +108,7 @@ def dispatch_hold_status(
     hold_id: str | None = None,
     db_path: Path | None = None,
 ) -> dict[str, Any]:
-    from . import supervisor as _supervisor_mod
-    _logical_job_row = _supervisor_mod._logical_job_row
+    _logical_job_row = _db_mod._logical_job_row
     state_mod.validate_run_id(run_id)
     repo = str(Path(canonical_repo).resolve(strict=False))
     db = db_path or _db_mod.default_db_path()
@@ -151,8 +150,7 @@ def release_dispatch_hold(
     hold_id: str,
     db_path: Path | None = None,
 ) -> dict[str, Any]:
-    from . import supervisor as _supervisor_mod
-    _logical_job_row = _supervisor_mod._logical_job_row
+    _logical_job_row = _db_mod._logical_job_row
     state_mod.validate_run_id(run_id)
     repo = str(Path(canonical_repo).resolve(strict=False))
     db = db_path or _db_mod.default_db_path()
@@ -204,8 +202,7 @@ def cancel_dispatch_hold(
     hold_id: str,
     db_path: Path | None = None,
 ) -> dict[str, Any]:
-    from . import supervisor as _supervisor_mod
-    _logical_job_row = _supervisor_mod._logical_job_row
+    _logical_job_row = _db_mod._logical_job_row
     state_mod.validate_run_id(run_id)
     repo = str(Path(canonical_repo).resolve(strict=False))
     db = db_path or _db_mod.default_db_path()
