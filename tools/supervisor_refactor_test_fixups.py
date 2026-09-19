@@ -7,7 +7,7 @@ text = path.read_text(encoding="utf-8")
 old_import = "from ownframework_loop import dispatch, guards, supervisor, worktrees\n"
 new_import = (
     "from ownframework_loop import dispatch, guards, supervisor, "
-    "supervisor_accounting, supervisor_identity, worktrees\n"
+    "supervisor_accounting, supervisor_claims, supervisor_identity, worktrees\n"
 )
 if old_import not in text:
     raise RuntimeError("v090 import surface drifted")
@@ -36,11 +36,13 @@ for old, new in {
 
 
 def migrate_enrollment_identity_patch(lambda_expr: str) -> None:
-    """Move one claims/enrollment identity substitution to its canonical owner.
+    """Move one claims/enrollment identity substitution to its exact owner seam.
 
-    The third identity patch in v090 intentionally probes `_apply_data_migrations`,
-    which remains a supervisor.py cross-domain coordinator.  Do not rewrite that
-    one: it is a valid facade-level test, unlike the two claims/enrollment probes.
+    ``enqueue`` is canonically owned by supervisor_claims and consumes identity
+    through that module's ``_identity_mod`` dependency.  Patch that exact seam
+    rather than the composition facade.  The third identity patch in v090
+    intentionally probes ``_apply_data_migrations``, which remains a
+    supervisor.py cross-domain coordinator, so that one stays on the facade.
     """
     global text
     prefix = (
@@ -48,8 +50,9 @@ def migrate_enrollment_identity_patch(lambda_expr: str) -> None:
         f"supervisor._repository_scheduling_identity = {lambda_expr}\n"
     )
     replacement = (
-        "orig_identity = supervisor_identity._repository_scheduling_identity\n"
-        f"supervisor_identity._repository_scheduling_identity = {lambda_expr}\n"
+        "orig_identity = supervisor_claims._identity_mod._repository_scheduling_identity\n"
+        f"supervisor_claims._identity_mod._repository_scheduling_identity = {lambda_expr}\n"
+        "assert supervisor_claims._identity_mod is supervisor_identity\n"
     )
     if text.count(prefix) != 1:
         raise RuntimeError(f"v090 expected exactly one enrollment identity patch: {lambda_expr}")
@@ -59,17 +62,18 @@ def migrate_enrollment_identity_patch(lambda_expr: str) -> None:
     restore_pos = text.find(restore, start)
     if restore_pos < 0:
         raise RuntimeError(f"v090 restore missing after identity patch: {lambda_expr}")
-    text = text[:restore_pos] + "supervisor_identity._repository_scheduling_identity = orig_identity" + text[restore_pos + len(restore):]
+    replacement_restore = "supervisor_claims._identity_mod._repository_scheduling_identity = orig_identity"
+    text = text[:restore_pos] + replacement_restore + text[restore_pos + len(restore):]
 
 
 migrate_enrollment_identity_patch('lambda _p: ("unproven", False)')
 migrate_enrollment_identity_patch('lambda _p: ("synthetic-drift-key", True)')
 
 # Guard the distinction above: two enrollment patches moved to the canonical
-# identity owner, while exactly one migration-coordinator patch remains on the
-# supervisor facade.
-if text.count("orig_identity = supervisor_identity._repository_scheduling_identity") != 2:
-    raise RuntimeError("v090 canonical identity patch count drifted")
+# claims->identity seam, while exactly one migration-coordinator patch remains
+# on the supervisor facade.
+if text.count("orig_identity = supervisor_claims._identity_mod._repository_scheduling_identity") != 2:
+    raise RuntimeError("v090 claims identity patch count drifted")
 if text.count("orig_identity = supervisor._repository_scheduling_identity") != 1:
     raise RuntimeError("v090 migration facade identity probe disappeared or multiplied")
 
