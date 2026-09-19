@@ -52,8 +52,9 @@ from . import (
     runtime_identity,
 )
 from .locking import flock_exclusive
+from . import supervisor_db as _db_mod
 
-SCHEMA = "ownframework-loop-supervisor/v1"
+SCHEMA = _db_mod.SCHEMA
 DISPATCH_HOLD_KIND = "PROGRAM_CHECKPOINT_BOUNDARY"
 DISPATCH_HOLD_STATES = frozenset({"ARMED", "HELD", "RELEASED", "CANCELLED"})
 # Per-pass runaway fuse fallback. A semantic worker that neither declared a
@@ -79,7 +80,12 @@ CLAUDE_REVIEWER_TOOLS = "Read,Bash,Glob,Grep"
 # this optimization.
 _LOCAL_EXECUTION_LOCK = threading.Lock()
 _LOCAL_EXECUTION_JOBS: dict[int, set[int]] = {}
-_LOCAL_CONNECTION_DEPTH: dict[int, int] = {}
+# _LOCAL_CONNECTION_DEPTH is owned by supervisor_db (the canonical
+# persistence owner).  We additionally keep a parallel depth counter here
+# so the supervisor can clear _LOCAL_EXECUTION_JOBS on depth=0 — the
+# previous design coupled connection lifecycle to execution-job lifecycle
+# for the per-thread connection ownership check.
+_LOCAL_CONNECTION_DEPTH_SUPERVISOR: dict[int, int] = {}
 _SUPERVISOR_LIFECYCLE_LOCK_NAME = "SUPERVISOR_LIFECYCLE.lock"
 
 
@@ -150,22 +156,22 @@ def _private_mode(path: Path) -> int:
 
 
 def _ensure_private_dir(path: Path) -> Path:
-    """Create/repair a supervisor-owned private directory (0700 on POSIX)."""
-    p = Path(path).expanduser().resolve(strict=False)
-    p.mkdir(parents=True, exist_ok=True, mode=0o700)
-    try:
-        os.chmod(p, 0o700)
-    except OSError:
-        pass
-    return p
+    """Create/repair a supervisor-owned private directory (0700 on POSIX).
+
+    Thin delegate to ``supervisor_db._ensure_private_dir``.  Kept as
+    a module-local symbol so existing callers do not need an import
+    rewrite; the canonical owner is ``supervisor_db``.
+    """
+    return _db_mod._ensure_private_dir(path)
 
 
 def _ensure_private_file_mode(path: Path) -> None:
-    """Force a supervisor-owned file to 0600 where POSIX modes are available."""
-    try:
-        os.chmod(path, 0o600)
-    except OSError:
-        pass
+    """Force a supervisor-owned file to 0600 where POSIX modes are available.
+
+    Thin delegate to ``supervisor_db._ensure_private_file_mode``.
+    Canonical owner is ``supervisor_db``.
+    """
+    _db_mod._ensure_private_file_mode(path)
 
 
 def _load_service_env_file() -> list[str]:
@@ -555,9 +561,8 @@ _current_runtime_generation = runtime_generation
 
 
 def default_db_path() -> Path:
-    root = os.environ.get("XDG_STATE_HOME", "").strip()
-    base = Path(root).expanduser() if root else Path.home() / ".local" / "state"
-    return base / "ownframework-loop" / "supervisor.sqlite3"
+    """Thin delegate to ``supervisor_db.default_db_path`` (canonical owner)."""
+    return _db_mod.default_db_path()
 
 
 def default_worker_log_dir() -> Path:
@@ -756,11 +761,14 @@ def worker_log_paths(
 # Historical rows may carry the old $25 / unlimited-token / 8h fingerprint,
 # but that tuple is indistinguishable from an operator explicitly selecting it.
 # Preserve it and mark ambiguity rather than inventing intent.
-SCHEMA_DATA_VERSION = 7
-_LEGACY_BUDGET_DEFAULT_FINGERPRINT = (25.0, 0, 28800)
-DEFAULT_MAX_CONCURRENCY = 1
-IMPLEMENTATION_MAX_CONCURRENCY = 64
-_CONFIG_MAX_CONCURRENCY = "max_concurrency"
+# Canonical owners are in ``supervisor_db``; the names below are re-bindings
+# so existing callers (96 internal SCHEMA references + 4 external
+# default_db_path callers + many more) keep the same identifier.
+SCHEMA_DATA_VERSION = _db_mod.SCHEMA_DATA_VERSION
+DEFAULT_MAX_CONCURRENCY = _db_mod.DEFAULT_MAX_CONCURRENCY
+IMPLEMENTATION_MAX_CONCURRENCY = _db_mod.IMPLEMENTATION_MAX_CONCURRENCY
+_CONFIG_MAX_CONCURRENCY = _db_mod._CONFIG_MAX_CONCURRENCY
+_LEGACY_BUDGET_DEFAULT_FINGERPRINT = _db_mod._LEGACY_BUDGET_DEFAULT_FINGERPRINT
 _CONTINUATION_SCHEMA = "ownframework-loop-program-continuation/v1"
 _PROGRAM_READY_STATE = next(
     value for value in transitions.STATES
@@ -1318,284 +1326,66 @@ def _apply_data_migrations(conn: sqlite3.Connection) -> None:
         conn.commit()
 
 def _connect(path: Path) -> sqlite3.Connection:
-    path = Path(path).expanduser().resolve(strict=False)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    managed_state_root = default_db_path().parent.expanduser().resolve(strict=False)
-    if path.parent == managed_state_root:
-        _ensure_private_dir(path.parent)
-    conn = sqlite3.connect(path, timeout=30)
-    _ensure_private_file_mode(path)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA synchronous=FULL")
-    conn.executescript(
-        """
-        CREATE TABLE IF NOT EXISTS jobs (
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          repo TEXT NOT NULL,
-          run_id TEXT NOT NULL,
-          runner TEXT NOT NULL DEFAULT 'claude-code',
-          status TEXT NOT NULL DEFAULT 'QUEUED',
-          infra_failures INTEGER NOT NULL DEFAULT 0,
-          max_infra_failures INTEGER NOT NULL DEFAULT 3,
-          transient_failures INTEGER NOT NULL DEFAULT 0,
-          max_transient_failures INTEGER NOT NULL DEFAULT 8,
-          transient_recovery_cycles INTEGER NOT NULL DEFAULT 0,
-          max_transient_recovery_cycles INTEGER NOT NULL DEFAULT 2,
-          total_cost_usd REAL NOT NULL DEFAULT 0,
-          total_input_tokens INTEGER NOT NULL DEFAULT 0,
-          total_output_tokens INTEGER NOT NULL DEFAULT 0,
-          total_cache_read_tokens INTEGER NOT NULL DEFAULT 0,
-          total_cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
-          last_error TEXT,
-          last_failure_class TEXT,
-          last_failure_reason TEXT,
-          next_attempt_at REAL NOT NULL DEFAULT 0,
-          created_at REAL NOT NULL,
-          updated_at REAL NOT NULL,
-          worker_pid INTEGER,
-          worker_started_at REAL,
-          worker_pgid INTEGER,
-          worker_deadline_at REAL,
-          worker_start_identity TEXT,
-          worker_role TEXT,
-          max_total_cost_usd REAL NOT NULL DEFAULT 0,
-          max_total_tokens INTEGER NOT NULL DEFAULT 0,
-          max_wall_seconds INTEGER NOT NULL DEFAULT 0,
-          execution_started_at REAL,
-          worker_stdout_path TEXT,
-          worker_stderr_path TEXT,
-          runtime_generation TEXT NOT NULL DEFAULT '',
-          legacy_budget_ambiguous INTEGER NOT NULL DEFAULT 0,
-          repository_scheduling_key TEXT NOT NULL DEFAULT '',
-          repository_identity_proven INTEGER NOT NULL DEFAULT 0,
-          candidate_branch TEXT NOT NULL DEFAULT '',
-          workspace_scheduling_key TEXT NOT NULL DEFAULT '',
-          workspace_identity_proven INTEGER NOT NULL DEFAULT 0,
-          execution_mode TEXT NOT NULL DEFAULT 'SINGLE',
-          dispatch_count INTEGER NOT NULL DEFAULT 0,
-          last_dispatch_sequence INTEGER NOT NULL DEFAULT 0,
-          UNIQUE(repo, run_id)
-        );
-        CREATE TABLE IF NOT EXISTS cost_attempts (
-          job_id INTEGER NOT NULL,
-          attempt_digest TEXT NOT NULL,
-          cost_usd REAL NOT NULL,
-          recorded_at REAL NOT NULL,
-          PRIMARY KEY (job_id, attempt_digest)
-        );
-        CREATE TABLE IF NOT EXISTS semantic_attempts (
-          attempt_id TEXT PRIMARY KEY,
-          job_id INTEGER NOT NULL,
-          role TEXT NOT NULL,
-          status TEXT NOT NULL,
-          started_at REAL NOT NULL,
-          completed_at REAL,
-          worker_pid INTEGER,
-          worker_pgid INTEGER,
-          deadline_at REAL,
-          worker_start_identity TEXT,
-          stdout_path TEXT NOT NULL,
-          stderr_path TEXT NOT NULL,
-          returncode INTEGER,
-          cost_usd REAL NOT NULL DEFAULT 0,
-          cost_accounted INTEGER NOT NULL DEFAULT 0,
-          semantic_accepted INTEGER NOT NULL DEFAULT 0,
-          cost_known INTEGER NOT NULL DEFAULT 1,
-          launch_gate_version INTEGER NOT NULL DEFAULT 0,
-          input_tokens INTEGER NOT NULL DEFAULT 0,
-          output_tokens INTEGER NOT NULL DEFAULT 0,
-          cache_read_tokens INTEGER NOT NULL DEFAULT 0,
-          cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
-          tokens_known INTEGER NOT NULL DEFAULT 0,
-          failure_class TEXT,
-          failure_reason TEXT,
-          effective_model TEXT NOT NULL DEFAULT '',
-          model_usage_json TEXT NOT NULL DEFAULT ''
-        );
-        CREATE INDEX IF NOT EXISTS semantic_attempts_job_idx
-          ON semantic_attempts(job_id, started_at);
-        CREATE TABLE IF NOT EXISTS dispatch_holds (
-          hold_id TEXT PRIMARY KEY,
-          job_id INTEGER NOT NULL UNIQUE,
-          repo TEXT NOT NULL,
-          run_id TEXT NOT NULL,
-          kind TEXT NOT NULL,
-          previous_checkpoint_id TEXT NOT NULL,
-          next_checkpoint_id TEXT NOT NULL,
-          state TEXT NOT NULL,
-          armed_at REAL NOT NULL,
-          held_at REAL,
-          released_at REAL,
-          cancelled_at REAL,
-          last_error TEXT,
-          updated_at REAL NOT NULL,
-          UNIQUE(repo, run_id, kind)
-        );
-        CREATE INDEX IF NOT EXISTS dispatch_holds_state_idx
-          ON dispatch_holds(state, updated_at);
-        CREATE TABLE IF NOT EXISTS supervisor_config (
-          key TEXT PRIMARY KEY,
-          value TEXT NOT NULL,
-          updated_at REAL NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS scheduler_meta (
-          id INTEGER PRIMARY KEY CHECK (id=1),
-          dispatch_sequence INTEGER NOT NULL DEFAULT 0,
-          single_since_program INTEGER NOT NULL DEFAULT 0,
-          updated_at REAL NOT NULL
-        );
-        """
-    )
-    columns = {
-        str(row["name"])
-        for row in conn.execute("PRAGMA table_info(jobs)").fetchall()
-    }
-    migrations = {
-        "worker_pid": "ALTER TABLE jobs ADD COLUMN worker_pid INTEGER",
-        "worker_started_at": "ALTER TABLE jobs ADD COLUMN worker_started_at REAL",
-        "worker_pgid": "ALTER TABLE jobs ADD COLUMN worker_pgid INTEGER",
-        "worker_deadline_at": "ALTER TABLE jobs ADD COLUMN worker_deadline_at REAL",
-        "worker_start_identity": "ALTER TABLE jobs ADD COLUMN worker_start_identity TEXT",
-        "worker_role": "ALTER TABLE jobs ADD COLUMN worker_role TEXT",
-        # New columns migrate DISABLED. Existing values are preserved;
-        # the ambiguous historical $25 / unlimited-token / 8-hour tuple is
-        # flagged, never silently rewritten.
-        "max_total_cost_usd": "ALTER TABLE jobs ADD COLUMN max_total_cost_usd REAL NOT NULL DEFAULT 0",
-        "max_wall_seconds": "ALTER TABLE jobs ADD COLUMN max_wall_seconds INTEGER NOT NULL DEFAULT 0",
-        "execution_started_at": "ALTER TABLE jobs ADD COLUMN execution_started_at REAL",
-        "worker_stdout_path": "ALTER TABLE jobs ADD COLUMN worker_stdout_path TEXT",
-        "worker_stderr_path": "ALTER TABLE jobs ADD COLUMN worker_stderr_path TEXT",
-        "worker_attempt_id": "ALTER TABLE jobs ADD COLUMN worker_attempt_id TEXT",
-        "latest_attempt_id": "ALTER TABLE jobs ADD COLUMN latest_attempt_id TEXT",
-        "transient_failures": "ALTER TABLE jobs ADD COLUMN transient_failures INTEGER NOT NULL DEFAULT 0",
-        "max_transient_failures": "ALTER TABLE jobs ADD COLUMN max_transient_failures INTEGER NOT NULL DEFAULT 8",
-        "transient_recovery_cycles": "ALTER TABLE jobs ADD COLUMN transient_recovery_cycles INTEGER NOT NULL DEFAULT 0",
-        "max_transient_recovery_cycles": "ALTER TABLE jobs ADD COLUMN max_transient_recovery_cycles INTEGER NOT NULL DEFAULT 2",
-        "total_input_tokens": "ALTER TABLE jobs ADD COLUMN total_input_tokens INTEGER NOT NULL DEFAULT 0",
-        "total_output_tokens": "ALTER TABLE jobs ADD COLUMN total_output_tokens INTEGER NOT NULL DEFAULT 0",
-        "total_cache_read_tokens": "ALTER TABLE jobs ADD COLUMN total_cache_read_tokens INTEGER NOT NULL DEFAULT 0",
-        "total_cache_creation_tokens": "ALTER TABLE jobs ADD COLUMN total_cache_creation_tokens INTEGER NOT NULL DEFAULT 0",
-        "max_total_tokens": "ALTER TABLE jobs ADD COLUMN max_total_tokens INTEGER NOT NULL DEFAULT 0",
-        "last_failure_class": "ALTER TABLE jobs ADD COLUMN last_failure_class TEXT",
-        "last_failure_reason": "ALTER TABLE jobs ADD COLUMN last_failure_reason TEXT",
-        "runtime_generation": "ALTER TABLE jobs ADD COLUMN runtime_generation TEXT NOT NULL DEFAULT ''",
-        "legacy_budget_ambiguous": "ALTER TABLE jobs ADD COLUMN legacy_budget_ambiguous INTEGER NOT NULL DEFAULT 0",
-        "repository_scheduling_key": "ALTER TABLE jobs ADD COLUMN repository_scheduling_key TEXT NOT NULL DEFAULT ''",
-        "repository_identity_proven": "ALTER TABLE jobs ADD COLUMN repository_identity_proven INTEGER NOT NULL DEFAULT 0",
-        "candidate_branch": "ALTER TABLE jobs ADD COLUMN candidate_branch TEXT NOT NULL DEFAULT ''",
-        "workspace_scheduling_key": "ALTER TABLE jobs ADD COLUMN workspace_scheduling_key TEXT NOT NULL DEFAULT ''",
-        "workspace_identity_proven": "ALTER TABLE jobs ADD COLUMN workspace_identity_proven INTEGER NOT NULL DEFAULT 0",
-        "execution_mode": "ALTER TABLE jobs ADD COLUMN execution_mode TEXT NOT NULL DEFAULT 'SINGLE'",
-        "dispatch_count": "ALTER TABLE jobs ADD COLUMN dispatch_count INTEGER NOT NULL DEFAULT 0",
-        "last_dispatch_sequence": "ALTER TABLE jobs ADD COLUMN last_dispatch_sequence INTEGER NOT NULL DEFAULT 0",
-    }
-    for name, statement in migrations.items():
-        if name not in columns:
-            conn.execute(statement)
-    _apply_data_migrations(conn)
+    """Thin delegate to ``supervisor_db._connect``.
 
-    attempt_columns = {
-        str(row["name"])
-        for row in conn.execute("PRAGMA table_info(semantic_attempts)").fetchall()
-    }
-    attempt_migrations = {
-        "worker_pgid": "ALTER TABLE semantic_attempts ADD COLUMN worker_pgid INTEGER",
-        "deadline_at": "ALTER TABLE semantic_attempts ADD COLUMN deadline_at REAL",
-        "worker_start_identity": "ALTER TABLE semantic_attempts ADD COLUMN worker_start_identity TEXT",
-        "cost_known": "ALTER TABLE semantic_attempts ADD COLUMN cost_known INTEGER NOT NULL DEFAULT 1",
-        # Historical attempts are intentionally NOT backfilled. Absence of a
-        # durable acceptance publication is ambiguous across a crash and must
-        # therefore remain replay-ineligible.
-        "semantic_accepted": "ALTER TABLE semantic_attempts ADD COLUMN semantic_accepted INTEGER NOT NULL DEFAULT 0",
-        "launch_gate_version": "ALTER TABLE semantic_attempts ADD COLUMN launch_gate_version INTEGER NOT NULL DEFAULT 0",
-        "input_tokens": "ALTER TABLE semantic_attempts ADD COLUMN input_tokens INTEGER NOT NULL DEFAULT 0",
-        "output_tokens": "ALTER TABLE semantic_attempts ADD COLUMN output_tokens INTEGER NOT NULL DEFAULT 0",
-        "cache_read_tokens": "ALTER TABLE semantic_attempts ADD COLUMN cache_read_tokens INTEGER NOT NULL DEFAULT 0",
-        "cache_creation_tokens": "ALTER TABLE semantic_attempts ADD COLUMN cache_creation_tokens INTEGER NOT NULL DEFAULT 0",
-        "tokens_known": "ALTER TABLE semantic_attempts ADD COLUMN tokens_known INTEGER NOT NULL DEFAULT 0",
-        "failure_class": "ALTER TABLE semantic_attempts ADD COLUMN failure_class TEXT",
-        "failure_reason": "ALTER TABLE semantic_attempts ADD COLUMN failure_reason TEXT",
-        "effective_model": "ALTER TABLE semantic_attempts ADD COLUMN effective_model TEXT NOT NULL DEFAULT ''",
-        "model_usage_json": "ALTER TABLE semantic_attempts ADD COLUMN model_usage_json TEXT NOT NULL DEFAULT ''",
-        # v0.9.1 terminal closure: acceptance must bind the exact semantic
-        # artifact digest and the exact role-specific finalization identity
-        # captured at acceptance publication. Historical rows with
-        # semantic_accepted=1 but no captured identity are ambiguous across a
-        # crash and therefore remain replay-ineligible; the new gate refuses
-        # them. Going forward the supervisor captures these fields at the
-        # moment of acceptance and refuses replay if either identity drifts.
-        "accepted_semantic_sha256": "ALTER TABLE semantic_attempts ADD COLUMN accepted_semantic_sha256 TEXT NOT NULL DEFAULT ''",
-        "accepted_candidate_sha": "ALTER TABLE semantic_attempts ADD COLUMN accepted_candidate_sha TEXT NOT NULL DEFAULT ''",
-        "accepted_at": "ALTER TABLE semantic_attempts ADD COLUMN accepted_at REAL NOT NULL DEFAULT 0",
-    }
-    cost_known_added = "cost_known" not in attempt_columns
-    for name, statement in attempt_migrations.items():
-        if name not in attempt_columns:
-            conn.execute(statement)
-    # Rows written before cost_known existed used COST_UNKNOWN itself as the
-    # uncertainty marker. Backfill exactly once when the column is introduced;
-    # ordinary connections must not rewrite historical rows.
-    if cost_known_added:
-        conn.execute(
-            "UPDATE semantic_attempts SET cost_known=0 WHERE status='COST_UNKNOWN'"
-        )
-    now = time.time()
-    conn.execute(
-        "INSERT OR IGNORE INTO supervisor_config(key, value, updated_at) VALUES (?, ?, ?)",
-        (_CONFIG_MAX_CONCURRENCY, str(DEFAULT_MAX_CONCURRENCY), now),
-    )
-    conn.execute(
-        "INSERT OR IGNORE INTO scheduler_meta(id, dispatch_sequence, single_since_program, updated_at) VALUES (1, 0, 0, ?)",
-        (now,),
-    )
-    conn.commit()
-    return conn
+    The canonical connection bootstrap (file-mode protection,
+    schema CREATE TABLE statements, column migrations, config-row
+    priming, ``PRAGMA journal_mode=WAL`` /
+    ``PRAGMA synchronous=FULL``) lives in ``supervisor_db``.  This
+    delegate wires the supervisor-owned data-migration callable
+    (``_apply_data_migrations``) through the explicit
+    ``data_migrations`` seam so the DB owner never imports this
+    module.
+    """
+    return _db_mod._connect(path, data_migrations=_apply_data_migrations)
+
 
 
 @contextmanager
 def _managed_connect(path: Path):
-    """Commit/rollback through sqlite's context protocol, then close it.
+    """Thin delegate to ``supervisor_db._managed_connect``.
 
-    ``sqlite3.Connection`` implements transaction context management but does
-    not close itself on ``__exit__``. This distinction becomes a descriptor
-    leak when multiple execution lanes repeatedly open their own connections.
+    The context-manager wrapper (commit/rollback + close +
+    per-thread depth tracking) lives in ``supervisor_db``.  This
+    delegate threads the supervisor-owned data-migration callable
+    through the same ``data_migrations`` seam as ``_connect`` so
+    the two stay in lockstep.  It also keeps a parallel
+    per-thread depth counter so that when the DB-level depth
+    returns to zero the supervisor can clear its own
+    ``_LOCAL_EXECUTION_JOBS`` for the thread — this preserves
+    the historical coupling between connection lifecycle and
+    per-thread execution ownership.
     """
-    conn = _connect(path)
     tid = threading.get_ident()
     with _LOCAL_EXECUTION_LOCK:
-        _LOCAL_CONNECTION_DEPTH[tid] = _LOCAL_CONNECTION_DEPTH.get(tid, 0) + 1
+        _LOCAL_CONNECTION_DEPTH_SUPERVISOR[tid] = (
+            _LOCAL_CONNECTION_DEPTH_SUPERVISOR.get(tid, 0) + 1
+        )
     try:
-        with conn:
+        with _db_mod._managed_connect(
+            path, data_migrations=_apply_data_migrations
+        ) as conn:
             yield conn
     finally:
-        conn.close()
         with _LOCAL_EXECUTION_LOCK:
-            remaining = _LOCAL_CONNECTION_DEPTH.get(tid, 1) - 1
+            remaining = _LOCAL_CONNECTION_DEPTH_SUPERVISOR.get(tid, 1) - 1
             if remaining <= 0:
-                _LOCAL_CONNECTION_DEPTH.pop(tid, None)
+                _LOCAL_CONNECTION_DEPTH_SUPERVISOR.pop(tid, None)
                 _LOCAL_EXECUTION_JOBS.pop(tid, None)
             else:
-                _LOCAL_CONNECTION_DEPTH[tid] = remaining
+                _LOCAL_CONNECTION_DEPTH_SUPERVISOR[tid] = remaining
 
 
 def _connect_readonly(path: Path) -> sqlite3.Connection:
-    """Open an existing supervisor ledger without schema/data mutation."""
-    p = Path(path).expanduser().resolve(strict=False)
-    if not p.is_file():
-        raise FileNotFoundError(str(p))
-    conn = sqlite3.connect(f"file:{p}?mode=ro", uri=True, timeout=5)
-    conn.row_factory = sqlite3.Row
-    return conn
+    """Thin delegate to ``supervisor_db._connect_readonly``."""
+    return _db_mod._connect_readonly(path)
 
 
 @contextmanager
 def _managed_connect_readonly(path: Path):
-    conn = _connect_readonly(path)
-    try:
+    """Thin delegate to ``supervisor_db._managed_connect_readonly``."""
+    with _db_mod._managed_connect_readonly(path) as conn:
         yield conn
-    finally:
-        conn.close()
 
 
 def _pid_alive(pid: int | None, worker_started_at: float | None = None) -> bool:
