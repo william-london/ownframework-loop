@@ -4023,28 +4023,16 @@ def _terminate_group(proc: subprocess.Popen[str], grace_seconds: float = 3.0) ->
     proc.wait()
 
 
-@dataclass
-class RunnerResult:
-    ok: bool
-    returncode: int
-    cost_usd: float
-    stdout: str
-    stderr: str
-    pid: int | None = None
-    cost_known: bool = True
-    input_tokens: int = 0
-    output_tokens: int = 0
-    cache_read_tokens: int = 0
-    cache_creation_tokens: int = 0
-    tokens_known: bool = False
-    # The model the provider ACTUALLY billed/reported, when the envelope
-    # PROVES a singular model. This is the EFFECTIVE model and may differ from
-    # the profile's REQUESTED model (e.g. a substitution/downgrade); it is
-    # recorded so the two are never conflated. Empty when not provable.
-    effective_model: str = ""
-    # Canonical JSON of the FULL provider-reported modelUsage. Preserved even
-    # when a singular effective model is not provable (multi-model mixes).
-    model_usage_json: str = ""
+# RunnerResult / RunnerReadiness are owned by supervisor_runner_registry
+# so the runner contract lives in one place.  Import them now so
+# downstream code in this module uses the canonical classes, not a
+# duplicate.  Existing call sites that reference
+# ``supervisor.RunnerResult`` / ``supervisor.RunnerReadiness`` keep
+# working because the supervisor module re-exports the same class
+# objects via the post-import assignment below.
+from . import supervisor_runner_registry as _runner_registry_mod  # noqa: E402
+RunnerResult = _runner_registry_mod.RunnerResult
+RunnerReadiness = _runner_registry_mod.RunnerReadiness
 
 
 class ClaudeCodeRunner:
@@ -4633,59 +4621,35 @@ class ClaudeCodeRunner:
         )
 
 
-@dataclass(frozen=True)
-class RunnerReadiness:
-    ready: bool
-    classification: str = "ready"
-    reason: str = "ready"
-    detail: str = ""
-    retry_after_seconds: float = 30.0
-
-
-# Vendor-neutral runner registry. A new provider only needs to register a
-# subclass of SemanticRunner (or duck-typed class with runner_id + run()).
-# Adding a runner MUST NOT require any change to dispatch / supervisor FSM.
-_RUNNER_REGISTRY: dict[str, Any] = {}
+# Vendor-neutral runner registry.  The canonical implementation lives
+# in supervisor_runner_registry.py so the registry's authority is
+# explicit (this module owns the runner contract; this module also
+# owns ClaudeCodeRunner itself).  We re-export the registry
+# internals here so existing call sites within supervisor.py keep
+# working without an import-site rewrite.
+from . import supervisor_runner_registry as _runner_registry_mod
+_RUNNER_REGISTRY = _runner_registry_mod._RUNNER_REGISTRY
 
 
 def register_runner(cls: type) -> type:
-    rid = getattr(cls, "runner_id", None)
-    if not rid or not isinstance(rid, str):
-        raise RuntimeError(f"runner {cls!r} missing string runner_id")
-    _RUNNER_REGISTRY[rid] = cls()
-    return cls
-
-
-@register_runner
-class _RegisteredClaudeCodeRunner(ClaudeCodeRunner):
-    runner_id = "claude-code"
+    return _runner_registry_mod.register_runner(cls)
 
 
 def registered_runner_ids() -> tuple[str, ...]:
-    """Return the exact live supervisor runner IDs registered in this runtime."""
-    return tuple(sorted(_RUNNER_REGISTRY))
+    return _runner_registry_mod.registered_runner_ids()
 
 
 def _runner(name: str):
-    if name not in _RUNNER_REGISTRY:
-        raise RuntimeError(
-            f"runner {name!r} is not registered; live implementations: "
-            + ", ".join(registered_runner_ids())
-        )
-    return _RUNNER_REGISTRY[name]
+    return _runner_registry_mod.get_runner(name)
 
 
 def _runner_preflight(name: str) -> RunnerReadiness:
-    runner = _runner(name)
-    probe = getattr(runner, "preflight", None)
-    if probe is None:
-        return RunnerReadiness(True)
-    result = probe()
-    if isinstance(result, RunnerReadiness):
-        return result
-    raise RuntimeError(
-        f"runner {name!r} returned invalid preflight result: {type(result).__name__}"
-    )
+    return _runner_registry_mod.runner_preflight(name)
+
+
+@_runner_registry_mod.register_runner
+class _RegisteredClaudeCodeRunner(ClaudeCodeRunner):
+    runner_id = "claude-code"
 
 
 def _classify_runner_failure(result: RunnerResult) -> tuple[str, str]:
