@@ -7,6 +7,9 @@ on:
   push:
     branches:
       - 'hardening/**'
+  # GitHub-token pushes from Actions do not recursively start workflows.
+  # Generated hardening commits therefore need an explicit/manual or
+  # human-authored follow-up event before promotion so their exact SHA is proven.
   workflow_dispatch:
 permissions:
   contents: read

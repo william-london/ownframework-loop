@@ -32,12 +32,8 @@ What stays in ``supervisor.py``:
     relocate them.  They will move with the runner-execution
     owner when the runner class extraction lands.
 
-Dependency direction: this module imports from supervisor_db
-for the connection primitives, from supervisor_accounting
-for cost/token/model observation, and from supervisor via
-lazy function-scope imports for the process-ownership
-helpers (``_local_execution_owned``, ``_pid_alive``,
-``_terminate_owned_process_group``, ``_account_attempt_cost``).
+Dependency direction: this module imports the persistence, accounting,
+attempt, and process leaves directly. It never imports supervisor.py.
 """
 from __future__ import annotations
 
@@ -48,6 +44,8 @@ from typing import Any
 
 from . import supervisor_db as _db_mod
 from . import supervisor_accounting as _accounting_mod
+from . import supervisor_attempts as _attempts_mod
+from . import supervisor_process as _process_mod
 
 
 # Job columns that prove ownership of an in-flight RUNNING
@@ -78,23 +76,14 @@ def _recover_stale_running(conn: sqlite3.Connection) -> int:
     A concurrent recovery or legitimate reclaim therefore turns this stale
     decision into a no-op instead of clobbering the newer RUNNING owner.
     """
-    from . import supervisor as _supervisor_mod
-    _local_execution_owned = _supervisor_mod._local_execution_owned
-    _pid_alive = _supervisor_mod._pid_alive
-    _terminate_owned_process_group = _supervisor_mod._terminate_owned_process_group
-    _recovery_ownership_matches = _supervisor_mod._recovery_ownership_matches
-    # The accounting parsers are reached through the supervisor
-    # facade (NOT directly from supervisor_accounting) so that
-    # tests can monkey-patch ``supervisor._parse_*`` to inject
-    # deterministic parsers into the recovery sweep.  The
-    # facade is a thin delegate to supervisor_accounting; the
-    # monkey-patch attaches a different callable to that exact
-    # attribute and the recovery code observes it.
-    _parse_cost_from_durable_stdout = _supervisor_mod._parse_cost_from_durable_stdout
-    _parse_token_usage_from_durable_stdout = _supervisor_mod._parse_token_usage_from_durable_stdout
-    _extract_effective_model_from_durable_stdout = _supervisor_mod._extract_effective_model_from_durable_stdout
-    _extract_model_usage_json_from_durable_stdout = _supervisor_mod._extract_model_usage_json_from_durable_stdout
-    _account_attempt_cost = _supervisor_mod._account_attempt_cost
+    _local_execution_owned = _process_mod._local_execution_owned
+    _pid_alive = _process_mod._pid_alive
+    _terminate_owned_process_group = _process_mod._terminate_owned_process_group
+    _parse_cost_from_durable_stdout = _accounting_mod.parse_cost_from_durable_stdout
+    _parse_token_usage_from_durable_stdout = _accounting_mod.parse_token_usage_from_durable_stdout
+    _extract_effective_model_from_durable_stdout = _accounting_mod.extract_effective_model_from_durable_stdout
+    _extract_model_usage_json_from_durable_stdout = _accounting_mod.extract_model_usage_json_from_durable_stdout
+    _account_attempt_cost = _attempts_mod._account_attempt_cost
 
     recovered = 0
     rows = conn.execute(
@@ -374,3 +363,91 @@ __all__ = [
     "_recover_stale_running",
     "_recovery_ownership_matches",
 ]
+
+
+def _apply_failure_policy(
+    conn: sqlite3.Connection,
+    *,
+    job_id: int,
+    failure_class: str,
+    failure_reason: str,
+    detail: str,
+    total_cost_usd: float | None = None,
+) -> dict[str, Any]:
+    """Apply operational retry policy while leaving engineering state untouched."""
+    row = conn.execute("SELECT * FROM jobs WHERE id=?", (int(job_id),)).fetchone()
+    if row is None:
+        raise RuntimeError(f"supervisor job missing during failure policy: {job_id}")
+
+    immediate = failure_class in {
+        "configuration",
+        "invariant",
+        "usage_unknown",
+        "timeout_usage_unknown",
+        "usage_ceiling",
+    }
+    infra_failures = int(row["infra_failures"] or 0)
+    transient_failures = int(row["transient_failures"] or 0)
+    transient_recovery_cycles = int(row["transient_recovery_cycles"] or 0)
+
+    if failure_class == "transient":
+        transient_failures += 1
+        ceiling = int(row["max_transient_failures"] or 0)
+        max_cycles = int(row["max_transient_recovery_cycles"] or 0)
+        threshold_hit = ceiling > 0 and transient_failures >= ceiling
+        if threshold_hit and transient_recovery_cycles < max_cycles:
+            # Open a bounded provider circuit instead of requiring an operator
+            # resume. Cost/token/wall-clock ledgers are preserved and keep
+            # bounding the run; only the transient streak is cooled down.
+            transient_recovery_cycles += 1
+            transient_failures = 0
+            quarantined = False
+            backoff = 600.0
+        else:
+            quarantined = threshold_hit
+            streak = transient_failures
+            backoff = min(300.0, float(5 * (2 ** max(0, streak - 1))))
+    elif immediate:
+        # A hard non-transient refusal ends any active transient streak.
+        transient_failures = 0
+        quarantined = True
+        streak = 1
+        backoff = 0.0
+    else:
+        infra_failures += 1
+        ceiling = int(row["max_infra_failures"] or 0)
+        quarantined = ceiling > 0 and infra_failures >= ceiling
+        streak = infra_failures
+        backoff = min(300.0, float(5 * (2 ** max(0, streak - 1))))
+
+    status_value = "QUARANTINED" if quarantined else "BACKOFF"
+    next_attempt = 0.0 if quarantined else time.time() + backoff
+    _db_mod._update_job(
+        conn,
+        int(job_id),
+        status_value=status_value,
+        infra_failures=infra_failures,
+        transient_failures=transient_failures,
+        transient_recovery_cycles=transient_recovery_cycles,
+        total_cost_usd=total_cost_usd,
+        last_error=detail[-4000:],
+        last_failure_class=failure_class,
+        last_failure_reason=failure_reason,
+        next_attempt_at=next_attempt,
+    )
+    return {
+        "status": status_value,
+        "failure_class": failure_class,
+        "failure_reason": failure_reason,
+        "infra_failures": infra_failures,
+        "transient_failures": transient_failures,
+        "transient_recovery_cycles": transient_recovery_cycles,
+        "max_transient_recovery_cycles": int(row["max_transient_recovery_cycles"] or 0),
+        "circuit_opened": bool(
+            failure_class == "transient"
+            and not quarantined
+            and backoff == 600.0
+            and transient_failures == 0
+        ),
+        "backoff_seconds": 0.0 if quarantined else backoff,
+    }

@@ -177,18 +177,21 @@ def extract_effective_model(payload: dict[str, Any] | None) -> str:
 
 
 def extract_model_usage_json(payload: dict[str, Any] | None) -> str:
-    """Return the canonical JSON of the FULL provider-reported modelUsage.
+    """Return compact canonical JSON of the full provider-reported modelUsage.
 
-    Preserved even when a singular effective model is not provable
-    (multi-model mixes).  Empty string when no usage block exists.
+    This preserves the behavior of the historically effective supervisor
+    implementation: multi-model usage is retained intact and malformed values
+    fail closed to an empty string.
     """
     if not isinstance(payload, dict):
         return ""
     usage = payload.get("modelUsage")
-    if not usage:
+    if not isinstance(usage, dict) or not usage:
         return ""
     try:
-        return json.dumps(usage, indent=2, sort_keys=True)
+        return json.dumps(
+            usage, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+        )
     except (TypeError, ValueError):
         return ""
 
