@@ -148,30 +148,10 @@ find_upward(
     allowed_lazy=["_validate_max_concurrency"],
 )
 
-# The remaining supervisor_* modules are still scaffolding
-# re-export facades — they import supervisor.  Stage B will
-# flip them too.  supervisor_runner_registry is already
-# canonical-body-owned (e1 extraction) and does NOT import
-# supervisor.  supervisor_readmodel was flipped to canonical
-# body ownership in g2.  supervisor_recovery was flipped to
-# canonical body ownership in g3.  supervisor_attempts was
-# flipped to canonical body ownership in g4.
-for m in [
-    "supervisor_claims",
-]:
-    # These are STILL facades; they MUST import supervisor.
-    src = (LIB / f"{m}.py").read_text(encoding="utf-8")
-    assert "from .supervisor import" in src, (
-        f"{m}: expected to remain a re-export facade "
-        f"importing from supervisor (until Stage B)"
-    )
-# Canonical body owners — must NOT import supervisor at module
-# or function scope.  supervisor_recovery and supervisor_attempts
-# DO lazy-import supervisor at function scope for helper bridges
-# that keep test monkey-patches on supervisor._parse_* working
-# and for process-introspection / path-resolution helpers that
-# will move to the runner-execution authority; those are
-# documented exceptions.
+# All canonical body owners — must NOT import supervisor at
+# module or function scope EXCEPT for documented test-monkey-patch
+# bridges and runner-execution helper bridges (which are slated
+# for the next consolidation pass).
 for m in [
     "supervisor_runner_registry",
     "supervisor_readmodel",
@@ -211,6 +191,24 @@ find_upward(
         "_read_pid_start_identity",
     ],
 )
+# supervisor_claims: lazy imports of supervisor at function
+# scope are permitted for the documented test-monkey-patch
+# bridge — enrolled-run identity helpers (``_repository_scheduling_identity``
+# etc.) and runner-registry lookup (``registered_runner_ids``)
+# and runtime-generation (``_current_runtime_generation``) are
+# reached through the supervisor facade so test monkey-patches
+# on supervisor.X continue to apply.  These follow-up extractions
+# (identity owner, runner execution) move them off the facade.
+find_upward(
+    "supervisor_claims",
+    allowed_lazy=[
+        "_repository_scheduling_identity",
+        "_workspace_scheduling_identity",
+        "_packet_execution_mode",
+        "registered_runner_ids",
+        "_current_runtime_generation",
+    ],
+)
 print("  PASS: dependency-direction invariants hold for inverted modules")
 
 # Step 4: supervisor.py is a composition facade that imports
@@ -230,6 +228,7 @@ required_imports = {
     "supervisor_identity",
     "supervisor_recovery",
     "supervisor_attempts",
+    "supervisor_claims",
 }
 for m in required_imports:
     assert (
