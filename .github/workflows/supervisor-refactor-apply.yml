@@ -8,6 +8,7 @@ on:
       - .github/workflows/supervisor-refactor-apply.yml
       - tools/supervisor_refactor_once.py
       - tools/supervisor_refactor_fixups.py
+      - tools/supervisor_refactor_test_fixups.py
 
 permissions:
   contents: write
@@ -28,10 +29,12 @@ jobs:
         run: |
           python3 tools/supervisor_refactor_once.py
           python3 tools/supervisor_refactor_fixups.py
+          python3 tools/supervisor_refactor_test_fixups.py
       - name: Remove one-shot scaffolding
         run: |
           rm -f tools/supervisor_refactor_once.py
           rm -f tools/supervisor_refactor_fixups.py
+          rm -f tools/supervisor_refactor_test_fixups.py
           rm -f .github/workflows/supervisor-refactor-analysis.yml
           rm -f .github/workflows/supervisor-refactor-apply.yml
       - name: Refactor invariants
@@ -41,18 +44,31 @@ jobs:
           bash tests/integration/test_v10c_supervisor_dependency_direction.sh
           python3 - <<'PY'
           import ast
+          from collections import Counter
           from pathlib import Path
+
           root = Path('lib/ownframework_loop')
           sup = root / 'supervisor.py'
           tree = ast.parse(sup.read_text())
           print('SUPERVISOR_LINES_FINAL_CANDIDATE=' + str(sum(1 for _ in sup.open())))
+
+          names = [
+              node.name for node in tree.body
+              if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+          ]
+          duplicates = {name: count for name, count in Counter(names).items() if count > 1}
+          if duplicates:
+              raise SystemExit(f'duplicate top-level supervisor definitions: {duplicates}')
+          print('SUPERVISOR_DUPLICATE_TOP_LEVEL_DEFS=0')
+
           print('SUPERVISOR_TOP_LEVEL_NON_WRAPPERS=')
           for node in tree.body:
               if isinstance(node, (ast.FunctionDef, ast.ClassDef)):
                   body = getattr(node, 'body', [])[:]
                   if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant) and isinstance(body[0].value.value, str):
                       body = body[1:]
-                  thin = isinstance(node, ast.FunctionDef) and len(body) == 1 and isinstance(body[0], (ast.Return, ast.Expr))
+                  semantic = [stmt for stmt in body if not isinstance(stmt, (ast.Import, ast.ImportFrom))]
+                  thin = isinstance(node, ast.FunctionDef) and len(semantic) == 1 and isinstance(semantic[0], (ast.Return, ast.Expr))
                   if not thin:
                       print(f'  {node.name}:{node.lineno}-{node.end_lineno}')
           PY
