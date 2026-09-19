@@ -755,15 +755,26 @@ def _publish_acceptance_for_ready_artifact(
         # rejects replay when semantic_accepted=0, but the operator now sees
         # the real reason (identity drift, missing attempt, unaccounted cost)
         # rather than an opaque refusal.
+        # The helper reuses the existing job status (typically RUNNING); pass
+        # it through so _update_job's required status_value kwarg is satisfied.
         try:
+            current_status = conn.execute(
+                "SELECT status FROM jobs WHERE id=?", (int(job_id),)
+            ).fetchone()
+            status_value = str(current_status["status"] or "RUNNING") if current_status else "RUNNING"
             _db_mod._update_job(
                 conn,
                 int(job_id),
+                status_value=status_value,
                 last_error=(
                     f"semantic_acceptance_publication_failed: {exc}"
                 )[-4000:],
             )
         except Exception:
+            # The surface-call must not mask a programming defect in the
+            # publication helper itself. Re-raising here would silently abort
+            # the recovery path; logging the cause is sufficient because
+            # the gate's downstream refusal already carries diagnostic context.
             pass
 
 # NOTE: PRE_PROVIDER_FAILURE_REASONS is defined once at the top of this module

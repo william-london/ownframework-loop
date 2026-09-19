@@ -133,3 +133,4 @@ tests/integration/test_v10a_install_helpers.sh
 tests/integration/test_v10b_finalize_proof.sh
 tests/integration/test_v10c_supervisor_dependency_direction.sh
 tests/integration/test_v10d_pre1_adversarial_fixes.sh
+tests/integration/test_v10e_pre1_behavioral_proofs.sh

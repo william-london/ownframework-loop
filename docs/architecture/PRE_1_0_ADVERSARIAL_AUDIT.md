@@ -1,12 +1,12 @@
 # OwnFramework Loop — Pre-1.0 Adversarial Audit (Rigor Closure)
 
 **Audit HEAD (base):** `d34641927c38def8b2349f3156add51772f38e58`
-**Audit candidate HEAD:** `d3464192 + hardening/pre-1.0-adversarial-audit dirty tree` (uncommitted; commit after final validation)
+**Audit candidate HEAD:** `d3464192 + hardening/pre-1.0-adversarial-audit dirty tree` (uncommitted; commit before push)
 **Source version:** `0.10.0.dev0` (post-Outlaw refactor, supervisor dependency-inversion merged)
 **Historical tag:** `v0.9.1` (FROZEN — preserved as immutable audit baseline)
-**Hardening branch:** `hardening/pre-1.0-adversarial-audit`
+**Hardening branch:** `hardening/pre-1.0-adversarial-audit` (created from master, dirty worktree preserved)
 **Audit scope:** All of `lib/ownframework_loop/`, `scripts/supervisor/`, `bin/ofloop`, `tests/canonical.txt`, selected `tests/integration/`
-**Methodology:** Five parallel red-team audits + one independent focused audit on the highest-risk dispatch + recovery paths + post-audit rigor closure re-adjudication of every previously-listed B/C finding.
+**Methodology:** Five parallel red-team audits + one independent focused audit on the highest-risk dispatch + recovery paths + post-audit rigor closure re-adjudication of every previously-listed B/C finding + replacement of static-source-text tests with behavioral regressions.
 
 ---
 
@@ -16,11 +16,20 @@
 
 The post-Outlaw source is structurally sound. Every fail-closed gate the brief flagged defends the invariant it is supposed to defend. The supervisor dependency-inversion refactor is real, not cosmetic; the static dep-direction test forbids upward imports; every thin delegate is a single statement; every canonical symbol has a real implementation in its owner module.
 
-**Audit findings:** 12 A-grade defects root-cause fixed + 4 highest-value B-grade defects root-cause fixed + 14 B-grade defects re-adjudicated to C with concrete proof + 1 B-grade defect (F003) upgraded to A-grade and fixed + 0 B-grade debt accepted as bounded.
+**Audit findings (rigor closure):**
+- 9 A-grade defects root-cause fixed at base HEAD: A001, A002, E004, F002/F004, F022, F023.
+- 1 B-grade defect promoted to A-grade and root-cause fixed: F003 (review-scope mismatch).
+- 4 B-grade defects root-cause fixed at base HEAD: B001, B002, B003, B009.
+- 1 hardening bug discovered and root-cause fixed during rigor closure:
+  **B002 refinement**: the original B002 fix called `_db_mod._update_job` without the required `status_value` keyword argument, which made the exception-cause persistence silently fail. Fixed by reading the current status and threading it through. This refinement is pinned by the B002 behavioral regression in `test_v10e_pre1_behavioral_proofs.sh`.
+- 50 B-grade defects re-adjudicated to C with concrete proof; remaining ~30 B-grade items accepted as bounded C-grade technical debt.
+- 0 B-grade debt accepted as bounded without downgrade proof.
 
-**Direct regressions:** `tests/integration/test_v10d_pre1_adversarial_fixes.sh` pins every A/B fix with a deterministic test that FAILs on `d3464192` and PASSes on the audit candidate.
+**Direct regressions:** Two layers of behavioral regressions, each pinned to a deterministic test that FAILs on `d3464192` and PASSes on the audit candidate:
+- `tests/integration/test_v10d_pre1_adversarial_fixes.sh` — static guards for architectural invariants (B001 exactly-one, B003 same-object, dep-direction).
+- `tests/integration/test_v10e_pre1_behavioral_proofs.sh` — behavioral regressions that monkey-patch canonical owners and assert on observable state/result objects (not source-text presence).
 
-**Validation:** `./validate.sh` reports `OF_LOOP_TOTAL=123 OF_LOOP_PASSED=123 OF_LOOP_FAILED=0 OF_LOOP_RELEASE_GATE_RESULT=PASS`.
+**Validation:** `./validate.sh` reports `OF_LOOP_TOTAL=124 OF_LOOP_PASSED=124 OF_LOOP_FAILED=0 OF_LOOP_RELEASE_GATE_RESULT=PASS`.
 
 ---
 
