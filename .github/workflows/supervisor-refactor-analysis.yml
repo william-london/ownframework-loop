@@ -1,0 +1,77 @@
+name: Supervisor refactor analysis
+
+on:
+  push:
+    branches:
+      - hardening/supervisor-core-finalize
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Inventory supervisor ownership and upward imports
+        run: |
+          python3 - <<'PY'
+          import ast
+          from pathlib import Path
+
+          root = Path('lib/ownframework_loop')
+          path = root / 'supervisor.py'
+          text = path.read_text()
+          tree = ast.parse(text)
+
+          print('=== TOP LEVEL DEFINITIONS ===')
+          for node in tree.body:
+              if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                  print(f'{node.lineno:4d}-{node.end_lineno:4d} {type(node).__name__:12s} {node.name}')
+
+          targets = {
+              '_load_service_env_file', '_claude_cli_version', '_validate_claude_extra_args',
+              '_parse_adapter_auth_read_paths', '_semantic_worker_settings', '_load_role_prompt',
+              '_write_semantic_prompt_provenance', '_pid_alive', '_read_pid_start_identity',
+              '_pid_identity_proven', '_read_pid_start_time', '_terminate_owned_process_group',
+              '_terminate_group', '_current_runtime_generation', 'worker_log_paths',
+              'ClaudeCodeRunner', '_RegisteredClaudeCodeRunner', '_classify_runner_failure',
+              '_classify_exception', '_apply_failure_policy', '_cleanup_runtime_cache',
+              '_cleanup_terminal_runtime_cache', '_apply_data_migrations'
+          }
+          print('\n=== TARGET GLOBAL NAME USE ===')
+          for node in tree.body:
+              if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and node.name in targets:
+                  loads = sorted({n.id for n in ast.walk(node) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)})
+                  print(f'[{node.name}] lines={node.lineno}-{node.end_lineno}')
+                  print('  ' + ' '.join(loads))
+
+          print('\n=== UPWARD IMPORTS INTO supervisor.py ===')
+          for mod in sorted(root.glob('supervisor_*.py')):
+              t = ast.parse(mod.read_text())
+              hits = []
+              for n in ast.walk(t):
+                  if isinstance(n, ast.ImportFrom):
+                      module = n.module or ''
+                      names = ','.join(a.name for a in n.names)
+                      if module == 'supervisor' or module.endswith('.supervisor') or (n.level and module == '' and 'supervisor' in names):
+                          hits.append((n.lineno, f'from {"." * n.level}{module} import {names}'))
+                  elif isinstance(n, ast.Import):
+                      for a in n.names:
+                          if a.name.endswith('.supervisor') or a.name == 'supervisor':
+                              hits.append((n.lineno, f'import {a.name}'))
+              if hits:
+                  print(mod.name)
+                  for line, stmt in hits:
+                      print(f'  {line}: {stmt}')
+
+          print('\n=== supervisor_* MODULES ===')
+          for mod in sorted(root.glob('supervisor_*.py')):
+              print(mod.name, sum(1 for _ in mod.open()))
+          PY
