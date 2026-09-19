@@ -85,8 +85,15 @@ _LEGACY_BUDGET_DEFAULT_FINGERPRINT = (25.0, 0, 28800)
 # avoid import-order surprises).  Tests that want a clean depth
 # map should use ``reset_thread_depth()`` below.
 
+from . import supervisor_process as _process_mod  # noqa: E402  (deferred: canonical lock owner)
+
 _LOCAL_CONNECTION_DEPTH: dict[int, int] = {}
-_LOCAL_EXECUTION_LOCK = threading.Lock()
+# v0.10.0-dev b003: use the canonical process-local fencing lock from
+# supervisor_process (the lower layer that owns execution-local fencing).
+# Previously this module defined its own threading.Lock() — a different
+# object from supervisor_process._LOCAL_EXECUTION_LOCK. Two locks guarding
+# related state could interleave incorrectly. Now there is one lock.
+_LOCAL_EXECUTION_LOCK = _process_mod._LOCAL_EXECUTION_LOCK
 
 
 def reset_thread_depth() -> None:

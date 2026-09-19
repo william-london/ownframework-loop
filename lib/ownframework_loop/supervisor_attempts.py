@@ -120,6 +120,13 @@ def _attempt_provenance_gate(
         return False, "semantic_replay_attempt_unaccounted", None
     if not bool(int(attempt["semantic_accepted"] or 0)):
         return False, "semantic_replay_attempt_not_accepted", None
+    # v0.10.0-dev e004: cost_known=0 means the provider did not report a cost
+    # for a real call. A zero-cost replay would let a worker that omits
+    # total_cost_usd from its envelope escape the cost ceiling — the ledger
+    # would record $0.00 while the provider was actually paid. Refuse replay
+    # so a fresh provider call is required and the ceiling stays authoritative.
+    if not bool(int(attempt["cost_known"] or 0)):
+        return False, "semantic_replay_attempt_cost_unknown", None
     if attempt["failure_class"] or attempt["failure_reason"]:
         return False, "semantic_replay_attempt_previously_failed", None
     # v0.9.1 terminal closure: the acceptance publication captured the exact
@@ -669,12 +676,24 @@ def _maybe_complete_semantic_artifact(
                 semantic_path=semantic_path,
                 candidate_sha=candidate_sha,
             )
-        except Exception:
-            # Publication is best-effort here: the gate below will surface
-            # any persistent provenance mismatch as a structured replay
-            # rejection, leaving the run retryable rather than silently
-            # consuming the attempt.
-            pass
+        except RuntimeError as exc:
+            # v0.10.0-dev b002: narrow the catch from `except Exception` to
+            # `except RuntimeError as exc` and surface the actual cause on
+            # last_error so the downstream gate refusal carries diagnostic
+            # context for the operator. The gate below still rejects replay
+            # when semantic_accepted=0, but the operator sees the real cause
+            # (identity drift, missing attempt row, unaccounted cost) rather
+            # than the gate's opaque refusal reason.
+            try:
+                _db_mod._update_job(
+                    conn,
+                    int(job_id),
+                    last_error=(
+                        f"semantic_acceptance_publication_failed: {exc}"
+                    )[-4000:],
+                )
+            except Exception:
+                pass
     return True
 
 
@@ -730,16 +749,26 @@ def _publish_acceptance_for_ready_artifact(
             semantic_path=semantic_path,
             candidate_sha=candidate_sha,
         )
-    except Exception:
-        pass
+    except RuntimeError as exc:
+        # v0.10.0-dev b002: surface the actual cause on last_error so the
+        # downstream gate refusal carries diagnostic context. The gate still
+        # rejects replay when semantic_accepted=0, but the operator now sees
+        # the real reason (identity drift, missing attempt, unaccounted cost)
+        # rather than an opaque refusal.
+        try:
+            _db_mod._update_job(
+                conn,
+                int(job_id),
+                last_error=(
+                    f"semantic_acceptance_publication_failed: {exc}"
+                )[-4000:],
+            )
+        except Exception:
+            pass
 
-PRE_PROVIDER_FAILURE_REASONS = frozenset({
-    "worker_launch_failed",
-    "capability_resolution_failed",
-    "capability_binding_failed",
-    "runner_profile_resolution_failed",
-    "worker_ownership_not_published",
-})
+# NOTE: PRE_PROVIDER_FAILURE_REASONS is defined once at the top of this module
+# (line ~415). Do not re-define it here — a duplicate would silently shadow
+# the canonical definition and split the contract between the two call sites.
 
 def _capability_binding_creation_allowed(
     conn: sqlite3.Connection,

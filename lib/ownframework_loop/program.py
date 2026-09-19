@@ -928,6 +928,23 @@ def advance_after_review_approval(
     )
     new_program = advance_to_next(new_program, packet)
     new_cps = list(new_program.get("current_checkpoints") or [])
+    # v0.10.0-dev f002/f004: POSITIVE proof that all checkpoints are
+    # finalized before stamping program_final scope. The previous code
+    # inferred program_final from `not new_cps` alone, which is also true
+    # when a dependency-blocked CP cannot proceed (new_cps=[]) — yielding
+    # false-TERMINALIZATION vector where the program could be promoted to
+    # program_final review with dependency-blocked CPs silently skipped.
+    expected_cp_ids = {
+        str(cp.get("id"))
+        for cp in ((packet.get("checkpoint_graph") or {}).get("checkpoints") or [])
+        if isinstance(cp, dict) and cp.get("id") is not None
+    }
+    finalized_cp_ids = {
+        str(fc.get("id"))
+        for fc in (new_program.get("finalized_checkpoints") or [])
+        if isinstance(fc, dict) and fc.get("id") is not None
+    }
+    all_cps_finalized = expected_cp_ids == finalized_cp_ids
     # Bind the next checkpoint to the candidate that just passed review.  The
     # binding is carried in the same STATE transaction as the advancement, so
     # a future protected-drift recovery has a durable, exact anchor.
@@ -938,7 +955,8 @@ def advance_after_review_approval(
         # the field authoritative on every program_state snapshot the
         # final reviewer inspects.
         new_program["review_scope"] = REVIEW_SCOPE_CHECKPOINT
-    else:
+        next_top_state = "READY_TO_BUILD"
+    elif all_cps_finalized:
         # v0.9.1+: All checkpoints are APPROVED. Top-level PROGRAM APPROVED
         # is now gated by a mandatory final whole-product review of the
         # exact assembled candidate. The deterministic core routes
@@ -946,7 +964,21 @@ def advance_after_review_approval(
         # the durable scope. terminalize_program_after_final_review is the
         # sole owner of REVIEWING -> APPROVED after that final review.
         new_program["review_scope"] = REVIEW_SCOPE_PROGRAM_FINAL
-    next_top_state = "READY_TO_BUILD" if new_cps else "READY_FOR_REVIEW"
+        next_top_state = "READY_FOR_REVIEW"
+    else:
+        # v0.10.0-dev f002/f004: cannot infer program_final — dep-blocked CPs
+        # produce new_cps=[] without finalized coverage. Surface the unfinished
+        # CPs via a deterministic exception so the operator sees the gap
+        # rather than a silently-skipped program_final promotion.
+        unfinished = sorted(expected_cp_ids - finalized_cp_ids)
+        raise ProgramStateError(
+            "advance_after_review_approval_refused: cannot promote to "
+            "program_final with unfinished checkpoints: "
+            f"finalized={sorted(finalized_cp_ids)} "
+            f"unfinished={unfinished} "
+            f"expected={sorted(expected_cp_ids)}"
+        )
+    next_top_state = next_top_state  # explicit — set above
 
     # v0.4.6: PROGRAM advancement uses the atomic FSM-owned transition path.
     # The prospective PROGRAM block is supplied so program_transition validates

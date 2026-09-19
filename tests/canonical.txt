@@ -132,3 +132,4 @@ tests/integration/test_v091n_commissioning_lifecycle_failure_paths.sh
 tests/integration/test_v10a_install_helpers.sh
 tests/integration/test_v10b_finalize_proof.sh
 tests/integration/test_v10c_supervisor_dependency_direction.sh
+tests/integration/test_v10d_pre1_adversarial_fixes.sh

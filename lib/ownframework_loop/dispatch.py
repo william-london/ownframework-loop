@@ -569,6 +569,26 @@ def semantic_result_ready(work_order: dict[str, Any]) -> tuple[bool, str]:
     else:
         expected_ac = expected_ids(meta.get("acceptance_criteria") or [], "AC")
     expected_ng = expected_ids(meta.get("non_goals") or [], "NG")
+    # v0.10.0-dev f003: scope-match enforcement for program_final. When the
+    # durable program.review_scope is program_final, a reviewer authoring a
+    # checkpoint-scope review (data["review_scope"] != "program_final") would
+    # otherwise pass the AC set-equality check (because program_final scope
+    # demands the full packet AC list, and a checkpoint reviewer covering the
+    # full set looks identical). The durable scope is authoritative — refuse
+    # when the model's authored scope does not match the state.
+    if state_mod.is_program_state(state_doc):
+        durable_scope = (
+            ((state_doc or {}).get("program") or {}).get("review_scope")
+        )
+        authored_scope = str(data.get("review_scope") or "checkpoint")
+        if durable_scope == program_mod.REVIEW_SCOPE_PROGRAM_FINAL:
+            if authored_scope != program_mod.REVIEW_SCOPE_PROGRAM_FINAL:
+                return False, "review_scope_mismatch_durable_program_final"
+        else:
+            # durable_scope is checkpoint (or unset) — author's "program_final"
+            # would be a scope escalation attempt; refuse.
+            if authored_scope == program_mod.REVIEW_SCOPE_PROGRAM_FINAL:
+                return False, "review_scope_mismatch_durable_not_program_final"
     ac = data.get("acceptance_results")
     ng = data.get("non_goal_results")
     if not isinstance(ac, list) or not isinstance(ng, list):
@@ -1309,8 +1329,24 @@ def _checkpoint_authority_context(
     }
 
 
+# v0.10.0-dev a001: upper bound for claim / prepare / skeleton CLI
+# subprocesses when the packet did not declare max_pass_runtime_seconds.
+# Without this, a wedged child process stalls the durable execution
+# clock indefinitely; with this, the durable clock always recovers.
+#
+# Rationale: claim/prepare/skeleton are deterministic state-mutation
+# subprocesses (no model call, no worker launch). The longest legitimate
+# duration is preparing a worktree for a multi-thousand-file repo,
+# which completes in tens of seconds. 3600s (matching the historical
+# cli.py per-pass fallback) is a generous safety fuse that does not
+# interfere with any legitimate operation. When the packet DOES declare
+# max_pass_runtime_seconds, that value is used instead — so an
+# explicitly-authorized long pass is not killed.
+_DEFAULT_CLAIM_CLI_TIMEOUT_SECONDS = 3600
+
+
 def _claim_or_terminal(
-    args: list[str], *, repo: Path, run_id: str
+    args: list[str], *, repo: Path, run_id: str, timeout_seconds: int | None = None
 ) -> dict[str, Any]:
     """Run one claim CLI command; convert cap-exhaustion seals to TERMINAL.
 
@@ -1318,9 +1354,12 @@ def _claim_or_terminal(
     exhausted. When the claim fails but the run is now terminal, dispatch
     surfaces the terminal result instead of an error, so the supervisor
     completes the job cleanly without an operator quarantine/resume cycle.
+
+    v0.10.0-dev a001: timeout_seconds bounds the subprocess wall wait so
+    a wedged CLI child cannot stall the durable clock.
     """
     try:
-        return _run_cli(args)
+        return _run_cli(args, timeout_seconds=timeout_seconds)
     except DispatchError:
         cur = state_mod.load_verified(repo, run_id)
         if isinstance(cur, dict):
@@ -1398,14 +1437,30 @@ def claim_next(*, canonical_repo: Path, run_id: str) -> dict[str, Any]:
                     run_id=run_id,
                     state_doc=cur,
                 )
+                # v0.10.0-dev a001: derive the per-CLI subprocess timeout
+                # from the packet's per-pass budget. Falls back to a hard
+                # upper bound so unfunded packets still recover.
+                rb = pmeta.get("risk_budget") or {}
+                declared_pass = int(rb.get("max_pass_runtime_seconds") or 0)
+                cli_timeout = (
+                    declared_pass
+                    if declared_pass > 0
+                    else _DEFAULT_CLAIM_CLI_TIMEOUT_SECONDS
+                )
                 claim = _claim_or_terminal(
                     ["build", "claim", str(repo), run_id, "--actor", "ofloop-supervisor"],
-                    repo=repo, run_id=run_id,
+                    repo=repo, run_id=run_id, timeout_seconds=cli_timeout,
                 )
                 if claim.get("decision") == "TERMINAL":
                     return claim
-                prep = _run_cli(["build", "prepare", str(repo), run_id])
-                skel = _run_cli(["build", "agent-skeleton", str(repo), run_id])
+                prep = _run_cli(
+                    ["build", "prepare", str(repo), run_id],
+                    timeout_seconds=cli_timeout,
+                )
+                skel = _run_cli(
+                    ["build", "agent-skeleton", str(repo), run_id],
+                    timeout_seconds=cli_timeout,
+                )
                 semantic_path = (
                     prep.get("agent_result_path") or skel.get("agent_result_path")
                 )
@@ -1442,15 +1497,27 @@ def claim_next(*, canonical_repo: Path, run_id: str) -> dict[str, Any]:
                 }
 
             if state in REVIEW_STATES:
+                # v0.10.0-dev a001: same per-CLI timeout derivation as BUILD.
+                rb = pmeta.get("risk_budget") or {}
+                declared_pass = int(rb.get("max_pass_runtime_seconds") or 0)
+                cli_timeout = (
+                    declared_pass
+                    if declared_pass > 0
+                    else _DEFAULT_CLAIM_CLI_TIMEOUT_SECONDS
+                )
                 claim = _claim_or_terminal(
                     ["review", "claim", str(repo), run_id, "--actor", "ofloop-supervisor"],
-                    repo=repo, run_id=run_id,
+                    repo=repo, run_id=run_id, timeout_seconds=cli_timeout,
                 )
                 if claim.get("decision") == "TERMINAL":
                     return claim
-                prep = _run_cli(["review", "prepare", str(repo), run_id])
+                prep = _run_cli(
+                    ["review", "prepare", str(repo), run_id],
+                    timeout_seconds=cli_timeout,
+                )
                 skel = _run_cli(
-                    ["review", "assessment-skeleton", str(repo), run_id]
+                    ["review", "assessment-skeleton", str(repo), run_id],
+                    timeout_seconds=cli_timeout,
                 )
                 semantic_path = prep.get("assessment_path") or skel.get(
                     "assessment_path"

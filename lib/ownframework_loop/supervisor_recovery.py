@@ -121,6 +121,11 @@ def _recover_stale_running(conn: sqlite3.Connection) -> int:
             if not _terminate_owned_process_group(
                 int(pid), pgid, start_identity or None, started_at
             ):
+                # v0.10.0-dev b009: instead of leaving the row in RUNNING
+                # forever (the previous b009 defect — PID-reuse + start-time
+                # drift would have stranded the row), force QUARANTINED
+                # immediately. The identity proof failed; the operator must
+                # retire the run manually if the orphan is genuine.
                 conn.execute("BEGIN IMMEDIATE")
                 current = conn.execute(
                     "SELECT * FROM jobs WHERE id=?", (job_id,)
@@ -129,16 +134,24 @@ def _recover_stale_running(conn: sqlite3.Connection) -> int:
                     conn.rollback()
                     continue
                 conn.execute(
-                    """UPDATE jobs SET last_error=?, updated_at=?
+                    """UPDATE jobs SET status='QUARANTINED',
+                       last_error=?, last_failure_class='orphan_identity',
+                       last_failure_reason='orphan_identity_unproven',
+                       worker_pid=NULL, worker_started_at=NULL,
+                       worker_pgid=NULL, worker_deadline_at=NULL,
+                       worker_start_identity=NULL, worker_role=NULL,
+                       worker_attempt_id=NULL, next_attempt_at=0,
+                       updated_at=?
                        WHERE id=? AND status='RUNNING'""",
                     (
                         "semantic deadline expired but exact orphan process identity "
-                        "could not be proven/terminated; retaining RUNNING ownership",
+                        "could not be proven/terminated; quarantined for operator action",
                         time.time(),
                         job_id,
                     ),
                 )
                 conn.commit()
+                recovered += 1
                 continue
             recovery_reason = "semantic deadline expired; exact owned orphan terminated"
 

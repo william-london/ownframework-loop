@@ -705,6 +705,26 @@ def finalize_build(
         )
         validations.append(result)
 
+    # v0.10.0-dev f022: validation is required iff the packet has any
+    # declared validation contract (top-level OR CP-local). An empty effective
+    # list under a declared contract is a fail-closed surface — the previous
+    # `else True` default let packets without validations silently PASS the
+    # finalization gate. See review_finalize for the symmetric reviewer-side
+    # check (f023).
+    def _packet_declares_validation(meta_obj: dict[str, Any]) -> bool:
+        if meta_obj.get("required_validation"):
+            return True
+        for cp in ((meta_obj.get("checkpoint_graph") or {}).get("checkpoints") or []):
+            if isinstance(cp, dict) and cp.get("required_validation"):
+                return True
+        return False
+
+    validation_required = _packet_declares_validation(meta)
+    if validation_required and not validations:
+        raise RuntimeError(
+            "build_finalize_fail_closed: validation_required_but_effective_list_empty"
+        )
+
     # 16. Validation succeeds only when every declared command satisfies its
     # own exit-code/marker contract and no command timed out.
     validation_pass = all(bool(v.get("passed")) for v in validations) if validations else True

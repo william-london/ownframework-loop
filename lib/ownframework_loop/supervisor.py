@@ -472,6 +472,22 @@ _PROGRAM_READY_STATE = next(
     if value.startswith("READY_TO_") and value.endswith("_BUILD")
 )
 
+# v0.10.0-dev a002: default wall budget for the build/review finalize CLI
+# subprocess when the operator did not declare max_wall_seconds. The packet-
+# derived path (max_wall > 0) feeds the remaining wall budget through; this
+# default is the upper bound for unfunded/unbounded runs so a wedged CLI
+# child cannot stall the durable execution clock indefinitely.
+#
+# Rationale: finalize CLI subprocesses commit build/review receipts and
+# run deterministic proof (validation, secret scan, protected-path check).
+# Legitimate finalize runs complete in tens of seconds; large validation
+# suites can take minutes. 3600s (the historical cli.py fallback) is a
+# generous safety fuse that matches the per-pass fallback used elsewhere.
+# When the operator declares max_wall_seconds via enqueue, that value is
+# used instead — so an explicitly-authorized long finalization is not
+# killed.
+_DEFAULT_FINALIZER_TIMEOUT_SECONDS = 3600
+
 
 def _repository_scheduling_identity(repo: Path) -> tuple[str, bool]:
     """Thin delegate to ``supervisor_identity._repository_scheduling_identity``."""
@@ -2333,14 +2349,20 @@ def run_one(*, db_path: Path | None = None, timeout_seconds: int = 0) -> dict[st
                     }
                 finalizer_timeout = remaining_after_worker
 
-            if finalizer_timeout is None:
-                # Preserve the stable single-argument dispatch surface for
-                # unfunded/unbounded runs and test/adapter implementations.
-                finalized = dispatch_mod.finalize_work_order(work_order)
-            else:
-                finalized = dispatch_mod.finalize_work_order(
-                    work_order, timeout_seconds=finalizer_timeout
-                )
+            # v0.10.0-dev a002: default finalize timeout for unfunded runs.
+            # When the operator omits max_wall_seconds, the CLI subprocess
+            # would otherwise hang forever on a wedged build/review finalize.
+            # The packet-derived max_runtime_seconds already feeds this when
+            # max_wall > 0; we keep that path and add a hard upper bound for
+            # the unfunded path so the durable clock always recovers.
+            effective_finalizer_timeout = (
+                int(finalizer_timeout)
+                if finalizer_timeout and int(finalizer_timeout) > 0
+                else _DEFAULT_FINALIZER_TIMEOUT_SECONDS
+            )
+            finalized = dispatch_mod.finalize_work_order(
+                work_order, timeout_seconds=effective_finalizer_timeout
+            )
             _update_job(
                 conn,
                 job["id"],
