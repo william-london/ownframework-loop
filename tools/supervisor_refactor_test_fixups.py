@@ -13,10 +13,9 @@ if old_import not in text:
     raise RuntimeError("v090 import surface drifted")
 text = text.replace(old_import, new_import, 1)
 
-# This race test intentionally substitutes durable-output parsers. Those
-# parsers are now canonically owned by supervisor_accounting; patching the
-# supervisor compatibility facade would recreate the production upward-import
-# bridge solely for a test monkey-patch.
+# Recovery consumes durable-output parsers from the canonical accounting owner.
+# Keep the race test aimed at that owner rather than retaining an upward import
+# only so a legacy supervisor-facade monkey patch remains visible.
 for old, new in {
     "orig_cost_parser = supervisor._parse_cost_from_durable_stdout":
         "orig_cost_parser = supervisor_accounting.parse_cost_from_durable_stdout",
@@ -35,31 +34,44 @@ for old, new in {
         raise RuntimeError(f"v090 expected monkey-patch site missing: {old}")
     text = text.replace(old, new, 1)
 
-# Enrollment now consumes scheduling identity directly from its canonical
-# owner. Both identity-substitution tests must therefore patch that owner:
-# one proves unproven identity is refused before enrollment, and the other
-# proves a RUNNING enrollment cannot have its scheduling identity rewritten.
-identity_replacements = {
-    "orig_identity = supervisor._repository_scheduling_identity":
-        "orig_identity = supervisor_identity._repository_scheduling_identity",
-    "supervisor._repository_scheduling_identity = orig_identity":
-        "supervisor_identity._repository_scheduling_identity = orig_identity",
-}
-for old, new in identity_replacements.items():
-    count = text.count(old)
-    if count != 2:
-        raise RuntimeError(f"v090 expected two identity monkey-patch sites for {old!r}, found {count}")
-    text = text.replace(old, new)
 
-for old, new in {
-    "supervisor._repository_scheduling_identity = lambda _p: (\"unproven\", False)":
-        "supervisor_identity._repository_scheduling_identity = lambda _p: (\"unproven\", False)",
-    "supervisor._repository_scheduling_identity = lambda _p: (\"synthetic-drift-key\", True)":
-        "supervisor_identity._repository_scheduling_identity = lambda _p: (\"synthetic-drift-key\", True)",
-}.items():
-    if text.count(old) != 1:
-        raise RuntimeError(f"v090 expected one identity substitution site: {old}")
-    text = text.replace(old, new, 1)
+def migrate_enrollment_identity_patch(lambda_expr: str) -> None:
+    """Move one claims/enrollment identity substitution to its canonical owner.
+
+    The third identity patch in v090 intentionally probes `_apply_data_migrations`,
+    which remains a supervisor.py cross-domain coordinator.  Do not rewrite that
+    one: it is a valid facade-level test, unlike the two claims/enrollment probes.
+    """
+    global text
+    prefix = (
+        "orig_identity = supervisor._repository_scheduling_identity\n"
+        f"supervisor._repository_scheduling_identity = {lambda_expr}\n"
+    )
+    replacement = (
+        "orig_identity = supervisor_identity._repository_scheduling_identity\n"
+        f"supervisor_identity._repository_scheduling_identity = {lambda_expr}\n"
+    )
+    if text.count(prefix) != 1:
+        raise RuntimeError(f"v090 expected exactly one enrollment identity patch: {lambda_expr}")
+    start = text.index(prefix)
+    text = text.replace(prefix, replacement, 1)
+    restore = "supervisor._repository_scheduling_identity = orig_identity"
+    restore_pos = text.find(restore, start)
+    if restore_pos < 0:
+        raise RuntimeError(f"v090 restore missing after identity patch: {lambda_expr}")
+    text = text[:restore_pos] + "supervisor_identity._repository_scheduling_identity = orig_identity" + text[restore_pos + len(restore):]
+
+
+migrate_enrollment_identity_patch('lambda _p: ("unproven", False)')
+migrate_enrollment_identity_patch('lambda _p: ("synthetic-drift-key", True)')
+
+# Guard the distinction above: two enrollment patches moved to the canonical
+# identity owner, while exactly one migration-coordinator patch remains on the
+# supervisor facade.
+if text.count("orig_identity = supervisor_identity._repository_scheduling_identity") != 2:
+    raise RuntimeError("v090 canonical identity patch count drifted")
+if text.count("orig_identity = supervisor._repository_scheduling_identity") != 1:
+    raise RuntimeError("v090 migration facade identity probe disappeared or multiplied")
 
 path.write_text(text, encoding="utf-8")
 print("SUPERVISOR_REFACTOR_TEST_FIXUPS=APPLIED")
