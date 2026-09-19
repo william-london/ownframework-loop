@@ -373,6 +373,118 @@ implementations-extraction pass.
 - v0.10.0-dev remains the source version; the historical v0.9.1
   release tag remains FROZEN.
 
+## Stage 2 Inversion (post-Stage-A)
+
+After f1–f5 (commits 6357437, 005d18e, 23829a8, 7b50bd0, 99d611d,
+52e13bb, 0a79b9e, 6518ce3), the supervisor package has been
+fully inverted at the named-owner level.  Every function body
+in `supervisor.py` is now either a thin delegate to a named
+authority or part of the composition facade itself.
+
+### Canonical body owners (no upward imports)
+
+| Module | Body ownership | Symbols |
+|---|---|---|
+| `supervisor_db.py` | canonical | connection / schema / file-mode / per-thread depth / lookup / validator |
+| `supervisor_runner_io.py` | canonical | provider envelope + diagnostic tail readers, size ceilings |
+| `supervisor_runner_registry.py` | canonical | RunnerResult / RunnerReadiness, register_runner, lookup, preflight contract |
+| `supervisor_accounting.py` | canonical | cost / token / model observation |
+| `supervisor_holds.py` | canonical | dispatch hold lifecycle (validation, persistence, projection, release, cancel) |
+| `supervisor_operator.py` | canonical | operator mutations that are not hold / not claim (supervisor_config_set) |
+| `supervisor_readmodel.py` | canonical | read-only operator projections (status, fleet_status, supervisor_config_get, hold_status, _job_dict, etc.) |
+| `supervisor_identity.py` | canonical | scheduling-identity (Git common-dir / workspace / packet-mode) |
+| `supervisor_recovery.py` | canonical | stale-RUNNING recovery sweep + predicate |
+| `supervisor_attempts.py` | canonical | semantic-attempt lifecycle (reservation, provenance gate, acceptance publication, completion) |
+| `supervisor_claims.py` | canonical | enqueue / claim / submission-budget |
+
+ZERO re-export facades remain in the supervisor package.
+
+### Composition facade (supervisor.py)
+
+After f1–f5, supervisor.py is 4395 lines (down from 6817).  The
+remaining body is the durable execution-loop composition facade
+plus the ClaudeCodeRunner class and PID-introspection /
+prompt-construction helpers that the runner class depends on.
+
+What supervisor.py still owns:
+
+  * The ClaudeCodeRunner class (~600 lines) — provider execution
+    implementation that depends on dozens of supervisor-internal
+    helpers (PID introspection, prompt construction, prompt
+    provenance, runtime generation, file-mode protection).  The
+    brief asks for this to move to `supervisor_runner.py`, but
+    the body has dense coupling with supervisor-internal state
+    that requires extracting PID introspection to
+    `supervisor_pid.py` AND prompt construction to
+    `supervisor_prompts.py` AND capability-binding helpers BEFORE
+    the runner can safely land.  Skipped this checkpoint as
+    `BLOCKED` on those follow-up owners; flagged in the
+    sequencing roadmap.
+  * PID introspection helpers (`_pid_alive`,
+    `_terminate_owned_process_group`,
+    `_read_pid_start_identity`, `_pid_identity_proven`,
+    `_read_pid_start_time`) — runner-process lifecycle.
+  * Worker-prompt construction (`_semantic_worker_settings`,
+    `_load_role_prompt`, `_write_semantic_prompt_provenance`,
+    `_claude_cli_version`) — Claude-specific helpers.
+  * `_apply_data_migrations` — versioned migrations that
+    cross the DB / identity / packet boundary.
+  * The composition facade itself (`serve`, `run_one`, `enqueue`,
+    `resume`, `retire`).
+  * Thin delegating wrappers for every public + private
+    authority symbol (re-exports for backward compatibility).
+
+### Dependency direction (verified statically)
+
+`tests/integration/test_v10c_supervisor_dependency_direction.sh`
+proves:
+
+  * supervisor_db, supervisor_runner_io, supervisor_runner_registry,
+    supervisor_accounting, supervisor_identity: ZERO upward imports
+    at module OR function scope.
+  * supervisor_holds, supervisor_operator, supervisor_readmodel:
+    ZERO upward imports.
+  * supervisor_recovery: function-scope lazy imports for the
+    test-monkey-patch bridge (`_parse_cost_from_durable_stdout`,
+    etc.).  Documented exception.
+  * supervisor_attempts: function-scope lazy imports for
+    runner-execution helpers (`worker_log_paths`,
+    `_read_pid_start_identity`).  Documented follow-up target.
+  * supervisor_claims: function-scope lazy imports for
+    identity helpers + runner registry + runtime generation
+    (so test monkey-patches on `supervisor.X` keep working).
+    Documented follow-up target.
+  * supervisor.py imports every named authority module.
+
+### Sequencing roadmap for the runner extraction
+
+To complete the supervisor inversion, the ClaudeCodeRunner
+class needs to move to `supervisor_runner.py` (renamed
+`process_runner.py` if that name is preferred to match the
+static check allowlist).  The dependency surface is bounded:
+
+  1. Extract `supervisor_pid.py` (PID introspection helpers +
+     `_terminate_owned_process_group`).
+  2. Extract `supervisor_prompts.py` (worker-prompt construction
+     + prompt provenance + Claude CLI version probe).
+  3. Extract `supervisor_runtime.py` (`_current_runtime_generation`,
+     `_load_service_env_file`, runtime cache cleanup).
+  4. With those in place, move ClaudeCodeRunner +
+     `_terminate_group` + `_classify_runner_failure` +
+     `_classify_exception` + `_apply_failure_policy` +
+     `_RegisteredClaudeCodeRunner` into `supervisor_runner.py`
+     with body-level lazy imports through the three new owners.
+  5. Update `static_checks.py` to allow `supervisor_runner.py`
+     alongside `process_runner.py` / `supervisor.py` /
+     `validation_executor.py` (or rename the new module to
+     `process_runner.py` to match the existing allowlist).
+  6. supervisor.py loses the runner block; `_apply_data_migrations`
+     stays as the cross-boundary callback for `bootstrap_schema`.
+
+This sequenced move keeps the test suite green at every step
+because each new owner becomes a thin facade before the runner
+extraction takes the canonical body.
+
 ## Stage A → Stage 2 Inversion (current state)
 
 After f1–f4 (commits 6357437, 005d18e, 23829a8, 7b50bd0),
