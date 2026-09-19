@@ -529,3 +529,77 @@ def _validate_max_concurrency(value: Any) -> int:
             f"max_concurrency must be between 1 and {IMPLEMENTATION_MAX_CONCURRENCY}"
         )
     return parsed
+
+
+# ---------------------------------------------------------------------------
+# Generic durable job-state transition primitive.
+#
+# ``_update_job`` is the universal mutator that applies a job-status
+# transition: status + counters + last_error + worker-clearing + commit.
+# Every domain authority (claims, attempts, recovery, hold lifecycle)
+# uses this primitive to persist an already-decided transition.  The
+# DECISION lives in the domain authority; the WRITE is the DB owner's.
+# ---------------------------------------------------------------------------
+
+def _update_job(
+    conn: sqlite3.Connection,
+    job_id: int,
+    *,
+    status_value: str,
+    infra_failures: int | None = None,
+    transient_failures: int | None = None,
+    transient_recovery_cycles: int | None = None,
+    total_cost_usd: float | None = None,
+    last_error: str | None = None,
+    last_failure_class: str | None = None,
+    last_failure_reason: str | None = None,
+    next_attempt_at: float | None = None,
+) -> None:
+    """Persist one job-state transition; commit when complete.
+
+    The transition is generic: status, counters, last_error, and
+    worker-clearing.  Domain decisions (which transition is
+    allowed, what value to set) are the caller's responsibility;
+    this primitive only writes the chosen transition durably.
+    """
+    import time as _time
+    row = conn.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
+    if row is None:
+        return
+    conn.execute(
+        """
+        UPDATE jobs SET
+          status=?,
+          infra_failures=?,
+          transient_failures=?,
+          transient_recovery_cycles=?,
+          total_cost_usd=?,
+          last_error=?,
+          last_failure_class=?,
+          last_failure_reason=?,
+          next_attempt_at=?,
+          worker_pid=NULL,
+          worker_started_at=NULL,
+          worker_pgid=NULL,
+          worker_deadline_at=NULL,
+          worker_start_identity=NULL,
+          worker_role=NULL,
+          worker_attempt_id=NULL,
+          updated_at=?
+        WHERE id=?
+        """,
+        (
+            status_value,
+            int(row["infra_failures"] if infra_failures is None else infra_failures),
+            int(row["transient_failures"] if transient_failures is None else transient_failures),
+            int(row["transient_recovery_cycles"] if transient_recovery_cycles is None else transient_recovery_cycles),
+            float(row["total_cost_usd"] if total_cost_usd is None else total_cost_usd),
+            last_error,
+            last_failure_class,
+            last_failure_reason,
+            float(row["next_attempt_at"] if next_attempt_at is None else next_attempt_at),
+            _time.time(),
+            job_id,
+        ),
+    )
+    conn.commit()

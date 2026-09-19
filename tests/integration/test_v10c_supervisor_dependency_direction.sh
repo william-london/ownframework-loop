@@ -154,9 +154,9 @@ find_upward(
 # canonical-body-owned (e1 extraction) and does NOT import
 # supervisor.  supervisor_readmodel was flipped to canonical
 # body ownership in g2.  supervisor_recovery was flipped to
-# canonical body ownership in g3.
+# canonical body ownership in g3.  supervisor_attempts was
+# flipped to canonical body ownership in g4.
 for m in [
-    "supervisor_attempts",
     "supervisor_claims",
 ]:
     # These are STILL facades; they MUST import supervisor.
@@ -166,10 +166,12 @@ for m in [
         f"importing from supervisor (until Stage B)"
     )
 # Canonical body owners — must NOT import supervisor at module
-# or function scope.  supervisor_recovery DOES lazy-import
-# supervisor at function scope for the helper bridge that
-# keeps test monkey-patches on supervisor._parse_* working;
-# that is a documented exception.
+# or function scope.  supervisor_recovery and supervisor_attempts
+# DO lazy-import supervisor at function scope for helper bridges
+# that keep test monkey-patches on supervisor._parse_* working
+# and for process-introspection / path-resolution helpers that
+# will move to the runner-execution authority; those are
+# documented exceptions.
 for m in [
     "supervisor_runner_registry",
     "supervisor_readmodel",
@@ -198,6 +200,17 @@ find_upward(
         "_account_attempt_cost",
     ],
 )
+# supervisor_attempts: lazy imports of supervisor at function
+# scope are permitted only for the documented runner-execution
+# helpers (worker_log_paths, _read_pid_start_identity) that
+# will move to the runner-execution authority.
+find_upward(
+    "supervisor_attempts",
+    allowed_lazy=[
+        "worker_log_paths",
+        "_read_pid_start_identity",
+    ],
+)
 print("  PASS: dependency-direction invariants hold for inverted modules")
 
 # Step 4: supervisor.py is a composition facade that imports
@@ -216,6 +229,7 @@ required_imports = {
     "supervisor_readmodel",
     "supervisor_identity",
     "supervisor_recovery",
+    "supervisor_attempts",
 }
 for m in required_imports:
     assert (
