@@ -28,6 +28,22 @@ jobs:
           from pathlib import Path
           p = Path('lib/ownframework_loop/supervisor_db.py')
           p.write_text(p.read_text().rstrip() + '\n')
+
+          # The sibling B002 proof is about acceptance-publication recovery,
+          # not git probe behavior. Pin only the deterministic preconditions
+          # required to reach that publication boundary, then restore them.
+          p = Path('tests/integration/test_v10e_pre1_behavioral_proofs.sh')
+          t = p.read_text()
+          start = '    c.execute("UPDATE jobs SET last_error=NULL WHERE id=1"); c.commit(); ok='
+          repl = '''    c.execute("UPDATE jobs SET last_error=NULL WHERE id=1"); c.commit()\n    real_dirty=attempts_mod.git_checks.dirty_status; real_head=attempts_mod.git_checks.current_head; real_branch=attempts_mod.git_checks.current_branch; real_run=attempts_mod.util.run_subprocess\n    attempts_mod.git_checks.dirty_status=lambda _p:"clean"; attempts_mod.git_checks.current_head=lambda _p:head; attempts_mod.git_checks.current_branch=lambda _p:"agent/r/builder"; attempts_mod.util.run_subprocess=lambda *_a,**_k:types.SimpleNamespace(returncode=0,stdout=head,stderr="")\n    try:\n        ok='''
+          if t.count(start) != 1:
+              raise SystemExit('B002 sibling fixture start marker mismatch')
+          t = t.replace(start, repl, 1)
+          end = ',semantic_reason="synthetic",job_id=1); after,e=snap(); check("B002-maybe: sibling path exercised",ok is True);'
+          repl_end = ''',semantic_reason="synthetic",job_id=1)\n    finally:\n        attempts_mod.git_checks.dirty_status=real_dirty; attempts_mod.git_checks.current_head=real_head; attempts_mod.git_checks.current_branch=real_branch; attempts_mod.util.run_subprocess=real_run\n    after,e=snap(); check("B002-maybe: sibling path exercised",ok is True);'''
+          if t.count(end) != 1:
+              raise SystemExit('B002 sibling fixture end marker mismatch')
+          p.write_text(t.replace(end, repl_end, 1))
           PY
       - name: Inspect bounded diff
         run: |
