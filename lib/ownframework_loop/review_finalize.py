@@ -314,6 +314,22 @@ def finalize_review(
             validation_pass = False
         validations.append(result)
 
+    # v0.10.0-dev f023: symmetric to build_finalize f022. Validation is
+    # required iff the packet has any declared validation contract. An empty
+    # effective list under a declared contract is fail-closed.
+    def _packet_declares_validation(meta_obj: dict[str, Any]) -> bool:
+        if meta_obj.get("required_validation"):
+            return True
+        for cp in ((meta_obj.get("checkpoint_graph") or {}).get("checkpoints") or []):
+            if isinstance(cp, dict) and cp.get("required_validation"):
+                return True
+        return False
+
+    if _packet_declares_validation(meta) and not validations:
+        raise RuntimeError(
+            "review_finalize_fail_closed: validation_required_but_effective_list_empty"
+        )
+
     # 13. Re-run scope, protected, secret checks (independent of builder).
     diff_r = util.run_subprocess(
         ["git", "-C", str(reviewer_wt), "diff", "--name-only", baseline_sha, receipt_candidate_sha],

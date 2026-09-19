@@ -85,8 +85,15 @@ _LEGACY_BUDGET_DEFAULT_FINGERPRINT = (25.0, 0, 28800)
 # avoid import-order surprises).  Tests that want a clean depth
 # map should use ``reset_thread_depth()`` below.
 
+from . import supervisor_process as _process_mod  # noqa: E402  (deferred: canonical lock owner)
+
 _LOCAL_CONNECTION_DEPTH: dict[int, int] = {}
-_LOCAL_EXECUTION_LOCK = threading.Lock()
+# v0.10.0-dev b003: use the canonical process-local fencing lock from
+# supervisor_process (the lower layer that owns execution-local fencing).
+# Previously this module defined its own threading.Lock() — a different
+# object from supervisor_process._LOCAL_EXECUTION_LOCK. Two locks guarding
+# related state could interleave incorrectly. Now there is one lock.
+_LOCAL_EXECUTION_LOCK = _process_mod._LOCAL_EXECUTION_LOCK
 
 
 def reset_thread_depth() -> None:
@@ -602,4 +609,28 @@ def _update_job(
             job_id,
         ),
     )
+    conn.commit()
+
+
+def _persist_job_last_error(
+    conn: sqlite3.Connection,
+    job_id: int,
+    *,
+    last_error: str,
+) -> None:
+    """Persist a diagnostic without performing a job lifecycle transition.
+
+    Unlike `_update_job`, this preserves status, retry/counter state, and all
+    worker ownership fields. A missing row is an invariant/programming error.
+    """
+    import time as _time
+    cur = conn.execute(
+        "UPDATE jobs SET last_error=?, updated_at=? WHERE id=?",
+        (str(last_error), _time.time(), int(job_id)),
+    )
+    if cur.rowcount != 1:
+        conn.rollback()
+        raise RuntimeError(
+            f"diagnostic persistence lost job row authority: job_id={int(job_id)}"
+        )
     conn.commit()

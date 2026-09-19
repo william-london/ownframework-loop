@@ -48,6 +48,7 @@ from . import packet as packet_mod
 from . import util
 from . import git_checks
 from . import state as state_mod
+from . import build_agent as build_agent_mod
 from . import capabilities as capabilities_mod
 from . import supervisor_db as _db_mod
 from . import supervisor_accounting as _accounting_mod
@@ -120,6 +121,13 @@ def _attempt_provenance_gate(
         return False, "semantic_replay_attempt_unaccounted", None
     if not bool(int(attempt["semantic_accepted"] or 0)):
         return False, "semantic_replay_attempt_not_accepted", None
+    # v0.10.0-dev e004: cost_known=0 means the provider did not report a cost
+    # for a real call. A zero-cost replay would let a worker that omits
+    # total_cost_usd from its envelope escape the cost ceiling — the ledger
+    # would record $0.00 while the provider was actually paid. Refuse replay
+    # so a fresh provider call is required and the ceiling stays authoritative.
+    if not bool(int(attempt["cost_known"] or 0)):
+        return False, "semantic_replay_attempt_cost_unknown", None
     if attempt["failure_class"] or attempt["failure_reason"]:
         return False, "semantic_replay_attempt_previously_failed", None
     # v0.9.1 terminal closure: the acceptance publication captured the exact
@@ -539,6 +547,21 @@ def _ensure_execution_started(conn: sqlite3.Connection, job_id: int) -> float:
 
 
 
+def _persist_semantic_acceptance_failure(
+    conn: sqlite3.Connection,
+    *,
+    job_id: int,
+    exc: RuntimeError,
+) -> None:
+    """Persist acceptance refusal without changing lifecycle ownership."""
+    _db_mod._persist_job_last_error(
+        conn,
+        int(job_id),
+        last_error=(f"semantic_acceptance_publication_failed: {exc}")[-4000:],
+    )
+
+
+
 
 def _maybe_complete_semantic_artifact(
     *,
@@ -669,12 +692,11 @@ def _maybe_complete_semantic_artifact(
                 semantic_path=semantic_path,
                 candidate_sha=candidate_sha,
             )
-        except Exception:
-            # Publication is best-effort here: the gate below will surface
-            # any persistent provenance mismatch as a structured replay
-            # rejection, leaving the run retryable rather than silently
-            # consuming the attempt.
-            pass
+        except RuntimeError as exc:
+            # B002: diagnostic-only; preserve lifecycle and worker ownership.
+            _persist_semantic_acceptance_failure(
+                conn, job_id=int(job_id), exc=exc
+            )
     return True
 
 
@@ -730,16 +752,15 @@ def _publish_acceptance_for_ready_artifact(
             semantic_path=semantic_path,
             candidate_sha=candidate_sha,
         )
-    except Exception:
-        pass
+    except RuntimeError as exc:
+        # B002: symmetric diagnostic-only persistence.
+        _persist_semantic_acceptance_failure(
+            conn, job_id=int(job_id), exc=exc
+        )
 
-PRE_PROVIDER_FAILURE_REASONS = frozenset({
-    "worker_launch_failed",
-    "capability_resolution_failed",
-    "capability_binding_failed",
-    "runner_profile_resolution_failed",
-    "worker_ownership_not_published",
-})
+# NOTE: PRE_PROVIDER_FAILURE_REASONS is defined once at the top of this module
+# (line ~415). Do not re-define it here — a duplicate would silently shadow
+# the canonical definition and split the contract between the two call sites.
 
 def _capability_binding_creation_allowed(
     conn: sqlite3.Connection,

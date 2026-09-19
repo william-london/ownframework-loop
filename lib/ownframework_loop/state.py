@@ -307,9 +307,15 @@ def _recover_pending_state_txn_locked(
         atomic_write_json(sp, new_state, mode=0o600)
         current_sha = integrity.sha256_file(sp)
     elif current_sha != new_sha:
-        raise integrity.TamperingDetected(
-            "pending state transaction prior state binding mismatch"
-        )
+        # Only unreadable/torn bytes may be explained by this proven journal.
+        current_doc = read_json(sp, default=None) if sp.exists() else None
+        if current_doc is None:
+            atomic_write_json(sp, new_state, mode=0o600)
+            current_sha = integrity.sha256_file(sp)
+        else:
+            raise integrity.TamperingDetected(
+                "pending state transaction prior state binding mismatch"
+            )
     if current_sha != new_sha:
         raise integrity.TamperingDetected(
             "pending state transaction could not reproduce journaled state"
@@ -456,6 +462,22 @@ def load_verified(canonical_repo: Path, run_id: str) -> dict[str, Any]:
                     )
         ok, msg = integrity.verify_state_sha(sp, ep)
         if not ok:
+            # v0.10.0-dev f007: unreadable STATE bytes are torn; a
+            # parseable SHA mismatch is tampering. A valid pending journal may
+            # recover only the former; otherwise unreadable bytes are StateTorn.
+            current_bytes = read_json(sp, default=None)
+            if current_bytes is None:
+                # STATE.json is unreadable / truncated / malformed. Try to
+                # recover from the pending journal one more time under the
+                # same flock. If still torn, raise StateTorn.
+                _recover_pending_state_txn_locked(canonical_repo, run_id)
+                recovered = read_json(sp, default=None)
+                if recovered is None:
+                    raise integrity.StateTorn(
+                        "STATE.json is unreadable/torn; "
+                        f"pending journal did not produce a recoverable state: {msg}"
+                    )
+                return recovered
             raise integrity.TamperingDetected(msg)
         return read_json(sp, default={}) or {}
 

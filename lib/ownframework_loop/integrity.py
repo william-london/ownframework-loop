@@ -43,6 +43,22 @@ class TamperingDetected(RuntimeError):
     recorded SHA-256 in EVENTS.log."""
 
 
+# v0.10.0-dev f007: torn-write recovery subclass. A torn write (disk-full
+# mid-write, kernel panic mid-write, manual file truncation) leaves STATE.json
+# with content that does NOT match its recorded SHA, but the integrity
+# violation is not the same as adversarial tampering — the file is corrupt,
+# not malicious. Operators deserve a recovery path. StateTorn is the narrow
+# contract: the file is unreadable or its bytes don't match the recorded
+# SHA, but a pending journal may exist that can replay the lost state.
+class StateTorn(TamperingDetected):
+    """STATE.json is torn / truncated; recoverable from pending journal.
+
+    Inherits from TamperingDetected so existing narrow catches (which all
+    assume the integrity module's generic exception) still match. Callers
+    that want to attempt journal recovery should catch StateTorn first.
+    """
+
+
 # Authoritative artifact names that must match an event-chain hash.
 AUTHORITATIVE_ARTIFACTS: tuple[str, ...] = (
     "WORK_PACKET.md",
