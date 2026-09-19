@@ -7,7 +7,7 @@ text = path.read_text(encoding="utf-8")
 old_import = "from ownframework_loop import dispatch, guards, supervisor, worktrees\n"
 new_import = (
     "from ownframework_loop import dispatch, guards, supervisor, "
-    "supervisor_accounting, worktrees\n"
+    "supervisor_accounting, supervisor_identity, worktrees\n"
 )
 if old_import not in text:
     raise RuntimeError("v090 import surface drifted")
@@ -33,6 +33,22 @@ for old, new in {
 }.items():
     if old not in text:
         raise RuntimeError(f"v090 expected monkey-patch site missing: {old}")
+    text = text.replace(old, new, 1)
+
+# Enrollment now consumes scheduling identity directly from its canonical
+# owner. Keep this fail-closed enrollment test aimed at that authority instead
+# of patching supervisor.py's compatibility delegate (which production claims
+# deliberately no longer import).
+for old, new in {
+    "orig_identity = supervisor._repository_scheduling_identity":
+        "orig_identity = supervisor_identity._repository_scheduling_identity",
+    "supervisor._repository_scheduling_identity = lambda _p: (\"unproven\", False)":
+        "supervisor_identity._repository_scheduling_identity = lambda _p: (\"unproven\", False)",
+    "supervisor._repository_scheduling_identity = orig_identity":
+        "supervisor_identity._repository_scheduling_identity = orig_identity",
+}.items():
+    if old not in text:
+        raise RuntimeError(f"v090 expected identity monkey-patch site missing: {old}")
     text = text.replace(old, new, 1)
 
 path.write_text(text, encoding="utf-8")
