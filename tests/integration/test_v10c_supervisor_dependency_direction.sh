@@ -153,9 +153,9 @@ find_upward(
 # flip them too.  supervisor_runner_registry is already
 # canonical-body-owned (e1 extraction) and does NOT import
 # supervisor.  supervisor_readmodel was flipped to canonical
-# body ownership in g2 (this stage).
+# body ownership in g2.  supervisor_recovery was flipped to
+# canonical body ownership in g3.
 for m in [
-    "supervisor_recovery",
     "supervisor_attempts",
     "supervisor_claims",
 ]:
@@ -165,11 +165,11 @@ for m in [
         f"{m}: expected to remain a re-export facade "
         f"importing from supervisor (until Stage B)"
     )
-# supervisor_runner_registry + supervisor_readmodel +
-# supervisor_holds + supervisor_operator + supervisor_db +
-# supervisor_runner_io + supervisor_accounting +
-# supervisor_identity: canonical body ownership; they must NOT
-# import supervisor at module or function scope.
+# Canonical body owners — must NOT import supervisor at module
+# or function scope.  supervisor_recovery DOES lazy-import
+# supervisor at function scope for the helper bridge that
+# keeps test monkey-patches on supervisor._parse_* working;
+# that is a documented exception.
 for m in [
     "supervisor_runner_registry",
     "supervisor_readmodel",
@@ -181,6 +181,23 @@ for m in [
     "supervisor_identity",
 ]:
     find_upward(m, allowed_lazy=[])
+# supervisor_recovery: lazy imports of supervisor at function
+# scope are permitted only for the documented test-monkey-patch
+# bridge.  Allow the specific names tests patch.
+find_upward(
+    "supervisor_recovery",
+    allowed_lazy=[
+        "_local_execution_owned",
+        "_pid_alive",
+        "_terminate_owned_process_group",
+        "_recovery_ownership_matches",
+        "_parse_cost_from_durable_stdout",
+        "_parse_token_usage_from_durable_stdout",
+        "_extract_effective_model_from_durable_stdout",
+        "_extract_model_usage_json_from_durable_stdout",
+        "_account_attempt_cost",
+    ],
+)
 print("  PASS: dependency-direction invariants hold for inverted modules")
 
 # Step 4: supervisor.py is a composition facade that imports
@@ -198,6 +215,7 @@ required_imports = {
     "supervisor_accounting",
     "supervisor_readmodel",
     "supervisor_identity",
+    "supervisor_recovery",
 }
 for m in required_imports:
     assert (
