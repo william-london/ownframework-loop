@@ -36,19 +36,29 @@ for old, new in {
     text = text.replace(old, new, 1)
 
 # Enrollment now consumes scheduling identity directly from its canonical
-# owner. Keep this fail-closed enrollment test aimed at that authority instead
-# of patching supervisor.py's compatibility delegate (which production claims
-# deliberately no longer import).
-for old, new in {
+# owner. Both identity-substitution tests must therefore patch that owner:
+# one proves unproven identity is refused before enrollment, and the other
+# proves a RUNNING enrollment cannot have its scheduling identity rewritten.
+identity_replacements = {
     "orig_identity = supervisor._repository_scheduling_identity":
         "orig_identity = supervisor_identity._repository_scheduling_identity",
-    "supervisor._repository_scheduling_identity = lambda _p: (\"unproven\", False)":
-        "supervisor_identity._repository_scheduling_identity = lambda _p: (\"unproven\", False)",
     "supervisor._repository_scheduling_identity = orig_identity":
         "supervisor_identity._repository_scheduling_identity = orig_identity",
+}
+for old, new in identity_replacements.items():
+    count = text.count(old)
+    if count != 2:
+        raise RuntimeError(f"v090 expected two identity monkey-patch sites for {old!r}, found {count}")
+    text = text.replace(old, new)
+
+for old, new in {
+    "supervisor._repository_scheduling_identity = lambda _p: (\"unproven\", False)":
+        "supervisor_identity._repository_scheduling_identity = lambda _p: (\"unproven\", False)",
+    "supervisor._repository_scheduling_identity = lambda _p: (\"synthetic-drift-key\", True)":
+        "supervisor_identity._repository_scheduling_identity = lambda _p: (\"synthetic-drift-key\", True)",
 }.items():
-    if old not in text:
-        raise RuntimeError(f"v090 expected identity monkey-patch site missing: {old}")
+    if text.count(old) != 1:
+        raise RuntimeError(f"v090 expected one identity substitution site: {old}")
     text = text.replace(old, new, 1)
 
 path.write_text(text, encoding="utf-8")
