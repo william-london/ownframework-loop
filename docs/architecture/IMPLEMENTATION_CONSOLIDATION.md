@@ -372,3 +372,72 @@ implementations-extraction pass.
 - `LOCAL == origin/master` after every push.
 - v0.10.0-dev remains the source version; the historical v0.9.1
   release tag remains FROZEN.
+
+## Stage A → Stage 2 Inversion (current state)
+
+After f1–f4 (commits 6357437, 005d18e, 23829a8, 7b50bd0),
+the supervisor architecture has been partially inverted:
+
+### Canonical body owners (no upward imports to supervisor)
+
+| Module | Body ownership | Symbols |
+|---|---|---|
+| `supervisor_db.py` | canonical | connection / schema / file-mode / per-thread depth |
+| `supervisor_runner_io.py` | canonical | provider envelope + diagnostic tail readers, size ceilings |
+| `supervisor_runner_registry.py` | canonical | RunnerResult / RunnerReadiness dataclasses, register_runner, lookup helpers |
+| `supervisor_accounting.py` | canonical | cost / token / model observation |
+| `supervisor_holds.py` | canonical | dispatch hold lifecycle (validation, persistence, projection, release, cancel) |
+| `supervisor_operator.py` | canonical | operator mutations that are not hold / not claim (supervisor_config_set) |
+
+### Staging facade modules (next extraction targets)
+
+| Module | Status | Follow-up extraction cost |
+|---|---|---|
+| `supervisor_readmodel.py` | re-export facade | `_logical_job_row`, `_readonly_columns`, `_legacy_readonly_fleet_projection`, `_run_git_readonly`, `_registered_worktree_paths`, `_worktree_visibility`, `_candidate_diff_visibility`, `_core_snapshot`, `_job_dict` all live in supervisor.py with 18-170 internal callers each |
+| `supervisor_recovery.py` | re-export facade | `_recover_stale_running`, `_recovery_ownership_matches` tightly coupled to `_local_execution_owned` and `_update_job` |
+| `supervisor_attempts.py` | re-export facade | `_reserve_semantic_attempt` + `_update_job` (18 callers) + `_completion_*` + `_publish_*` form a 1000+ line tightly-coupled cluster |
+| `supervisor_claims.py` | re-export facade | `enqueue` (16 internal + 81 external callers) + `_take_next_job` + `_scheduler_submission_budget` |
+
+### Composition facade (supervisor.py)
+
+After f1–f4, supervisor.py is 6373 lines (down from 6817).
+The remaining bodies are:
+
+  * The ClaudeCodeRunner class + its ~600-line `run` method
+    (the runner execution owner — recommended next extraction
+    target once the per-attempt helper surface is broken down).
+  * `_apply_data_migrations` (cross-domain identity / packet
+    migration; would move to a future `supervisor_identity.py`
+    or stay in supervisor if a `supervisor_db` data-migrations
+    callback is wired).
+  * `_local_execution_owned`, `_register_local_execution` and
+    related per-thread execution state (move to a future
+    `supervisor_execution.py` once the four facades above are
+    inverted).
+  * `_update_job` (18 internal callers; the universal job-state
+    mutator — split across the four facades when each is
+    inverted, since attempts/claims/recovery/readmodel each
+    use a different subset of its keyword surface).
+  * `_recover_stale_running` + `_recovery_ownership_matches`
+    (recovery is a thin consumer of `_update_job` + attempts;
+    its extraction is blocked on attempts inversion).
+  * `serve`, `run_one`, `resume`, `retire`, `enqueue` (the
+    durable execution-loop composition facade — its job is to
+    compose the authority modules, which it already does for
+    the 6 inverted modules).
+
+### Dependency direction (verified statically)
+
+`tests/integration/test_v10c_supervisor_dependency_direction.sh`
+proves:
+
+  * supervisor_db imports supervisor: 0
+  * supervisor_runner_io imports supervisor: 0
+  * supervisor_accounting imports supervisor: 0
+  * supervisor_runner_registry imports supervisor: 0
+  * supervisor_holds imports supervisor: 0 (lazy `_logical_job_row` only, in 3 function bodies — documented follow-up target)
+  * supervisor_operator imports supervisor: 0 (lazy `_validate_max_concurrency` only — documented follow-up target)
+  * supervisor.py imports all 6 canonical-body authorities
+
+The four remaining facade modules still re-export from
+supervisor — that is the documented next extraction pass.
