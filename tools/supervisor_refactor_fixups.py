@@ -1,7 +1,44 @@
+from __future__ import annotations
+
+import ast
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 LIB = ROOT / "lib" / "ownframework_loop"
+
+
+def function_nodes(text: str, name: str) -> list[ast.FunctionDef]:
+    tree = ast.parse(text)
+    return [
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == name
+    ]
+
+
+def node_segment(text: str, node: ast.AST) -> str:
+    lines = text.splitlines(keepends=True)
+    start = getattr(node, "lineno")
+    decorators = getattr(node, "decorator_list", [])
+    if decorators:
+        start = min([start, *(d.lineno for d in decorators)])
+    end = getattr(node, "end_lineno")
+    return "".join(lines[start - 1:end]).rstrip() + "\n"
+
+
+def replace_node_ranges(text: str, replacements: list[tuple[ast.AST, str]]) -> str:
+    lines = text.splitlines(keepends=True)
+    ranged: list[tuple[int, int, str]] = []
+    for node, replacement in replacements:
+        start = getattr(node, "lineno")
+        decorators = getattr(node, "decorator_list", [])
+        if decorators:
+            start = min([start, *(d.lineno for d in decorators)])
+        end = getattr(node, "end_lineno")
+        ranged.append((start, end, replacement.rstrip() + ("\n" if replacement else "")))
+    for start, end, replacement in sorted(ranged, reverse=True):
+        lines[start - 1:end] = [replacement] if replacement else []
+    return "".join(lines)
+
 
 # The extraction source owns this cache as module state immediately before
 # _boot_time_unix; AST function extraction intentionally does not copy adjacent
@@ -18,9 +55,8 @@ if "_BOOT_TIME_CACHE: float | None = None" not in process:
 process_path.write_text(process, encoding="utf-8")
 
 # supervisor_accounting intentionally exposes descriptive canonical names
-# (without the historical supervisor-private underscore).  Bind the extracted
-# consumers to that API rather than recreating compatibility aliases in the
-# lower-level accounting owner.
+# (without the historical supervisor-private underscore). Bind extracted
+# consumers to that API rather than recreating compatibility aliases below it.
 recovery_path = LIB / "supervisor_recovery.py"
 recovery = recovery_path.read_text(encoding="utf-8")
 for old, new in {
@@ -38,9 +74,40 @@ runner = runner.replace("_accounting_mod._extract_effective_model(", "_accountin
 runner = runner.replace("_accounting_mod._extract_model_usage_json(", "_accounting_mod.extract_model_usage_json(")
 runner_path.write_text(runner, encoding="utf-8")
 
-# Preserve the exact historical compatibility signatures on the composition
-# facade. The canonical bodies live below it; these wrappers are intentionally
-# boring and signature-compatible.
+# Grade-B defect found during the refactor audit: supervisor.py currently has
+# TWO definitions named _extract_model_usage_json. The later implementation
+# wins at runtime, so the older accounting delegate did not actually own the
+# canonical behavior. Preserve the effective compact/canonical JSON semantics
+# in supervisor_accounting, then leave exactly one thin compatibility delegate
+# in supervisor.py.
+accounting_path = LIB / "supervisor_accounting.py"
+accounting = accounting_path.read_text(encoding="utf-8")
+acc_nodes = function_nodes(accounting, "extract_model_usage_json")
+if len(acc_nodes) != 1:
+    raise RuntimeError(f"expected one accounting extract_model_usage_json, found {len(acc_nodes)}")
+canonical_model_usage = '''def extract_model_usage_json(payload: dict[str, Any] | None) -> str:
+    """Return compact canonical JSON of the full provider-reported modelUsage.
+
+    This preserves the behavior of the historically effective supervisor
+    implementation: multi-model usage is retained intact and malformed values
+    fail closed to an empty string.
+    """
+    if not isinstance(payload, dict):
+        return ""
+    usage = payload.get("modelUsage")
+    if not isinstance(usage, dict) or not usage:
+        return ""
+    try:
+        return json.dumps(
+            usage, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+        )
+    except (TypeError, ValueError):
+        return ""
+'''
+accounting = replace_node_ranges(accounting, [(acc_nodes[0], canonical_model_usage)])
+accounting_path.write_text(accounting, encoding="utf-8")
+
+# Preserve exact historical compatibility signatures on the composition facade.
 supervisor_path = LIB / "supervisor.py"
 supervisor = supervisor_path.read_text(encoding="utf-8")
 supervisor = supervisor.replace(
@@ -76,6 +143,140 @@ right_policy = '''def _apply_failure_policy(
 if wrong_policy not in supervisor:
     raise RuntimeError("expected generated failure-policy compatibility wrapper not found")
 supervisor = supervisor.replace(wrong_policy, right_policy, 1)
+
+# The later duplicate model-usage body is the historical winner. Accounting now
+# owns those exact semantics, so delete every duplicate after the first facade
+# delegate rather than leaving shadow definitions behind.
+model_nodes = function_nodes(supervisor, "_extract_model_usage_json")
+if len(model_nodes) < 1:
+    raise RuntimeError("supervisor model-usage compatibility surface disappeared")
+if len(model_nodes) > 1:
+    supervisor = replace_node_ranges(
+        supervisor,
+        [(node, "") for node in model_nodes[1:]],
+    )
+
+# Two more attempt-lifecycle bodies were left in the facade by the previous
+# Stage-2 pass. They mutate/query semantic_attempts and therefore belong with
+# supervisor_attempts, not composition.
+sup_tree = ast.parse(supervisor)
+pre_provider_node = next(
+    node for node in sup_tree.body
+    if isinstance(node, ast.Assign)
+    and any(isinstance(t, ast.Name) and t.id == "PRE_PROVIDER_FAILURE_REASONS" for t in node.targets)
+)
+cap_node = next(
+    node for node in sup_tree.body
+    if isinstance(node, ast.FunctionDef) and node.name == "_capability_binding_creation_allowed"
+)
+launch_node = next(
+    node for node in sup_tree.body
+    if isinstance(node, ast.FunctionDef) and node.name == "_mark_attempt_launch_failed"
+)
+attempts_path = LIB / "supervisor_attempts.py"
+attempts = attempts_path.read_text(encoding="utf-8").rstrip() + "\n\n"
+if "def _capability_binding_creation_allowed(" in attempts or "def _mark_attempt_launch_failed(" in attempts:
+    raise RuntimeError("attempt lifecycle fixup would duplicate an existing attempts owner body")
+attempts += node_segment(supervisor, pre_provider_node) + "\n"
+attempts += node_segment(supervisor, cap_node) + "\n"
+attempts += node_segment(supervisor, launch_node) + "\n"
+attempts_path.write_text(attempts, encoding="utf-8")
+
+cap_wrapper = '''def _capability_binding_creation_allowed(
+    conn: sqlite3.Connection,
+    job_id: int,
+) -> bool:
+    return _attempts_mod._capability_binding_creation_allowed(conn, job_id)
+'''
+launch_wrapper = '''def _mark_attempt_launch_failed(
+    conn: sqlite3.Connection,
+    *,
+    job_id: int,
+    attempt_id: str,
+    detail: str,
+    failure_reason: str = "worker_launch_failed",
+) -> None:
+    _attempts_mod._mark_attempt_launch_failed(
+        conn,
+        job_id=job_id,
+        attempt_id=attempt_id,
+        detail=detail,
+        failure_reason=failure_reason,
+    )
+'''
+# Reparse because deleting the duplicate model function changed line positions.
+sup_tree = ast.parse(supervisor)
+pre_provider_node = next(
+    node for node in sup_tree.body
+    if isinstance(node, ast.Assign)
+    and any(isinstance(t, ast.Name) and t.id == "PRE_PROVIDER_FAILURE_REASONS" for t in node.targets)
+)
+cap_node = next(
+    node for node in sup_tree.body
+    if isinstance(node, ast.FunctionDef) and node.name == "_capability_binding_creation_allowed"
+)
+launch_node = next(
+    node for node in sup_tree.body
+    if isinstance(node, ast.FunctionDef) and node.name == "_mark_attempt_launch_failed"
+)
+supervisor = replace_node_ranges(
+    supervisor,
+    [
+        (pre_provider_node, "PRE_PROVIDER_FAILURE_REASONS = _attempts_mod.PRE_PROVIDER_FAILURE_REASONS\n"),
+        (cap_node, cap_wrapper),
+        (launch_node, launch_wrapper),
+    ],
+)
 supervisor_path.write_text(supervisor, encoding="utf-8")
+
+# Strengthen the architecture regression itself: old compatibility delegates
+# may contain one local import before their one call/return, but duplicate
+# top-level definitions are forbidden and the newly relocated accounting /
+# attempt surfaces are now part of the canonical-body set.
+dep_path = ROOT / "tests" / "integration" / "test_v10c_supervisor_dependency_direction.sh"
+dep = dep_path.read_text(encoding="utf-8")
+dep = dep.replace(
+    '    "_classify_exception", "_apply_failure_policy",\n}',
+    '    "_classify_exception", "_apply_failure_policy",\n'
+    '    "_parse_cost_from_durable_stdout", "_parse_token_usage_from_durable_stdout",\n'
+    '    "_durable_envelope_payload", "_extract_effective_model_from_durable_stdout",\n'
+    '    "_extract_model_usage_json_from_durable_stdout", "_extract_effective_model",\n'
+    '    "_extract_model_usage_json", "_strict_profile_model_violation",\n'
+    '    "_capability_binding_creation_allowed", "_mark_attempt_launch_failed",\n'
+    '}',
+)
+old_loop = '''for node in supervisor_tree.body:
+    if isinstance(node, ast.ClassDef) and node.name in {"WorkerLaunchError", "ClaudeCodeRunner", "_RegisteredClaudeCodeRunner"}:
+        raise AssertionError(f"supervisor.py duplicates canonical class {node.name}")
+    if isinstance(node, ast.FunctionDef) and node.name in canonical:
+        body = node.body[:]
+        if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant) and isinstance(body[0].value.value, str):
+            body = body[1:]
+        assert len(body) == 1 and isinstance(body[0], (ast.Return, ast.Expr)), (
+            f"supervisor.py compatibility surface {node.name} is not a thin delegate"
+        )
+print("  PASS: no duplicate canonical implementations remain in supervisor.py")
+'''
+new_loop = '''defs = {}
+for node in supervisor_tree.body:
+    if isinstance(node, ast.ClassDef) and node.name in {"WorkerLaunchError", "ClaudeCodeRunner", "_RegisteredClaudeCodeRunner"}:
+        raise AssertionError(f"supervisor.py duplicates canonical class {node.name}")
+    if isinstance(node, ast.FunctionDef) and node.name in canonical:
+        defs.setdefault(node.name, []).append(node)
+        body = node.body[:]
+        if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant) and isinstance(body[0].value.value, str):
+            body = body[1:]
+        body = [stmt for stmt in body if isinstance(stmt, (ast.Import, ast.ImportFrom)) is False]
+        assert len(body) == 1 and isinstance(body[0], (ast.Return, ast.Expr)), (
+            f"supervisor.py compatibility surface {node.name} is not a thin delegate"
+        )
+for name, nodes in defs.items():
+    assert len(nodes) == 1, f"supervisor.py defines canonical compatibility symbol {name} {len(nodes)} times"
+print("  PASS: no duplicate canonical implementations or shadow definitions remain in supervisor.py")
+'''
+if old_loop not in dep:
+    raise RuntimeError("dependency regression body drifted before fixup")
+dep = dep.replace(old_loop, new_loop, 1)
+dep_path.write_text(dep, encoding="utf-8")
 
 print("SUPERVISOR_REFACTOR_FIXUPS=APPLIED")
