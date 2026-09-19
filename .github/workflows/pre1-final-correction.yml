@@ -1,4 +1,4 @@
-name: Pre-1.0 final correction
+name: Pre-1.0 final doc correction
 
 on:
   push:
@@ -9,87 +9,47 @@ permissions:
   contents: write
 
 jobs:
-  correct-and-prove:
+  correct-audit-doc:
     if: github.actor != 'github-actions[bot]'
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v6
         with:
           ref: ${{ github.sha }}
           fetch-depth: 0
-      - uses: actions/setup-python@v6
-        with:
-          python-version: '3.12'
-      - name: Apply bounded source correction
+      - name: Align B002 audit wording with materialized source
         run: |
-          python3 .github/pre1_final_correction.py
           python3 - <<'PY'
           from pathlib import Path
 
-          p = Path('lib/ownframework_loop/supervisor_db.py')
-          p.write_text(p.read_text().rstrip() + '\n')
-
-          # B002 behavioral sibling fixture: pin only the git probes required
-          # to reach the publication boundary, then restore them.
-          p = Path('tests/integration/test_v10e_pre1_behavioral_proofs.sh')
-          t = p.read_text()
-          start = '    c.execute("UPDATE jobs SET last_error=NULL WHERE id=1"); c.commit(); ok='
-          repl = '''    c.execute("UPDATE jobs SET last_error=NULL WHERE id=1"); c.commit()\n    real_dirty=attempts_mod.git_checks.dirty_status; real_head=attempts_mod.git_checks.current_head; real_branch=attempts_mod.git_checks.current_branch; real_run=attempts_mod.util.run_subprocess\n    attempts_mod.git_checks.dirty_status=lambda _p:"clean"; attempts_mod.git_checks.current_head=lambda _p:head; attempts_mod.git_checks.current_branch=lambda _p:"agent/r/builder"; attempts_mod.util.run_subprocess=lambda *_a,**_k:types.SimpleNamespace(returncode=0,stdout=head,stderr="")\n    try:\n        ok='''
-          if t.count(start) != 1:
-              raise SystemExit('B002 sibling fixture start marker mismatch')
-          t = t.replace(start, repl, 1)
-          end = ',semantic_reason="synthetic",job_id=1); after,e=snap(); check("B002-maybe: sibling path exercised",ok is True);'
-          repl_end = ''',semantic_reason="synthetic",job_id=1)\n    finally:\n        attempts_mod.git_checks.dirty_status=real_dirty; attempts_mod.git_checks.current_head=real_head; attempts_mod.git_checks.current_branch=real_branch; attempts_mod.util.run_subprocess=real_run\n    after,e=snap(); check("B002-maybe: sibling path exercised",ok is True);'''
-          if t.count(end) != 1:
-              raise SystemExit('B002 sibling fixture end marker mismatch')
-          p.write_text(t.replace(end, repl_end, 1))
-
-          # B002 canonical static regression: preserve strict shape checking,
-          # but require the new shared diagnostic-only owner instead of the
-          # obsolete duplicated last_error implementation in each sibling.
-          p = Path('tests/integration/test_v10d_pre1_adversarial_fixes.sh')
-          t = p.read_text()
-          old = '''# Both helpers must narrow to except RuntimeError and persist cause\nfor name in ('_maybe_complete_semantic_artifact', '_publish_acceptance_for_ready_artifact'):\n    fn = getattr(supervisor_attempts, name)\n    src = inspect.getsource(fn)\n    assert 'except RuntimeError as exc' in src, f'B002: {name} must narrow except to RuntimeError'\n    assert 'semantic_acceptance_publication_failed' in src, f'B002: {name} must surface cause on last_error'\nprint('ok')\n'''
-          new = '''# Both siblings must narrow to RuntimeError and delegate to one shared\n# diagnostic-only owner. The owner must persist the bounded cause without\n# routing through _update_job (which is a lifecycle transition).\nfor name in ('_maybe_complete_semantic_artifact', '_publish_acceptance_for_ready_artifact'):\n    fn = getattr(supervisor_attempts, name)\n    src = inspect.getsource(fn)\n    assert 'except RuntimeError as exc' in src, f'B002: {name} must narrow except to RuntimeError'\n    assert '_persist_semantic_acceptance_failure' in src, f'B002: {name} must delegate diagnostic persistence'\nhelper_src = inspect.getsource(supervisor_attempts._persist_semantic_acceptance_failure)\nassert 'semantic_acceptance_publication_failed' in helper_src, 'B002: shared helper must persist the actual cause'\nassert '_persist_job_last_error' in helper_src, 'B002: shared helper must use diagnostic-only DB primitive'\nassert '_update_job' not in helper_src, 'B002: diagnostic helper must not perform lifecycle transition'\nassert 'except Exception' not in helper_src, 'B002: deterministic diagnostic programming errors must not be swallowed'\nprint('ok')\n'''
-          if t.count(old) != 1:
-              raise SystemExit('v10d B002 static regression marker mismatch')
-          p.write_text(t.replace(old, new, 1))
+          p = Path('docs/architecture/PRE_1_0_ADVERSARIAL_AUDIT.md')
+          text = p.read_text()
+          old = '''### B002 — v0.9.9-h recovery paths swallowed all exceptions silently
+          **Root cause:** `_maybe_complete_semantic_artifact` and `_publish_acceptance_for_ready_artifact` wrapped `_publish_semantic_acceptance` in `except Exception: pass`. Operators lost the cause of any failure.
+          **Fix:** Narrowed to `except RuntimeError as exc`; surface the cause via `_db_mod._update_job(... last_error=f"semantic_acceptance_publication_failed: {exc}")` so the downstream gate refusal carries diagnostic context.
+          **Regression:** test_v10d section B002 asserts both helpers contain the narrowed except and the surfaced message.
+          **Fix file:** `lib/ownframework_loop/supervisor_attempts.py:679-695,752-768`.
+          '''
+          new = '''### B002 — v0.9.9-h recovery paths swallowed all exceptions silently
+          **Root cause:** `_maybe_complete_semantic_artifact` and `_publish_acceptance_for_ready_artifact` wrapped `_publish_semantic_acceptance` in `except Exception: pass`. Operators lost the cause of any failure.
+          **Fix:** Both sibling paths now catch the expected `RuntimeError` and delegate to one `_persist_semantic_acceptance_failure` owner. That helper uses `supervisor_db._persist_job_last_error` to update only bounded `last_error` plus `updated_at`, preserving durable status, retry/cost counters, and all worker-ownership fields. Missing job rows and deterministic diagnostic-persistence programming errors propagate instead of disappearing behind a broad catch.
+          **Regression:** `test_v10d_pre1_adversarial_fixes.sh` requires the shared helper, the diagnostic-only DB primitive, no `_update_job` lifecycle mutation, and no broad swallow. `test_v10e_pre1_behavioral_proofs.sh` exercises both sibling paths through real SQLite, proves the injected cause is persisted, proves status/worker ownership is unchanged, and proves a diagnostic-persistence programming error propagates.
+          **Fix files:** `lib/ownframework_loop/supervisor_db.py`, `lib/ownframework_loop/supervisor_attempts.py`, `tests/integration/test_v10d_pre1_adversarial_fixes.sh`, `tests/integration/test_v10e_pre1_behavioral_proofs.sh`.
+          '''
+          if old in text:
+              p.write_text(text.replace(old, new, 1))
+          elif new not in text:
+              raise SystemExit('B002 audit paragraph is neither expected old nor expected final form')
           PY
-      - name: Inspect bounded diff
-        run: |
           git diff --check
-          CHANGED="$(git diff --name-only)"
-          printf '%s\n' "$CHANGED"
-          test "$(printf '%s\n' "$CHANGED" | sed '/^$/d' | wc -l | tr -d ' ')" -eq 6
-          printf '%s\n' "$CHANGED" | grep -Fx 'lib/ownframework_loop/supervisor_db.py'
-          printf '%s\n' "$CHANGED" | grep -Fx 'lib/ownframework_loop/supervisor_attempts.py'
-          printf '%s\n' "$CHANGED" | grep -Fx 'lib/ownframework_loop/state.py'
-          printf '%s\n' "$CHANGED" | grep -Fx 'tests/integration/test_v10d_pre1_adversarial_fixes.sh'
-          printf '%s\n' "$CHANGED" | grep -Fx 'tests/integration/test_v10e_pre1_behavioral_proofs.sh'
-          printf '%s\n' "$CHANGED" | grep -Fx 'docs/architecture/PRE_1_0_ADVERSARIAL_AUDIT.md'
-      - name: Focused behavioral proof
-        run: bash tests/integration/test_v10e_pre1_behavioral_proofs.sh
-      - name: Dependency direction
-        run: bash tests/integration/test_v10c_supervisor_dependency_direction.sh
-      - name: Canonical validation
-        run: ./validate.sh
-      - name: Create local candidate commit
-        run: |
+          if git diff --quiet; then
+            echo 'AUDIT_DOC_ALREADY_FINAL=yes'
+            exit 0
+          fi
+          test "$(git diff --name-only)" = 'docs/architecture/PRE_1_0_ADVERSARIAL_AUDIT.md'
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add \
-            lib/ownframework_loop/supervisor_db.py \
-            lib/ownframework_loop/supervisor_attempts.py \
-            lib/ownframework_loop/state.py \
-            tests/integration/test_v10d_pre1_adversarial_fixes.sh \
-            tests/integration/test_v10e_pre1_behavioral_proofs.sh \
-            docs/architecture/PRE_1_0_ADVERSARIAL_AUDIT.md
-          git commit -m 'v0.10.0-dev f: close final pre-1.0 proof gaps'
-          git checkout -B hardening/pre-1.0-adversarial-audit HEAD
-      - name: Release gate
-        env:
-          OFLOOP_RELEASE_GATE_EXPECTED_BRANCH: hardening/pre-1.0-adversarial-audit
-        run: ./release_gate.sh
-      - name: Push gated correction
-        run: git push origin HEAD:hardening/pre-1.0-adversarial-audit
+          git add docs/architecture/PRE_1_0_ADVERSARIAL_AUDIT.md
+          git commit -m 'docs: align B002 freeze audit with diagnostic-only owner'
+          git push origin HEAD:hardening/pre-1.0-adversarial-audit
