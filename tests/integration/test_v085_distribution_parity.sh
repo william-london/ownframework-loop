@@ -90,8 +90,8 @@ from pathlib import Path
 
 root = Path(sys.argv[1])
 
-def from_supervisor_py():
-    text = (root / "lib/ownframework_loop/supervisor.py").read_text()
+def from_runtime_owner():
+    text = (root / "lib/ownframework_loop/supervisor_runtime.py").read_text()
     m = re.search(r"_SERVICE_ENV_ALLOWED_KEYS = frozenset\(\{([^}]+)\}\)", text, re.DOTALL)
     return sorted(re.findall(r'"([^"]+)"', m.group(1)))
 
@@ -117,7 +117,7 @@ def from_installer(path):
                 break
     return sorted(set(items))
 
-sur = from_supervisor_py()
+sur = from_runtime_owner()
 mac_helpers = from_install_helpers()
 mac_installer = from_installer(root / "scripts/supervisor/install-macos.sh")
 lin = from_installer(root / "scripts/supervisor/install-linux.sh")
@@ -128,11 +128,11 @@ lin = from_installer(root / "scripts/supervisor/install-linux.sh")
 # accept either as authoritative for that platform.
 assert sur == lin, (
     f"service-env allowlist drift: "
-    f"supervisor.py={sur} install-linux.sh={lin}"
+    f"supervisor_runtime.py={sur} install-linux.sh={lin}"
 )
 assert mac_helpers == sur or mac_installer == sur, (
     f"service-env allowlist drift: "
-    f"supervisor.py={sur} install_helpers.py={mac_helpers} install-macos.sh={mac_installer}"
+    f"supervisor_runtime.py={sur} install_helpers.py={mac_helpers} install-macos.sh={mac_installer}"
 )
 print(f"SERVICE_ENV_PLATFORM_PARITY=PASS keys={len(sur)}")
 PY

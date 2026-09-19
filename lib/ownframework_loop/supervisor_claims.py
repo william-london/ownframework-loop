@@ -41,9 +41,7 @@ Dependency direction:
   supervisor_claims -> supervisor_recovery (recovery sweep)
   supervisor_claims -> supervisor_readmodel (job projection)
   supervisor_claims -> supervisor_identity (scheduling keys)
-  supervisor_claims -> supervisor (LAZY function-scope only,
-      for the composition-facade helpers that will move to
-      the runner-execution authority once it is extracted)
+  supervisor_claims -> supervisor_runner_registry + supervisor_runtime
 """
 from __future__ import annotations
 
@@ -61,6 +59,8 @@ from . import supervisor_holds as _holds_mod
 from . import supervisor_recovery as _recovery_mod
 from . import supervisor_readmodel as _readmodel_mod
 from . import supervisor_identity as _identity_mod
+from . import supervisor_runner_registry as _runner_registry_mod
+from . import supervisor_runtime as _runtime_mod
 
 
 
@@ -109,18 +109,11 @@ def enqueue(
     The CLI resolves packet-declared envelopes (risk_budget.max_runtime_seconds
     -> wall clock) before calling this; explicit operator flags win.
     """
-    # registered_runner_ids + _current_runtime_generation + identity
-    # helpers: all reached through the supervisor facade (NOT
-    # directly from supervisor_runner_registry / supervisor_identity)
-    # so test monkey-patches on ``supervisor.X`` continue to apply.
-    # The supervisor facade re-exports the canonical bodies, so the
-    # monkey-patch surface stays stable.
-    from . import supervisor as _supervisor_mod
-    _current_runtime_generation = _supervisor_mod._current_runtime_generation
-    _repository_scheduling_identity = _supervisor_mod._repository_scheduling_identity
-    _workspace_scheduling_identity = _supervisor_mod._workspace_scheduling_identity
-    _packet_execution_mode = _supervisor_mod._packet_execution_mode
-    registered_runner_ids = _supervisor_mod.registered_runner_ids
+    _current_runtime_generation = _runtime_mod.runtime_generation
+    _repository_scheduling_identity = _identity_mod._repository_scheduling_identity
+    _workspace_scheduling_identity = _identity_mod._workspace_scheduling_identity
+    _packet_execution_mode = _identity_mod._packet_execution_mode
+    registered_runner_ids = _runner_registry_mod.registered_runner_ids
     state_mod.validate_run_id(run_id)
     db = db_path or _db_mod.default_db_path()
     live_runners = registered_runner_ids()

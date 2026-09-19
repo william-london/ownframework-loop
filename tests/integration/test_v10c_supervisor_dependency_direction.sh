@@ -1,222 +1,45 @@
 #!/usr/bin/env bash
-# v0.10.0-dev c: supervisor dependency-direction regressions.
-#
-# After the supervisor decomposition, the dependency direction
-# MUST be:
-#
-#   subordinate authority modules (supervisor_db, supervisor_runner_io,
-#   supervisor_holds, supervisor_operator, supervisor_accounting,
-#   supervisor_runner_registry, supervisor_readmodel,
-#   supervisor_recovery, supervisor_attempts, supervisor_claims)
-#       ↓
-#   nothing (or only stdlib + sibling leaves)
-#
-# supervisor.py
-#       ↓
-#   subordinate authority modules (composition facade)
-#
-# This test statically inspects the import graph of every
-# supervisor_* module and asserts:
-#
-#   1. supervisor_db does NOT import supervisor or any other
-#      supervisor_* module.
-#   2. supervisor_runner_io does NOT import supervisor or any
-#      other supervisor_* module.
-#   3. supervisor_accounting does NOT import supervisor.
-#   4. supervisor_holds does NOT import supervisor.* except for
-#      _logical_job_row (currently a follow-up extraction
-#      target; documented as deferred).
-#   5. supervisor_operator does NOT import supervisor.* except
-#      for _validate_max_concurrency (currently a follow-up
-#      extraction target; documented as deferred).
-#   6. supervisor.py imports all of the above modules (proves
-#      supervisor is a composition facade).
-#   7. supervisor.py does not duplicate any of the canonical
-#      function bodies of the supervisor_* modules.
+# v0.10.0-dev c: final supervisor dependency-direction regression.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 . "$HERE/../_helpers.sh"
 ROOT_DIR="$(cd "$HERE/../.." && pwd)"
-TMP="$(mktemp -d -t ofloop-supervisor-dep-direction.XXXXXX)"
-trap 'rm -rf "$TMP"' EXIT INT TERM HUP
-
-fail(){ echo "FAIL: $*" >&2; exit 1; }
-pass(){ echo "  pass: $*"; }
-
 cd "$ROOT_DIR"
-LIB="lib/ownframework_loop"
 
 PYTHONPATH="$ROOT_DIR/lib" python3 -B <<'PY'
 import ast
 from pathlib import Path
-import sys
 
 LIB = Path("lib/ownframework_loop")
-supervisor_py = (LIB / "supervisor.py").read_text(encoding="utf-8")
-
-# Step 1: enumerate all supervisor_* modules.
+supervisor_path = LIB / "supervisor.py"
+supervisor_src = supervisor_path.read_text(encoding="utf-8")
+supervisor_tree = ast.parse(supervisor_src)
 modules = sorted(p.stem for p in LIB.glob("supervisor_*.py"))
 print(f"  modules discovered: {modules}")
 
-# Step 2: parse each module and collect its module-level imports.
-def collect_imports(path: Path) -> set[str]:
-    src = path.read_text(encoding="utf-8")
-    tree = ast.parse(src)
-    imports: set[str] = set()
+
+def upward_imports(path: Path):
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    hits = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
-                imports.add(alias.name)
+                if alias.name in {"supervisor", "ownframework_loop.supervisor"} or alias.name.endswith(".supervisor"):
+                    hits.append((node.lineno, f"import {alias.name}"))
         elif isinstance(node, ast.ImportFrom):
-            if node.module and node.level == 1:
-                # relative import
-                imports.add(node.module)
-    return imports
-
-imports: dict[str, set[str]] = {}
-for m in modules:
-    imports[m] = collect_imports(LIB / f"{m}.py")
-
-# Step 3: enforce "no upward imports to supervisor".
-def find_upward(target_module: str, allowed_lazy: list[str]) -> None:
-    """Static check: target_module MUST NOT import supervisor
-    in its top-level (non-function-body) imports.
-
-    Lazy imports inside function bodies are scoped to that
-    function's call; they are still real upward imports but
-    the brief's Phase 2 sequencing permits them only as
-    follow-up extraction targets.  These are listed in
-    ``allowed_lazy`` for the test to admit the documented
-    exceptions.
-    """
-    src = (LIB / f"{target_module}.py").read_text(encoding="utf-8")
-    tree = ast.parse(src)
-    for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom) and node.module == "supervisor":
-            # Module-level import (outside any function) is forbidden.
-            # Find enclosing scope.
-            enclosing = None
-            for parent in ast.walk(tree):
-                if isinstance(parent, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                    for child in ast.walk(parent):
-                        if child is node:
-                            enclosing = parent.name
-            if enclosing is None:
-                # Module-level import is NOT allowed at all.
-                msg = (
-                    f"{target_module}: forbidden module-level "
-                    f"`from .supervisor import ...` (no function scope)"
-                )
-                raise AssertionError(msg)
-            # Lazy import inside a function is permitted but the
-            # symbol must be in allowed_lazy.
+            module = node.module or ""
             names = [a.name for a in node.names]
-            for name in names:
-                if name not in allowed_lazy:
-                    raise AssertionError(
-                        f"{target_module}: lazy import of "
-                        f"supervisor.{name} inside function {enclosing} "
-                        f"is not in the documented follow-up allowlist "
-                        f"{allowed_lazy!r}"
-                    )
-    return None
+            if module == "supervisor" or module.endswith(".supervisor"):
+                hits.append((node.lineno, f"from {module} import {','.join(names)}"))
+            if node.level and module == "" and "supervisor" in names:
+                hits.append((node.lineno, "from . import supervisor"))
+    return hits
 
-# supervisor_db has no upward imports — fully inverted.
-find_upward("supervisor_db", allowed_lazy=[])
+for module in modules:
+    hits = upward_imports(LIB / f"{module}.py")
+    assert not hits, f"{module}: forbidden upward import(s): {hits}"
+print("  PASS: every canonical supervisor_* module has zero imports of supervisor.py")
 
-# supervisor_runner_io has no upward imports — fully inverted.
-find_upward("supervisor_runner_io", allowed_lazy=[])
-
-# supervisor_accounting: was the canonical example of an upward
-# import to supervisor (for _read_durable_provider_envelope).
-# After f3 it must NOT import supervisor at all.
-find_upward("supervisor_accounting", allowed_lazy=[])
-
-# supervisor_holds: currently imports _logical_job_row from
-# supervisor inside three function bodies.  Documented as the
-# next extraction target.
-find_upward(
-    "supervisor_holds",
-    allowed_lazy=["_logical_job_row"],
-)
-
-# supervisor_operator: currently imports _validate_max_concurrency
-# from supervisor inside one function body.  Documented as the
-# next extraction target.
-find_upward(
-    "supervisor_operator",
-    allowed_lazy=["_validate_max_concurrency"],
-)
-
-# All canonical body owners — must NOT import supervisor at
-# module or function scope EXCEPT for documented test-monkey-patch
-# bridges and runner-execution helper bridges (which are slated
-# for the next consolidation pass).
-for m in [
-    "supervisor_runner_registry",
-    "supervisor_readmodel",
-    "supervisor_holds",
-    "supervisor_operator",
-    "supervisor_db",
-    "supervisor_runner_io",
-    "supervisor_accounting",
-    "supervisor_identity",
-]:
-    find_upward(m, allowed_lazy=[])
-# supervisor_recovery: lazy imports of supervisor at function
-# scope are permitted only for the documented test-monkey-patch
-# bridge.  Allow the specific names tests patch.
-find_upward(
-    "supervisor_recovery",
-    allowed_lazy=[
-        "_local_execution_owned",
-        "_pid_alive",
-        "_terminate_owned_process_group",
-        "_recovery_ownership_matches",
-        "_parse_cost_from_durable_stdout",
-        "_parse_token_usage_from_durable_stdout",
-        "_extract_effective_model_from_durable_stdout",
-        "_extract_model_usage_json_from_durable_stdout",
-        "_account_attempt_cost",
-    ],
-)
-# supervisor_attempts: lazy imports of supervisor at function
-# scope are permitted only for the documented runner-execution
-# helpers (worker_log_paths, _read_pid_start_identity) that
-# will move to the runner-execution authority.
-find_upward(
-    "supervisor_attempts",
-    allowed_lazy=[
-        "worker_log_paths",
-        "_read_pid_start_identity",
-    ],
-)
-# supervisor_claims: lazy imports of supervisor at function
-# scope are permitted for the documented test-monkey-patch
-# bridge — enrolled-run identity helpers (``_repository_scheduling_identity``
-# etc.) and runner-registry lookup (``registered_runner_ids``)
-# and runtime-generation (``_current_runtime_generation``) are
-# reached through the supervisor facade so test monkey-patches
-# on supervisor.X continue to apply.  These follow-up extractions
-# (identity owner, runner execution) move them off the facade.
-find_upward(
-    "supervisor_claims",
-    allowed_lazy=[
-        "_repository_scheduling_identity",
-        "_workspace_scheduling_identity",
-        "_packet_execution_mode",
-        "registered_runner_ids",
-        "_current_runtime_generation",
-    ],
-)
-print("  PASS: dependency-direction invariants hold for inverted modules")
-
-# Step 4: supervisor.py is a composition facade that imports
-# the named authority modules that have been flipped from
-# facade to canonical body owner.  Modules still in facade
-# stage (supervisor_attempts, supervisor_claims,
-# supervisor_recovery, supervisor_readmodel) are imported
-# via the supervisor package, not supervisor.py directly.
 required_imports = {
     "supervisor_db",
     "supervisor_holds",
@@ -229,12 +52,53 @@ required_imports = {
     "supervisor_recovery",
     "supervisor_attempts",
     "supervisor_claims",
+    "supervisor_process",
+    "supervisor_runtime",
+    "supervisor_prompts",
+    "supervisor_runner",
 }
-for m in required_imports:
-    assert (
-        f"from . import {m}" in supervisor_py
-        or f"import {m}" in supervisor_py
-    ), f"supervisor.py does not import {m}"
-print("  PASS: supervisor.py imports all canonical-body authorities")
+for module in required_imports:
+    assert f"{module} as _" in supervisor_src or f"import {module}" in supervisor_src, (
+        f"supervisor.py does not compose {module}"
+    )
+print("  PASS: supervisor.py composes every named authority")
+
+# Canonical implementation symbols may remain in supervisor.py only as thin
+# compatibility delegates. A delegate may contain an optional docstring plus
+# a single return/call/assignment expression; control-flow or multiple semantic
+# statements is a duplicate implementation.
+canonical = {
+    "_register_local_execution", "_local_execution_owned", "_clear_local_executions_for_thread",
+    "_load_service_env_file", "_claude_cli_version", "_validate_claude_extra_args",
+    "_parse_adapter_auth_read_paths", "_semantic_worker_settings", "runtime_generation",
+    "default_worker_log_dir", "_runtime_cache_run_root", "_cleanup_terminal_runtime_cache",
+    "_cleanup_done_runtime_caches", "_slug_repo", "worker_log_paths", "_pid_alive",
+    "_read_pid_start_identity", "_pid_identity_proven", "_terminate_owned_process_group",
+    "_read_pid_start_time", "_boot_time_unix", "_source_root", "_load_role_prompt",
+    "_write_semantic_prompt_provenance", "_terminate_group", "_classify_runner_failure",
+    "_classify_exception", "_apply_failure_policy",
+    "_parse_cost_from_durable_stdout", "_parse_token_usage_from_durable_stdout",
+    "_durable_envelope_payload", "_extract_effective_model_from_durable_stdout",
+    "_extract_model_usage_json_from_durable_stdout", "_extract_effective_model",
+    "_extract_model_usage_json", "_strict_profile_model_violation",
+    "_capability_binding_creation_allowed", "_mark_attempt_launch_failed",
+}
+defs = {}
+for node in supervisor_tree.body:
+    if isinstance(node, ast.ClassDef) and node.name in {"WorkerLaunchError", "ClaudeCodeRunner", "_RegisteredClaudeCodeRunner"}:
+        raise AssertionError(f"supervisor.py duplicates canonical class {node.name}")
+    if isinstance(node, ast.FunctionDef) and node.name in canonical:
+        defs.setdefault(node.name, []).append(node)
+        body = node.body[:]
+        if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant) and isinstance(body[0].value.value, str):
+            body = body[1:]
+        body = [stmt for stmt in body if isinstance(stmt, (ast.Import, ast.ImportFrom)) is False]
+        assert len(body) == 1 and isinstance(body[0], (ast.Return, ast.Expr)), (
+            f"supervisor.py compatibility surface {node.name} is not a thin delegate"
+        )
+for name, nodes in defs.items():
+    assert len(nodes) == 1, f"supervisor.py defines canonical compatibility symbol {name} {len(nodes)} times"
+print("  PASS: no duplicate canonical implementations or shadow definitions remain in supervisor.py")
 PY
+
 echo "V10C_SUPERVISOR_DEPENDENCY_DIRECTION=PASS"

@@ -8,7 +8,7 @@ TMP_ROOT="$TMP" PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$(cd "$HERE/.." && pwd):$L
 import hashlib, json, os, sqlite3, subprocess, tempfile, threading, time
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
-from ownframework_loop import dispatch, guards, supervisor, worktrees
+from ownframework_loop import dispatch, guards, supervisor, supervisor_accounting, supervisor_claims, supervisor_identity, worktrees
 import sys as _sys_h
 _sys_h.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from _test_support import write_minimal_valid_packet  # noqa: E402
@@ -148,8 +148,8 @@ with supervisor._connect(race_db) as c:
     )
     c.commit()
 
-orig_cost_parser = supervisor._parse_cost_from_durable_stdout
-orig_usage_parser = supervisor._parse_token_usage_from_durable_stdout
+orig_cost_parser = supervisor_accounting.parse_cost_from_durable_stdout
+orig_usage_parser = supervisor_accounting.parse_token_usage_from_durable_stdout
 b_observed = threading.Event()
 release_b = threading.Event()
 recovery_results = {}
@@ -167,8 +167,8 @@ def run_recovery(name):
     with supervisor._connect(race_db) as c:
         recovery_results[name] = supervisor._recover_stale_running(c)
 
-supervisor._parse_cost_from_durable_stdout = fake_cost_parser
-supervisor._parse_token_usage_from_durable_stdout = fake_usage_parser
+supervisor_accounting.parse_cost_from_durable_stdout = fake_cost_parser
+supervisor_accounting.parse_token_usage_from_durable_stdout = fake_usage_parser
 try:
     slow = threading.Thread(target=run_recovery, args=("b",), name="recovery-b")
     slow.start()
@@ -206,8 +206,8 @@ try:
     assert recovery_results.get("b") == 0, recovery_results
 finally:
     release_b.set()
-    supervisor._parse_cost_from_durable_stdout = orig_cost_parser
-    supervisor._parse_token_usage_from_durable_stdout = orig_usage_parser
+    supervisor_accounting.parse_cost_from_durable_stdout = orig_cost_parser
+    supervisor_accounting.parse_token_usage_from_durable_stdout = orig_usage_parser
 
 with supervisor._connect_readonly(race_db) as c:
     job_row = c.execute("SELECT * FROM jobs WHERE id=?", (race_job["id"],)).fetchone()
@@ -687,8 +687,9 @@ print("REAL_GIT_IDENTITY_UNCERTAINTY_FAILS_CLOSED=PASS")
 
 # Identity uncertainty is rejected at enrollment rather than left silently
 # queued forever in a background service.
-orig_identity = supervisor._repository_scheduling_identity
-supervisor._repository_scheduling_identity = lambda _p: ("unproven", False)
+orig_identity = supervisor_claims._identity_mod._repository_scheduling_identity
+supervisor_claims._identity_mod._repository_scheduling_identity = lambda _p: ("unproven", False)
+assert supervisor_claims._identity_mod is supervisor_identity
 try:
     write_minimal_valid_packet(identity_repo, "identity-enqueue-refusal")
     refused_identity = supervisor.enqueue(
@@ -698,7 +699,7 @@ try:
         runtime_generation="test-generation",
     )
 finally:
-    supervisor._repository_scheduling_identity = orig_identity
+    supervisor_claims._identity_mod._repository_scheduling_identity = orig_identity
 assert refused_identity.get("enqueue_refused") is True, refused_identity
 assert refused_identity.get("reason") == "repository_identity_unproven", refused_identity
 print("UNPROVEN_IDENTITY_ENQUEUE_REFUSED=PASS")
@@ -754,8 +755,9 @@ with supervisor._connect(db) as c:
         (os.getpid(), time.time(), identity_job["id"]),
     )
     c.commit()
-orig_identity = supervisor._repository_scheduling_identity
-supervisor._repository_scheduling_identity = lambda _p: ("synthetic-drift-key", True)
+orig_identity = supervisor_claims._identity_mod._repository_scheduling_identity
+supervisor_claims._identity_mod._repository_scheduling_identity = lambda _p: ("synthetic-drift-key", True)
+assert supervisor_claims._identity_mod is supervisor_identity
 try:
     write_minimal_valid_packet(Path(identity_job["repo"]), "identity-running")
     refused = supervisor.enqueue(
@@ -765,7 +767,7 @@ try:
         runtime_generation="test-generation",
     )
 finally:
-    supervisor._repository_scheduling_identity = orig_identity
+    supervisor_claims._identity_mod._repository_scheduling_identity = orig_identity
 assert refused.get("enqueue_refused") is True, refused
 assert refused.get("reason") == "cannot_change_scheduling_identity_while_running", refused
 print("RUNNING_SCHEDULING_IDENTITY_IMMUTABLE=PASS")

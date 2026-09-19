@@ -373,183 +373,70 @@ implementations-extraction pass.
 - v0.10.0-dev remains the source version; the historical v0.9.1
   release tag remains FROZEN.
 
-## Stage 2 Inversion (post-Stage-A)
+## Stage 2 Finalization (current architecture)
 
-After f1–f5 (commits 6357437, 005d18e, 23829a8, 7b50bd0, 99d611d,
-52e13bb, 0a79b9e, 6518ce3), the supervisor package has been
-fully inverted at the named-owner level.  Every function body
-in `supervisor.py` is now either a thin delegate to a named
-authority or part of the composition facade itself.
+The supervisor decomposition is complete at the named-owner boundary.  The
+composition facade remains intentionally broad because it owns orchestration,
+not because leaf authorities still depend upward on it.
 
-### Canonical body owners (no upward imports)
+### Canonical body owners
 
-| Module | Body ownership | Symbols |
-|---|---|---|
-| `supervisor_db.py` | canonical | connection / schema / file-mode / per-thread depth / lookup / validator |
-| `supervisor_runner_io.py` | canonical | provider envelope + diagnostic tail readers, size ceilings |
-| `supervisor_runner_registry.py` | canonical | RunnerResult / RunnerReadiness, register_runner, lookup, preflight contract |
-| `supervisor_accounting.py` | canonical | cost / token / model observation |
-| `supervisor_holds.py` | canonical | dispatch hold lifecycle (validation, persistence, projection, release, cancel) |
-| `supervisor_operator.py` | canonical | operator mutations that are not hold / not claim (supervisor_config_set) |
-| `supervisor_readmodel.py` | canonical | read-only operator projections (status, fleet_status, supervisor_config_get, hold_status, _job_dict, etc.) |
-| `supervisor_identity.py` | canonical | scheduling-identity (Git common-dir / workspace / packet-mode) |
-| `supervisor_recovery.py` | canonical | stale-RUNNING recovery sweep + predicate |
-| `supervisor_attempts.py` | canonical | semantic-attempt lifecycle (reservation, provenance gate, acceptance publication, completion) |
-| `supervisor_claims.py` | canonical | enqueue / claim / submission-budget |
+| Module | Canonical authority |
+|---|---|
+| `supervisor_db.py` | connection, schema, file-mode, lookup, validator, transition primitive |
+| `supervisor_holds.py` | dispatch-hold validation, persistence, matching, release/cancel, projection |
+| `supervisor_readmodel.py` | status/fleet/config read models and job/core visibility projection |
+| `supervisor_operator.py` | operator configuration mutation |
+| `supervisor_identity.py` | repository/workspace scheduling identity and packet execution mode |
+| `supervisor_accounting.py` | durable cost/token/model observation |
+| `supervisor_attempts.py` | semantic-attempt reservation, provenance, acceptance, completion, launch-failure lifecycle |
+| `supervisor_recovery.py` | stale-RUNNING recovery and durable failure/retry/quarantine policy |
+| `supervisor_claims.py` | enrollment, atomic claim, scheduler submission budget |
+| `supervisor_process.py` | local execution fence, PID/start identity, liveness, owned process-group termination |
+| `supervisor_runtime.py` | commissioned service environment, runtime generation, runtime-cache lifecycle |
+| `supervisor_prompts.py` | role prompt construction and immutable prompt provenance |
+| `supervisor_runner_io.py` | provider envelope/diagnostic readers and durable worker-log paths |
+| `supervisor_runner_registry.py` | generic runner result/readiness contract and registry |
+| `supervisor_runner.py` | Claude-specific provider execution, subprocess lifecycle, configuration and failure observation |
 
-ZERO re-export facades remain in the supervisor package.
+`supervisor.py` composes these authorities and keeps compatibility delegates
+for established imports.  Cross-domain orchestration stays there: `run_one`,
+`serve`, `resume`, `retire`, PROGRAM continuation/protected recovery,
+startup-ready attestation, and `_apply_data_migrations` as the explicit
+persistence/identity migration callback.
 
-### Composition facade (supervisor.py)
+### Dependency direction
 
-After f1–f5, supervisor.py is 4395 lines (down from 6817).  The
-remaining body is the durable execution-loop composition facade
-plus the ClaudeCodeRunner class and PID-introspection /
-prompt-construction helpers that the runner class depends on.
+`tests/integration/test_v10c_supervisor_dependency_direction.sh` rejects any
+module- or function-scope import of `supervisor.py` from a canonical
+`supervisor_*` owner.  There is no lazy-import exception list.  The facade may
+import downward; canonical owners may depend on lower/cohesive owners, but not
+back upward into the composition module.
 
-What supervisor.py still owns:
+Compatibility tests patch the canonical owner consumed by the code under test.
+Production modules no longer import upward merely to preserve historical test
+monkey-patch behavior.
 
-  * The ClaudeCodeRunner class (~600 lines) — provider execution
-    implementation that depends on dozens of supervisor-internal
-    helpers (PID introspection, prompt construction, prompt
-    provenance, runtime generation, file-mode protection).  The
-    brief asks for this to move to `supervisor_runner.py`, but
-    the body has dense coupling with supervisor-internal state
-    that requires extracting PID introspection to
-    `supervisor_pid.py` AND prompt construction to
-    `supervisor_prompts.py` AND capability-binding helpers BEFORE
-    the runner can safely land.  Skipped this checkpoint as
-    `BLOCKED` on those follow-up owners; flagged in the
-    sequencing roadmap.
-  * PID introspection helpers (`_pid_alive`,
-    `_terminate_owned_process_group`,
-    `_read_pid_start_identity`, `_pid_identity_proven`,
-    `_read_pid_start_time`) — runner-process lifecycle.
-  * Worker-prompt construction (`_semantic_worker_settings`,
-    `_load_role_prompt`, `_write_semantic_prompt_provenance`,
-    `_claude_cli_version`) — Claude-specific helpers.
-  * `_apply_data_migrations` — versioned migrations that
-    cross the DB / identity / packet boundary.
-  * The composition facade itself (`serve`, `run_one`, `enqueue`,
-    `resume`, `retire`).
-  * Thin delegating wrappers for every public + private
-    authority symbol (re-exports for backward compatibility).
+### Runner extraction
 
-### Dependency direction (verified statically)
+The previously blocked runner prerequisites are now explicit owners:
+`supervisor_process`, `supervisor_prompts`, and `supervisor_runtime`.
+`ClaudeCodeRunner` and `_RegisteredClaudeCodeRunner` live in
+`supervisor_runner.py`; provider-output paths live in `supervisor_runner_io`;
+retry/quarantine policy remains in `supervisor_recovery`.  `static_checks.py`
+permits `subprocess.Popen` in the explicit runner owner without weakening the
+unsafe-process detector elsewhere.
 
-`tests/integration/test_v10c_supervisor_dependency_direction.sh`
-proves:
+### Consolidation invariants
 
-  * supervisor_db, supervisor_runner_io, supervisor_runner_registry,
-    supervisor_accounting, supervisor_identity: ZERO upward imports
-    at module OR function scope.
-  * supervisor_holds, supervisor_operator, supervisor_readmodel:
-    ZERO upward imports.
-  * supervisor_recovery: function-scope lazy imports for the
-    test-monkey-patch bridge (`_parse_cost_from_durable_stdout`,
-    etc.).  Documented exception.
-  * supervisor_attempts: function-scope lazy imports for
-    runner-execution helpers (`worker_log_paths`,
-    `_read_pid_start_identity`).  Documented follow-up target.
-  * supervisor_claims: function-scope lazy imports for
-    identity helpers + runner registry + runtime generation
-    (so test monkey-patches on `supervisor.X` keep working).
-    Documented follow-up target.
-  * supervisor.py imports every named authority module.
-
-### Sequencing roadmap for the runner extraction
-
-To complete the supervisor inversion, the ClaudeCodeRunner
-class needs to move to `supervisor_runner.py` (renamed
-`process_runner.py` if that name is preferred to match the
-static check allowlist).  The dependency surface is bounded:
-
-  1. Extract `supervisor_pid.py` (PID introspection helpers +
-     `_terminate_owned_process_group`).
-  2. Extract `supervisor_prompts.py` (worker-prompt construction
-     + prompt provenance + Claude CLI version probe).
-  3. Extract `supervisor_runtime.py` (`_current_runtime_generation`,
-     `_load_service_env_file`, runtime cache cleanup).
-  4. With those in place, move ClaudeCodeRunner +
-     `_terminate_group` + `_classify_runner_failure` +
-     `_classify_exception` + `_apply_failure_policy` +
-     `_RegisteredClaudeCodeRunner` into `supervisor_runner.py`
-     with body-level lazy imports through the three new owners.
-  5. Update `static_checks.py` to allow `supervisor_runner.py`
-     alongside `process_runner.py` / `supervisor.py` /
-     `validation_executor.py` (or rename the new module to
-     `process_runner.py` to match the existing allowlist).
-  6. supervisor.py loses the runner block; `_apply_data_migrations`
-     stays as the cross-boundary callback for `bootstrap_schema`.
-
-This sequenced move keeps the test suite green at every step
-because each new owner becomes a thin facade before the runner
-extraction takes the canonical body.
-
-## Stage A → Stage 2 Inversion (current state)
-
-After f1–f4 (commits 6357437, 005d18e, 23829a8, 7b50bd0),
-the supervisor architecture has been partially inverted:
-
-### Canonical body owners (no upward imports to supervisor)
-
-| Module | Body ownership | Symbols |
-|---|---|---|
-| `supervisor_db.py` | canonical | connection / schema / file-mode / per-thread depth |
-| `supervisor_runner_io.py` | canonical | provider envelope + diagnostic tail readers, size ceilings |
-| `supervisor_runner_registry.py` | canonical | RunnerResult / RunnerReadiness dataclasses, register_runner, lookup helpers |
-| `supervisor_accounting.py` | canonical | cost / token / model observation |
-| `supervisor_holds.py` | canonical | dispatch hold lifecycle (validation, persistence, projection, release, cancel) |
-| `supervisor_operator.py` | canonical | operator mutations that are not hold / not claim (supervisor_config_set) |
-
-### Staging facade modules (next extraction targets)
-
-| Module | Status | Follow-up extraction cost |
-|---|---|---|
-| `supervisor_readmodel.py` | re-export facade | `_logical_job_row`, `_readonly_columns`, `_legacy_readonly_fleet_projection`, `_run_git_readonly`, `_registered_worktree_paths`, `_worktree_visibility`, `_candidate_diff_visibility`, `_core_snapshot`, `_job_dict` all live in supervisor.py with 18-170 internal callers each |
-| `supervisor_recovery.py` | re-export facade | `_recover_stale_running`, `_recovery_ownership_matches` tightly coupled to `_local_execution_owned` and `_update_job` |
-| `supervisor_attempts.py` | re-export facade | `_reserve_semantic_attempt` + `_update_job` (18 callers) + `_completion_*` + `_publish_*` form a 1000+ line tightly-coupled cluster |
-| `supervisor_claims.py` | re-export facade | `enqueue` (16 internal + 81 external callers) + `_take_next_job` + `_scheduler_submission_budget` |
-
-### Composition facade (supervisor.py)
-
-After f1–f4, supervisor.py is 6373 lines (down from 6817).
-The remaining bodies are:
-
-  * The ClaudeCodeRunner class + its ~600-line `run` method
-    (the runner execution owner — recommended next extraction
-    target once the per-attempt helper surface is broken down).
-  * `_apply_data_migrations` (cross-domain identity / packet
-    migration; would move to a future `supervisor_identity.py`
-    or stay in supervisor if a `supervisor_db` data-migrations
-    callback is wired).
-  * `_local_execution_owned`, `_register_local_execution` and
-    related per-thread execution state (move to a future
-    `supervisor_execution.py` once the four facades above are
-    inverted).
-  * `_update_job` (18 internal callers; the universal job-state
-    mutator — split across the four facades when each is
-    inverted, since attempts/claims/recovery/readmodel each
-    use a different subset of its keyword surface).
-  * `_recover_stale_running` + `_recovery_ownership_matches`
-    (recovery is a thin consumer of `_update_job` + attempts;
-    its extraction is blocked on attempts inversion).
-  * `serve`, `run_one`, `resume`, `retire`, `enqueue` (the
-    durable execution-loop composition facade — its job is to
-    compose the authority modules, which it already does for
-    the 6 inverted modules).
-
-### Dependency direction (verified statically)
-
-`tests/integration/test_v10c_supervisor_dependency_direction.sh`
-proves:
-
-  * supervisor_db imports supervisor: 0
-  * supervisor_runner_io imports supervisor: 0
-  * supervisor_accounting imports supervisor: 0
-  * supervisor_runner_registry imports supervisor: 0
-  * supervisor_holds imports supervisor: 0 (lazy `_logical_job_row` only, in 3 function bodies — documented follow-up target)
-  * supervisor_operator imports supervisor: 0 (lazy `_validate_max_concurrency` only — documented follow-up target)
-  * supervisor.py imports all 6 canonical-body authorities
-
-The four remaining facade modules still re-export from
-supervisor — that is the documented next extraction pass.
+- zero canonical `supervisor_* -> supervisor.py` imports, including lazy imports;
+- zero duplicate canonical implementations or shadow top-level definitions in
+  `supervisor.py`;
+- runner/provider execution separated from durable recovery policy;
+- tests target canonical owners rather than forcing production dependency
+  inversions for monkey-patch compatibility;
+- `supervisor.py` is reduced from the original 6817-line monolith to a
+  composition/compatibility surface of roughly 3000 lines, with authority
+  bodies moved to named owners;
+- the one-shot transformation is published only after canonical validation and
+  the release gate succeed on the committed candidate.

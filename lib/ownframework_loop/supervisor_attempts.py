@@ -22,14 +22,9 @@ What stays in ``supervisor.py``:
 
   * The composition facade (``serve``, ``run_one``, ``enqueue``,
     ``resume``, ``retire``).
-  * The ClaudeCodeRunner class + its ``run`` method (still
-    pending extraction to ``supervisor_runner.py``).
-  * ``_pid_alive`` / ``_terminate_owned_process_group`` /
-    ``_local_execution_owned`` / ``_read_pid_start_identity`` —
-    these are process / PID introspection helpers owned by the
-    runner-execution authority once that lands; until then they
-    live in supervisor.py and attempts reaches them via a
-    lazy function-scope import (documented follow-up target).
+  * Composition/orchestration remains in ``supervisor.py``.
+  * Process identity is owned by ``supervisor_process`` and runner
+    output paths are owned by ``supervisor_runner_io``.
 
 Dependency direction:
 
@@ -37,9 +32,7 @@ Dependency direction:
       including the generic ``_update_job`` transition)
   supervisor_attempts -> supervisor_accounting (parsers)
   supervisor_attempts -> supervisor_runner_registry (runner lookup)
-  supervisor_attempts -> supervisor (LAZY function-scope only,
-      for the process-introspection helpers and the runner
-      preflight, with documented test-monkey-patch aliases)
+  supervisor_attempts -> supervisor_process + supervisor_runner_io
 """
 from __future__ import annotations
 
@@ -59,6 +52,8 @@ from . import capabilities as capabilities_mod
 from . import supervisor_db as _db_mod
 from . import supervisor_accounting as _accounting_mod
 from . import supervisor_runner_registry as _runner_registry_mod
+from . import supervisor_process as _process_mod
+from . import supervisor_runner_io as _runner_io_mod
 
 
 def _replay_candidate_sha(
@@ -427,11 +422,7 @@ def _reserve_semantic_attempt(
     job: sqlite3.Row,
     role: str,
 ) -> tuple[str, tuple[Path, Path]]:
-    # worker_log_paths is owned by supervisor.py until it is relocated
-    # with the runner-execution authority.  Lazy import keeps the
-    # dependency direction correct.
-    from . import supervisor as _supervisor_mod
-    worker_log_paths = _supervisor_mod.worker_log_paths
+    worker_log_paths = _runner_io_mod.worker_log_paths
     attempt_id = uuid.uuid4().hex
     durable_files = worker_log_paths(
         Path(str(job["repo"])),
@@ -483,12 +474,7 @@ def _set_worker_pid(
     attempt_id: str | None = None,
     deadline_at: float | None = None,
 ) -> None:
-    # _read_pid_start_identity is a PID-introspection helper owned
-    # by the runner-execution authority once that lands.  Until
-    # then it lives in supervisor.py and is reached via a lazy
-    # function-scope import.
-    from . import supervisor as _supervisor_mod
-    _read_pid_start_identity = _supervisor_mod._read_pid_start_identity
+    _read_pid_start_identity = _process_mod._read_pid_start_identity
     started = time.time()
     cur = conn.execute(
         """
@@ -747,6 +733,65 @@ def _publish_acceptance_for_ready_artifact(
     except Exception:
         pass
 
+PRE_PROVIDER_FAILURE_REASONS = frozenset({
+    "worker_launch_failed",
+    "capability_resolution_failed",
+    "capability_binding_failed",
+    "runner_profile_resolution_failed",
+    "worker_ownership_not_published",
+})
 
+def _capability_binding_creation_allowed(
+    conn: sqlite3.Connection,
+    job_id: int,
+) -> bool:
+    """Allow first binding only when no provider-reachable historical attempt exists."""
+    rows = conn.execute(
+        """SELECT status, failure_reason, cost_accounted, cost_usd
+             FROM semantic_attempts WHERE job_id=?""",
+        (int(job_id),),
+    ).fetchall()
+    if not rows:
+        return True
+    return all(
+        str(row["status"] or "") == "FAILED"
+        and str(row["failure_reason"] or "") in PRE_PROVIDER_FAILURE_REASONS
+        and int(row["cost_accounted"] or 0) == 1
+        and float(row["cost_usd"] or 0.0) == 0.0
+        for row in rows
+    )
 
+def _mark_attempt_launch_failed(
+    conn: sqlite3.Connection,
+    *,
+    job_id: int,
+    attempt_id: str,
+    detail: str,
+    failure_reason: str = "worker_launch_failed",
+) -> None:
+    """Terminalize only a semantic attempt proven not to have reached provider exec."""
+    conn.execute("BEGIN IMMEDIATE")
+    cur = conn.execute(
+        """UPDATE semantic_attempts SET
+             status='FAILED', completed_at=?, returncode=NULL,
+             worker_pid=NULL, worker_pgid=NULL, deadline_at=NULL,
+             worker_start_identity=NULL,
+             cost_usd=0, cost_accounted=1, cost_known=1,
+             input_tokens=0, output_tokens=0, cache_read_tokens=0,
+             cache_creation_tokens=0, tokens_known=1,
+             failure_class='configuration', failure_reason=?
+           WHERE attempt_id=? AND job_id=?
+             AND (
+               status='RESERVED'
+               OR (status='RUNNING' AND launch_gate_version>=1)
+             )""",
+        (time.time(), failure_reason, attempt_id, int(job_id)),
+    )
+    if cur.rowcount != 1:
+        conn.rollback()
+        raise RuntimeError(
+            f"launch-failed attempt was not provably pre-provider: "
+            f"{attempt_id}: {detail[-500:]}"
+        )
+    conn.commit()
 
