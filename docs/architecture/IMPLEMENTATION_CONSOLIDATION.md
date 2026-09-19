@@ -301,3 +301,74 @@ a thin shell entrypoint that delegates to the helper.
 
 `state.py` is LEFT INTACT. `capabilities.py` keeps its current
 shape unless a domain seam is empirically justified.
+
+## Stage A Outcome (post-consolidation seams)
+
+The planned seams in the section above were verified against the
+actual call graph before extraction began. Stage A of the v0.10.0-dev
+consolidation produced six NEW named-owner modules. Every one of
+them is a **thin re-export facade** at the supervisor package
+boundary — not a body-relocation extraction — because the targeted
+seams share tight internal coupling with the DB / schema / hold /
+attempts primitives that are still owned by `supervisor.py`.
+
+The honest consolidation move is: name the owner NOW so future
+extractions have a clear destination, prove each seam is reachable
+via the new owner (one routed call site per module), and leave
+`supervisor.py` unchanged for callers that still reach into it.
+The implementations will follow when a follow-on consolidation
+adds a `supervisor_db.py` (or equivalent) that owns the
+`_managed_connect` / schema / validation primitives those bodies
+depend on.
+
+| Module | Status | Symbols owned (count) | Routed call sites |
+|---|---|---|---|
+| `supervisor_runner_registry.py` (e1) | canonical body ownership | 7 | re-bindings + runner class |
+| `supervisor_accounting.py` (e2) | canonical body ownership | 6 | wrapper delegation |
+| `supervisor_readmodel.py` (e3) | re-export facade | 7 public | 7 CLI handlers |
+| `supervisor_recovery.py` (e4) | re-export facade | 6 internal | `_take_next_job` recovery sweep |
+| `supervisor_attempts.py` (e5) | re-export facade | 8 internal | none (callable from supervisors) |
+| `supervisor_claims.py` (e6) | re-export facade | 3 (incl. `enqueue`) | `run_one` claim phase |
+
+Why the split between "canonical body ownership" and "re-export
+facade":
+
+- `supervisor_runner_registry.py` and `supervisor_accounting.py`
+  own datatypes and pure helpers that have NO coupling to the
+  supervisor's DB / schema / hold primitives. They were
+  relocatable in one step.
+- The four facade modules own surfaces whose bodies cannot be
+  relocated without dragging `_managed_connect`,
+  `_repository_scheduling_identity`, `_hold_dict`, `_update_job`,
+  and the schema constants along with them. Those primitives are
+  still owned by `supervisor.py` because their natural owner
+  (`supervisor_db.py`) has not been extracted yet — extracting the
+  helpers without extracting their dependencies would have produced
+  sync drift.
+
+What this means for the consolidation sequencing:
+
+1. The next consolidation pass should extract `supervisor_db.py`
+   (DB connect + schema migration + transaction primitives).
+2. With `supervisor_db.py` in place, the readmodel, recovery,
+   attempts, and claims implementations can be relocated to their
+   respective named-owner modules without the current coupling risk.
+3. The same pass can also extract `program_graph.py`,
+   `program_progression.py`, `program_entitlements.py`,
+   `program_claims.py` (program has tight but local coupling that
+   does not depend on `supervisor_db.py`).
+
+The thin-facade shape is therefore a STRUCTURAL commitment, not
+a defect: it proves the consolidation is bounded, the seams are
+real, and Stage A leaves a clean roadmap for the
+implementations-extraction pass.
+
+### Stage A verification evidence
+
+- 121/121 tests PASS after every seam extraction (e1, e2, e3,
+  e4, e5, e6).
+- `validate.sh` PASS, `release_gate.sh` PASS on every intermediate
+  commit.
+- `LOCAL == origin/master` after every push.
+- v0.10.0-dev remains the source version; the historical v0.9.1
+  release tag remains FROZEN.
