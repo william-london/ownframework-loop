@@ -96,6 +96,20 @@ print("ATOMIC_JOB_AND_HOLD_ENROLLMENT=PASS")
 
 # H-03/H-04/H-05/H-06/H-08/H-16/H-27/H-28.
 repo, db, job, hold = held_fixture("held", "run-held")
+# An ARMED hold at its exact engineering boundary is already a real claim
+# barrier even before the scheduler atomically transitions it to HELD. Read-only
+# status/fleet projections must report that truth rather than advertising the
+# queued job as effectively schedulable and making a correct hold look hung.
+armed_fleet = supervisor.fleet_status(db_path=db)
+armed_item = next(x for x in armed_fleet["jobs"] if x["id"] == job["id"])
+assert armed_item["dispatch_hold_claim_decision"] == "MATCH", armed_item
+assert armed_item["dispatch_hold_blocked"] is True, armed_item
+assert armed_item["effective_schedulability"] is False, armed_item
+armed_status = supervisor.status(canonical_repo=repo, run_id="run-held", db_path=db)
+assert armed_status["dispatch_hold_claim_decision"] == "MATCH", armed_status
+assert armed_status["dispatch_hold_blocked"] is True, armed_status
+print("ARMED_MATCH_PROJECTED_AS_BLOCKED=PASS")
+
 with supervisor._connect(db) as conn:
     got = supervisor._take_next_job(conn)
     assert got is None
@@ -105,6 +119,9 @@ with supervisor._connect(db) as conn:
     assert hstate == "HELD"
     assert conn.execute("select count(*) from semantic_attempts where job_id=?", (job["id"],)).fetchone()[0] == 0
     assert "HELD" not in {row[1] for row in conn.execute("pragma table_info(jobs)")}
+held_status = supervisor.status(canonical_repo=repo, run_id="run-held", db_path=db)
+assert held_status["dispatch_hold_claim_decision"] == "HELD", held_status
+assert held_status["dispatch_hold_blocked"] is True, held_status
 released = supervisor.release_dispatch_hold(canonical_repo=repo, run_id="run-held", hold_id=hold["hold_id"], db_path=db)
 assert released["state"] == "RELEASED"
 assert supervisor.release_dispatch_hold(canonical_repo=repo, run_id="run-held", hold_id=hold["hold_id"], db_path=db)["idempotent"]
@@ -123,10 +140,16 @@ write_minimal_valid_packet(mismatch, 'run-mismatch')
 mjob = supervisor.enqueue(canonical_repo=mismatch, run_id="run-mismatch", db_path=mdb, runtime_generation="test-generation",
                           dispatch_hold_kind=supervisor.DISPATCH_HOLD_KIND,
                           dispatch_hold_previous_checkpoint_id="CP-X", dispatch_hold_next_checkpoint_id="CP-Y")
+mismatch_fleet = supervisor.fleet_status(db_path=mdb)
+mismatch_item = next(x for x in mismatch_fleet["jobs"] if x["id"] == mjob["id"])
+assert mismatch_item["dispatch_hold_claim_decision"] == "checkpoint_identity_not_found", mismatch_item
+assert mismatch_item["dispatch_hold_blocked"] is False, mismatch_item
+assert mismatch_item["effective_schedulability"] is True, mismatch_item
 with supervisor._connect(mdb) as conn:
     got = supervisor._take_next_job(conn)
     assert got is not None and got["id"] == mjob["id"]
 print("WRONG_CHECKPOINT_DOES_NOT_HOLD=PASS")
+print("ARMED_MISMATCH_REMAINS_SCHEDULABLE=PASS")
 
 held2, db2, job2, hold2 = held_fixture("held2", "run-held2")
 plain = make_repo("plain")
