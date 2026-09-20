@@ -1,15 +1,10 @@
 #!/usr/bin/env bash
 # OwnFramework Loop — version-truth gate (fail-closed).
-# v0.4.2: derives the expected version from lib/ownframework_loop/__init__.py
-# (canonical single source of truth) and asserts every other release surface
-# matches. Future patches only need to update lib + the matching JSON/Markdown
-# files; this test follows automatically.
-#
-# v0.10.0-dev: when lib/ownframework_loop/__init__.py reports a development
-# version (e.g. "0.10.0.dev0"), the test distinguishes dev vs release:
-# the canonical source line and JSON surfaces must agree with the dev
-# version; the historical FROZEN release (v0.9.1) continues to be the
-# "latest published GitHub Release" until v0.10.0 is tagged.
+# Derives the expected source version from lib/ownframework_loop/__init__.py
+# (canonical source-version authority) and asserts every source mirror agrees.
+# Publication is a separate authority: immutable Git tag + GitHub Release.
+# This static test intentionally does not infer live publication state from a
+# final source version and does not call GitHub or consume a release-state knob.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/../.." && pwd)"
@@ -19,9 +14,6 @@ python3 -B <<'PYEOF'
 import json, os, re, sys
 ROOT = os.environ["ROOT"]
 
-# Derive EXPECTED from the canonical lib version. Fall back to a string
-# match if the regex misses (so a test-time lib bug doesn't silently
-# compare against empty).
 try:
     lib_text = open(os.path.join(ROOT, "lib/ownframework_loop/__init__.py")).read()
     m = re.search(r'^__version__\s*=\s*["\']([^"\']+)', lib_text, re.MULTILINE)
@@ -31,13 +23,12 @@ except Exception:
 if not EXPECTED:
     print("  FAIL: could not derive EXPECTED from lib/ownframework_loop/__init__.py")
     sys.exit(1)
-# IS_DEV: True when EXPECTED is a development pre-release marker (e.g.
-# "0.10.0.dev0").  When IS_DEV, the historical published release
-# (v0.9.1 at d23cadca751c9ed37b5eeab25415c8b0574dae4e) remains the
-# "latest published GitHub Release" until the next tagged release.
-IS_DEV = bool(re.search(r"\.dev\d+$", EXPECTED))
-PUBLISHED_RELEASE_TAG = "v0.9.1"
-PUBLISHED_RELEASE_SHA = "d23cadca751c9ed37b5eeab25415c8b0574dae4e"
+
+FROZEN_RELEASE_TAG = "v0.9.1"
+FROZEN_RELEASE_SHA = "d23cadca751c9ed37b5eeab25415c8b0574dae4e"
+PUBLICATION_AUTHORITY_TEXT = (
+    "Publication authority is the immutable Git tag together with its corresponding GitHub Release."
+)
 
 failures = []
 
@@ -49,6 +40,9 @@ def check(label, ok, detail=""):
         print(msg)
         failures.append(msg)
 
+def normalized(text):
+    return " ".join(text.split())
+
 # 1. plugin.json
 try:
     with open(os.path.join(ROOT, ".claude-plugin/plugin.json")) as f:
@@ -59,7 +53,7 @@ except Exception as e:
     check("plugin.json readable", False, f"({e})")
     plugin_ver = ""
 
-# 2. marketplace.json (from ROOT, not parent)
+# 2. marketplace.json
 try:
     with open(os.path.join(ROOT, ".claude-plugin/marketplace.json")) as f:
         mkt_data = json.load(f)
@@ -82,20 +76,23 @@ except Exception as e:
 # 4. README.md
 try:
     text = open(os.path.join(ROOT, "README.md")).read()
-    # Accept either X.Y.Z or X.Y.Z.devN in the source/master line
+    flat = normalized(text)
     m = re.search(r"Source/master release line:\s*\*\*([0-9]+\.[0-9]+\.[0-9]+(?:\.dev\d+)?)\*\*", text)
     readme_ver = m.group(1) if m else ""
     check("README source/master release line", readme_ver == EXPECTED, f"= {readme_ver!r}, expected {EXPECTED!r}")
-    # Published-release truth: always references the FROZEN historical
-    # release when current source is dev.
-    pub_ver = EXPECTED if not IS_DEV else PUBLISHED_RELEASE_TAG
-    pub_sha = "" if not IS_DEV else PUBLISHED_RELEASE_SHA
+    check("README publication authority", PUBLICATION_AUTHORITY_TEXT in flat)
     check(
-        "README published release truth",
-        f"Latest published GitHub Release: **{pub_ver}**" in text and (not pub_sha or pub_sha in text),
-        f"(must reference {pub_ver}{' @ '+pub_sha if pub_sha else ''})",
+        "README frozen historical release reference",
+        FROZEN_RELEASE_TAG in text and FROZEN_RELEASE_SHA in text,
+        f"(must retain {FROZEN_RELEASE_TAG} @ {FROZEN_RELEASE_SHA})",
     )
-    check("README workspace concurrency truth", "execution ownership is that" in text and "run-frozen candidate branch" in text and "may run concurrently" in text)
+    check(
+        "README workspace concurrency truth",
+        "Current concurrency is workspace-scoped" in text
+        and "execution ownership is that" in text
+        and "run-frozen candidate branch" in text
+        and "may run concurrently" in text,
+    )
 except Exception as e:
     check("README readable", False, f"({e})")
     readme_ver = ""
@@ -103,21 +100,21 @@ except Exception as e:
 # 5. SECURITY.md
 try:
     text = open(os.path.join(ROOT, "SECURITY.md")).read()
+    flat = normalized(text)
     m = re.search(r"source/master supported line in this repository is\s*\*\*([0-9]+\.[0-9]+\.[0-9]+(?:\.dev\d+)?)\*\*", text)
     sec_ver = m.group(1) if m else ""
     check("SECURITY source/master supported line", sec_ver == EXPECTED, f"= {sec_ver!r}, expected {EXPECTED!r}")
-    pub_ver = EXPECTED if not IS_DEV else PUBLISHED_RELEASE_TAG
-    pub_sha = "" if not IS_DEV else PUBLISHED_RELEASE_SHA
+    check("SECURITY publication authority", PUBLICATION_AUTHORITY_TEXT in flat)
     check(
-        "SECURITY published release truth",
-        f"latest published GitHub Release is **{pub_ver}**" in text and (not pub_sha or pub_sha in text),
-        f"(must reference {pub_ver}{' @ '+pub_sha if pub_sha else ''})",
+        "SECURITY frozen historical release reference",
+        FROZEN_RELEASE_TAG in text and FROZEN_RELEASE_SHA in text,
+        f"(must retain {FROZEN_RELEASE_TAG} @ {FROZEN_RELEASE_SHA})",
     )
 except Exception as e:
     check("SECURITY readable", False, f"({e})")
     sec_ver = ""
 
-# Current v0.9.1 doctrine/template truth.
+# Current workspace-doctrine/template truth.
 try:
     arch = open(os.path.join(ROOT, "docs/ARCHITECTURE.md")).read()
     model = open(os.path.join(ROOT, "docs/architecture/SUPERVISOR_MODEL.md")).read()
@@ -126,14 +123,26 @@ try:
     check("SUPERVISOR_MODEL bounded workspace concurrency", "configurable bounded host concurrency" in model and "repository-wide\nmutex" in model)
     check("WORK_PACKET default candidate branch valid-by-omission", '"candidate_branch_prefix": "factory/candidate/"' not in template)
 except Exception as e:
-    check("current v0.9.1 doctrine surfaces readable", False, f"({e})")
+    check("current doctrine surfaces readable", False, f"({e})")
 
-# 6. CHANGELOG.md (most recent entry must equal EXPECTED)
+# 6. CHANGELOG.md (most recent entry must equal EXPECTED; historical publication
+# reference remains a frozen audit fact, not a claim about live latest-release state).
 try:
     text = open(os.path.join(ROOT, "CHANGELOG.md")).read()
+    flat = normalized(text)
     m = re.search(r"^## ([0-9]+\.[0-9]+\.[0-9]+(?:\.dev\d+)?)\s+[—\-]", text, re.MULTILINE)
     cl_ver = m.group(1) if m else ""
     check("CHANGELOG most recent entry", cl_ver == EXPECTED, f"= {cl_ver!r}, expected {EXPECTED!r}")
+    check(
+        "CHANGELOG publication authority",
+        "Publication authority" in flat
+        and "immutable Git tag together with its corresponding GitHub Release." in flat,
+    )
+    check(
+        "CHANGELOG frozen historical release reference",
+        FROZEN_RELEASE_TAG in text and FROZEN_RELEASE_SHA in text,
+        f"(must retain {FROZEN_RELEASE_TAG} @ {FROZEN_RELEASE_SHA})",
+    )
 except Exception as e:
     check("CHANGELOG readable", False, f"({e})")
     cl_ver = ""
@@ -142,6 +151,9 @@ print()
 if failures:
     print(f"  VERSION_TRUTH=FAIL ({len(failures)} mismatch(es))")
     sys.exit(1)
-status = "DEVELOPMENT" if IS_DEV else "RELEASE"
-print(f"  VERSION_TRUTH=PASS (source line = {EXPECTED}; status = {status}; published release = {PUBLISHED_RELEASE_TAG}; v0.9.1 workspace doctrine current)")
+print(
+    "  VERSION_TRUTH=PASS "
+    f"(source line = {EXPECTED}; publication authority = immutable Git tag + GitHub Release; "
+    f"historical release = {FROZEN_RELEASE_TAG} @ {FROZEN_RELEASE_SHA})"
+)
 PYEOF

@@ -8,13 +8,13 @@ or OS-level containment of arbitrary same-user code.
 
 ## Supported release posture
 
-- The source/master supported line in this repository is
-  **0.10.0.dev0** (in-progress architectural consolidation; NOT yet
-  released).
-- The latest published GitHub Release is **v0.9.1** at
-  `d23cadca751c9ed37b5eeab25415c8b0574dae4e` (the FROZEN released
-  line). v0.10.0 will not be tagged until independent adjudication of
-  the consolidated source.
+- The source/master supported line in this repository is **1.0.0**. Source
+  version truth does not itself assert publication.
+- Publication authority is the immutable Git tag together with its corresponding
+  GitHub Release. Static source documentation does not duplicate a mutable
+  "latest published release" fact.
+- Historical release **v0.9.1** remains frozen at
+  `d23cadca751c9ed37b5eeab25415c8b0574dae4e`.
 - v0.8.4 (`134a7ce543e2d5858b3a4613c49d49959fe0b029`) remains the
   immutable historical baseline of the previous published line.
 - Earlier 0.2.x/0.3.x/0.4.x/0.5.0-0.5.4 behavior remains in Git history for

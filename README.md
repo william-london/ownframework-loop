@@ -1,15 +1,13 @@
 # OwnFramework Loop
 
-Source/master release line: **0.10.0.dev0** (in-progress architectural
-consolidation; NOT yet released).
+Source/master release line: **1.0.0**. Source version truth does not itself assert publication.
 
-Latest published GitHub Release: **v0.9.1** at
-`d23cadca751c9ed37b5eeab25415c8b0574dae4e`. v0.8.4
+Publication authority is the immutable Git tag together with its corresponding
+GitHub Release. Static source documentation does not duplicate a mutable
+"latest published release" fact. Historical release **v0.9.1** remains frozen
+at `d23cadca751c9ed37b5eeab25415c8b0574dae4e`; v0.8.4
 (`134a7ce543e2d5858b3a4613c49d49959fe0b029`) remains the immutable
-historical baseline of the previous published line. The v0.9.1 tag is
-FROZEN; the v0.10.0 series is the in-progress source-quality
-consolidation that began after v0.9.1 and will not be released until
-independent adjudication of the consolidated source.
+historical baseline of the previous published line.
 
 OwnFramework Loop is a vendor-neutral, execution-sealed engineering runtime for
 autonomous coding agents.
@@ -32,7 +30,7 @@ binding, and promotion boundaries. Agent hosts are adapters.
 
 ## Canonical operating model
 
-v0.9.1 concurrency is workspace-scoped. Repository identity is the resolved Git
+Current concurrency is workspace-scoped. Repository identity is the resolved Git
 common directory used for provenance/grouping; execution ownership is that
 repository identity plus the run-frozen candidate branch. Different candidate
 workspaces in the same Git repository may run concurrently—even when they
