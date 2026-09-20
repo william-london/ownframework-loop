@@ -14,7 +14,7 @@ import sys
 from pathlib import Path
 from ownframework_loop import (
     guards, integrity, receipts, state, worktrees, git_checks, limits, util,
-    validation_executor,
+    validation_executor, review_finalize,
 )
 
 root = Path(sys.argv[1])
@@ -174,6 +174,97 @@ try:
 finally:
     validation_executor.validation_policy.classify_required_validation = orig_policy
     validation_executor.runtime_env.commissioned_validation_env = orig_env
+
+# Review-finalizer validation is also behavioral: drive finalize_review through
+# its deterministic authority preconditions and use a sentinel executor to
+# prove a declared required_validation reaches the canonical executor. The
+# sentinel fires before verdict persistence, so this fixture does not duplicate
+# the wider review lifecycle tests.
+review_repo = root / "review-validation-repo"
+review_repo.mkdir()
+review_rid = "run-review-validation-authority"
+review_run_dir = review_repo / ".ownframework-loop" / review_rid
+review_run_dir.mkdir(parents=True)
+(review_run_dir / "WORK_PACKET.md").write_text("fixture\n", encoding="utf-8")
+review_assessment_path = root / "review-assessment.json"
+review_assessment_path.write_text("{}\n", encoding="utf-8")
+review_wt = review_repo / ".worktrees" / "ownframework-loop" / review_rid / "reviewer"
+review_wt.mkdir(parents=True)
+baseline = "b" * 40
+candidate = "c" * 40
+candidate_branch = "factory/candidate/" + review_rid
+validation_decl = {"name": "review-required", "command": "true", "kind": "fast"}
+packet_meta = {"required_validation": [validation_decl]}
+approval_doc = {
+    "baseline_sha": baseline,
+    "candidate_branch": candidate_branch,
+}
+receipt_doc = {
+    "candidate_sha": candidate,
+    "candidate_branch": candidate_branch,
+    "baseline_sha": baseline,
+}
+assessment_doc = {
+    "schema": "ownframework-loop-review-agent-assessment/v1",
+    "run_id": review_rid,
+    "candidate_sha_claimed": candidate,
+    "acceptance_results": [],
+    "non_goal_results": [],
+    "findings": [],
+    "recommended_verdict": "APPROVED",
+}
+
+class ReviewValidationReached(RuntimeError):
+    pass
+
+def validation_sentinel(**kwargs):
+    assert kwargs["validation"] == validation_decl, kwargs
+    assert kwargs["cwd"] == review_wt, kwargs
+    raise ReviewValidationReached("review-finalizer-reached-validation-executor")
+
+saved = []
+def patch(obj, name, value):
+    saved.append((obj, name, getattr(obj, name)))
+    setattr(obj, name, value)
+
+try:
+    patch(review_finalize.packet_mod, "parse_packet_file", lambda *_a, **_k: (packet_meta, "packet-hash"))
+    patch(review_finalize.packet_mod, "validate_packet_for_approval", lambda *_a, **_k: [])
+    patch(review_finalize.approval, "load_approval", lambda *_a, **_k: approval_doc)
+    patch(review_finalize.approval, "validate_approval_binding", lambda *_a, **_k: (True, "ok"))
+    patch(review_finalize.state_mod, "load_verified", lambda *_a, **_k: {"state": "REVIEWING"})
+    patch(review_finalize.state_mod, "is_program_state", lambda *_a, **_k: False)
+    patch(review_finalize.receipts, "load_receipt", lambda *_a, **_k: receipt_doc)
+    patch(review_finalize.util, "sha256_file", lambda *_a, **_k: "receipt-hash")
+    patch(review_finalize.git_checks, "is_git_repo", lambda *_a, **_k: True)
+    patch(review_finalize.git_checks, "commit_exists", lambda *_a, **_k: True)
+    patch(review_finalize.git_checks, "current_head", lambda *_a, **_k: candidate)
+    patch(review_finalize.git_checks, "dirty_status", lambda *_a, **_k: "clean")
+    patch(review_finalize.git_checks, "dirty_classification", lambda *_a, **_k: {"status": "clean", "porcelain": []})
+    patch(review_finalize.worktrees, "is_registered_worktree", lambda *_a, **_k: True)
+    patch(review_finalize.util, "reviewer_worktree", lambda *_a, **_k: review_wt)
+    patch(review_finalize, "_ancestor_of", lambda *_a, **_k: True)
+    patch(review_finalize, "_candidate_branch_contains", lambda *_a, **_k: True)
+    patch(review_finalize, "_read_json", lambda *_a, **_k: assessment_doc)
+    patch(review_finalize, "_assessment_schema_ok", lambda *_a, **_k: (True, []))
+    patch(review_finalize.assessment_mod, "build_skeleton", lambda *_a, **_k: assessment_doc)
+    patch(review_finalize.assessment_mod, "FIXED_KEYS", frozenset())
+    patch(review_finalize.program_mod, "resolve_effective_required_validation", lambda *_a, **_k: [validation_decl])
+    patch(review_finalize.validation_executor, "run_required_validation", validation_sentinel)
+    try:
+        review_finalize.finalize_review(
+            review_repo,
+            review_rid,
+            review_assessment_path,
+            actor="reviewer",
+        )
+    except ReviewValidationReached as exc:
+        assert "review-finalizer-reached-validation-executor" in str(exc)
+    else:
+        raise SystemExit("review finalizer did not execute required validation")
+finally:
+    for obj, name, original in reversed(saved):
+        setattr(obj, name, original)
 PY
 
 echo "V061_AUTHORITY_TAIL_HARDENING=PASS"
