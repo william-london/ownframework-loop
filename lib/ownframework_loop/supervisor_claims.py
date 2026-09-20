@@ -65,7 +65,6 @@ from . import supervisor_runtime as _runtime_mod
 
 
 
-
 def enqueue(
     *,
     canonical_repo: Path,
@@ -208,32 +207,6 @@ def enqueue(
             })
             return out
 
-        # Pre-enqueue admission backstop: refuse durable admission of a
-        # never-started run whose current pre-seal packet is not
-        # deterministically executable enough to enter durable scheduling.
-        # The trusted spec adapter is supposed to validate its own packet
-        # before enqueueing (per the spec workflow), but if the adapter skips
-        # or mishandles that step, the deterministic supervisor must still
-        # fail closed BEFORE the run becomes durable.
-        #
-        # Three refusal branches, in this order:
-        #   A. WORK_PACKET.md is absent              → pre_seal_packet_missing
-        #   B. WORK_PACKET.md exists but parse fails → pre_seal_packet_invalid
-        #   C. packet parses but does not validate   → pre_seal_packet_invalid
-        #                                                 (with packet_errors)
-        #
-        # Valid packets (D) fall through to the existing durable enrollment
-        # path unchanged. Refusal in any branch produces no job row, no
-        # dispatch count, no execution seal, no semantic attempt, no cost or
-        # token consumption, and no QUARANTINED mutation. The check reuses
-        # the authoritative ``validate_packet_for_approval`` (also called by
-        # execution_start and capability_migration) and the existing packet
-        # parser; it does not fork schema logic, weaken existing QUARANTINE
-        # semantics, or auto-reactivate operational rows.
-        #
-        # Parse-failure classifications (branch B) are emitted as a bounded,
-        # non-sensitive diagnostic (``packet_errors`` is a single short string
-        # describing the parse class, never raw exception text or file bytes).
         packet_path_for_admission = state_mod.run_dir(Path(repo), run_id) / "WORK_PACKET.md"
         if not packet_path_for_admission.is_file():
             return {
@@ -249,8 +222,6 @@ def enqueue(
         try:
             packet_meta_for_admission, _ = packet_mod.parse_packet_file(packet_path_for_admission)
         except Exception:
-            # Bounded diagnostic: classify the parse failure without exposing
-            # arbitrary exception text or file contents to durable state.
             return {
                 "schema": _db_mod.SCHEMA,
                 "ok": False,
@@ -280,11 +251,6 @@ def enqueue(
             "SELECT * FROM jobs WHERE repo=? AND run_id=?", (repo, run_id)
         ).fetchone()
         if existing is not None:
-            # Retired enrollments are durable historical evidence and must not
-            # be silently reactivated by a re-enqueue; the architecture does
-            # not expose a reactivation command by design. Fail closed with an
-            # explicit diagnostic so an operator cannot accidentally rewrite
-            # a retired historical record through normal enqueue traffic.
             if str(existing["status"] or "") == "RETIRED":
                 out = dict(existing)
                 out.update({
@@ -415,9 +381,6 @@ def enqueue(
                 now,
             ),
         )
-        # Fetch the authoritative row by the durable unique enrollment key.
-        # On first enrollment there is intentionally no pre-existing row, while
-        # ON CONFLICT re-enrollment preserves the same (repo, run_id) identity.
         row = conn.execute(
             "SELECT * FROM jobs WHERE repo=? AND run_id=?", (repo, run_id)
         ).fetchone()
@@ -469,8 +432,6 @@ def enqueue(
     return result
 
 
-
-
 def _take_next_job(conn: sqlite3.Connection) -> sqlite3.Row | None:
     _recovery_mod._recover_stale_running(conn)
     while True:
@@ -486,9 +447,6 @@ def _take_next_job(conn: sqlite3.Connection) -> sqlite3.Row | None:
         if not candidates:
             return None
 
-        # Persisted two-to-one SINGLE preference, with least-recently-served
-        # ordering inside each class.  The counter lives in the ledger so a
-        # supervisor restart cannot reset a continuously eligible PROGRAM.
         meta = conn.execute(
             "SELECT dispatch_sequence, single_since_program FROM scheduler_meta WHERE id=1"
         ).fetchone()
@@ -513,9 +471,6 @@ def _take_next_job(conn: sqlite3.Connection) -> sqlite3.Row | None:
             r for r in candidates
             if str(r["execution_mode"] or "SINGLE") == "PROGRAM"
         ])
-        # Prefer the configured class but retain the other class as fallback.
-        # Otherwise a HELD or same-repository-blocked preferred job can strand
-        # a free slot while an unrelated job is eligible.
         if singles and programs:
             candidates = (
                 singles + programs
@@ -528,22 +483,7 @@ def _take_next_job(conn: sqlite3.Connection) -> sqlite3.Row | None:
         retry_candidates = False
         for candidate in candidates:
             hold, decision = _holds_mod._hold_matches_before_claim(conn, candidate)
-            if decision == "HELD":
-                # A held job remains QUEUED and is intentionally skipped so a
-                # different repository/run may use the operational slot.
-                continue
-            if decision in {"invalid_hold_state", "unsupported_hold_kind"}:
-                # A malformed operational hold is never interpreted as an
-                # absent hold.  Leave the job queued and fail closed; the
-                # diagnostic remains inspectable through hold status.
-                continue
-            if decision.startswith("engineering_state_unavailable"):
-                # A hold whose engineering truth cannot be verified is never
-                # treated as released. Leave the job queued and fail closed.
-                continue
             if decision == "MATCH":
-                # The slow authoritative read happened outside SQLite write
-                # ownership. Revalidate both rows before the CAS transition.
                 conn.execute("BEGIN IMMEDIATE")
                 current = conn.execute(
                     "SELECT * FROM jobs WHERE id=?", (int(candidate["id"]),)
@@ -560,7 +500,7 @@ def _take_next_job(conn: sqlite3.Connection) -> sqlite3.Row | None:
                     config[0] if config is not None else DEFAULT_MAX_CONCURRENCY
                 )
                 same_workspace = conn.execute(
-                    """SELECT id FROM jobs WHERE status=\'RUNNING\'
+                    """SELECT id FROM jobs WHERE status='RUNNING'
                        AND workspace_scheduling_key=? LIMIT 1""",
                     (str(candidate["workspace_scheduling_key"] or ""),),
                 ).fetchone()
@@ -585,12 +525,12 @@ def _take_next_job(conn: sqlite3.Connection) -> sqlite3.Row | None:
                     (held_at, held_at, current_hold["hold_id"], int(candidate["id"])),
                 )
                 conn.commit()
-                # Re-scan in case another queued job can safely run while
-                # this run waits for its explicit operational release.
+                continue
+            if _holds_mod._hold_decision_blocks_claim(decision):
+                # Remaining canonical barrier decisions leave the job queued.
+                # MATCH is handled above because it owns the ARMED -> HELD CAS.
                 continue
 
-            # Normal no-hold or predicate-false claim. Revalidate the job
-            # after the out-of-transaction hold observation.
             conn.execute("BEGIN IMMEDIATE")
             current = conn.execute(
                 "SELECT * FROM jobs WHERE id=?", (int(candidate["id"]),)
@@ -613,14 +553,11 @@ def _take_next_job(conn: sqlite3.Connection) -> sqlite3.Row | None:
                 or int(current_meta["dispatch_sequence"] or 0) != observed_dispatch_sequence
                 or int(current_meta["single_since_program"] or 0) != single_since_program
             ):
-                # Another lane committed a scheduling decision after our
-                # observation. Retry from fresh fairness truth instead of
-                # allowing multiple lanes to spend the same 2:1 preference.
                 conn.commit()
                 retry_candidates = True
                 break
             same_workspace = conn.execute(
-                """SELECT id FROM jobs WHERE status=\'RUNNING\'
+                """SELECT id FROM jobs WHERE status='RUNNING'
                    AND workspace_scheduling_key=? LIMIT 1""",
                 (str(candidate["workspace_scheduling_key"] or ""),),
             ).fetchone()
@@ -667,8 +604,6 @@ def _take_next_job(conn: sqlite3.Connection) -> sqlite3.Row | None:
             return None
 
 
-
-
 def _scheduler_submission_budget(
     *,
     db_path: Path,
@@ -708,11 +643,7 @@ def _scheduler_submission_budget(
                 (time.time(),),
             ).fetchone()[0])
             useful = min(local_room, durable_room, max(0, due))
-            # After supervisor restart, durable RUNNING rows may have no local
-            # Future. Keep one reconciliation probe alive even at full durable
-            # capacity so dead workers cannot strand the fleet forever.
             orphan_probe = 1 if active > int(local_inflight) else 0
             return min(local_room, max(useful, orphan_probe))
     except (OSError, sqlite3.Error, ValueError):
         return min(local_room, 1)
-
