@@ -9,9 +9,13 @@ trap 'rm -rf "$TMP"' EXIT
 
 python3 - "$TMP" <<'PY'
 import json
+import os
 import sys
 from pathlib import Path
-from ownframework_loop import guards, integrity, receipts, state, worktrees, git_checks, limits, util
+from ownframework_loop import (
+    guards, integrity, receipts, state, worktrees, git_checks, limits, util,
+    validation_executor,
+)
 
 root = Path(sys.argv[1])
 
@@ -116,6 +120,60 @@ assert guards.classify_bash_command(
 assert guards.classify_bash_command(
     "echo $(sudo true)", role="builder"
 )["severity"] == "forbidden"
+
+# Validation exit-code and marker semantics are behavioral authority, not
+# implementation-text contracts. Exercise the canonical executor directly
+# while isolating unrelated capability/policy plumbing.
+validation_cwd = root / "validation-cwd"
+validation_cwd.mkdir()
+orig_policy = validation_executor.validation_policy.classify_required_validation
+orig_env = validation_executor.runtime_env.commissioned_validation_env
+try:
+    validation_executor.validation_policy.classify_required_validation = (
+        lambda *_a, **_k: {"allowed": True}
+    )
+    validation_executor.runtime_env.commissioned_validation_env = (
+        lambda *_a, **_k: dict(os.environ)
+    )
+    accepted = validation_executor.run_required_validation(
+        cwd=validation_cwd,
+        validation={
+            "name": "expected-exit-and-marker",
+            "command": "printf 'EXPECTED_MARKER\\n'; exit 7",
+            "kind": "fast",
+            "expected_exit_code": 7,
+            "expected_marker": "EXPECTED_MARKER",
+        },
+        timeout_seconds=5,
+        canonical_repo=validation_cwd,
+        run_id="run-validation-authority",
+        packet={},
+    )
+    assert accepted["exit_code"] == 7, accepted
+    assert accepted["expected_exit_code"] == 7, accepted
+    assert accepted["marker_match"] is True, accepted
+    assert accepted["passed"] is True, accepted
+
+    marker_fail = validation_executor.run_required_validation(
+        cwd=validation_cwd,
+        validation={
+            "name": "missing-marker",
+            "command": "printf 'OTHER_MARKER\\n'; exit 7",
+            "kind": "fast",
+            "expected_exit_code": 7,
+            "expected_marker": "EXPECTED_MARKER",
+        },
+        timeout_seconds=5,
+        canonical_repo=validation_cwd,
+        run_id="run-validation-authority",
+        packet={},
+    )
+    assert marker_fail["exit_code"] == 7, marker_fail
+    assert marker_fail["marker_match"] is False, marker_fail
+    assert marker_fail["passed"] is False, marker_fail
+finally:
+    validation_executor.validation_policy.classify_required_validation = orig_policy
+    validation_executor.runtime_env.commissioned_validation_env = orig_env
 PY
 
 echo "V061_AUTHORITY_TAIL_HARDENING=PASS"
