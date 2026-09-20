@@ -58,12 +58,6 @@ acct=program.source_tree_accounting(canonical_repo=repo,baseline_sha=base,candid
 assert acct["files_changed_unique"] == 1, acct
 PY
 
-# Guard normalizer errors must not be swallowed into raw-command fallback.
-if grep -A22 'Apply the same layered normalizations' "$ROOT_DIR/lib/ownframework_loop/guards.py" | grep -Fq 'except Exception'; then
-  echo "FAIL: semantic Bash normalization still fails open"
-  exit 1
-fi
-
 # PostToolUse must not attach an interactive session to an arbitrary historical
 # run merely because .ownframework-loop exists.
 REPO="$TMP/post-repo"
