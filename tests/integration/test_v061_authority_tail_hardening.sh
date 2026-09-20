@@ -200,6 +200,7 @@ approval_doc = {
     "candidate_branch": candidate_branch,
 }
 receipt_doc = {
+    "schema": "ownframework-loop-build-receipt/v2",
     "candidate_sha": candidate,
     "candidate_branch": candidate_branch,
     "baseline_sha": baseline,
