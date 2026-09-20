@@ -162,8 +162,8 @@ unavailable_repo, unavailable_db, unavailable_job, unavailable_hold = held_fixtu
     "unavailable", "run-unavailable"
 )
 unavailable_state = state_mod.state_path(unavailable_repo, "run-unavailable")
-unavailable_backup = unavailable_state.with_suffix(".hold-test-backup")
-unavailable_state.rename(unavailable_backup)
+unavailable_original = unavailable_state.read_bytes()
+unavailable_state.write_text("{not-json", encoding="utf-8")
 try:
     unavailable_fleet = supervisor.fleet_status(db_path=unavailable_db)
     unavailable_item = next(
@@ -180,7 +180,7 @@ try:
             "select status from jobs where id=?", (unavailable_job["id"],)
         ).fetchone()[0] == "QUEUED"
 finally:
-    unavailable_backup.rename(unavailable_state)
+    unavailable_state.write_bytes(unavailable_original)
 print("ENGINEERING_STATE_UNAVAILABLE_FAILS_CLOSED=PASS")
 
 # H-10/H-11/H-12/H-15: mismatch does not hold, and a held run is skipped so
