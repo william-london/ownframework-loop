@@ -45,6 +45,7 @@ def _logical_job_row(
     return _db_mod._logical_job_row(conn, canonical_repo, run_id)
 
 
+
 def status(
     *,
     canonical_repo: Path,
@@ -87,11 +88,15 @@ def status(
     return _job_dict(row, db)
 
 
+
+
 def _readonly_columns(conn: sqlite3.Connection, table: str) -> set[str]:
     try:
         return {str(row["name"]) for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
     except sqlite3.Error:
         return set()
+
+
 
 
 def _legacy_readonly_fleet_projection(
@@ -142,6 +147,7 @@ def _legacy_readonly_fleet_projection(
     }
 
 
+
 def supervisor_config_get(*, db_path: Path | None = None) -> dict[str, Any]:
     """Read persistent operational supervisor configuration."""
     db = db_path or _db_mod.default_db_path()
@@ -163,6 +169,8 @@ def supervisor_config_get(*, db_path: Path | None = None) -> dict[str, Any]:
         ).fetchone()
     value = _db_mod._validate_max_concurrency(row[0] if row is not None else _db_mod.DEFAULT_MAX_CONCURRENCY)
     return {"schema": _db_mod.SCHEMA, "ok": True, "max_concurrency": value, "db_path": str(db)}
+
+
 
 
 def fleet_status(*, db_path: Path | None = None) -> dict[str, Any]:
@@ -257,6 +265,8 @@ def fleet_status(*, db_path: Path | None = None) -> dict[str, Any]:
         }
 
 
+
+
 def _run_git_readonly(repo: Path, args: list[str], *, timeout: int = 10) -> dict[str, Any]:
     """Run one bounded read-only Git observation for operator visibility."""
     try:
@@ -282,6 +292,8 @@ def _run_git_readonly(repo: Path, args: list[str], *, timeout: int = 10) -> dict
     }
 
 
+
+
 def _registered_worktree_paths(repo: Path) -> tuple[set[str], str | None]:
     probe = _run_git_readonly(repo, ["worktree", "list", "--porcelain"])
     if not probe["ok"]:
@@ -296,6 +308,8 @@ def _registered_worktree_paths(repo: Path) -> tuple[set[str], str | None]:
                 str(Path(raw[len("worktree "):].strip()).resolve(strict=False))
             )
     return paths, None
+
+
 
 
 def _worktree_visibility(
@@ -337,6 +351,8 @@ def _worktree_visibility(
             "dirty" if str(status["stdout"]).strip() else "clean"
         )
     return out
+
+
 
 
 def _candidate_diff_visibility(
@@ -415,6 +431,8 @@ def _candidate_diff_visibility(
     return out
 
 
+
+
 def _core_snapshot(repo: Path, run_id: str) -> dict[str, Any]:
     """Read protocol state plus read-only operator visibility evidence."""
     run_dir = repo / ".ownframework-loop" / run_id
@@ -439,6 +457,8 @@ def _core_snapshot(repo: Path, run_id: str) -> dict[str, Any]:
             continue
         loaded[name] = value
 
+    # Approval metadata is optional for visibility because historical status
+    # reads must not gain a new authority requirement merely to show paths.
     approval_doc: dict[str, Any] = {}
     approval_path = run_dir / "APPROVAL.json"
     visibility_errors: list[str] = []
@@ -546,6 +566,7 @@ def _core_snapshot(repo: Path, run_id: str) -> dict[str, Any]:
     }
 
 
+
 def _job_dict(row: sqlite3.Row, db: Path) -> dict[str, Any]:
     d = dict(row)
     d.update({"schema": _db_mod.SCHEMA, "ok": True, "db_path": str(db)})
@@ -606,6 +627,10 @@ def _job_dict(row: sqlite3.Row, db: Path) -> dict[str, Any]:
             or d.get("last_error")
         )
     if str(d.get("status") or "") == "RETIRED":
+        # Retired enrollments preserve their original quarantine context as
+        # durable historical evidence; surface the prior failure class for
+        # operators auditing a retired enrollment. runtime_generation is
+        # preserved verbatim (including legacy empty / UNBOUND).
         d["retired_enrollment"] = {
             "previous_quarantine_reason": (
                 d.get("last_failure_reason")
@@ -676,6 +701,10 @@ def _job_dict(row: sqlite3.Row, db: Path) -> dict[str, Any]:
     return d
 
 
+
+
+
+
 # -----------------------------------------------------------------------------
 # Hold read projection.
 #
@@ -689,6 +718,7 @@ from .supervisor_holds import dispatch_hold_status  # noqa: E402,F401  (read pro
 
 
 __all__ = [
+    # Canonical read-model bodies (this module):
     "status",
     "supervisor_config_get",
     "fleet_status",
@@ -701,5 +731,6 @@ __all__ = [
     "_candidate_diff_visibility",
     "_core_snapshot",
     "_job_dict",
+    # Hold read projection (re-exported from supervisor_holds):
     "dispatch_hold_status",
 ]
