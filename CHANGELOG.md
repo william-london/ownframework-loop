@@ -738,8 +738,8 @@ be paired with a structurally finalizable builder worktree before the
 dispatch layer will report `semantic_result_ready`. A complete semantic
 artifact over a dirty worktree (e.g. uncommitted modifications, generated
 out-of-scope artifacts left as untracked state) is no longer replay-finalized
-across retries; instead the supervisor dispatches a fresh semantic builder for
-the SAME claimed pass — same run id, same pass number, same checkpoint,
+across retries; instead the supervisor dispatches a fresh semantic builder
+for the SAME claimed pass — same run id, same pass number, same checkpoint,
 same candidate branch, same worktree, same semantic artifact path.
 
 The deterministic builder finalize still refuses dirty worktrees by design
