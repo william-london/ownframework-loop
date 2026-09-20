@@ -226,13 +226,23 @@ jobs:
             -w /repo \
             ghcr.io/gitleaks/gitleaks:v8.24.3 \
             git --redact --verbose --config .gitleaks.toml --log-opts="${base}..HEAD" .
-      - name: Gitleaks 8.24.3 (manual exact snapshot)
-        if: github.event_name == 'workflow_dispatch'
+      - name: Gitleaks 8.24.3 (manual exact master commit)
+        if: github.event_name == 'workflow_dispatch' && github.ref_name == 'master'
         shell: bash
         run: |
           set -euo pipefail
+          parent_count="$(git rev-list --parents -n 1 HEAD | awk '{print NF-1}')"
+          if [ "$parent_count" -gt 1 ]; then
+            log_opts="-m -1"
+          else
+            log_opts="-1"
+          fi
+          echo "GITLEAKS_MANUAL_MASTER_LOG_OPTS=${log_opts}"
           docker run --rm \
+            -e GIT_CONFIG_COUNT=1 \
+            -e GIT_CONFIG_KEY_0=safe.directory \
+            -e GIT_CONFIG_VALUE_0=/repo \
             -v "$PWD:/repo" \
             -w /repo \
             ghcr.io/gitleaks/gitleaks:v8.24.3 \
-            dir --redact --verbose --config .gitleaks.toml .
+            git --redact --verbose --config .gitleaks.toml --log-opts="$log_opts" .
