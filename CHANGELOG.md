@@ -11,7 +11,7 @@ immutable historical baseline of the previous published line.
 The complete historical changelog through 0.5.2 is preserved at
 [`docs/history/CHANGELOG-through-0.5.2.md`](docs/history/CHANGELOG-through-0.5.2.md).
 
-## 1.0.0 - Stable Autonomous Engineering Runtime (release candidate, 2026-09-19)
+## 1.0.0 - Stable Autonomous Engineering Runtime (2026-09-19)
 
 - Deterministic packet and source authority with exact execution binding and
   exact-SHA build/review evidence.
@@ -181,7 +181,7 @@ commissioning at N=4.
 
 ## 0.8.4 - Autonomous Runtime Portability and Containment (2026-08-30)
 
-A post-closure adversarial sweep exercised failure/containment paths that the
+A post-closure adversarial seam sweep exercised failure/containment paths that the
 successful 0.8.3 live PROGRAM canary did not.
 
 ### Vendor-neutral runtime topology
