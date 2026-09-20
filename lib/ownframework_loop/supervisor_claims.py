@@ -28,11 +28,12 @@ What stays in ``supervisor.py``:
 
   * The composition facade (``serve``, ``run_one``, ``resume``,
     ``retire``).
-  * Process / PID introspection helpers (``_pid_alive``,
-    ``_terminate_owned_process_group``,
+  * Backward-compatible process / PID introspection delegates
+    (``_pid_alive``, ``_terminate_owned_process_group``,
     ``_local_execution_owned``).
-  * The ClaudeCodeRunner class + its ``run`` method (still
-    pending extraction to ``supervisor_runner.py``).
+
+Provider-specific runner implementation and semantic subprocess lifecycle live
+in ``supervisor_runner.py``.
 
 Dependency direction:
 
