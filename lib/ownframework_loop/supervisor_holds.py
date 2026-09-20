@@ -67,14 +67,20 @@ def _validate_dispatch_hold_request(
         raise ValueError("PROGRAM_CHECKPOINT_BOUNDARY requires previous and next checkpoint ids")
 
 
+
+
 def _hold_row(conn: sqlite3.Connection, job_id: int) -> sqlite3.Row | None:
     return conn.execute(
         "SELECT * FROM dispatch_holds WHERE job_id=?", (int(job_id),)
     ).fetchone()
 
 
+
+
 def _hold_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
     return dict(row) if row is not None else None
+
+
 
 
 def _hold_matches_before_claim(
@@ -94,11 +100,13 @@ def _hold_matches_before_claim(
     return hold, "MATCH" if matches else reason
 
 
+
+
 def _hold_decision_blocks_claim(decision: str) -> bool:
     """Return whether a pre-claim hold decision is a scheduling barrier.
 
     This classification is shared by the authoritative claim path and its
-    read-only projections.  ``MATCH`` remains special in the claim path because
+    read-only projections. ``MATCH`` remains special in the claim path because
     it must first perform the existing ARMED -> HELD compare-and-swap; it is
     nevertheless already a barrier for read-side schedulability truth.
     """
@@ -111,6 +119,8 @@ def _hold_decision_blocks_claim(decision: str) -> bool:
         }
         or decision.startswith("engineering_state_unavailable")
     )
+
+
 
 
 def dispatch_hold_status(
@@ -151,6 +161,8 @@ def dispatch_hold_status(
     result = dict(row)
     result.update({"schema": _db_mod.SCHEMA, "ok": True, "db_path": str(db)})
     return result
+
+
 
 
 def release_dispatch_hold(
@@ -203,6 +215,8 @@ def release_dispatch_hold(
     return out
 
 
+
+
 def cancel_dispatch_hold(
     *,
     canonical_repo: Path,
@@ -251,3 +265,6 @@ def cancel_dispatch_hold(
     out = _hold_dict(updated) or {}
     out.update({"schema": _db_mod.SCHEMA, "ok": True, "cancelled": True})
     return out
+
+
+
