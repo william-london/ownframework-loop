@@ -2,14 +2,36 @@
 
 All notable source/master release-line changes to OwnFramework Loop are documented here.
 
-**Publication status:** **v0.9.1** is the current published
-GitHub Release at `d23cadca751c9ed37b5eeab25415c8b0574dae4e` and
-remains FROZEN. Current source/master is the **0.10.0-dev**
-consolidation series (development; NOT yet released). **v0.8.4**
+**Publication authority:** the immutable Git tag together with its corresponding
+GitHub Release. Static source documentation does not claim live "latest
+published release" state. Historical release **v0.9.1** remains frozen at
+`d23cadca751c9ed37b5eeab25415c8b0574dae4e`. **v0.8.4**
 (`134a7ce543e2d5858b3a4613c49d49959fe0b029`) remains the
 immutable historical baseline of the previous published line.
 The complete historical changelog through 0.5.2 is preserved at
 [`docs/history/CHANGELOG-through-0.5.2.md`](docs/history/CHANGELOG-through-0.5.2.md).
+
+## 1.0.0 - Stable Autonomous Engineering Runtime (2026-09-19)
+
+- Deterministic packet and source authority with exact execution binding and
+  exact-SHA build/review evidence.
+- Durable autonomous supervisor with PROGRAM checkpoint progression and
+  zero-routine-ceremony execution between human SPEC and human promotion.
+- Crash/recovery safety and exact-once semantic attempt, cost, token, and replay
+  accounting across bounded retries and repairs.
+- Host capability and runtime-generation binding with fail-closed identity,
+  sandbox, and commissioned-runtime checks.
+- Whole-product PROGRAM final review, bounded repair continuity, and terminal
+  truth that never turns APPROVED into autonomous promotion authority.
+- Claude Code remains the stable, live-verified unattended semantic runner;
+  the Generic CLI remains the portable vendor-neutral contract.
+- Codex remains experimental/static-distribution proven with
+  `CODEX_LIVE_VERIFIED=no`; no live certification is claimed.
+- Source version truth is now independent from publication state: immutable Git
+  tags plus GitHub Releases are publication authority.
+- Release-candidate preparation changes version/publication surfaces only;
+  runtime behavior, schema, FSM, packet contracts, and operator ceremony remain
+  unchanged.
 
 ## 0.10.0.dev0 - Architectural Consolidation (in-progress, 2026-09-18)
 
