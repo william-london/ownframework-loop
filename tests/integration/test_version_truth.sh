@@ -133,7 +133,11 @@ try:
     m = re.search(r"^## ([0-9]+\.[0-9]+\.[0-9]+(?:\.dev\d+)?)\s+[—\-]", text, re.MULTILINE)
     cl_ver = m.group(1) if m else ""
     check("CHANGELOG most recent entry", cl_ver == EXPECTED, f"= {cl_ver!r}, expected {EXPECTED!r}")
-    check("CHANGELOG publication authority", PUBLICATION_AUTHORITY_TEXT in flat)
+    check(
+        "CHANGELOG publication authority",
+        "Publication authority" in flat
+        and "immutable Git tag together with its corresponding GitHub Release." in flat,
+    )
     check(
         "CHANGELOG frozen historical release reference",
         FROZEN_RELEASE_TAG in text and FROZEN_RELEASE_SHA in text,
