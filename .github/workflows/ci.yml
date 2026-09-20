@@ -200,7 +200,39 @@ jobs:
           fetch-depth: 0
       - name: Exact event SHA
         run: bash tests/ci/assert_exact_sha.sh
-      - name: Gitleaks
+      - name: Gitleaks (non-manual action path)
+        if: github.event_name != 'workflow_dispatch'
         uses: gitleaks/gitleaks-action@v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Fetch canonical master for manual security scope
+        if: github.event_name == 'workflow_dispatch'
+        run: git fetch --no-tags origin master:refs/remotes/origin/master
+      - name: Gitleaks 8.24.3 (manual bounded branch history)
+        if: github.event_name == 'workflow_dispatch' && github.ref_name != 'master'
+        shell: bash
+        run: |
+          set -euo pipefail
+          base="$(git merge-base origin/master HEAD)"
+          test -n "$base"
+          head="$(git rev-parse HEAD)"
+          test "$base" != "$head"
+          echo "GITLEAKS_MANUAL_RANGE=${base}..HEAD"
+          docker run --rm \
+            -e GIT_CONFIG_COUNT=1 \
+            -e GIT_CONFIG_KEY_0=safe.directory \
+            -e GIT_CONFIG_VALUE_0=/repo \
+            -v "$PWD:/repo" \
+            -w /repo \
+            ghcr.io/gitleaks/gitleaks:v8.24.3 \
+            git --redact --verbose --config .gitleaks.toml --log-opts="${base}..HEAD" .
+      - name: Gitleaks 8.24.3 (manual exact snapshot)
+        if: github.event_name == 'workflow_dispatch'
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            -v "$PWD:/repo" \
+            -w /repo \
+            ghcr.io/gitleaks/gitleaks:v8.24.3 \
+            dir --redact --verbose --config .gitleaks.toml .
