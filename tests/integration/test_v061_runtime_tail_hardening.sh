@@ -9,7 +9,7 @@ trap 'rm -rf "$TMP"' EXIT
 python3 - "$TMP" <<'PY'
 import os, subprocess, sys, time
 from pathlib import Path
-from ownframework_loop import program, runtime_env, supervisor
+from ownframework_loop import program, runtime_env, supervisor, guards, external_action
 import sys as _sys_h
 _sys_h.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from _test_support import write_minimal_valid_packet  # noqa: E402
@@ -56,6 +56,23 @@ subprocess.run(["git","-C",str(repo),"commit","-qm","candidate"],check=True)
 cand=subprocess.check_output(["git","-C",str(repo),"rev-parse","HEAD"],text=True).strip()
 acct=program.source_tree_accounting(canonical_repo=repo,baseline_sha=base,candidate_sha=cand)
 assert acct["files_changed_unique"] == 1, acct
+
+# Command-normalization failure is security-significant. The classifier must
+# propagate it so the active hook can refuse deterministically; it must never
+# fall back to classifying the unnormalized raw command as allowed.
+orig_normalizer = external_action._normalize_python_argv
+def fail_normalizer(_command):
+    raise RuntimeError("injected-normalization-failure")
+external_action._normalize_python_argv = fail_normalizer
+try:
+    try:
+        guards.classify_bash_command("git status", role="builder")
+    except RuntimeError as exc:
+        assert "injected-normalization-failure" in str(exc)
+    else:
+        raise SystemExit("bash classifier failed open after normalization exception")
+finally:
+    external_action._normalize_python_argv = orig_normalizer
 PY
 
 # PostToolUse must not attach an interactive session to an arbitrary historical
