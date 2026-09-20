@@ -253,9 +253,9 @@ try:
     patch(review_finalize.validation_executor, "run_required_validation", validation_sentinel)
     try:
         review_finalize.finalize_review(
-            review_repo,
-            review_rid,
-            review_assessment_path,
+            canonical_repo=review_repo,
+            run_id=review_rid,
+            assessment_path=review_assessment_path,
             actor="reviewer",
         )
     except ReviewValidationReached as exc:
