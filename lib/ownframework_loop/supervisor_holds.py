@@ -5,6 +5,7 @@ Canonical owner of the supervisor's dispatch-hold lifecycle surface:
   * Hold request validation (one bounded pre-conditions check).
   * Hold persistence primitives (``_hold_row``, ``_hold_dict``).
   * Pre-claim hold matching (``_hold_matches_before_claim``).
+  * Claim-barrier classification (``_hold_decision_blocks_claim``).
   * Hold read projection (``dispatch_hold_status``).
   * Hold release mutation (``release_dispatch_hold``).
   * Hold cancel mutation (``cancel_dispatch_hold``).
@@ -97,6 +98,27 @@ def _hold_matches_before_claim(
         repo=Path(str(row["repo"])), run_id=str(row["run_id"]), hold=hold
     )
     return hold, "MATCH" if matches else reason
+
+
+
+
+def _hold_decision_blocks_claim(decision: str) -> bool:
+    """Return whether a pre-claim hold decision is a scheduling barrier.
+
+    This classification is shared by the authoritative claim path and its
+    read-only projections. ``MATCH`` remains special in the claim path because
+    it must first perform the existing ARMED -> HELD compare-and-swap; it is
+    nevertheless already a barrier for read-side schedulability truth.
+    """
+    return (
+        decision in {
+            "HELD",
+            "MATCH",
+            "invalid_hold_state",
+            "unsupported_hold_kind",
+        }
+        or decision.startswith("engineering_state_unavailable")
+    )
 
 
 
@@ -243,7 +265,6 @@ def cancel_dispatch_hold(
     out = _hold_dict(updated) or {}
     out.update({"schema": _db_mod.SCHEMA, "ok": True, "cancelled": True})
     return out
-
 
 
 

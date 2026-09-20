@@ -119,6 +119,8 @@ def _legacy_readonly_fleet_projection(
             "effective_schedulability": False,
             "workspace_blocked": False,
             "repository_peer_running": False,
+            "dispatch_hold_claim_decision": "legacy_projection_unavailable",
+            "dispatch_hold_blocked": None,
             "held": False,
             "active_slot": str(row["status"] or "") == "RUNNING",
             "scheduler_class": "SINGLE",
@@ -209,6 +211,11 @@ def fleet_status(*, db_path: Path | None = None) -> dict[str, Any]:
         for row in rows:
             hold_state = str(row["hold_state"] or "")
             status_value = str(row["status"])
+            _hold, hold_decision = _holds_mod._hold_matches_before_claim(conn, row)
+            dispatch_hold_blocked = (
+                status_value in {"QUEUED", "BACKOFF"}
+                and _holds_mod._hold_decision_blocks_claim(hold_decision)
+            )
             workspace_blocked = (
                 status_value in {"QUEUED", "BACKOFF"}
                 and str(row["workspace_scheduling_key"] or "") in running_workspace_keys
@@ -217,10 +224,7 @@ def fleet_status(*, db_path: Path | None = None) -> dict[str, Any]:
                 status_value in {"QUEUED", "BACKOFF"}
                 and str(row["repository_scheduling_key"] or "") in running_repository_keys
             )
-            blocked = (
-                status_value in {"QUEUED", "BACKOFF"}
-                and (hold_state == "HELD" or workspace_blocked)
-            )
+            blocked = dispatch_hold_blocked or workspace_blocked
             due = float(row["next_attempt_at"] or 0) <= time.time()
             identity_proven = int(row["repository_identity_proven"] or 0) == 1
             workspace_proven = int(row["workspace_identity_proven"] or 0) == 1
@@ -237,6 +241,8 @@ def fleet_status(*, db_path: Path | None = None) -> dict[str, Any]:
                 "effective_schedulability": bool(effective),
                 "workspace_blocked": bool(workspace_blocked),
                 "repository_peer_running": bool(repository_peer_running),
+                "dispatch_hold_claim_decision": hold_decision,
+                "dispatch_hold_blocked": bool(dispatch_hold_blocked),
                 "held": hold_state == "HELD",
                 "active_slot": status_value == "RUNNING",
                 "scheduler_class": str(row["execution_mode"] or "SINGLE"),
@@ -592,10 +598,15 @@ def _job_dict(row: sqlite3.Row, db: Path) -> dict[str, Any]:
             ).fetchall()
         d["attempt_history"] = [dict(item) for item in history]
         with _db_mod._managed_connect_readonly(db) as hold_conn:
-            hold = hold_conn.execute(
-                "SELECT * FROM dispatch_holds WHERE job_id=?", (int(row["id"]),)
-            ).fetchone()
+            hold, hold_decision = _holds_mod._hold_matches_before_claim(
+                hold_conn, row
+            )
         d["dispatch_hold"] = _holds_mod._hold_dict(hold)
+        d["dispatch_hold_claim_decision"] = hold_decision
+        d["dispatch_hold_blocked"] = (
+            str(d.get("status") or "") in {"QUEUED", "BACKOFF"}
+            and _holds_mod._hold_decision_blocks_claim(hold_decision)
+        )
     except sqlite3.Error as exc:
         d["attempt_snapshot_error"] = type(exc).__name__
     if int(d.get("legacy_budget_ambiguous") or 0):

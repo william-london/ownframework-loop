@@ -28,11 +28,12 @@ What stays in ``supervisor.py``:
 
   * The composition facade (``serve``, ``run_one``, ``resume``,
     ``retire``).
-  * Process / PID introspection helpers (``_pid_alive``,
-    ``_terminate_owned_process_group``,
+  * Backward-compatible process / PID introspection delegates
+    (``_pid_alive``, ``_terminate_owned_process_group``,
     ``_local_execution_owned``).
-  * The ClaudeCodeRunner class + its ``run`` method (still
-    pending extraction to ``supervisor_runner.py``).
+
+Provider-specific runner implementation and semantic subprocess lifecycle live
+in ``supervisor_runner.py``.
 
 Dependency direction:
 
@@ -527,19 +528,6 @@ def _take_next_job(conn: sqlite3.Connection) -> sqlite3.Row | None:
         retry_candidates = False
         for candidate in candidates:
             hold, decision = _holds_mod._hold_matches_before_claim(conn, candidate)
-            if decision == "HELD":
-                # A held job remains QUEUED and is intentionally skipped so a
-                # different repository/run may use the operational slot.
-                continue
-            if decision in {"invalid_hold_state", "unsupported_hold_kind"}:
-                # A malformed operational hold is never interpreted as an
-                # absent hold.  Leave the job queued and fail closed; the
-                # diagnostic remains inspectable through hold status.
-                continue
-            if decision.startswith("engineering_state_unavailable"):
-                # A hold whose engineering truth cannot be verified is never
-                # treated as released. Leave the job queued and fail closed.
-                continue
             if decision == "MATCH":
                 # The slow authoritative read happened outside SQLite write
                 # ownership. Revalidate both rows before the CAS transition.
@@ -586,6 +574,11 @@ def _take_next_job(conn: sqlite3.Connection) -> sqlite3.Row | None:
                 conn.commit()
                 # Re-scan in case another queued job can safely run while
                 # this run waits for its explicit operational release.
+                continue
+            if _holds_mod._hold_decision_blocks_claim(decision):
+                # Canonical hold barriers remain queued and claimable only
+                # after their existing hold authority resolves them. MATCH is
+                # handled above because it owns the ARMED -> HELD transition.
                 continue
 
             # Normal no-hold or predicate-false claim. Revalidate the job
@@ -714,4 +707,3 @@ def _scheduler_submission_budget(
             return min(local_room, max(useful, orphan_probe))
     except (OSError, sqlite3.Error, ValueError):
         return min(local_room, 1)
-

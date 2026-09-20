@@ -7,9 +7,9 @@ TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
 python3 - "$TMP" <<'PY'
-import json, sys
+import json, signal, subprocess, sys
 from pathlib import Path
-from ownframework_loop import supervisor
+from ownframework_loop import supervisor, supervisor_runner
 root=Path(sys.argv[1])
 p=root/"cost.json"
 p.write_text(json.dumps({"total_cost_usd":1.25}))
@@ -34,14 +34,34 @@ except RuntimeError:
 else:
     raise SystemExit("non-finite model cost was accounted")
 conn.close()
-PY
 
-grep -Fq 'cost_known' "$ROOT_DIR/lib/ownframework_loop/supervisor.py"
-grep -Fq 'model_cost_unknown' "$ROOT_DIR/lib/ownframework_loop/supervisor.py"
-grep -Fq 'def _terminate_group' "$ROOT_DIR/lib/ownframework_loop/supervisor.py"
-if grep -Fq 'or proc.returncode == 0' "$ROOT_DIR/lib/ownframework_loop/supervisor.py"; then
-  fail "structured Claude output can still be bypassed by returncode zero"
-fi
+# Process-group termination is lifecycle behavior, not a function-name grep.
+# Force the graceful wait to expire and prove TERM -> KILL -> reap ordering.
+class FakeProc:
+    pid = 424242
+    returncode = None
+    def __init__(self):
+        self.wait_calls = 0
+    def poll(self):
+        return self.returncode
+    def wait(self, timeout=None):
+        self.wait_calls += 1
+        if self.wait_calls == 1:
+            raise subprocess.TimeoutExpired(cmd="fake-semantic-worker", timeout=timeout)
+        self.returncode = -signal.SIGKILL
+        return self.returncode
+
+fake = FakeProc()
+signals = []
+orig_killpg = supervisor_runner.os.killpg
+try:
+    supervisor_runner.os.killpg = lambda pid, sig: signals.append((pid, sig))
+    supervisor_runner._terminate_group(fake, grace_seconds=0.01)
+finally:
+    supervisor_runner.os.killpg = orig_killpg
+assert signals == [(fake.pid, signal.SIGTERM), (fake.pid, signal.SIGKILL)], signals
+assert fake.wait_calls == 2, fake.wait_calls
+PY
 
 # A valid Claude result may exceed diagnostic retention. The runner must parse
 # the complete durable envelope and bound only the returned diagnostics.
@@ -121,6 +141,53 @@ print("LARGE_DURABLE_STDOUT_DIAGNOSTIC_BOUND_PRESERVED=PASS")
 PY
 )"
 printf '%s\n' "$LARGE_RESULT"
+
+# Provider process exit 0 is not semantic success by itself. An invalid
+# structured envelope must still return ok=False even though the executable
+# exits successfully.
+ZERO_EXIT_FAKE="$TMP/zero-exit-invalid-envelope"
+cat > "$ZERO_EXIT_FAKE" <<'PY'
+#!/usr/bin/env python3
+print("not-a-structured-provider-envelope")
+PY
+chmod +x "$ZERO_EXIT_FAKE"
+ZERO_EXIT_RESULT="$(OFLOOP_CLAUDE_BIN="$ZERO_EXIT_FAKE" python3 - "$TMP" <<'PY'
+import sys
+from pathlib import Path
+from ownframework_loop import supervisor
+
+root = Path(sys.argv[1])
+repo = root / "zero-exit-repo"
+worktree = root / "zero-exit-worktree"
+repo.mkdir()
+worktree.mkdir()
+out = root / "zero-exit.out"
+err = root / "zero-exit.err"
+result = supervisor.ClaudeCodeRunner().run(
+    {
+        "schema": supervisor.SCHEMA,
+        "decision": "BUILD",
+        "role": "builder",
+        "run_id": "run-zero-exit-invalid-envelope",
+        "state": "BUILDING",
+        "replayed": False,
+        "canonical_repo": str(repo),
+        "worktree": str(worktree),
+        "semantic_path": str(worktree / "result.json"),
+        "network_read_allowlist": [],
+        "attempt_id": "attempt-zero-exit-invalid-envelope",
+    },
+    timeout_seconds=30,
+    durable_files=(out, err),
+)
+assert result.returncode == 0, result
+assert result.ok is False, result
+assert result.cost_known is False, result
+assert result.tokens_known is False, result
+print("ZERO_EXIT_INVALID_SEMANTIC_ENVELOPE_REFUSED=PASS")
+PY
+)"
+printf '%s\n' "$ZERO_EXIT_RESULT"
 
 # A durable provider envelope above the explicit unattended-runtime ceiling
 # must fail closed before the supervisor reads it into memory. The ceiling is
