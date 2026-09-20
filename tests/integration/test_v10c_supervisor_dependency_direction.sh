@@ -18,8 +18,12 @@ modules = sorted(p.stem for p in LIB.glob("supervisor_*.py"))
 print(f"  modules discovered: {modules}")
 
 
+def parsed(path: Path):
+    return ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+
+
 def upward_imports(path: Path):
-    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    tree = parsed(path)
     hits = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
@@ -99,6 +103,80 @@ for node in supervisor_tree.body:
 for name, nodes in defs.items():
     assert len(nodes) == 1, f"supervisor.py defines canonical compatibility symbol {name} {len(nodes)} times"
 print("  PASS: no duplicate canonical implementations or shadow definitions remain in supervisor.py")
+
+# Dispatch-hold matching and barrier classification are one authority. Claims
+# retain MATCH's state transition, while both claims and read model consume the
+# same supervisor_holds barrier predicate for decision classification.
+holds_tree = parsed(LIB / "supervisor_holds.py")
+claims_tree = parsed(LIB / "supervisor_claims.py")
+readmodel_tree = parsed(LIB / "supervisor_readmodel.py")
+
+def function_defs(tree, name):
+    return [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == name]
+
+def hold_policy_calls(tree):
+    hits = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+            continue
+        if (
+            node.func.attr == "_hold_decision_blocks_claim"
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "_holds_mod"
+        ):
+            hits.append(node)
+    return hits
+
+assert len(function_defs(holds_tree, "_hold_matches_before_claim")) == 1
+assert len(function_defs(holds_tree, "_hold_decision_blocks_claim")) == 1
+assert not function_defs(claims_tree, "_hold_decision_blocks_claim")
+assert not function_defs(readmodel_tree, "_hold_decision_blocks_claim")
+assert hold_policy_calls(claims_tree), "claims do not consume canonical hold barrier policy"
+assert hold_policy_calls(readmodel_tree), "read model does not consume canonical hold barrier policy"
+print("  PASS: hold matching + claim-barrier policy have one supervisor_holds owner")
+
+# The old source-layout greps for candidate-branch authority are replaced with
+# an AST contract: build finalization must bind candidate_branch directly to
+# the actual builder worktree branch, never to an `or` fallback expression.
+build_tree = parsed(LIB / "build_finalize.py")
+branch_bindings = []
+for node in ast.walk(build_tree):
+    if not isinstance(node, ast.Assign):
+        continue
+    if not any(isinstance(t, ast.Name) and t.id == "candidate_branch" for t in node.targets):
+        continue
+    branch_bindings.append(node.value)
+assert len(branch_bindings) == 1, f"unexpected candidate_branch bindings: {len(branch_bindings)}"
+branch_value = branch_bindings[0]
+assert isinstance(branch_value, ast.Call)
+assert isinstance(branch_value.func, ast.Attribute)
+assert isinstance(branch_value.func.value, ast.Name)
+assert branch_value.func.value.id == "git_checks"
+assert branch_value.func.attr == "require_current_branch"
+assert len(branch_value.args) == 1 and isinstance(branch_value.args[0], ast.Name)
+assert branch_value.args[0].id == "builder_wt"
+assert not isinstance(branch_value, ast.BoolOp)
+print("  PASS: build candidate branch authority is actual worktree branch with no fallback")
+
+# Finalizer-to-validator wiring is an intrinsically static ownership contract;
+# executor behavior itself is covered behaviorally by authority-tail tests.
+def validation_executor_calls(tree):
+    hits = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+            continue
+        if (
+            node.func.attr == "run_required_validation"
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "validation_executor"
+        ):
+            hits.append(node)
+    return hits
+
+review_tree = parsed(LIB / "review_finalize.py")
+assert validation_executor_calls(build_tree), "build finalizer is not wired to validation executor"
+assert validation_executor_calls(review_tree), "review finalizer is not wired to validation executor"
+print("  PASS: build/review finalizers both consume canonical validation executor")
 PY
 
 echo "V10C_SUPERVISOR_DEPENDENCY_DIRECTION=PASS"
