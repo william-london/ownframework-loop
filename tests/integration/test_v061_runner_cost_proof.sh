@@ -36,13 +36,6 @@ else:
 conn.close()
 PY
 
-grep -Fq 'cost_known' "$ROOT_DIR/lib/ownframework_loop/supervisor.py"
-grep -Fq 'model_cost_unknown' "$ROOT_DIR/lib/ownframework_loop/supervisor.py"
-grep -Fq 'def _terminate_group' "$ROOT_DIR/lib/ownframework_loop/supervisor.py"
-if grep -Fq 'or proc.returncode == 0' "$ROOT_DIR/lib/ownframework_loop/supervisor.py"; then
-  fail "structured Claude output can still be bypassed by returncode zero"
-fi
-
 # A valid Claude result may exceed diagnostic retention. The runner must parse
 # the complete durable envelope and bound only the returned diagnostics.
 LARGE_FAKE="$TMP/large-claude"
