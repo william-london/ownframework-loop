@@ -84,8 +84,32 @@ if len(matches) != 2:
     print("FAIL: expected 2 total worktree entries (1 builder + 1 reviewer), got", len(matches))
     sys.exit(1)
 
+# A directory at the reviewer path is not reviewer authority. It must be a
+# registered worktree of this canonical repository, and refusal must not
+# destructively clean an unrelated directory.
+invalid_rid = rid + "-unregistered"
+invalid_reviewer = repo / ".worktrees" / "ownframework-loop" / invalid_rid / "reviewer"
+invalid_reviewer.mkdir(parents=True)
+(invalid_reviewer / "sentinel.txt").write_text("do-not-delete\n", encoding="utf-8")
+base_sha = subprocess.run(
+    ["git", "-C", str(repo), "rev-parse", "HEAD"],
+    capture_output=True, text=True, check=True,
+).stdout.strip()
+try:
+    wt_mod.add_reviewer_worktree(repo, invalid_rid, candidate_sha=base_sha)
+except wt_mod.WorktreeError as exc:
+    if "not a registered worktree" not in str(exc):
+        raise
+else:
+    print("FAIL: unregistered reviewer path was accepted")
+    sys.exit(1)
+if not (invalid_reviewer / "sentinel.txt").is_file():
+    print("FAIL: unregistered reviewer path was destructively cleaned")
+    sys.exit(1)
+
 print("BUILDER_RESULTS", json.dumps(results_builder))
 print("REVIEWER_RESULTS", json.dumps(results_reviewer))
 print("WT_LIST_MATCHES", len(matches))
+print("UNREGISTERED_REVIEWER_REFUSAL=PASS")
 print("WORKTREE_CONCURRENCY=PASS")
 PYEND
