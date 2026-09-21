@@ -1609,12 +1609,14 @@ def _set_worker_pid(
     err_path: Path | None = None,
     attempt_id: str | None = None,
     deadline_at: float | None = None,
+    max_pass_runtime_seconds: int | None = None,
 ) -> None:
     """Thin delegate to ``supervisor_attempts._set_worker_pid``."""
     _attempts_mod._set_worker_pid(
         conn, job_id, pid, role,
         out_path=out_path, err_path=err_path,
         attempt_id=attempt_id, deadline_at=deadline_at,
+        max_pass_runtime_seconds=max_pass_runtime_seconds,
     )
 
 
