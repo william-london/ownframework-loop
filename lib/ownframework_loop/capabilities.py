@@ -105,14 +105,32 @@ BUILTIN_CAPABILITIES: dict[str, CapabilityDefinition] = {
     "research.public": CapabilityDefinition(
         # Governed public read authority per docs/architecture/RESEARCH_AUTHORITY.md.
         # Not a tool the worker invokes directly; the broker executable is the
-        # one and only thing with public-internet reachability for the run, and
-        # it is commissioned via host-manifest entry + canary proof. Network
-        # domains are intentionally empty here: the broker manages its own
-        # outbound authority (and SSRF/destination validation), and the
-        # worker's Bash allowedDomains are NOT widened by this capability.
+        # one and only thing in the run that publishes research receipts / asset
+        # provenance. The broker manages its own destination validation
+        # (SSRF, DNS rebinding, redirect revalidation).
+        #
+        # Sandbox reality: Claude's Bash sandbox blocks subprocess network
+        # access too, so the broker must be reachable from inside the worker's
+        # allowedDomains. We list the broker's specific research destinations
+        # here so the broker's HTTPS calls are permitted; the broker remains
+        # the only thing that produces durable receipts / content-addressed
+        # artifacts, so worker-level Curl against these domains produces no
+        # provenance and the audit trail still belongs to the broker.
+        #
+        # Only public read authority is enabled: HTTP/HTTPS GET-equivalent
+        # semantics, no POST/PUT/PATCH/DELETE/auth/cookies. The schema URLs
+        # below cover:
+        #   - Wikipedia REST + article bodies (search + read)
+        #   - Wikimedia Commons (asset-read for openly-licensed media)
+        #   - upload.wikimedia.org (asset-read direct CDN)
+        #   - commons.wikimedia.org (asset-read via Special:FilePath)
         "research.public", "read-only-network", privileged=True,
         requires_commissioned_provider=True,
-        network_domains=(),
+        network_domains=(
+            "en.wikipedia.org",
+            "commons.wikimedia.org",
+            "upload.wikimedia.org",
+        ),
     ),
 }
 
