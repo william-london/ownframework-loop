@@ -1303,9 +1303,115 @@ def _validate_common(args: argparse.Namespace) -> None:
 # -------------------------------------------------------------------- #
 
 
+CANARY_VERSION = 1
+CANARY_RESULT_SCHEMA = "ownframework-loop-privileged-canary/v1"
+
+
+def _emit_canary(
+    name: str,
+    fingerprint: str,
+    canary_kind: str,
+    contract_revision: str,
+) -> dict[str, Any]:
+    """Privilege-protocol canary envelope.
+
+    Mirrors the ``ownframework-loop-privileged-canary/v1`` schema the
+    canonical ``commission_capability`` resolver expects. The broker's
+    canary self-test refuses the private/loopback address ranges via
+    the same SSRF primitives a real op=read uses; if the boundary
+    drifts, the canary fails and the resolver refuses to seal the
+    commissioning evidence.
+    """
+    # Self-test 1: loopback refused.
+    try:
+        _resolve_and_validate("127.0.0.1")
+        refused_loopback = False
+    except (SSRFRefused, BrokerError):
+        refused_loopback = True
+    # Self-test 2: rfc1918 refused.
+    try:
+        _resolve_and_validate("10.0.0.1")
+        refused_rfc1918 = False
+    except (SSRFRefused, BrokerError):
+        refused_rfc1918 = True
+    # Self-test 3: private v6 refused.
+    try:
+        _resolve_and_validate("fc00::1")
+        refused_v6_unique_local = False
+    except (SSRFRefused, BrokerError):
+        refused_v6_unique_local = True
+    # Self-test 4: URL with userinfo refused.
+    try:
+        _parse_url("https://user:pass@example.com/")
+        refused_userinfo = False
+    except (ForbiddenHeader, BrokerError):
+        refused_userinfo = True
+    # Self-test 5: file:// scheme refused.
+    try:
+        _parse_url("file:///etc/passwd")
+        refused_file_scheme = False
+    except (InvalidRequest, BrokerError):
+        refused_file_scheme = True
+    if not all([
+        refused_loopback, refused_rfc1918, refused_v6_unique_local,
+        refused_userinfo, refused_file_scheme,
+    ]):
+        return {
+            "schema": CANARY_RESULT_SCHEMA,
+            "ok": False,
+            "error": (
+                f"research broker boundary drifted: loopback={refused_loopback} "
+                f"rfc1918={refused_rfc1918} v6={refused_v6_unique_local} "
+                f"userinfo={refused_userinfo} file_scheme={refused_file_scheme}"
+            ),
+        }
+    return {
+        "schema": CANARY_RESULT_SCHEMA,
+        "ok": True,
+        "capability": name,
+        "capability_contract_revision": contract_revision,
+        "semantic_runtime_fingerprint": fingerprint,
+        "provider": "core_research_broker",
+        "canary_kind": canary_kind,
+        "canary_version": CANARY_VERSION,
+    }
+
+
+def _handle_capability_canary(argv: list[str]) -> int:
+    """Entry point for ``--ofloop-capability-canary <cap> <fp> <kind> <rev>``.
+
+    The canonical commissioning protocol invokes the canary_executable
+    with this exact positional arg list and expects a JSON envelope that
+    matches ``ownframework-loop-privileged-canary/v1`` exactly. The
+    supplier of those exact values is the broker itself.
+    """
+    if len(argv) < 6:
+        print(json.dumps({
+            "schema": CANARY_RESULT_SCHEMA, "ok": False,
+            "error_class": "InvalidRequest",
+            "error": "expected 4 positional args after --ofloop-capability-canary",
+        }, sort_keys=True))
+        return 2
+    name = str(argv[2])
+    fingerprint = str(argv[3])
+    canary_kind = str(argv[4])
+    contract_revision = str(argv[5])
+    result = _emit_canary(name, fingerprint, canary_kind, contract_revision)
+    print(json.dumps(result, sort_keys=True))
+    return 0 if result.get("ok") else 1
+
+
 def main(argv: list[str]) -> int:
     _ignore_sigpipe()
     _set_resource_limits()
+    # The privileged-capability commissioning harness invokes the canary
+    # executable with a fixed positional arg list. Detect that form
+    # BEFORE argparse so the broker can be its own canary.
+    if (
+        len(argv) >= 5
+        and argv[1] == "--ofloop-capability-canary"
+    ):
+        return _handle_capability_canary(argv)
     try:
         # Build a fresh-from-environ copy for sending outbound (defence in
         # depth against any credential leak inherited from the worker
