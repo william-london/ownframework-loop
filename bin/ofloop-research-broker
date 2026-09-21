@@ -46,18 +46,58 @@ import argparse
 import datetime as _dt
 import hashlib
 import hmac
+import html as _html
+import http.client as _http_client
 import json
 import os
+import re as _re
 import resource
 import signal
 import socket
+import ssl as _ssl
 import sys
 import time
+import unicodedata
+import urllib.parse as _urllib_parse
+import uuid as _uuid
+from html.parser import HTMLParser as _HTMLParser
+from pathlib import Path
 from typing import Any, NoReturn
 
 BROKER_VERSION = "0.1.0-dev"
 BROKER_CAPABILITY_NAME = "research.public"
 BROKER_OPERATION_SCHEMA = "ownframework-loop-research-broker/v1"
+
+# Operational ceilings. Keep these conservative; the broker is the last
+# defence in depth against an unbounded network read.
+READ_MAX_REDIRECTS = 5
+READ_CONNECT_TIMEOUT = 10.0
+READ_READ_TIMEOUT = 30.0
+READ_DEFAULT_MAX_BYTES = 5 * 1024 * 1024         # 5 MiB response cap
+READ_TEXT_PREVIEW_BYTES = 1500                    # small preview returned on stdout
+SEARCH_DEFAULT_MAX_BYTES = 2 * 1024 * 1024        # 2 MiB for DDG HTML responses
+SEARCH_MAX_RESULTS = 12
+ASSET_DEFAULT_MAX_BYTES = 32 * 1024 * 1024       # 32 MiB asset cap
+
+# Asset MIME allowlist for op=asset-read. Anything else is refused up
+# front, so the worker cannot be tricked into copying an HTML "asset"
+# into the product tree.
+ASSET_MIME_ALLOWLIST = frozenset((
+    "image/png", "image/jpeg", "image/gif", "image/webp",
+    "image/svg+xml", "image/avif",
+    "application/pdf",
+    "font/woff", "font/woff2", "font/ttf", "font/otf",
+    "application/vnd.ms-fontobject",
+    "application/octet-stream",
+))
+
+# Search is currently provided by the DuckDuckGo HTML endpoint, which is
+# unauthenticated and serves a privacy-respecting HTML page. Future
+# providers (Brave, Kagi, etc.) can be added by branching on a
+# --search-backend flag in this same module. Do NOT let the worker pick
+# the backend -- the broker is the authority.
+SEARCH_DEFAULT_ENDPOINT = "https://html.duckduckgo.com/html/"
+SEARCH_USER_AGENT = f"OwnFrameworkLoop-ResearchBroker/{BROKER_VERSION}"
 
 
 # -------------------------------------------------------------------- #
@@ -276,7 +316,30 @@ def _parse_url(url: str) -> _UrlParse:
         hostpart, path, query, fragment = rest, "", "", ""
     if "@" in hostpart:
         raise ForbiddenHeader("url contains userinfo (credentials)")
-    if ":" in hostpart:
+    if hostpart.startswith("["):
+        # IPv6 literal: ``hostpart`` looks like ``[::1]`` or ``[::1]:8080``.
+        close = hostpart.find("]")
+        if close == -1:
+            raise InvalidRequest("url has unmatched [ in IPv6 host")
+        host = hostpart[1:close]
+        rest_after = hostpart[close + 1:]
+        if rest_after == "":
+            port = None
+        elif rest_after.startswith(":"):
+            port_text = rest_after[1:]
+            try:
+                port = int(port_text)
+            except ValueError:
+                raise InvalidRequest(f"invalid url port: {port_text!r}")
+            if not (1 <= port <= 65535):
+                raise InvalidRequest(
+                    f"url port out of range: {port} (must be 1..65535)"
+                )
+        else:
+            raise InvalidRequest(
+                f"unexpected characters after IPv6 host: {rest_after!r}"
+            )
+    elif ":" in hostpart:
         host, _, port_text = hostpart.rpartition(":")
         try:
             port = int(port_text)
@@ -458,6 +521,805 @@ def _emit_help() -> dict[str, Any]:
     }
 
 
+# -------------------------------------------------------------------- #
+# HTTP fetching with re-validated redirects                             #
+# -------------------------------------------------------------------- #
+
+
+class _HttpResponse:
+    """Result of one HTTP exchange."""
+
+    __slots__ = ("status_code", "reason", "headers", "body", "connect_log",
+                 "final_url", "redirect_chain")
+
+    def __init__(self, status_code: int, reason: str, headers: dict[str, str],
+                 body: bytes, connect_log: list[dict[str, Any]],
+                 final_url: str, redirect_chain: list[str]) -> None:
+        self.status_code = status_code
+        self.reason = reason
+        self.headers = headers
+        self.body = body
+        self.connect_log = connect_log
+        self.final_url = final_url
+        self.redirect_chain = redirect_chain
+
+
+def _parse_status_line(line: str) -> tuple[int, str]:
+    """Parse 'HTTP/1.1 200 OK' -> (200, 'OK')."""
+    parts = line.split(" ", 2)
+    if len(parts) < 2:
+        raise InvalidRequest("response status line malformed")
+    try:
+        code = int(parts[1])
+    except ValueError:
+        raise InvalidRequest(f"response status code unparseable: {parts[1]!r}")
+    return code, parts[2] if len(parts) > 2 else ""
+
+
+def _parse_headers(header_blob: bytes) -> dict[str, str]:
+    """Parse raw HTTP headers with case-insensitive keys; value is the
+    *combined* (comma-joined) value for repeated headers."""
+    raw = header_blob.decode("iso-8859-1", errors="replace")
+    out: dict[str, str] = {}
+    for line in raw.splitlines():
+        if not line or ":" not in line:
+            continue
+        k, _, v = line.partition(":")
+        k_lc = k.strip().lower()
+        v_clean = v.strip()
+        if k_lc in out:
+            out[k_lc] = out[k_lc] + ", " + v_clean
+        else:
+            out[k_lc] = v_clean
+    return out
+
+
+def _read_capped(sock: socket.socket, max_bytes: int, timeout: float) -> bytes:
+    """Read until the server closes or max_bytes is exceeded. Returns the
+    raw bytes. Raises PayloadTooLarge if the cap is hit (and closes the
+    socket to stop further data)."""
+    pieces: list[bytes] = []
+    total = 0
+    sock.settimeout(timeout)
+    while True:
+        try:
+            chunk = sock.recv(64 * 1024)
+        except socket.timeout as exc:
+            raise TransientFailure(f"read timeout after {total} bytes") from exc
+        if not chunk:
+            break
+        total += len(chunk)
+        pieces.append(chunk)
+        if total > max_bytes:
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            raise PayloadTooLarge(
+                f"response exceeded {max_bytes}-byte cap at {total} bytes"
+            )
+    return b"".join(pieces)
+
+
+def _browse(url: str, max_bytes: int, *, max_redirects: int = READ_MAX_REDIRECTS,
+            accept: str = "*/*",
+            ) -> _HttpResponse:
+    """Fetch ``url`` with re-validated redirects and a hard byte cap.
+
+    Returns the final response (the broker refuses to interpret, so a 4xx
+    is just a 4xx here). The redirect chain is recorded on the response
+    so callers (and the receipt writer) can show what happened.
+    """
+    chain: list[str] = []
+    connect_log: list[dict[str, Any]] = []
+    current_url = url
+    for hop in range(max_redirects + 1):
+        u = _parse_url(current_url)
+        if u.scheme not in {"http", "https"}:
+            raise SSRFRefused(
+                f"redirect to non-http(s) scheme refused: {current_url!r}"
+            )
+        if u.userinfo:
+            raise ForbiddenHeader("redirect target contains userinfo")
+        accepted = _resolve_and_validate(u.host)
+        connect_log.append({
+            "url": current_url,
+            "host": u.host,
+            "addresses": [[socket.AddressFamily(f).name, a] for f, a in accepted],
+        })
+        port = u.port if u.port is not None else (
+            443 if u.scheme == "https" else 80
+        )
+        # Try each accepted address in order; first success wins.
+        last_exc: Exception | None = None
+        sock: socket.socket | None = None
+        chosen: tuple[int, str] | None = None
+        for fam, addr in accepted:
+            try:
+                s = socket.create_connection(
+                    (addr, port), timeout=READ_CONNECT_TIMEOUT
+                )
+                sock = s
+                chosen = (fam, addr)
+                break
+            except OSError as exc:
+                last_exc = exc
+                continue
+        if sock is None or chosen is None:
+            raise TransientFailure(
+                f"connect refused to {u.host}: {last_exc}"
+            )
+        try:
+            if u.scheme == "https":
+                ctx = _ssl.create_default_context()
+                sock = ctx.wrap_socket(sock, server_hostname=u.host)
+            path = u.path or "/"
+            if u.query:
+                path = f"{path}?{u.query}"
+            # Manually compose a minimal HTTP/1.1 GET. http.client would
+            # work but emits a small surface (still vulnerable to proxies
+            # deciding to add weird headers). The raw request stays under
+            # our control.
+            request_lines = [
+                f"GET {path} HTTP/1.1",
+                f"Host: {u.host}",
+                f"User-Agent: {SEARCH_USER_AGENT}",
+                "Accept: " + accept,
+                "Accept-Encoding: identity",
+                "Connection: close",
+                "",  # CRLF terminator
+            ]
+            request_blob = ("\r\n".join(request_lines) + "\r\n").encode("ascii")
+            sock.sendall(request_blob)
+            # Read status line + headers
+            sock.settimeout(READ_READ_TIMEOUT)
+            head = b""
+            while b"\r\n\r\n" not in head:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    raise TransientFailure("server closed before headers")
+                head += chunk
+                if len(head) > 64 * 1024:
+                    raise TransientFailure("response headers too large")
+            header_blob, _, rest = head.partition(b"\r\n\r\n")
+            status_line, _, header_lines = header_blob.partition(b"\r\n")
+            code, reason = _parse_status_line(status_line.decode("iso-8859-1", "replace"))
+            headers = _parse_headers(header_lines)
+            # Body handling: if Content-Length present and > max_bytes,
+            # refuse early; otherwise read raw body with byte cap.
+            cl = headers.get("content-length", "")
+            try:
+                cl_int = int(cl) if cl else -1
+            except ValueError:
+                cl_int = -1
+            if cl_int > max_bytes:
+                try:
+                    sock.close()
+                except OSError:
+                    pass
+                raise PayloadTooLarge(
+                    f"response Content-Length {cl_int} exceeds cap {max_bytes}"
+                )
+            if code in {301, 302, 303, 307, 308}:
+                location = headers.get("location", "")
+                if not location:
+                    raise InvalidRequest(
+                        "redirect response missing Location header"
+                    )
+                chain.append(current_url)
+                # 303 always converts to GET; 301/302 are historical
+                # "follow with same method", which here is always GET.
+                # 307/308 preserve method but we only ever use GET.
+                # Combine base + relative.
+                if location.startswith("/"):
+                    joined = f"{u.scheme}://{u.host}{location}"
+                elif "://" in location:
+                    joined = location
+                else:
+                    joined = f"{u.scheme}://{u.host}/{location}"
+                # Re-validate the next URL by parsing it and re-asserting
+                # scheme + host + absence of userinfo + non-private DNS.
+                current_url = joined
+                if len(chain) >= max_redirects:
+                    raise RedirectRefused(
+                        f"redirect chain exceeded {max_redirects} hops"
+                    )
+                continue
+            body = rest
+            if cl_int < 0:
+                # No Content-Length: read until close with cap.
+                # Combine `rest` with whatever else remains.
+                pieces = [rest] if rest else []
+                total = len(rest)
+                while True:
+                    try:
+                        chunk = sock.recv(64 * 1024)
+                    except socket.timeout:
+                        break  # treat as end
+                    if not chunk:
+                        break
+                    total += len(chunk)
+                    if total > max_bytes:
+                        try:
+                            sock.shutdown(socket.SHUT_RDWR)
+                        except OSError:
+                            pass
+                        raise PayloadTooLarge(
+                            f"response exceeded {max_bytes}-byte cap at {total} bytes"
+                        )
+                    pieces.append(chunk)
+                body = b"".join(pieces)
+            elif rest:
+                # Content-Length was given but body already partially read.
+                remaining = cl_int - len(rest)
+                if remaining < 0:
+                    raise PayloadTooLarge(
+                        f"server sent more bytes than Content-Length: {cl_int}"
+                    )
+                # Read the precise number of remaining bytes with cap.
+                pieces = [rest] if rest else []
+                total = len(rest)
+                while remaining > 0:
+                    want = min(remaining, 64 * 1024)
+                    try:
+                        chunk = sock.recv(want)
+                    except socket.timeout as exc:
+                        raise TransientFailure("read timeout before Content-Length satisfied") from exc
+                    if not chunk:
+                        raise TransientFailure("server closed before Content-Length satisfied")
+                    remaining -= len(chunk)
+                    total += len(chunk)
+                    if total > max_bytes:
+                        raise PayloadTooLarge(
+                            f"response exceeded {max_bytes}-byte cap at {total} bytes"
+                        )
+                    pieces.append(chunk)
+                body = b"".join(pieces)
+            return _HttpResponse(
+                status_code=code, reason=reason, headers=headers,
+                body=body, connect_log=connect_log,
+                final_url=current_url, redirect_chain=chain,
+            )
+        finally:
+            try:
+                sock.close()
+            except OSError:
+                pass
+    raise RedirectRefused(
+        f"too many redirects (>{max_redirects}); final url was {current_url!r}"
+    )
+
+
+# -------------------------------------------------------------------- #
+# HTML → text (best-effort, strip scripts/styles)                       #
+# -------------------------------------------------------------------- #
+
+
+class _TextExtractor(_HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self._parts: list[str] = []
+        self._skip_stack: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: Any) -> None:
+        if tag in {"script", "style", "noscript", "iframe", "svg"}:
+            self._skip_stack.append(tag)
+
+    def handle_endtag(self, tag: str) -> None:
+        if self._skip_stack and self._skip_stack[-1] == tag:
+            self._skip_stack.pop()
+
+    def handle_data(self, data: str) -> None:
+        if self._skip_stack:
+            return
+        cleaned = data.replace("\r", " ").replace("\n", " ").replace("\t", " ")
+        if cleaned.strip():
+            self._parts.append(cleaned)
+
+    def text(self) -> str:
+        joined = " ".join(self._parts)
+        return _re.sub(r"\s+", " ", joined).strip()
+
+
+class _TitleExtractor(_HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self._in_title = False
+        self._buf: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: Any) -> None:
+        if tag == "title":
+            self._in_title = True
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag == "title" and self._in_title:
+            self._in_title = False
+
+    def handle_data(self, data: str) -> None:
+        if self._in_title:
+            self._buf.append(data)
+
+    def title(self) -> str:
+        return _re.sub(r"\s+", " ", "".join(self._buf)).strip()
+
+
+def _html_to_text(body: bytes, max_chars: int = READ_DEFAULT_MAX_BYTES) -> str:
+    """Best-effort HTML → readable text.
+
+    Strips script/style/iframe/svg. Returns at most ``max_chars`` chars.
+    Decoding is explicit; the broker is stdlib-only.
+    """
+    # Use the stdlib parser which auto-detects encoding via meta tags.
+    parser = _TextExtractor()
+    try:
+        parser.feed(body.decode("utf-8", errors="replace"))
+    except _UnicodeDecodeError:
+        parser.feed(body.decode("iso-8859-1", errors="replace"))
+    text = parser.text()
+    if len(text) > max_chars:
+        text = text[:max_chars] + f" […truncated to {max_chars} chars]"
+    return text
+
+
+def _html_title(body: bytes) -> str:
+    parser = _TitleExtractor()
+    try:
+        parser.feed(body.decode("utf-8", errors="replace"))
+    except _UnicodeDecodeError:
+        parser.feed(body.decode("iso-8859-1", errors="replace"))
+    return parser.title()
+
+
+# -------------------------------------------------------------------- #
+# DuckDuckGo HTML search parser                                          #
+# -------------------------------------------------------------------- #
+
+
+class _DDGResultParser(_HTMLParser):
+    """Parser for the DuckDuckGo HTML endpoint.
+
+    DDG HTML results appear as <a class="result__a" href="URL">TITLE</a>
+    followed by <a class="result__snippet">SNIPPET</a>. There is no
+    stable API; we treat a missing class as 'no result' rather than
+    guessing.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self._results: list[dict[str, str]] = []
+        self._current: dict[str, str] | None = None
+        self._in_title = False
+        self._in_snippet = False
+        self._title_buf: list[str] = []
+        self._snippet_buf: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag != "a":
+            return
+        klass = ""
+        href = ""
+        for k, v in attrs:
+            if k == "class":
+                klass = (v or "")
+            elif k == "href":
+                href = (v or "")
+        if "result__a" in klass.split():
+            self._current = {"href": href, "title": "", "snippet": ""}
+            self._in_title = True
+            self._title_buf = []
+        elif "result__snippet" in klass.split():
+            if self._current is not None:
+                self._in_snippet = True
+                self._snippet_buf = []
+
+    def handle_endtag(self, tag: str) -> None:
+        if self._in_title and tag == "a":
+            self._in_title = False
+            if self._current is not None:
+                self._current["title"] = _re.sub(r"\s+", " ",
+                                                  "".join(self._title_buf)).strip()
+        elif self._in_snippet and tag == "a":
+            self._in_snippet = False
+            if self._current is not None:
+                self._current["snippet"] = _re.sub(
+                    r"\s+", " ", "".join(self._snippet_buf)
+                ).strip()
+                # DDG result hrefs are wrapped in /l/?uddg=... when the
+                # user's browser is not JS. Resolve them statically.
+                href = self._current["href"]
+                if href.startswith("/l/?") and "uddg=" in href:
+                    parsed_qs = _urllib_parse.parse_qs(
+                        _urllib_parse.urlparse(href).query
+                    )
+                    target = parsed_qs.get("uddg", [""])[0]
+                    if target:
+                        self._current["href"] = target
+                self._results.append(self._current)
+                self._current = None
+
+    def handle_data(self, data: str) -> None:
+        if self._in_title:
+            self._title_buf.append(data)
+        elif self._in_snippet:
+            self._snippet_buf.append(data)
+
+    def results(self) -> list[dict[str, str]]:
+        return list(self._results)
+
+
+# -------------------------------------------------------------------- #
+# Evidence persistence                                                  #
+# -------------------------------------------------------------------- #
+
+
+def _safe_under(base: Path, candidate: Path) -> bool:
+    """Return True if candidate's resolved path is within ``base``."""
+    try:
+        candidate.resolve(strict=False).relative_to(base.resolve(strict=False))
+        return True
+    except ValueError:
+        return False
+
+
+def _op_id() -> str:
+    return f"op-{_uuid.uuid4().hex[:16]}"
+
+
+def _now_iso() -> str:
+    return _dt.datetime.now(_dt.timezone.utc).isoformat()
+
+
+def _publish_evidence(evidence_dir: Path, payload: dict[str, Any]) -> Path:
+    """Atomically publish one evidence JSON under evidence_dir/receipts/.
+
+    The directory layout is hardened: 0o700 created on demand, atomic
+    replace via O_EXCL tmp+rename, content-addressed by op-id so
+    identical receipts never collide and so the file name itself is a
+    stable identifier.
+    """
+    if not evidence_dir.exists() or not evidence_dir.is_dir():
+        raise InvalidRequest(
+            f"evidence-dir does not exist or is not a directory: {evidence_dir}"
+        )
+    receipts_dir = evidence_dir / "receipts"
+    receipts_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chmod(receipts_dir, 0o700)
+    op_id = str(payload.get("op_id") or _op_id())
+    payload["op_id"] = op_id
+    payload["schema"] = BROKER_OPERATION_SCHEMA
+    target = receipts_dir / f"{op_id}.json"
+    if target.is_symlink():
+        raise InvalidRequest(f"refusing to overwrite symlink receipt: {target}")
+    if target.exists():
+        raise InvalidRequest(f"op_id collision refused: {target}")
+    tmp = receipts_dir / f".{op_id}.{os.getpid()}.{_uuid.uuid4().hex}.tmp"
+    encoded = json.dumps(payload, sort_keys=True, ensure_ascii=True, indent=2) + "\n"
+    fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(encoded)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.link(tmp, target)
+    finally:
+        try:
+            tmp.unlink()
+        except FileNotFoundError:
+            pass
+    return target
+
+
+def _safe_ext_for_mime(mime: str) -> str:
+    """Return a vetted file extension for an asset MIME.
+
+    Extensions are derived from validated MIME, NEVER from URL path.
+    """
+    mime_l = mime.split(";", 1)[0].strip().lower()
+    table = {
+        "image/png": ".png",
+        "image/jpeg": ".jpg",
+        "image/gif": ".gif",
+        "image/webp": ".webp",
+        "image/avif": ".avif",
+        "image/svg+xml": ".svg",
+        "application/pdf": ".pdf",
+        "font/woff": ".woff",
+        "font/woff2": ".woff2",
+        "font/ttf": ".ttf",
+        "font/otf": ".otf",
+        "application/vnd.ms-fontobject": ".eot",
+    }
+    return table.get(mime_l, ".bin")
+
+
+def _publish_artifact(
+    evidence_dir: Path,
+    op_id: str,
+    digest: str,
+    safe_ext: str,
+    data: bytes,
+) -> Path:
+    """Publish one content-addressed asset under evidence_dir/artifacts/.
+
+    Filename: ``<digest><safe_ext>``. Defense in depth: the resolved
+    final path is asserted to remain under the artifacts directory.
+    """
+    if not evidence_dir.exists() or not evidence_dir.is_dir():
+        raise InvalidRequest(
+            f"evidence-dir does not exist: {evidence_dir}"
+        )
+    artifacts_dir = evidence_dir / "artifacts"
+    artifacts_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chmod(artifacts_dir, 0o700)
+    target = (artifacts_dir / f"{digest}{safe_ext}").resolve(strict=False)
+    if not _safe_under(artifacts_dir, target):
+        raise InvalidRequest(f"artifact path escaped evidence root: {target}")
+    if target.is_symlink():
+        raise InvalidRequest(f"refusing to overwrite symlink artifact: {target}")
+    if target.exists():
+        # Content-addressed: a clash means the bytes are identical; the
+        # broker already verified that, so we just return the existing
+        # path without rewriting.
+        return target
+    tmp = artifacts_dir / f".{digest}.{os.getpid()}.{_uuid.uuid4().hex}.tmp"
+    fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(data)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.link(tmp, target)
+    finally:
+        try:
+            tmp.unlink()
+        except FileNotFoundError:
+            pass
+    return target
+
+
+# -------------------------------------------------------------------- #
+# Public operations                                                     #
+# -------------------------------------------------------------------- #
+
+
+def _sanitize_query(q: str) -> str:
+    """Refuse queries that look like they carry credential-shaped tokens."""
+    if not q or not q.strip():
+        raise InvalidRequest("query must be a non-empty string")
+    patterns = (
+        _re.compile(r"\b[A-Za-z0-9_]{40,}\b"),                # opaque long tokens
+        _re.compile(r"(?i)\b(gh[oprsu]_[A-Za-z0-9]{20,})\b"),  # GitHub token shapes
+        _re.compile(r"-----BEGIN [A-Z ]+-----"),              # PEM blocks
+        _re.compile(r"\bAKIA[0-9A-Z]{16}\b"),                  # AWS access key id
+    )
+    for pat in patterns:
+        if pat.search(q):
+            raise ForbiddenHeader("query contains credential-shaped token")
+    if any(ord(c) < 0x20 or ord(c) == 0x7f for c in q):
+        raise InvalidRequest("query contains control characters")
+    return unicodedata.normalize("NFKC", q).strip()
+
+
+def _op_search(args: argparse.Namespace) -> dict[str, Any]:
+    """op=search: query a public search backend, return top results.
+
+    Today the only backend is DuckDuckGo HTML. Results are extracted from
+    the HTML response; only the visible title, snippet, and resolved
+    href are kept in the receipt.
+    """
+    query = _sanitize_query(args.query or "")
+    evidence_dir = Path(args.evidence_dir).expanduser()
+    url = f"{SEARCH_DEFAULT_ENDPOINT}?q={_urllib_parse.quote_plus(query)}"
+    response = _browse(
+        url, max_bytes=SEARCH_DEFAULT_MAX_BYTES,
+        accept="text/html,application/xhtml+xml,*/*;q=0.5",
+    )
+    if response.status_code != 200:
+        raise TransientFailure(
+            f"search backend returned HTTP {response.status_code} {response.reason}"
+        )
+    parser = _DDGResultParser()
+    try:
+        parser.feed(response.body.decode("utf-8", errors="replace"))
+    except _UnicodeDecodeError:
+        parser.feed(response.body.decode("iso-8859-1", errors="replace"))
+    results = parser.results()[:SEARCH_MAX_RESULTS]
+    op_id = _op_id()
+    started_at = _now_iso()
+    payload = {
+        "ok": True,
+        "op": "search",
+        "capability": BROKER_CAPABILITY_NAME,
+        "version": BROKER_VERSION,
+        "broker_sha256": _self_sha256(),
+        "op_id": op_id,
+        "run_id": str(args.run_id),
+        "attempt": str(args.attempt),
+        "kind": str(args.kind or "")[: args.kind_cap],
+        "started_at": started_at,
+        "finished_at": _now_iso(),
+        "query": query,
+        "search_backend": "duckduckgo-html",
+        "search_endpoint": SEARCH_DEFAULT_ENDPOINT,
+        "request_url": url,
+        "status_code": response.status_code,
+        "response_bytes": len(response.body),
+        "response_sha256": hashlib.sha256(response.body).hexdigest(),
+        "redirect_chain": response.redirect_chain,
+        "connect_log": response.connect_log,
+        "results": results,
+        "results_count": len(results),
+        "evidence_received_at": _now_iso(),
+    }
+    receipt_path = _publish_evidence(evidence_dir, payload)
+    return {
+        "schema": BROKER_OPERATION_SCHEMA,
+        "ok": True,
+        "op": "search",
+        "op_id": op_id,
+        "receipt_path": str(receipt_path),
+        "query": query,
+        "search_backend": "duckduckgo-html",
+        "results_count": len(results),
+        "results": results,
+        "redirect_chain": response.redirect_chain,
+        "final_url": response.final_url,
+        "status_code": response.status_code,
+        "response_bytes": len(response.body),
+        "response_sha256": payload["response_sha256"],
+        "broker_version": BROKER_VERSION,
+    }
+
+
+def _op_read(args: argparse.Namespace) -> dict[str, Any]:
+    """op=read: fetch a public URL, strip HTML, retain text evidence."""
+    url = args.url
+    max_bytes = int(args.max_bytes) if args.max_bytes else READ_DEFAULT_MAX_BYTES
+    evidence_dir = Path(args.evidence_dir).expanduser()
+    response = _browse(url, max_bytes=max_bytes,
+                       accept="text/html,application/xhtml+xml,text/plain,application/json")
+    if response.status_code != 200:
+        raise TransientFailure(
+            f"upstream returned HTTP {response.status_code} {response.reason}"
+        )
+    content_type = (response.headers.get("content-type") or "").lower()
+    if content_type.startswith("text/html") or content_type.startswith("application/xhtml+xml"):
+        text = _html_to_text(response.body)
+        title = _html_title(response.body)
+    else:
+        # text/plain, application/json, application/xml: return as text.
+        try:
+            text = response.body.decode("utf-8")
+        except UnicodeDecodeError:
+            text = response.body.decode("iso-8859-1", errors="replace")
+        title = ""
+    text_sha = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    op_id = _op_id()
+    started_at = _now_iso()
+    payload = {
+        "ok": True,
+        "op": "read",
+        "capability": BROKER_CAPABILITY_NAME,
+        "version": BROKER_VERSION,
+        "broker_sha256": _self_sha256(),
+        "op_id": op_id,
+        "run_id": str(args.run_id),
+        "attempt": str(args.attempt),
+        "kind": str(args.kind or "")[: args.kind_cap],
+        "started_at": started_at,
+        "finished_at": _now_iso(),
+        "url_original": url,
+        "url_final": response.final_url,
+        "redirect_chain": response.redirect_chain,
+        "connect_log": response.connect_log,
+        "status_code": response.status_code,
+        "content_type": content_type,
+        "title": title,
+        "response_bytes": len(response.body),
+        "response_sha256": hashlib.sha256(response.body).hexdigest(),
+        "extracted_bytes": len(text),
+        "extracted_sha256": text_sha,
+        "extracted_preview": text[:READ_TEXT_PREVIEW_BYTES],
+        "extracted_truncated": len(text) > READ_TEXT_PREVIEW_BYTES,
+        "max_bytes": max_bytes,
+    }
+    receipt_path = _publish_evidence(evidence_dir, payload)
+    return {
+        "schema": BROKER_OPERATION_SCHEMA,
+        "ok": True,
+        "op": "read",
+        "op_id": op_id,
+        "receipt_path": str(receipt_path),
+        "url_original": url,
+        "url_final": response.final_url,
+        "redirect_chain": response.redirect_chain,
+        "status_code": response.status_code,
+        "content_type": content_type,
+        "title": title,
+        "response_bytes": len(response.body),
+        "response_sha256": payload["response_sha256"],
+        "extracted_bytes": len(text),
+        "extracted_sha256": text_sha,
+        "extracted_preview": text[:READ_TEXT_PREVIEW_BYTES],
+        "extracted_truncated": len(text) > READ_TEXT_PREVIEW_BYTES,
+        "broker_version": BROKER_VERSION,
+    }
+
+
+def _op_asset_read(args: argparse.Namespace) -> dict[str, Any]:
+    """op=asset-read: fetch a public asset, retain content-addressed bytes."""
+    url = args.url
+    max_bytes = int(args.max_bytes) if args.max_bytes else ASSET_DEFAULT_MAX_BYTES
+    evidence_dir = Path(args.evidence_dir).expanduser()
+    response = _browse(url, max_bytes=max_bytes,
+                       accept="*/*")
+    if response.status_code != 200:
+        raise TransientFailure(
+            f"asset upstream returned HTTP {response.status_code} {response.reason}"
+        )
+    content_type = (response.headers.get("content-type") or "application/octet-stream").split(";", 1)[0].strip().lower()
+    if content_type not in ASSET_MIME_ALLOWLIST:
+        raise InvalidRequest(
+            f"asset content-type refused by allowlist: {content_type!r}"
+        )
+    digest = hashlib.sha256(response.body).hexdigest()
+    safe_ext = _safe_ext_for_mime(content_type)
+    artifact_path = _publish_artifact(
+        evidence_dir, _op_id(), digest, safe_ext, response.body
+    )
+    # Determine legitimacy signals visible at the response (none for
+    # asset-only endpoints; the receipt records this explicitly so the
+    # worker can decide to inspect the upstream page if it cares).
+    op_id = _op_id()
+    started_at = _now_iso()
+    payload = {
+        "ok": True,
+        "op": "asset-read",
+        "capability": BROKER_CAPABILITY_NAME,
+        "version": BROKER_VERSION,
+        "broker_sha256": _self_sha256(),
+        "op_id": op_id,
+        "run_id": str(args.run_id),
+        "attempt": str(args.attempt),
+        "kind": str(args.kind or "")[: args.kind_cap],
+        "started_at": started_at,
+        "finished_at": _now_iso(),
+        "url_original": url,
+        "url_final": response.final_url,
+        "redirect_chain": response.redirect_chain,
+        "connect_log": response.connect_log,
+        "status_code": response.status_code,
+        "content_type": content_type,
+        "asset_sha256": digest,
+        "asset_bytes": len(response.body),
+        "artifact_path": str(artifact_path),
+        "legitimacy": "ambiguous",
+        "legitimacy_signals": {
+            "license_header": response.headers.get("x-license", ""),
+            "license_link_header": response.headers.get("link", ""),
+        },
+        "usage_hints": [],
+    }
+    receipt_path = _publish_evidence(evidence_dir, payload)
+    return {
+        "schema": BROKER_OPERATION_SCHEMA,
+        "ok": True,
+        "op": "asset-read",
+        "op_id": op_id,
+        "receipt_path": str(receipt_path),
+        "artifact_path": str(artifact_path),
+        "url_original": url,
+        "url_final": response.final_url,
+        "redirect_chain": response.redirect_chain,
+        "status_code": response.status_code,
+        "content_type": content_type,
+        "asset_bytes": len(response.body),
+        "asset_sha256": digest,
+        "legitimacy": "ambiguous",
+        "broker_version": BROKER_VERSION,
+    }
+
+
 def _validate_common(args: argparse.Namespace) -> None:
     """Common argument guards; raises InvalidRequest on failure."""
     if args.kind is not None and len(args.kind.encode("utf-8")) > args.kind_cap:
@@ -490,33 +1352,25 @@ def main(argv: list[str]) -> int:
         if args.op == "help":
             print(json.dumps(_emit_help(), sort_keys=True))
             return 0
-        # For search/read/asset-read the implementation lives in
-        # research_safety.py + research_evidence.py -- this file is the
-        # CLI bootstrap only. The runtime imports are deferred until those
-        # modules land; for now, search/read/asset-read return an explicit
-        # "not yet implemented in this slice" so operator commissioning
-        # can verify the boundary without enabling any network action.
-        if args.op in {"search", "read", "asset-read"}:
+        # All bounded operations share common argument guards.
+        if args.op == "search":
             _validate_common(args)
-            err = {
-                "schema": BROKER_OPERATION_SCHEMA,
-                "ok": False,
-                "capability": BROKER_CAPABILITY_NAME,
-                "op": args.op,
-                "version": BROKER_VERSION,
-                "broker_sha256": _self_sha256(),
-                "error_class": "NotImplemented",
-                "error": (
-                    f"op={args.op} not enabled in current broker slice; the "
-                    "boundary (skill skeleton) is present but the network "
-                    "and evidence code path is not yet wired. Run --op=ping "
-                    "for identity."
-                ),
-                "now": _dt.datetime.now(_dt.timezone.utc).isoformat(),
-            }
-            print(json.dumps(err, sort_keys=True))
-            return 2
-        _validate_common(args)
+            if not args.query:
+                raise InvalidRequest("--query is required for op=search")
+            print(json.dumps(_op_search(args), sort_keys=True))
+            return 0
+        if args.op == "read":
+            _validate_common(args)
+            if not args.url:
+                raise InvalidRequest("--url is required for op=read")
+            print(json.dumps(_op_read(args), sort_keys=True))
+            return 0
+        if args.op == "asset-read":
+            _validate_common(args)
+            if not args.url:
+                raise InvalidRequest("--url is required for op=asset-read")
+            print(json.dumps(_op_asset_read(args), sort_keys=True))
+            return 0
         err = {
             "schema": BROKER_OPERATION_SCHEMA,
             "ok": False,
