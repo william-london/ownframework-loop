@@ -726,12 +726,28 @@ def resolve_capabilities(
             environment["OFLOOP_RESEARCH_BROKER_VERSION"] = str(broker_version or "")
             environment["OFLOOP_RESEARCH_EVIDENCE_DIR"] = str(evidence_dir)
             environment["OFLOOP_RESEARCH_QUEUE"] = str(evidence_dir.parent / "queue")
+            # The worker must be able to PUBLISH REQUEST envelopes into
+            # the supervisor-owned queue. The helper writes the REQUEST
+            # file (helper is in allowRead, not allowWrite, because
+            # the helper subprocess inherits the parent process's
+            # sandbox restrictions). Add the queue dir to the worker's
+            # allowWrite so the helper can O_EXCL + write + chmod 0o600.
+            queue_dir = str(evidence_dir.parent / "queue")
+            queue_dir_path = Path(queue_dir)
+            queue_dir_path.mkdir(parents=True, exist_ok=True, mode=0o700)
+            try:
+                os.chmod(queue_dir_path, 0o700)
+            except OSError:
+                pass
+            allow_write.add(queue_dir)
             # Per-attempt scratch RESPONSE dir: the supervisor publishes
             # responses there; the worker reads them. The helper uses
             # OFLOOP_RESEARCH_SCRATCH_RESP + --request-id to find its
             # own file. This is the bridge between worker-readable
             # (scratch is allowRead) and broker-writable (only the
-            # supervisor's process writes via subprocess.run).
+            # supervisor's process writes via subprocess.run). The
+            # worker also needs allowWrite here for the helper to
+            # create its response marker file.
             scratch_resp = (
                 Path(canonical_repo).expanduser().resolve(strict=False)
                 / ".ownframework-loop" / (evidence_run_key or "")
@@ -739,6 +755,12 @@ def resolve_capabilities(
                 / "research"
             )
             environment["OFLOOP_RESEARCH_SCRATCH_RESP"] = str(scratch_resp)
+            scratch_resp.mkdir(parents=True, exist_ok=True, mode=0o700)
+            try:
+                os.chmod(scratch_resp, 0o700)
+            except OSError:
+                pass
+            allow_write.add(str(scratch_resp))
             resolved.append({
                 "name": name, "kind": "read-only-network", "privileged": True,
                 "provider": "core_research_broker",
