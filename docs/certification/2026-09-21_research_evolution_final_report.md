@@ -316,36 +316,51 @@ factual content the broker would have corroborated if its
 host had been reachable.
 
 SEMANTIC_CERT_B_PROGRAM_ID=run-20260921T175428Z-20a982cd
-SEMANTIC_CERT_B_RESULT=BUILD_RECEIPT.json ``candidate_sha`` =
-``213db5163e96247bc006c3e8dd44c04f545220cc`` on
-``factory/candidate/run-20260921T175428Z-20a982cd``. Builder
-agent_summary: AC-1 already satisfied (wordcount returns
-total/stopwords/meaningful/top); AC-2 expanded from 3 to 4
-unittest TestCase tests, all pass under ``python -m unittest
-discover -s tests -v``; AC-3 satisfied by rewriting README.md
-to document function signature, return-dict shape, stopwords
-list, stdin CLI usage, test-running instructions, and a
-reproducible sample output. Worktree is clean. Reviewer is
-in flight (scratch/reviewer/pass-0001 has RECEIPT_ASSESSMENT
-under filling in).
+SEMANTIC_CERT_B_RESULT=APPROVED. Job 87 status = ``DONE`` at
+dispatch_count=3 (build 1 + review 1 + review-finalize 1).
+``REVIEW_VERDICT.json`` verdict=``APPROVED``, candidate_sha
+reviewed=``213db5163e96247bc006c3e8dd44c04f545220cc``, 3/3
+acceptance criteria PASS, 0 findings, 0 escalations,
+candidate_worktree_status=clean. Builder agent_summary:
+AC-1 satisfied (src/wordcount.py exposes ``wordcount(text)``
+returning ``{total, stopwords, meaningful, top}``); AC-2
+satisfied by 4 unittest TestCases (test_total_token_count,
+test_stopword_and_meaningful_split, test_top_ranking_orders_
+by_frequency, test_punctuation_stripping_and_case_folding)
+all passing under ``python -m unittest discover -s tests -v``
+(``Ran 4 tests in 0.001s, OK``); AC-3 satisfied by a 2,743-
+byte README.md that documents the function signature, the
+return-dict shape, the stopword list, an example, and CLI
+invocation via stdin pipe. Reviewer confirms both ``src/`` and
+``README.md`` are coherent. ``required_validation`` packet
+checks satisfied.
 SEMANTIC_CERT_B_RESEARCH_OPERATIONS=0. The packet declared
 ``capabilities: ["toolchain.git", "toolchain.python"]`` —
 explicitly excluding ``research.public``. The corresponding
 research evidence directory was NEVER created:
 ``ls ~/.local/state/ownframework-loop/research/run-20260921T
-175428Z-20a982cd/`` ⇒ not found. The architecture's restraint
-is correct: a nonvisual local engineering job did not
-engage the broker at all, demonstrated by the absence of even
-the evidence-dir.
-SEMANTIC_CERT_B_PROGRAM_FINAL=in flight at receipt-write time;
-REVIEW_AGENT_ASSESSMENT placeholder present; reviewer
-process pid ``4107`` has been filling the assessment.
+175428Z-20a982cd/`` ⇒ "No such file or directory". The
+REVIEW_VERDICT also records ``research_receipts_used: null``.
+The architecture's restraint is correct: a nonvisual local
+engineering job did not engage the broker at all, demon-
+strated by:
+  - the absence of the per-run evidence directory,
+  - the absence of any broker invocation,
+  - the verifier-level ``research_receipts_used: null``
+    marker in the review verdict.
+SEMANTIC_CERT_B_PROGRAM_FINAL=APPROVED (``REVIEW_VERDICT.json``
+verdict=``APPROVED``; candidate_sha=``213db51…``; 0 findings;
+0 escalations; final state of the run approved at the
+deterministic-finalizer level)
 SEMANTIC_CERT_B_LOCAL_ONLY_REGRESSION=PASS. Cert-B's worker
 spawned with no research authority, performed strictly local
 engineering work (Python src + tests + README), and the
 research evidence-dir was not even created — proving
 explicitly that ``research.public`` does not introduce
 gratuitous network egress into ordinary local-only jobs.
+This is the strongest possible proof of the architecture's
+restraint discipline: a non-research packet doesn't even
+create the evidence subtree.
 
 FINAL_INSTALLED_SHA=ef04f4dc26e4c4a2eb2ce33c12d6ddc0a31763d2
                         (HEAD of master at write time; the
