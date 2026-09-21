@@ -230,7 +230,7 @@ expect "research.public without host manifest is refused" "${RC}" "0"
 section "8. live network integration (opt-in: OFLOOP_LIVE_NETWORK=1)"
 
 if [[ "${OFLOOP_LIVE_NETWORK:-0}" == "1" ]]; then
-    echo "Running live integration test against httpbin.org..."
+    echo "Running live integration test..."
     EVID_D="$(mktemp -d -t ofloop-research-live.XXXXXX)"
     set +e
     out="$(${BROKER} --op read --url 'https://example.com/' --evidence-dir "${EVID_D}" --run-id run-live --attempt a-live 2>&1)"
@@ -238,7 +238,63 @@ if [[ "${OFLOOP_LIVE_NETWORK:-0}" == "1" ]]; then
     set -e
     expect "live read response" "$(printf '%s' "${out}" | python3 -c "import json,sys;d=json.load(sys.stdin);print(d.get('op')=='read' and d.get('ok') and d.get('status_code')==200)")" "True"
     expect "live read rc=0" "${rc}" "0"
-    [[ -f "${EVID_D}/receipts/op-"*.json ]] && echo "PASS evidence receipt persisted" || { echo "FAIL evidence receipt missing"; failures=$((failures+1)); }
+    receipts_count="$(find "${EVID_D}/receipts" -name 'op-*.json' 2>/dev/null | wc -l | tr -d ' ')"
+    expect "evidence receipt persisted" "${receipts_count}" "1"
+
+    # Live search (Wikipedia REST query endpoint). Public search APIs
+    # carry throttling risk that no broker rule can prevent; the
+    # important invariants are the structured envelope and the
+    # package-side acceptance behaviour, not the up-time of any one
+    # backend.
+    set +e
+    sout="$(${BROKER} --op search --query 'python asyncio' --evidence-dir "${EVID_D}" --run-id run-live-search --attempt a-s 2>&1)"
+    src=$?
+    set -e
+    if [[ ${src} -eq 0 ]]; then
+        expect "live search results_count>0" \
+            "$(printf '%s' "${sout}" | python3 -c "import json,sys;d=json.load(sys.stdin);print(d.get('results_count',0) > 0 and d.get('ok') is True)")" \
+            "True"
+        expect "live search backend is wikipedia" \
+            "$(printf '%s' "${sout}" | python3 -c "import json,sys;print(json.load(sys.stdin).get('search_backend'))")" \
+            "wikipedia-rest-query"
+    else
+        # 429 / ThrottleFailure / TransientFailure are valid outcomes:
+        # the broker must return a structured error envelope either way.
+        schema="$(printf '%s' "${sout}" | python3 -c "import json,sys;d=json.load(sys.stdin);print(d.get('schema',''))")"
+        cls="$(printf '%s' "${sout}" | python3 -c "import json,sys;d=json.load(sys.stdin);print(d.get('error_class',''))")"
+        expect "live search envelope schema on transient fail" "${schema}" "ownframework-loop-research-broker/v1"
+        # The broker surfaces backend errors as either TransientFailure
+        # (HTTP 4xx/5xx) or InvalidRequest (non-JSON response body, e.g.
+        # an HTML error page). Both are valid broker outcomes.
+        case "${cls}" in
+            TransientFailure|InvalidRequest)
+                echo "PASS live search error_class is TransientFailure or InvalidRequest"
+                ;;
+            *)
+                echo "FAIL live search error_class on transient fail: got ${cls} expected TransientFailure|InvalidRequest"
+                failures=$((failures + 1))
+                ;;
+        esac
+        echo "INFO live search returned transient failure (Wikipedia throttle); broker envelope intact"
+    fi
+
+    # Live asset-read against example.com's favicon (a small PNG; CDN
+    # rate-limit friendly). The size + MIME checks happen on the
+    # response; this exercises the round-trip minus the rate-limit
+    # gate that strict hosts apply to large public assets.
+    if curl -sI -A "curl-probe" --max-time 5 'https://example.com/favicon.ico' 2>/dev/null | grep -qi '^HTTP.* 200'; then
+        set +e
+        aout="$(${BROKER} --op asset-read --url 'https://example.com/favicon.ico' --evidence-dir "${EVID_D}" --run-id run-live-asset --attempt a-a 2>&1)"
+        arc=$?
+        set -e
+        expect "live asset-read rc=0" "${arc}" "0"
+        expect "live asset-read sha256 reported" \
+            "$(printf '%s' "${aout}" | python3 -c "import json,sys;print(json.load(sys.stdin).get('asset_sha256','') != '')")" \
+            "True"
+    else
+        echo "SKIP live asset-read (rate-limit or non-200)"
+    fi
+    rm -rf "${EVID_D}"
 else
     echo "SKIP (set OFLOOP_LIVE_NETWORK=1 to enable)"
 fi

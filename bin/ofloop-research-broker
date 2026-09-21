@@ -91,12 +91,16 @@ ASSET_MIME_ALLOWLIST = frozenset((
     "application/octet-stream",
 ))
 
-# Search is currently provided by the DuckDuckGo HTML endpoint, which is
-# unauthenticated and serves a privacy-respecting HTML page. Future
-# providers (Brave, Kagi, etc.) can be added by branching on a
-# --search-backend flag in this same module. Do NOT let the worker pick
-# the backend -- the broker is the authority.
-SEARCH_DEFAULT_ENDPOINT = "https://html.duckduckgo.com/html/"
+# Search is currently provided by the Wikipedia REST query endpoint, which
+# returns unauthenticated JSON and survives the anti-bot restrictions the
+# legacy search engines have been tightening for years. Architectural
+# note: the search backend is a deployment choice, not a worker choice
+# -- the broker is the only authority that picks a search provider, and
+# alternative providers (Brave, Kagi, etc.) can be added by branching on
+# a --search-backend flag in this same module without ever widening the
+# worker's Bash allowedDomains.
+SEARCH_DEFAULT_ENDPOINT = "https://en.wikipedia.org/w/api.php"
+SEARCH_MAX_RESULTS = 12
 SEARCH_USER_AGENT = f"OwnFrameworkLoop-ResearchBroker/{BROKER_VERSION}"
 
 
@@ -871,83 +875,6 @@ def _html_title(body: bytes) -> str:
 
 
 # -------------------------------------------------------------------- #
-# DuckDuckGo HTML search parser                                          #
-# -------------------------------------------------------------------- #
-
-
-class _DDGResultParser(_HTMLParser):
-    """Parser for the DuckDuckGo HTML endpoint.
-
-    DDG HTML results appear as <a class="result__a" href="URL">TITLE</a>
-    followed by <a class="result__snippet">SNIPPET</a>. There is no
-    stable API; we treat a missing class as 'no result' rather than
-    guessing.
-    """
-
-    def __init__(self) -> None:
-        super().__init__(convert_charrefs=True)
-        self._results: list[dict[str, str]] = []
-        self._current: dict[str, str] | None = None
-        self._in_title = False
-        self._in_snippet = False
-        self._title_buf: list[str] = []
-        self._snippet_buf: list[str] = []
-
-    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        if tag != "a":
-            return
-        klass = ""
-        href = ""
-        for k, v in attrs:
-            if k == "class":
-                klass = (v or "")
-            elif k == "href":
-                href = (v or "")
-        if "result__a" in klass.split():
-            self._current = {"href": href, "title": "", "snippet": ""}
-            self._in_title = True
-            self._title_buf = []
-        elif "result__snippet" in klass.split():
-            if self._current is not None:
-                self._in_snippet = True
-                self._snippet_buf = []
-
-    def handle_endtag(self, tag: str) -> None:
-        if self._in_title and tag == "a":
-            self._in_title = False
-            if self._current is not None:
-                self._current["title"] = _re.sub(r"\s+", " ",
-                                                  "".join(self._title_buf)).strip()
-        elif self._in_snippet and tag == "a":
-            self._in_snippet = False
-            if self._current is not None:
-                self._current["snippet"] = _re.sub(
-                    r"\s+", " ", "".join(self._snippet_buf)
-                ).strip()
-                # DDG result hrefs are wrapped in /l/?uddg=... when the
-                # user's browser is not JS. Resolve them statically.
-                href = self._current["href"]
-                if href.startswith("/l/?") and "uddg=" in href:
-                    parsed_qs = _urllib_parse.parse_qs(
-                        _urllib_parse.urlparse(href).query
-                    )
-                    target = parsed_qs.get("uddg", [""])[0]
-                    if target:
-                        self._current["href"] = target
-                self._results.append(self._current)
-                self._current = None
-
-    def handle_data(self, data: str) -> None:
-        if self._in_title:
-            self._title_buf.append(data)
-        elif self._in_snippet:
-            self._snippet_buf.append(data)
-
-    def results(self) -> list[dict[str, str]]:
-        return list(self._results)
-
-
-# -------------------------------------------------------------------- #
 # Evidence persistence                                                  #
 # -------------------------------------------------------------------- #
 
@@ -1103,27 +1030,66 @@ def _sanitize_query(q: str) -> str:
 def _op_search(args: argparse.Namespace) -> dict[str, Any]:
     """op=search: query a public search backend, return top results.
 
-    Today the only backend is DuckDuckGo HTML. Results are extracted from
-    the HTML response; only the visible title, snippet, and resolved
-    href are kept in the receipt.
+    Today the only backend is the Wikipedia REST query endpoint, which
+    returns unauthenticated JSON. The backend is operator-chosen, not
+    worker-chosen -- the broker is the authority. The worker surfaces
+    what the broker returns; nothing else.
     """
     query = _sanitize_query(args.query or "")
     evidence_dir = Path(args.evidence_dir).expanduser()
-    url = f"{SEARCH_DEFAULT_ENDPOINT}?q={_urllib_parse.quote_plus(query)}"
+    # Wikipedia REST query API. action=query, list=search, srsearch=<q>,
+    # format=json, srlimit=N -- returns a JSON envelope with results[]
+    # containing title, pageid, snippet, size, wordcount.
+    q = _urllib_parse.urlencode({
+        "action": "query",
+        "list": "search",
+        "srsearch": query,
+        "srlimit": str(SEARCH_MAX_RESULTS),
+        "format": "json",
+        "utf8": "1",
+    })
+    url = f"{SEARCH_DEFAULT_ENDPOINT}?{q}"
     response = _browse(
         url, max_bytes=SEARCH_DEFAULT_MAX_BYTES,
-        accept="text/html,application/xhtml+xml,*/*;q=0.5",
+        accept="application/json,text/plain,*/*;q=0.5",
     )
     if response.status_code != 200:
         raise TransientFailure(
             f"search backend returned HTTP {response.status_code} {response.reason}"
         )
-    parser = _DDGResultParser()
     try:
-        parser.feed(response.body.decode("utf-8", errors="replace"))
-    except _UnicodeDecodeError:
-        parser.feed(response.body.decode("iso-8859-1", errors="replace"))
-    results = parser.results()[:SEARCH_MAX_RESULTS]
+        envelope = json.loads(response.body.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise InvalidRequest(
+            f"search backend returned non-JSON envelope: {exc}"
+        )
+    if not isinstance(envelope, dict):
+        raise InvalidRequest("search backend envelope is not a JSON object")
+    raw_results = (envelope.get("query") or {}).get("search") or []
+    if not isinstance(raw_results, list):
+        raise InvalidRequest("search backend results field is not an array")
+    # Each record maps to {url, title, snippet}. The wikipedia REST API
+    # returns titles without a URL component; we synthesize the article
+    # URL from the title (the worker can fetch it via op=read if it
+    # wants the article body).
+    results: list[dict[str, str]] = []
+    for r in raw_results:
+        if not isinstance(r, dict):
+            continue
+        title = str(r.get("title") or "")
+        if not title:
+            continue
+        snippet = _re.sub(r"<[^>]+>", "", str(r.get("snippet") or ""))
+        snippet = _re.sub(r"\s+", " ", snippet).strip()
+        url_part = _urllib_parse.quote(title.replace(" ", "_"))
+        results.append({
+            "url": f"https://en.wikipedia.org/wiki/{url_part}",
+            "title": title,
+            "snippet": snippet,
+            "pageid": str(r.get("pageid", "")),
+        })
+        if len(results) >= SEARCH_MAX_RESULTS:
+            break
     op_id = _op_id()
     started_at = _now_iso()
     payload = {
@@ -1139,7 +1105,7 @@ def _op_search(args: argparse.Namespace) -> dict[str, Any]:
         "started_at": started_at,
         "finished_at": _now_iso(),
         "query": query,
-        "search_backend": "duckduckgo-html",
+        "search_backend": "wikipedia-rest-query",
         "search_endpoint": SEARCH_DEFAULT_ENDPOINT,
         "request_url": url,
         "status_code": response.status_code,
@@ -1159,7 +1125,7 @@ def _op_search(args: argparse.Namespace) -> dict[str, Any]:
         "op_id": op_id,
         "receipt_path": str(receipt_path),
         "query": query,
-        "search_backend": "duckduckgo-html",
+        "search_backend": "wikipedia-rest-query",
         "results_count": len(results),
         "results": results,
         "redirect_chain": response.redirect_chain,
