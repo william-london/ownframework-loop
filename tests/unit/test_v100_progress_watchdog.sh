@@ -637,5 +637,45 @@ shutil.rmtree(str(tmpdir))
 print("PASS watchdog never considers reviewer role")
 PY
 
+# ---------------------------------------------------------------------------
+# 9. compute_signature tracks Claude scratch output as progress
+# ---------------------------------------------------------------------------
+python3 - "$ROOT" <<'PY'
+import sys, os, time
+from pathlib import Path
+sys.path.insert(0, str(Path(sys.argv[1]) / "lib"))
+from ownframework_loop import progress_watchdog as pw
+
+worktree = Path("/tmp/ofloop-watchdog-test-scratch")
+if worktree.exists():
+    import shutil
+    shutil.rmtree(str(worktree))
+worktree.mkdir()
+src = worktree / "src" / "hello.py"
+src.parent.mkdir()
+src.write_text("print('hi')\n")
+# Build a realistic .ownframework-loop/<run>/scratch tree.
+run_dir = worktree / ".ownframework-loop" / "run-test-123"
+scratch = run_dir / "scratch" / "builder" / "pass-0001"
+scratch.mkdir(parents=True)
+result = scratch / "BUILD_AGENT_RESULT.json"
+result.write_text("{}")
+time.sleep(1)
+
+# Pre-tick signature
+before = pw.compute_signature(stdout_path=None, stderr_path=None, worktree=worktree)
+# Now Claude "writes" the scratch file (touch).
+os.utime(str(result), (time.time(), time.time()))
+after = pw.compute_signature(stdout_path=None, stderr_path=None, worktree=worktree)
+
+assert before.worktree_max_mtime != after.worktree_max_mtime or before.worktree_file_count != after.worktree_file_count, (
+    f"scratch file mtime/count must count as advance: before={before} after={after}"
+)
+assert pw.signature_advanced(before, after), "scratch file advance must register"
+import shutil
+shutil.rmtree(str(worktree))
+print("PASS compute_signature tracks scratch output as progress")
+PY
+
 echo
 echo "ALL PROGRESS-WATCHDOG TESTS PASS"

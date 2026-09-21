@@ -166,13 +166,19 @@ def compute_signature(
             count = 0
             local_max = -1
             # Bounded walk: 4096 entries should cover any small repo.
-            # Top-level bookkeeping directories do NOT count as semantic
-            # progress: their mtimes move on every git operation, every
-            # Claude session ping, and every Loop dispatch tick. The
-            # watchdog must not be fooled into believing a stalled
-            # worker is making progress just because Loop / git /
-            # Claude touched their own internal state. Authoritative
-            # worktree HEAD is read separately via worktree_head_resolver.
+            # Bookkeeping that does NOT count as semantic progress:
+            #   - .git/               (git internal HEAD/index, etc.)
+            #   - .claude/            (Claude session ping/state)
+            #   - .worktrees/         (nested worktrees)
+            #   - node_modules/, __pycache__/, .venv/, .pytest_cache/,
+            #     .ruff_cache/        (runtime caches)
+            # Claude progress output is written under
+            # ``.ownframework-loop/<run-id>/scratch/<role>/<pass-N>/``
+            # — that path is the real semantic-progress signal, and it
+            # would be hidden if we filtered all of ``.ownframework-loop``.
+            # We therefore descend into the worktree root EXCLUDING the
+            # bookkeeping directories above, and ADDITIONALLY walk the
+            # scratch paths that contain Claude's actual output.
             SKIP_TOP_LEVEL_DIRS = {
                 ".git",
                 ".claude",
@@ -184,12 +190,53 @@ def compute_signature(
                 ".venv",
                 ".ruff_cache",
             }
+            # Bookkeeping filenames under .ownframework-loop/ that move
+            # on every supervisor transition and would create false
+            # progress if counted.
+            BOOKKEEPING_FILE_BASENAMES = {
+                "STATE.json",
+                "EVENTS.log",
+                "DISPATCH_LOCK",
+                "LOCK",
+                "BUILD_CLAIM_LOCK",
+                "REVIEW_CLAIM_LOCK",
+                "BINDING_LOCK",
+                "START_LOCK",
+                "SUPERVISOR_LIFECYCLE.lock",
+                "WORK_PACKET.md",
+                "APPROVAL.json",
+                "BUILDER_WORKSPACE_OWNERSHIP.json",
+                "CAPABILITY_BINDING.json",
+            }
+
+            def _consume(root: str, max_entries: int) -> None:
+                nonlocal count, local_max
+                for dirpath, dirnames, filenames in os.walk(root):
+                    for name in filenames:
+                        p = Path(dirpath) / name
+                        # Skip bookkeeping filenames anywhere in the walk.
+                        if name in BOOKKEEPING_FILE_BASENAMES:
+                            continue
+                        try:
+                            st = p.stat()
+                        except OSError:
+                            continue
+                        count += 1
+                        local_max = max(local_max, int(st.st_mtime))
+                        if count >= max_entries:
+                            return
+                    if count >= max_entries:
+                        return
+
+            # Walk the worktree root excluding known bookkeeping top-level dirs.
             for dirpath, dirnames, filenames in os.walk(str(worktree)):
                 if dirpath == str(worktree):
                     dirnames[:] = [
                         d for d in dirnames if d not in SKIP_TOP_LEVEL_DIRS
                     ]
                 for name in filenames:
+                    if name in BOOKKEEPING_FILE_BASENAMES:
+                        continue
                     p = Path(dirpath) / name
                     try:
                         st = p.stat()
@@ -201,6 +248,21 @@ def compute_signature(
                         break
                 if count >= 4096:
                     break
+
+            # Additionally walk Claude's scratch output under each
+            # ``.ownframework-loop/<run-id>/scratch/`` so the watchdog sees
+            # the worker's actual progress (BUILD_AGENT_RESULT.json,
+            # REVIEW_AGENT_ASSESSMENT.json, etc.).
+            ofloop_dir = Path(str(worktree)) / ".ownframework-loop"
+            if ofloop_dir.is_dir():
+                for run_dir in ofloop_dir.iterdir():
+                    scratch_dir = run_dir / "scratch"
+                    if scratch_dir.is_dir():
+                        # Allow a generous entry budget for scratch; total
+                        # walk budget remains capped at 4096.
+                        remaining = max(1, 4096 - count)
+                        _consume(str(scratch_dir), count + remaining)
+
             file_count = count
             max_mtime = local_max
         except OSError:
