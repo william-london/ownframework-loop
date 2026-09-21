@@ -991,6 +991,17 @@ def _apply_data_migrations(conn: sqlite3.Connection) -> None:
         conn.execute(f"PRAGMA user_version = {SCHEMA_DATA_VERSION}")
         conn.commit()
 
+    # v1.0.0: ensure PRAGMA user_version reflects the current
+    # SCHEMA_DATA_VERSION regardless of the version-specific blocks
+    # above. bootstrap_schema (run first by supervisor_db._connect) only
+    # adds missing columns and does NOT bump the version; older DBs that
+    # already satisfied a previous SCHEMA_DATA_VERSION never re-enter
+    # any version-specific block and would otherwise leave the PRAGMA
+    # one step behind the column schema.  The unconditional bump at the
+    # end of every connect is idempotent and cheap.
+    conn.execute(f"PRAGMA user_version = {SCHEMA_DATA_VERSION}")
+    conn.commit()
+
 def _connect(path: Path) -> sqlite3.Connection:
     """Thin delegate to ``supervisor_db._connect``.
 

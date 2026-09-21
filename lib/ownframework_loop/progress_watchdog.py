@@ -63,14 +63,28 @@ class Signature:
     def from_row(cls, row: sqlite3.Row | None) -> "Signature":
         if row is None:
             return cls()
+        # Production watchdog ticks use the inline construction (with
+        # explicit progress_signature_* column names) at the tick site;
+        # this helper exists so external callers can reconstruct a
+        # Signature from the persisted jobs row without knowing the
+        # column-naming convention.  Use the prefixed column names
+        # exactly as written in the SELECT/UPDATE statements.
+        def _opt_int(value):
+            if value is None or value == "":
+                return -1
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                return -1
+
         return cls(
-            stdout_size=int(row["stdout_size"] if row["stdout_size"] is not None else -1),
-            stdout_mtime=int(row["stdout_mtime"] if row["stdout_mtime"] is not None else -1),
-            stderr_size=int(row["stderr_size"] if row["stderr_size"] is not None else -1),
-            stderr_mtime=int(row["stderr_mtime"] if row["stderr_mtime"] is not None else -1),
-            worktree_head=str(row["worktree_head"] or ""),
-            worktree_max_mtime=int(row["worktree_max_mtime"] if row["worktree_max_mtime"] is not None else -1),
-            worktree_file_count=int(row["worktree_file_count"] if row["worktree_file_count"] is not None else -1),
+            stdout_size=_opt_int(row["progress_signature_stdout_size"]),
+            stdout_mtime=_opt_int(row["progress_signature_stdout_mtime"]),
+            stderr_size=_opt_int(row["progress_signature_stderr_size"]),
+            stderr_mtime=_opt_int(row["progress_signature_stderr_mtime"]),
+            worktree_head=str(row["progress_signature_worktree_head"] or ""),
+            worktree_max_mtime=_opt_int(row["progress_signature_worktree_max_mtime"]),
+            worktree_file_count=_opt_int(row["progress_signature_worktree_file_count"]),
         )
 
 
@@ -152,19 +166,29 @@ def compute_signature(
             count = 0
             local_max = -1
             # Bounded walk: 4096 entries should cover any small repo.
+            # Top-level bookkeeping directories do NOT count as semantic
+            # progress: their mtimes move on every git operation, every
+            # Claude session ping, and every Loop dispatch tick. The
+            # watchdog must not be fooled into believing a stalled
+            # worker is making progress just because Loop / git /
+            # Claude touched their own internal state. Authoritative
+            # worktree HEAD is read separately via worktree_head_resolver.
+            SKIP_TOP_LEVEL_DIRS = {
+                ".git",
+                ".claude",
+                ".ownframework-loop",
+                ".worktrees",
+                "node_modules",
+                "__pycache__",
+                ".pytest_cache",
+                ".venv",
+                ".ruff_cache",
+            }
             for dirpath, dirnames, filenames in os.walk(str(worktree)):
-                # Skip the runtime-cache and tool-cache under the
-                # worktree; those touch every dispatch tick and are
-                # not semantic progress signals.
-                if dirpath == str(worktree) and (
-                    ".ownframework-loop" in dirnames
-                    or ".worktrees" in dirnames
-                    or ".claude" in dirnames
-                    or ".git" in dirnames
-                ):
-                    # do descend into these; the git HEAD resolver is
-                    # authoritative for branch progress
-                    pass
+                if dirpath == str(worktree):
+                    dirnames[:] = [
+                        d for d in dirnames if d not in SKIP_TOP_LEVEL_DIRS
+                    ]
                 for name in filenames:
                     p = Path(dirpath) / name
                     try:
@@ -579,16 +603,20 @@ def tick(
             continue
 
         # Mark stalled attempt and request retry.
-        # v1.0.0 race fix: do not constrain by status='RUNNING'.
+        # v1.0.0 race fix: do not constrain by status='RUNNING' alone.
         # The dispatcher's exit handler runs under BEGIN IMMEDIATE and
-        # may have already moved status to BACKOFF/QUEUED before this
-        # UPDATE acquires the lock. Constraining the watchdog UPDATE
-        # would silently no-op and let the dispatcher's runner-classifier
+        # may have already moved status to BACKOFF before this UPDATE
+        # acquires the lock; constraining by status='RUNNING' would
+        # silently no-op and let the dispatcher's runner-classifier
         # overwrite the watchdog's authoritative progress_stalled
-        # classification. The watchdog is the authority for stalled
-        # workers; this UPDATE always wins.
+        # classification. We accept BOTH RUNNING and BACKOFF as the
+        # watchdog's expected target states (BACKOFF only arises when
+        # the dispatcher raced the watchdog, in which case the
+        # watchdog's authoritative kill still applies).
+        # Operator-driven terminal states (DONE, RETIRED, QUARANTINED,
+        # CANCELED) are NEVER resurrected by the watchdog.
         try:
-            conn.execute(
+            cur = conn.execute(
                 """
                 UPDATE jobs SET
                     status = 'QUEUED',
@@ -606,7 +634,7 @@ def tick(
                     transient_failures = transient_failures + 1,
                     next_attempt_at = MAX(next_attempt_at, ?),
                     updated_at = ?
-                WHERE id = ?
+                WHERE id = ? AND status IN ('RUNNING', 'BACKOFF')
                 """,
                 (
                     f"watchdog_no_progress_window={int(window)}",
@@ -615,10 +643,19 @@ def tick(
                     int(row["id"]),
                 ),
             )
+            if cur.rowcount != 1:
+                # Operator transitioned the row to a terminal state
+                # between the SELECT and the UPDATE. The watchdog
+                # must never resurrect terminal state; just count and
+                # move on.
+                summary["skipped"] += 1
+                continue
             # Append a FAILED attempt row bound to the latest attempt so
             # callers watching semantic_attempts see the watchdog kill.
             # v1.0.0 race fix: do not constrain by status='RUNNING'
-            # (same reason as the jobs UPDATE above).
+            # alone (same reason as the jobs UPDATE above); the
+            # dispatcher may have already set the attempt to a
+            # transition state.
             latest_attempt = str(row["latest_attempt_id"] or "")
             if latest_attempt:
                 conn.execute(
@@ -632,6 +669,7 @@ def tick(
                         failure_class='progress_stalled',
                         failure_reason=?
                     WHERE attempt_id=? AND job_id=?
+                      AND status IN ('RUNNING', 'RESERVED')
                     """,
                     (
                         float(now),

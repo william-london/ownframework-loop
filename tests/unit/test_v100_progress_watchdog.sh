@@ -278,3 +278,250 @@ PY
 
 echo
 echo "ALL PROGRESS-WATCHDOG TESTS PASS"
+
+# ---------------------------------------------------------------------------
+# 4. Signature.from_row uses prefixed column names correctly
+# ---------------------------------------------------------------------------
+python3 - "$ROOT" <<'PY'
+import sys, sqlite3
+from pathlib import Path
+sys.path.insert(0, str(Path(sys.argv[1]) / "lib"))
+from ownframework_loop import progress_watchdog as pw
+
+conn = sqlite3.connect(":memory:")
+conn.row_factory = sqlite3.Row
+# Row with prefixed column names as the production tick writes them.
+row = conn.execute(
+    "SELECT 0 AS progress_signature_stdout_size, "
+    "       100 AS progress_signature_stdout_mtime, "
+    "       302 AS progress_signature_stderr_size, "
+    "       101 AS progress_signature_stderr_mtime, "
+    "       'a07c6a8e' AS progress_signature_worktree_head, "
+    "       12345 AS progress_signature_worktree_max_mtime, "
+    "       7 AS progress_signature_worktree_file_count"
+).fetchone()
+
+sig = pw.Signature.from_row(row)
+assert sig.stdout_size == 0, sig
+assert sig.stdout_mtime == 100, sig
+assert sig.stderr_size == 302, sig
+assert sig.stderr_mtime == 101, sig
+assert sig.worktree_head == "a07c6a8e", sig
+assert sig.worktree_max_mtime == 12345, sig
+assert sig.worktree_file_count == 7, sig
+print("PASS Signature.from_row reads prefixed columns")
+PY
+
+# ---------------------------------------------------------------------------
+# 5. compute_signature must NOT count .git / .claude / .ownframework-loop /
+#    .worktrees bookkeeping as semantic progress.
+# ---------------------------------------------------------------------------
+python3 - "$ROOT" <<'PY'
+import sys, os, time
+from pathlib import Path
+sys.path.insert(0, str(Path(sys.argv[1]) / "lib"))
+from ownframework_loop import progress_watchdog as pw
+
+worktree = Path("/tmp/ofloop-watchdog-test-walk")
+if worktree.exists():
+    import shutil
+    shutil.rmtree(str(worktree))
+worktree.mkdir()
+# Real source file (counts).
+src = worktree / "src" / "hello.py"
+src.parent.mkdir()
+src.write_text("print('hi')\n")
+# Bookkeeping that must NOT count.
+for d in (".git", ".claude", ".ownframework-loop", ".worktrees"):
+    p = worktree / d / "objects"
+    p.mkdir(parents=True, exist_ok=True)
+    (p / "blob").write_text("internal bookkeeping")
+time.sleep(1)
+# Touch bookkeeping AFTER src by rewriting existing bookkeeping now
+# (mtime moves forward, but the bookkeeping must still be filtered out).
+for d in (".git", ".claude", ".ownframework-loop", ".worktrees"):
+    p = worktree / d / "objects"
+    (p / "blob").write_text("internal bookkeeping touch")
+
+sig = pw.compute_signature(stdout_path=None, stderr_path=None, worktree=worktree)
+assert sig.worktree_file_count == 1, (
+    f"expected 1 file (only src/hello.py), got {sig.worktree_file_count} "
+    f"— bookkeeping dirs must be filtered out"
+)
+# The bookkeeping dirs have higher mtime than src/, but the signature
+# must not see them.
+import shutil
+shutil.rmtree(str(worktree))
+print("PASS compute_signature filters .git/.claude/.ownframework-loop/.worktrees")
+PY
+
+# ---------------------------------------------------------------------------
+# 6. Watchdog UPDATE status guard: terminal states are NEVER resurrected
+# ---------------------------------------------------------------------------
+python3 - "$ROOT" <<'PY'
+import sys, time, sqlite3
+from pathlib import Path
+sys.path.insert(0, str(Path(sys.argv[1]) / "lib"))
+from ownframework_loop.progress_watchdog import tick, _worktree_head_resolver
+
+tmpdir = Path("/tmp/ofloop-watchdog-test-terminal")
+if tmpdir.exists():
+    import shutil
+    shutil.rmtree(str(tmpdir))
+tmpdir.mkdir()
+db = tmpdir / "ledger.sqlite3"
+conn = sqlite3.connect(str(db))
+conn.row_factory = sqlite3.Row
+# Use real stdout/stderr files so the watchdog computes stable
+# signatures; /dev/null would mtime-tick to "now" every stat().
+stdout_log = tmpdir / "worker.out"
+stderr_log = tmpdir / "worker.err"
+stdout_log.write_text("")
+stderr_log.write_text("")
+# Stale mtime so the watchdog sees NO advance.
+import os, time
+stale = time.time() - 2000
+os.utime(str(stdout_log), (stale, stale))
+os.utime(str(stderr_log), (stale, stale))
+conn.executescript(
+    """
+    CREATE TABLE jobs (
+        id INTEGER PRIMARY KEY,
+        repo TEXT NOT NULL,
+        run_id TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'QUEUED',
+        worker_pid INTEGER, worker_pgid INTEGER, worker_started_at REAL,
+        worker_role TEXT, worker_attempt_id TEXT, latest_attempt_id TEXT,
+        worker_start_identity TEXT,
+        worker_deadline_at REAL, worker_stdout_path TEXT, worker_stderr_path TEXT,
+        max_pass_runtime_seconds INTEGER NOT NULL DEFAULT 600,
+        progress_signature_stdout_size INTEGER NOT NULL DEFAULT 0,
+        progress_signature_stdout_mtime INTEGER NOT NULL DEFAULT 0,
+        progress_signature_stderr_size INTEGER NOT NULL DEFAULT 0,
+        progress_signature_stderr_mtime INTEGER NOT NULL DEFAULT 0,
+        progress_signature_worktree_head TEXT NOT NULL DEFAULT '',
+        progress_signature_worktree_max_mtime INTEGER NOT NULL DEFAULT 0,
+        progress_signature_worktree_file_count INTEGER NOT NULL DEFAULT 0,
+        progress_signature_at REAL NOT NULL DEFAULT 0,
+        progress_stall_count INTEGER NOT NULL DEFAULT 0,
+        progress_watchdog_window_seconds INTEGER NOT NULL DEFAULT 0,
+        transient_failures INTEGER NOT NULL DEFAULT 0,
+        max_transient_failures INTEGER NOT NULL DEFAULT 8,
+        last_error TEXT,
+        last_failure_class TEXT, last_failure_reason TEXT,
+        next_attempt_at REAL NOT NULL DEFAULT 0,
+        updated_at REAL NOT NULL DEFAULT 0
+    );
+    CREATE TABLE semantic_attempts (
+        attempt_id TEXT PRIMARY KEY,
+        job_id INTEGER NOT NULL,
+        status TEXT NOT NULL,
+        failure_class TEXT, failure_reason TEXT,
+        started_at REAL, completed_at REAL,
+        returncode INTEGER,
+        cost_usd REAL NOT NULL DEFAULT 0,
+        cost_accounted INTEGER NOT NULL DEFAULT 0,
+        cost_known INTEGER NOT NULL DEFAULT 0,
+        input_tokens INTEGER NOT NULL DEFAULT 0,
+        output_tokens INTEGER NOT NULL DEFAULT 0,
+        cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+        cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
+        tokens_known INTEGER NOT NULL DEFAULT 0
+    );
+    """
+)
+# Seed an operator-QUARANTINED job. Watchdog MUST NOT resurrect it.
+conn.execute(
+    "INSERT INTO jobs(id, repo, run_id, status, worker_deadline_at) "
+    "VALUES (1, '/tmp', 'run-quarantined', 'QUARANTINED', ?)",
+    (time.time() + 600,),
+)
+conn.execute(
+    """INSERT INTO jobs(id, repo, run_id, status, worker_pid, worker_pgid,
+                       worker_started_at, worker_role, worker_attempt_id,
+                       latest_attempt_id, worker_start_identity,
+                       worker_deadline_at, worker_stdout_path, worker_stderr_path,
+                       max_pass_runtime_seconds,
+                       progress_signature_stdout_size,
+                       progress_signature_stdout_mtime,
+                       progress_signature_stderr_size,
+                       progress_signature_stderr_mtime,
+                       progress_signature_worktree_head,
+                       progress_signature_worktree_max_mtime,
+                       progress_signature_worktree_file_count,
+                       progress_signature_at,
+                       progress_stall_count, progress_watchdog_window_seconds,
+                       transient_failures, max_transient_failures,
+                       last_error, last_failure_class, last_failure_reason,
+                       next_attempt_at, updated_at)
+       VALUES (2, '/tmp', 'run-stalled', 'RUNNING', 99999, 99999,
+               ?, 'builder', NULL, 'attempt-stalled', NULL,
+               ?, ?, ?, 600,
+               0, ?, 0, ?, '', -1, -1,
+               ?, 0, 0, 0, 8,
+               NULL, NULL, NULL, 0, 0)""",
+    (time.time(), time.time() + 600, str(stdout_log), str(stderr_log),
+     int(stale), int(stale), time.time() - 1000),
+)
+conn.execute(
+    "INSERT INTO semantic_attempts(attempt_id, job_id, status) "
+    "VALUES ('attempt-stalled', 2, 'RUNNING')"
+)
+conn.commit()
+
+calls = []
+def fake_term(pid, pgid, identity, started):
+    calls.append(pid)
+    return True
+
+# Tick: row 1 (QUARANTINED) MUST be skipped entirely; row 2 (RUNNING)
+# MUST be terminated.
+summary = tick(conn, terminate=fake_term)
+assert summary["terminated"] == 1, summary
+assert summary["considered"] == 1, summary
+assert calls == [99999], calls
+
+# QUARANTINED row stays QUARANTINED.
+q = conn.execute("SELECT status FROM jobs WHERE id=1").fetchone()
+assert q[0] == "QUARANTINED", f"watchdog resurrected QUARANTINED: {q[0]}"
+
+import shutil
+shutil.rmtree(str(tmpdir))
+print("PASS watchdog never resurrects QUARANTINED")
+PY
+
+# ---------------------------------------------------------------------------
+# 7. PRAGMA user_version bumped to SCHEMA_DATA_VERSION after migrations
+# ---------------------------------------------------------------------------
+python3 - "$ROOT" <<'PY'
+import sys, sqlite3
+from pathlib import Path
+sys.path.insert(0, str(Path(sys.argv[1]) / "lib"))
+from ownframework_loop.supervisor_db import bootstrap_schema, SCHEMA_DATA_VERSION
+
+conn = sqlite3.connect(":memory:")
+conn.row_factory = sqlite3.Row
+
+def bump_version(c):
+    # Mirror the supervisor-owned data-migrations ladder that runs
+    # after bootstrap_schema and unconditionally bumps the PRAGMA.
+    c.execute(f"PRAGMA user_version = {SCHEMA_DATA_VERSION}")
+    c.commit()
+
+# Force user_version to a lower number to simulate an upgrade from v7.
+conn.execute("PRAGMA user_version = 7")
+bootstrap_schema(conn)
+bump_version(conn)
+v = conn.execute("PRAGMA user_version").fetchone()[0]
+assert v == SCHEMA_DATA_VERSION, f"expected {SCHEMA_DATA_VERSION}, got {v}"
+# Idempotent: re-running the migration ladder on the same connection
+# must keep the PRAGMA at SCHEMA_DATA_VERSION.
+bootstrap_schema(conn)
+bump_version(conn)
+v = conn.execute("PRAGMA user_version").fetchone()[0]
+assert v == SCHEMA_DATA_VERSION, f"expected {SCHEMA_DATA_VERSION}, got {v}"
+print(f"PASS PRAGMA user_version bumped to {SCHEMA_DATA_VERSION} (idempotent)")
+PY
+
+echo
+echo "ALL PROGRESS-WATCHDOG TESTS PASS"
