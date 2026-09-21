@@ -215,77 +215,151 @@ The broker is the smallest mechanism that:
   Bash `strictAllowlist: true`, no external mutation authority, no
   receipt identity change).
 
-## 5. Chosen boundary
+## 5. Chosen boundary (CORRECTED 2026-09-21)
 
-The boundary is a **core-owned, host-commissioned, narrowly-permissioned
-executable** that the worker invokes through its existing Bash sandbox, and
-through which all public research passes.
+> **REVISION NOTE**: an earlier draft of this ADR proposed running the
+> broker inside the worker's Bash sandbox and relied on the worker's
+> `allowedDomains` widening to let the broker reach public hosts. That
+> draft shipped temporarily as commits `442901e`+`ef04f4d`. It is now
+> rejected: Claude's Bash sandbox applies its network filter to
+> subprocesses too, so widening the worker's `allowedDomains` to
+> wikipedia.org also widens every other Bash command's reach to those
+> domains. The corrected architecture below moves the network effect
+> **outside the worker's Bash sandbox** entirely. The worker ends
+> with `sandbox.network.allowedDomains = []` and
+> `sandbox.network.strictAllowlist = true` unchanged.
+
+### 5.a Corrected trusted transport
+
+The transport is **core-owned, host-commissioned, and
+supervisor-mediated**. The worker never speaks HTTP/HTTPS for
+research; the worker's only research surface is a small helper
+executable in `bin/ofloop-research-call` that publishes an
+immutable REQUEST to a supervisor-owned queue and blocks until a
+RESPONSE is published back to the worker's scratch dir. The
+supervisor — running as a launchd service with the operator's
+full network authority — validates the request against the run's
+frozen capability binding and invokes the broker (the same
+underlying stdlib-only Python executable, but launched by the
+supervisor as a child of the supervisor process, NOT a child of
+Claude's Bash).
 
 ```text
-semantic worker (Bash sandbox unchanged)
+semantic worker (Bash sandbox: allowedDomains=[]; strictAllowlist: true)
     |
-    | one narrowly typed CLI invocation:
-    |   ofloop-research-broker --op search|read|asset-read
-    |       --run-dir <...>
-    |       --url '<...>'
-    |       --max-bytes N
-    |       --kind '<...>'
+    |  ofloop-research-call --op read --url https://...
+    |                            --run-id <id> --attempt <id>
+    |                            --request-id <uuid>
     |
     v
-operator-commissioned provider (paths / SHA-256 from host-manifest)
-    |
-    +-- validates op, URL, scheme, bytes, redirect chain
-    +-- resolves DNS, refuses forbidden addresses
-    +-- rev-validates every 30x target
-    +-- bounds timeout, response bytes, asset bytes
-    +-- writes durable structured receipt into:
-    |     <canonical_repo>/.ownframework-loop/<run-id>/research/<op-id>.json
-    +-- returns: stdout = receipt path + small semantic summary;
-    |           no asset bytes streamed to the model (Claude only
-    |           reads the receipt, references the artifact by digest)
-    |
-    v
-public internet read (HTTPS / HTTP GET only)
+helper writes REQUEST file under:
+    ~/.local/state/ownframework-loop/research/queue/req-<uuid>.json
+        (atomic publish: O_EXCL tmp + os.link + dir fsync; 0o600)
+helper blocks polling RESPONSE file under:
+    <canonical_repo>/.ownframework-loop/<run-id>/scratch/<role>/pass-N/research/resp-<uuid>.json
+        (worker's allowRead includes scratch; broker writes
+         it via supervisor-mediated path)
+        |
+        v
+supervisor (launchd; user-level network authority; NOT Claude sandbox):
+    serve() loop tick scans queue for new requests; for each:
+        1. Validate REQUEST:
+            - run-id exists in supervisor DB, non-terminal
+            - attempt-id corresponds to a currently-active
+              semantic_attempt for that run
+            - the run's resolved capabilities include
+              research.public
+            - URL passes the broker's SSRF deny rules
+              (loopback / RFC1918 / link-local / multicast /
+              cloud-metadata / carrier-grade-NAT / IPv6 private /
+              credential-shaped)
+            - op ∈ {search, read, asset-read}
+            - per-attempt rate-limit not exceeded
+            - response budget remaining
+        2. Dispatch broker subprocess (subprocess.run) — the
+           broker runs under the supervisor process tree, with
+           full DNS/TCP egress; it validates destinations itself
+           and writes durable content-addressed receipt +
+           content-addressed asset bytes to:
+             ~/.local/state/ownframework-loop/research/<run>/receipts/op-<uuid>.json
+             ~/.local/state/ownframework-loop/research/<run>/artifacts/<sha256>.<safe-ext>
+        3. Write RESPONSE file under the worker's per-attempt
+           scratch dir (which the worker can READ); the helper
+           unblocks and emits the response on stdout.
 ```
 
-### Why this is a generic contract, not a `claude.*` contract
+### 5.b Why this is necessary — Claude sandbox subprocess inheritance
 
-The capability name (`research.public`) and the capability binding record
-(registry + commissioning + receipt shape) are vendor-neutral. The CLI
-surface is a normal executable. A non-Claude runner invokes the same
-broker the same way. Claude's tool list explicitly does **not** grow:
-Claude only gets to spawn the broker via its existing Bash sandbox, and
-the broker enforces the boundary.
+Claude's Bash sandbox applies network filtering to **all** subprocesses
+spawned through Bash, not just to the worker's Bash commands
+themselves. A worker that runs
 
-### Capability semantics
+```bash
+ofloop-research-broker --op read --url https://...
+```
+
+will fail at the broker's `getaddrinfo` step in the broker subprocess,
+because the spawned broker inherits the worker's empty
+`allowedDomains` + `strictAllowlist: true`. The architectural
+intuitive fix would be to widen the worker's `allowedDomains` to
+add wikipedia.org + wikimedia.org — but that widening ALSO lets
+the worker's own `curl https://en.wikipedia.org/...` succeed, which
+collapses the separation between trusted governed transport and
+ordinary Bash. The architecturally correct fix is to remove the
+broker from the worker's subprocess tree entirely.
+
+### 5.c Old (rejected) bash-widening concession — audit log
+
+The post-v1 commits `442901e` and `ef04f4d` widened the worker's
+`allowedDomains` (`en.wikipedia.org`, `commons.wikimedia.org`,
+`upload.wikimedia.org`). The motivation was: "the broker cannot
+reach its backend underneath Claude's sandbox; therefore widen the
+sandbox." That logic is structurally wrong against the ADR's
+governing principle. The corrected design instead moves the
+broker's network effect into the supervisor, which has no
+sandbox inheritance. Old commits remain in git history because
+they document the failure mode; the live source reverts the
+widening.
+
+### 5.d Capability semantics (corrected)
 
 A single new built-in capability family:
 
 * **`research.public`** — fails-closed-resolution unless the host
-  manifest points at a commissioned `ofloop-research-broker` executable
-  with verified SHA-256 / version. Resolution adds the broker to the
-  worker's `allowRead` and to a small **per-run research evidence**
-  directory under the pass-scoped runtime cache as `allowWrite`. The
-  broker is **not** added to `sandbox.network.allowedDomains` — only
-  the broker subprocess has public-internet reachability, and it
-  validates destinations itself.
+  manifest points at a commissioned `ofloop-research-broker`
+  executable with verified SHA-256 / version. **The capability
+  contributes nothing to the worker's Bash `allowedDomains`.**
+  The capability contributes:
+   * `OFLOOP_RESEARCH_BROKER` (broker path) and
+     `OFLOOP_RESEARCH_EVIDENCE_DIR` (per-run evidence dir) — env vars,
+     not Bash network authorities.
+   * `path_prepend` for the directory containing the
+     `ofloop-research-call` helper, so the worker can spawn it from
+     sandboxed Bash.
+   * `allowRead` entry for the helper executable (so Bash can execute it).
+   * `allowRead` entry for the per-run research evidence dir (so the
+     worker can read receipts/assets).
+   * NO `allowWrite` for the evidence dir.
+   * NO entry for the broker executable (the worker must NOT be able
+     to invoke the broker directly).
 
-No additional runtime capabilities are introduced in this ADR. Optional
-follow-on capabilities (e.g. `asset.public-photo`, render-as-screenshot
-delegated to a host render service) are deliberately deferred because
-they each need their own SSRF / asset-boundary / attribution story and
-benefit from the broker's evidence trail once it is in production.
+The worker helper ships at `bin/ofloop-research-call` (also installed
+to `~/.local/share/ownframework-loop/1.0.0/bin/ofloop-research-call`
+in the canonical install). It is **the only** public-research
+surface exposed to the worker.
 
-### Why the broker does not inherit Bash `allowedDomains` widening
+### 5.e Why this is a generic contract, not a `claude.*` contract
 
-The worker never gets an extra `allowedDomains`. Its existing sandbox
-remains `strictAllowlist: true` against packet ∩ capability domains. The
-worker is allowed to spawn the broker because the broker executable path
-was resolved by `resolve_capabilities()` and admitted into `allowRead`.
-The broker's outbound egress is a separate authority surface; it is
-commissioned, not inherited.
+The capability name (`research.public`) and the capability binding
+record (registry + commissioning + receipt shape) are
+vendor-neutral. The worker-side helper contract is a normal
+executable. The supervisor-side bridge uses the existing
+`supervisor.serve()` loop's tick — no new scheduler, no new state
+machine, no new database. A non-Claude runner could implement the
+same worker-side helper + supervisor-side queue handler
+infrastructure against the same `research.public` contract.
 
-### SSRF design
+### 5.f SSRF design
 
 The broker enforces the following. Any failure fails-closed and writes
 an audit entry before the network attempt.
@@ -490,7 +564,7 @@ The only new operator surface is `host-capabilities.json` documenting
 the broker executable and its commissioning evidence. That entry is
 operator-owned, exactly like the Docker broker entry today.
 
-## 6. Authority added (net new capability surface)
+## 6. Authority added (net new capability surface — CORRECTED)
 
 * `research.public` capability (commissioned via host manifest;
   same commissioning pattern as `container.docker` and
@@ -498,31 +572,68 @@ operator-owned, exactly like the Docker broker entry today.
 * A canonical `ofloop-research-broker` Python executable shipped in
   the same repository (separate file under
   `bin/ofloop-research-broker`), commissioned by the operator on
-  install.
-* A new `Broker` run-evidence dir under
-  `.ownframework-loop/<run-id>/research/`. Writes to this dir are
-  authorized only by the broker executable (the worker's Bash
-  cannot directly write to it because the dir is `allowWrite`-only
-  for the broker's runtime cache mapping and not surfaced to
-  Claude's `--allowedTools`).
+  install. **The broker is invoked ONLY by the supervisor, NOT by
+  the worker.**
+* A new `bin/ofloop-research-call` worker helper (stdlib-only
+  Python executable, also installed to the operator install dir).
+  This is the worker's only public-research surface.
+* A new `supervisor_research` module that extends the existing
+  `supervisor.serve()` loop with a per-tick queue consume step.
+  The supervisor — not the worker — invokes the broker subprocess
+  via `subprocess.run`, so the broker runs with the supervisor's
+  full DNS/TCP egress and never inherits Claude's Bash sandbox.
+* A new evidence root at
+  `~/.local/state/ownframework-loop/research/<run-id>/`:
+  - `queue/` — supervisor-owned REQUEST queue (mode 0o700).
+  - `responses/` — per-request RESPONSE files (mode 0o700).
+    The worker calls the helper; the helper polls `responses/<req
+    -id>.json` under the supervisor-owned responses dir. (Not the
+    same path the worker reads; the worker reads
+    `scratch/.../research/resp-<req-id>.json` published by the
+    supervisor on the worker's behalf.)
+  - `receipts/` — durable content-addressed receipts (mode 0o600).
+    Written by the broker; never readable as writable by the
+    worker.
+  - `artifacts/` — content-addressed asset bytes (mode 0o600).
+    Filenames derived from validated MIME + SHA-256, never from
+    URL path.
+* The worker's `allowWrite` is still limited to packet `allowed_paths`
+  + the per-attempt scratch dir. The worker's `allowRead` gains
+  the helper executable, the per-run evidence dir (read-only), but
+  **not** the broker executable.
 
-## 7. Authority still forbidden (preserved)
+## 7. Authority still forbidden (preserved — and restored after the
+rejected temporary widening)
 
 * `--no-chrome`, `--no-session-persistence`, `--strict-mcp-config`:
   unchanged.
 * `--restricted` native isolation: unchanged.
-* Bash `strictAllowlist: true`: unchanged. The new capability does
-  not widen `allowedDomains`.
-* `sandbox.network.credentials` deny list: unchanged. The broker
-  inherits the scrubbed subprocess env.
+* Bash `strictAllowlist: true`: unchanged. **The new capability does
+  NOT widen `allowedDomains` at all** — the worker's
+  `sandbox.network.allowedDomains` is `[]` when `research.public`
+  is committed (verified by `tests/unit/test_v200_research_authority
+  .sh`'s worker-sandbox assertion).
+* `sandbox.network.credentials` deny list: unchanged. The worker
+  helper inherits the scrubbed subprocess env (the same
+  `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1` and the same deny list).
 * Bash `sandbox.filesystem.denyRead` on HOME + state root: unchanged.
 * Browser `trust_asset` requirement: unchanged. Visual research
   reuses the existing commissioned browser capability.
 * External mutation authority (`POST`, `PUT`, `PATCH`, `DELETE`,
   account-creation, payments, deploys, uploads, etc.): explicitly
-  **not** granted by `research.public`.
+  **not** granted by `research.public`. The broker's HTTP path is
+  GET-only at every layer.
 * Docker raw socket / privileged container authority: unchanged.
-* Package registry domain authorities: unchanged.
+* Package registry domain authorities: unchanged. The
+  supervisor-side broker invocation does NOT extend
+  `package.pip` / `package.npm` / `package.uv` / Playwright CDN
+  domains — those continue to be the only Bash sub-network
+  authority granted to capability resolution.
+* Direct worker Bash public egress: explicitly forbidden. The
+  worker's `curl`, `wget`, `python -c 'import requests'`,
+  `node-fetch`, `python -c 'import socket, ssl'` are all refused
+  by `strictAllowlist: true` with empty `allowedDomains`, including
+  any of the research destinations (wikipedia.org, etc.).
 
 ## 8. Security-test surface
 
