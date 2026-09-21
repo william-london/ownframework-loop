@@ -289,6 +289,7 @@ def collect_no_progress_attempts(
             WHERE status='RUNNING'
               AND worker_pid IS NOT NULL
               AND worker_role != 'dispatching'
+              AND worker_role = 'builder'
             """
         ).fetchall()
     except sqlite3.Error:
@@ -465,6 +466,7 @@ def tick(
                 WHERE j.status='RUNNING'
                   AND j.worker_pid IS NOT NULL
                   AND j.worker_role != 'dispatching'
+                  AND j.worker_role = 'builder'
                   AND COALESCE(j.worker_deadline_at, 0) > 0
                   AND j.worker_deadline_at > ?
             )
