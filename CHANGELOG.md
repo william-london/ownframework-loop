@@ -28,6 +28,29 @@ The complete historical changelog through 0.5.2 is preserved at
 - Fix: `supervisor_attempts._set_worker_pid` now writes the initial
   progress signature at dispatch time so the first watchdog tick has a
   baseline rather than treating a freshly spawned worker as stalled.
+- Fix: `supervisor._set_worker_pid` thin delegate forwards
+  `max_pass_runtime_seconds` through to `supervisor_attempts._set_worker_pid`
+  so the watchdog can read the per-pass budget from the durable jobs row.
+- Fix: `supervisor.serve` now ticks the watchdog BEFORE collecting completed
+  pool futures. The dispatcher's exit handler can race a watchdog kill and
+  overwrite the watchdog's authoritative `progress_stalled` classification
+  with `runner`/`runner_unclassified_failure` if the futures are processed
+  first; ticking the watchdog first guarantees the watchdog's UPDATE is
+  committed before the dispatcher reads.
+- Fix: `supervisor` exit handler and `_apply_failure_policy` now read
+  `jobs.last_failure_class` and respect `progress_stalled` as
+  authoritative when present, so the dispatcher does not overwrite the
+  watchdog's authoritative classification when both UPDATEs race for the
+  same row.
+- Fix: `progress_watchdog` terminate-path UPDATEs no longer constrain by
+  `status = 'RUNNING'`. The dispatcher exit handler runs under
+  `BEGIN IMMEDIATE` and can move status to `BACKOFF`/`QUEUED` before the
+  watchdog acquires the write lock; constraining the watchdog UPDATE
+  silently no-oped and let the dispatcher's runner-classifier overwrite
+  the watchdog's classification. The watchdog UPDATE always wins.
+- Fix: watchdog UPDATEs (jobs + semantic_attempts) also drop the
+  `status = 'RUNNING'` guard for the same reason: the dispatcher's exit
+  handler can mark the attempt row before the watchdog acquires the lock.
 
 ## 1.0.0 - Stable Autonomous Engineering Runtime (2026-09-19)
 
