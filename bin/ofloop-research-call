@@ -1,0 +1,291 @@
+#!/usr/bin/env python3
+"""OwnFramework Loop governed research request helper.
+
+The semantic worker's ONE AND ONLY public-research surface. This
+binary is in the worker's ``allowRead`` and PATH (added by the
+``research.public`` capability resolution). The worker invokes
+this helper from sandboxed Bash. The helper has no network
+authority of its own — it can only write to the supervisor
+research queue and read from the per-attempt scratch
+RESPONSE file.
+
+Flow:
+
+    1. Worker invokes ``ofloop-research-call --op read --url <u>`` etc.
+    2. Helper validates request shape (no SSRF validation here —
+       that is the supervisor's job once the request is queued;
+       the broker re-validates too).
+    3. Helper atomically publishes an immutable REQUEST file to
+       ``$OFLOOP_RESEARCH_QUEUE/req-<uuid>.json`` with
+       ``request_id``, ``run_id``, ``attempt_id``, ``role``, ``op``,
+       ``url``, ``query``, ``max_bytes``, ``kind``, ``requested_at``.
+    4. Helper blocks waiting for the supervisor's RESPONSE file at
+       ``<OFLOOP_RESEARCH_SCRATCH_RESP>/resp-<uuid>.json``; the
+       helper polls every poll_ms milliseconds up to a per-call
+       request-timeout (default 90s).
+    5. When the supervisor publishes the response, the helper reads
+       it and emits the response body on stdout. On timeout /
+       failure, the helper emits a structured ``BrokerError``
+       envelope and exits non-zero.
+
+The helper is **not** authoritative. The supervisor validates the
+request against the run's frozen capability binding before the
+broker is invoked. The broker validates SSRF before any network
+attempt. The worker cannot widen its authority by writing a
+malformed request — every layer fails closed.
+
+CLI surface
+-----------
+
+::
+
+    ofloop-research-call \
+        --op search|read|asset-read \
+        [--url <url>] [--query <query>] \
+        [--max-bytes <n>] [--kind <label>] \
+        --request-id <uuid> \
+        --run-id <run> --attempt <attempt> --role <role> \
+        [--poll-ms <n>] [--timeout-seconds <n>]
+
+Required env vars (set by supervisor-mediated resolution):
+  - ``OFLOOP_RESEARCH_QUEUE`` (e.g.
+    ``~/.local/state/ownframework-loop/research/queue``).
+  - ``OFLOOP_RESEARCH_SCRATCH_RESP`` (the per-attempt scratch
+    RESPONSE dir under which the helper polls). The supervisor
+    publishes the response here so the worker (with
+    ``allowRead`` on the scratch) can read it without breaking
+    isolation. The helper uses this exact path to look for its
+    response file by request-id.
+"""
+from __future__ import annotations
+
+import argparse
+import datetime as _dt
+import json
+import os
+import re as _re
+import sys
+import time
+import uuid as _uuid
+
+REQUEST_SCHEMA = "ownframework-loop-research-request/v1"
+RESPONSE_SCHEMA = "ownframework-loop-research-response/v1"
+
+VALID_OPS = ("search", "read", "asset-read")
+URL_RE = _re.compile(
+    r"^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)*[a-z0-9]"
+    r"(?:[a-z0-9-]{0,61}[a-z0-9])?$"
+)
+
+
+class HelperError(Exception):
+    code: str = "HelperError"
+
+    def __init__(self, msg: str, *, code: str | None = None) -> None:
+        super().__init__(msg)
+        if code is not None:
+            self.code = code
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema": RESPONSE_SCHEMA,
+            "ok": False,
+            "error_class": self.code,
+            "error": str(self),
+            "timestamp": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+        }
+
+
+def _check_shape(args: argparse.Namespace) -> None:
+    """Argument-shape checks only (no SSRF, no DNS).
+
+    SSRF / destination validation lives in the broker, run by the
+    supervisor under its own network namespace. This helper only
+    refuses malformed argument shapes so the helper can't be used
+    as an SSRF bypass.
+    """
+    if args.op not in VALID_OPS:
+        raise HelperError(f"op must be one of {VALID_OPS}", code="InvalidRequest")
+    if args.op == "read" or args.op == "asset-read":
+        if not args.url:
+            raise HelperError(
+                f"--url is required for op={args.op}",
+                code="InvalidRequest",
+            )
+        if "://" not in args.url:
+            raise HelperError("url must have scheme://", code="InvalidRequest")
+        # Cheap pre-screen for userinfo and obvious dangerous schemes.
+        # The broker is authoritative; this is just enough to refuse
+        # to *queue* an obviously-invalid request.
+        if "@" in args.url.split("://", 1)[1].split("/", 1)[0]:
+            raise HelperError(
+                "url contains userinfo (refused pre-queue)",
+                code="ForbiddenHeader",
+            )
+        if not args.url.lower().startswith(("https://", "http://")):
+            raise HelperError(
+                "url must use http(s) scheme (refused pre-queue)",
+                code="InvalidRequest",
+            )
+    if args.op == "search":
+        if not args.query:
+            raise HelperError(
+                "--query is required for op=search",
+                code="InvalidRequest",
+            )
+        # Refuse obvious credential-shaped queries at the gate. The
+        # broker is authoritative; this is a cheap defense in depth.
+        bad_patterns = (
+            _re.compile(r"\b[A-Za-z0-9_]{40,}\b"),
+            _re.compile(r"(?i)\bgh[oprsu]_[A-Za-z0-9]{20,}\b"),
+            _re.compile(r"-----BEGIN [A-Z ]+-----"),
+            _re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
+        )
+        for pat in bad_patterns:
+            if pat.search(args.query):
+                raise HelperError(
+                    "query contains credential-shaped token (refused pre-queue)",
+                    code="ForbiddenHeader",
+                )
+    if not args.request_id:
+        raise HelperError("--request-id is required", code="InvalidRequest")
+    if not args.run_id or not args.attempt or not args.role:
+        raise HelperError(
+            "--run-id, --attempt, --role are required",
+            code="InvalidRequest",
+        )
+
+
+def _atomic_write_json(path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.{_uuid.uuid4().hex}.tmp")
+    encoded = json.dumps(payload, sort_keys=True, ensure_ascii=True) + "\n"
+    fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(encoded)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.link(tmp, path)
+    finally:
+        try:
+            tmp.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def _build_request(args: argparse.Namespace) -> dict[str, Any]:
+    return {
+        "schema": REQUEST_SCHEMA,
+        "ok": True,
+        "request_id": args.request_id,
+        "run_id": args.run_id,
+        "attempt_id": args.attempt,
+        "role": args.role,
+        "op": args.op,
+        "url": args.url,
+        "query": args.query,
+        "max_bytes": int(args.max_bytes) if args.max_bytes is not None else None,
+        "kind": args.kind,
+        "requested_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+    }
+
+
+def main() -> int:
+    p = argparse.ArgumentParser(prog="ofloop-research-call")
+    p.add_argument("--op", required=True, choices=VALID_OPS)
+    p.add_argument("--url", default=None)
+    p.add_argument("--query", default=None)
+    p.add_argument("--max-bytes", type=int, default=None)
+    p.add_argument("--kind", default=None)
+    p.add_argument("--request-id", default=None)
+    p.add_argument("--run-id", default=None)
+    p.add_argument("--attempt", default=None)
+    p.add_argument("--role", default=None, choices=("builder", "reviewer"))
+    p.add_argument("--poll-ms", type=int, default=200)
+    p.add_argument("--timeout-seconds", type=float, default=90.0)
+    args = p.parse_args()
+
+    try:
+        _check_shape(args)
+    except HelperError as exc:
+        print(json.dumps(exc.to_dict(), sort_keys=True), flush=True)
+        return 2
+
+    queue_dir = os.environ.get("OFLOOP_RESEARCH_QUEUE", "").strip()
+    scratch_resp = os.environ.get("OFLOOP_RESEARCH_SCRATCH_RESP", "").strip()
+    if not queue_dir or not scratch_resp:
+        # Without supervisor-mediated env vars, this helper has no
+        # path to a real transport. Refuse rather than silently
+        # succeed-without-evidence.
+        err = {
+            "schema": RESPONSE_SCHEMA,
+            "ok": False,
+            "error_class": "ConfigurationError",
+            "error": "OFLOOP_RESEARCH_QUEUE / OFLOOP_RESEARCH_SCRATCH_RESP unset",
+            "timestamp": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+        }
+        print(json.dumps(err, sort_keys=True), flush=True)
+        return 3
+
+    from pathlib import Path
+    queue_dir_p = Path(queue_dir)
+    scratch_resp_p = Path(scratch_resp)
+
+    request = _build_request(args)
+    request_path = queue_dir_p / f"req-{args.request_id}.json"
+    try:
+        _atomic_write_json(request_path, request)
+    except OSError as exc:
+        err = {
+            "schema": RESPONSE_SCHEMA,
+            "ok": False,
+            "error_class": "RequestPublishFailed",
+            "error": str(exc),
+            "timestamp": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+        }
+        print(json.dumps(err, sort_keys=True), flush=True)
+        return 4
+
+    # Poll for response.
+    deadline = time.monotonic() + float(args.timeout_seconds)
+    poll_ms = max(50, int(args.poll_ms))
+    response_path = scratch_resp_p / f"resp-{args.request_id}.json"
+    seen_dot = False
+    while time.monotonic() < deadline:
+        if response_path.exists():
+            try:
+                with response_path.open("r", encoding="utf-8") as fh:
+                    sys.stdout.write(fh.read())
+                    sys.stdout.flush()
+                return 0
+            except OSError as exc:
+                err = {
+                    "schema": RESPONSE_SCHEMA,
+                    "ok": False,
+                    "error_class": "ResponseReadFailed",
+                    "error": str(exc),
+                }
+                print(json.dumps(err, sort_keys=True), flush=True)
+                return 5
+        # Emit a single "." per ~2s so callers can see liveness.
+        if not seen_dot and (time.monotonic() - (deadline - float(args.timeout_seconds))) > 0:
+            sys.stderr.write(".")
+            sys.stderr.flush()
+            seen_dot = True
+        time.sleep(poll_ms / 1000.0)
+
+    err = {
+        "schema": RESPONSE_SCHEMA,
+        "ok": False,
+        "error_class": "ResponseTimeout",
+        "error": f"no response within {args.timeout_seconds}s",
+        "request_id": args.request_id,
+        "timestamp": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+    }
+    print(json.dumps(err, sort_keys=True), flush=True)
+    return 6
+
+
+if __name__ == "__main__":
+    sys.exit(main())
