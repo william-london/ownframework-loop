@@ -523,5 +523,119 @@ assert v == SCHEMA_DATA_VERSION, f"expected {SCHEMA_DATA_VERSION}, got {v}"
 print(f"PASS PRAGMA user_version bumped to {SCHEMA_DATA_VERSION} (idempotent)")
 PY
 
+# ---------------------------------------------------------------------------
+# 8. Watchdog NEVER considers non-builder roles
+# ---------------------------------------------------------------------------
+python3 - "$ROOT" <<'PY'
+import sys, sqlite3, time, os
+from pathlib import Path
+sys.path.insert(0, str(Path(sys.argv[1]) / "lib"))
+from ownframework_loop.progress_watchdog import tick
+
+tmpdir = Path("/tmp/ofloop-watchdog-test-roles")
+if tmpdir.exists():
+    import shutil
+    shutil.rmtree(str(tmpdir))
+tmpdir.mkdir()
+db = tmpdir / "ledger.sqlite3"
+conn = sqlite3.connect(str(db))
+conn.row_factory = sqlite3.Row
+conn.executescript(
+    """
+    CREATE TABLE jobs (
+        id INTEGER PRIMARY KEY,
+        repo TEXT NOT NULL, run_id TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'QUEUED',
+        worker_pid INTEGER, worker_pgid INTEGER, worker_started_at REAL,
+        worker_role TEXT, worker_attempt_id TEXT, latest_attempt_id TEXT,
+        worker_start_identity TEXT,
+        worker_deadline_at REAL, worker_stdout_path TEXT, worker_stderr_path TEXT,
+        max_pass_runtime_seconds INTEGER NOT NULL DEFAULT 600,
+        progress_signature_stdout_size INTEGER NOT NULL DEFAULT 0,
+        progress_signature_stdout_mtime INTEGER NOT NULL DEFAULT 0,
+        progress_signature_stderr_size INTEGER NOT NULL DEFAULT 0,
+        progress_signature_stderr_mtime INTEGER NOT NULL DEFAULT 0,
+        progress_signature_worktree_head TEXT NOT NULL DEFAULT '',
+        progress_signature_worktree_max_mtime INTEGER NOT NULL DEFAULT 0,
+        progress_signature_worktree_file_count INTEGER NOT NULL DEFAULT 0,
+        progress_signature_at REAL NOT NULL DEFAULT 0,
+        progress_stall_count INTEGER NOT NULL DEFAULT 0,
+        progress_watchdog_window_seconds INTEGER NOT NULL DEFAULT 0,
+        transient_failures INTEGER NOT NULL DEFAULT 0,
+        max_transient_failures INTEGER NOT NULL DEFAULT 8,
+        last_error TEXT, last_failure_class TEXT, last_failure_reason TEXT,
+        next_attempt_at REAL NOT NULL DEFAULT 0, updated_at REAL NOT NULL DEFAULT 0
+    );
+    CREATE TABLE semantic_attempts (
+        attempt_id TEXT PRIMARY KEY, job_id INTEGER NOT NULL, status TEXT NOT NULL,
+        failure_class TEXT, failure_reason TEXT, started_at REAL, completed_at REAL,
+        returncode INTEGER, cost_usd REAL NOT NULL DEFAULT 0,
+        cost_accounted INTEGER NOT NULL DEFAULT 0, cost_known INTEGER NOT NULL DEFAULT 0,
+        input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0,
+        cache_read_tokens INTEGER NOT NULL DEFAULT 0, cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
+        tokens_known INTEGER NOT NULL DEFAULT 0
+    );
+    """
+)
+stdout_log = tmpdir / "reviewer.out"
+stderr_log = tmpdir / "reviewer.err"
+stdout_log.write_text("")
+stderr_log.write_text("")
+stale = time.time() - 2000
+os.utime(str(stdout_log), (stale, stale))
+os.utime(str(stderr_log), (stale, stale))
+
+# Seed a reviewer row that looks stalled: stale signature, past window.
+# Watchdog MUST skip it because worker_role = "reviewer".
+conn.execute(
+    """INSERT INTO jobs(id, repo, run_id, status, worker_pid, worker_pgid,
+                       worker_started_at, worker_role, latest_attempt_id,
+                       worker_deadline_at, worker_stdout_path, worker_stderr_path,
+                       max_pass_runtime_seconds,
+                       progress_signature_stdout_size,
+                       progress_signature_stdout_mtime,
+                       progress_signature_stderr_size,
+                       progress_signature_stderr_mtime,
+                       progress_signature_worktree_head,
+                       progress_signature_worktree_max_mtime,
+                       progress_signature_worktree_file_count,
+                       progress_signature_at,
+                       last_error, last_failure_class, last_failure_reason,
+                       next_attempt_at, updated_at)
+       VALUES (1, '/tmp', 'run-reviewer', 'RUNNING', 99999, 99999,
+               ?, 'reviewer', 'attempt-reviewer',
+               ?, ?, ?, 600,
+               0, ?, 0, ?, '', -1, -1,
+               ?, NULL, NULL, NULL, 0, 0)""",
+    (time.time(), time.time() + 600, str(stdout_log), str(stderr_log),
+     int(stale), int(stale), time.time() - 1000),
+)
+conn.execute(
+    "INSERT INTO semantic_attempts(attempt_id, job_id, status) "
+    "VALUES ('attempt-reviewer', 1, 'RUNNING')"
+)
+conn.commit()
+
+calls = []
+def fake_term(pid, pgid, identity, started):
+    calls.append(pid)
+    return True
+
+summary = tick(conn, terminate=fake_term)
+assert summary["considered"] == 0, f"reviewer must NOT be considered: {summary}"
+assert calls == [], f"watchdog must not terminate reviewer: {calls}"
+
+# Reviewer row must be untouched.
+r = conn.execute(
+    "SELECT status, last_failure_class, worker_pid FROM jobs WHERE id=1"
+).fetchone()
+assert r[0] == "RUNNING", f"reviewer row mutated: status={r[0]}"
+assert r[1] is None, f"reviewer row mutated: last_failure_class={r[1]}"
+assert r[2] == 99999, f"reviewer row mutated: worker_pid={r[2]}"
+
+import shutil
+shutil.rmtree(str(tmpdir))
+print("PASS watchdog never considers reviewer role")
+PY
+
 echo
 echo "ALL PROGRESS-WATCHDOG TESTS PASS"
