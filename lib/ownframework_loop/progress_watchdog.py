@@ -37,8 +37,23 @@ from typing import Any, Iterable
 
 SCHEMA = "ownframework-loop-progress-watchdog/v1"
 
-DEFAULT_WATCHDOG_WINDOW_SECONDS = 180
-WATCHDOG_WINDOW_FRACTION = 6  # window = max(DEFAULT, budget // FRACTION)
+# Watchdog window derivation:
+#   window = max(DEFAULT_WATCHDOG_WINDOW_SECONDS, max_pass_runtime_seconds // WATCHDOG_WINDOW_FRACTION)
+#
+# The window is the bounded no-progress grace period the watchdog grants
+# before force-terminating an inflight worker. It MUST stay below the
+# packet's max_pass_runtime_seconds (the wallclock deadline already enforces
+# that ceiling) and MUST stay well above a provider's natural silent-thinking
+# windows. Empirical Claude (MiniMax-M3) thinking pauses in production can
+# exceed 5 minutes for non-trivial packets without producing observable IO;
+# a 180s window produced false-positive kills of normal healthy workers
+# (live canary job 82 attempt 11999c96 was force-terminated at t=361s after
+# a legitimate scratch-output advance at t=180s). The window floor is
+# therefore raised to 600s, which still gives the watchdog 6+ minutes of
+# lead time over a 10-minute budget and 12+ minutes over a 30-minute
+# budget while tolerating realistic long thinking phases.
+DEFAULT_WATCHDOG_WINDOW_SECONDS = 600
+WATCHDOG_WINDOW_FRACTION = 4  # window = max(DEFAULT, budget // FRACTION)
 WATCHDOG_MIN_BUDGET_FOR_FRACTION = 60
 
 

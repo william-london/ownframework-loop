@@ -61,13 +61,14 @@ assert watchdog_window_seconds(30) == DEFAULT_WATCHDOG_WINDOW_SECONDS
 # Sub-floor budgets honor DEFAULT
 assert watchdog_window_seconds(59) == DEFAULT_WATCHDOG_WINDOW_SECONDS
 
-# Floor+budget-6th for reasonable budgets
-assert watchdog_window_seconds(60)  == DEFAULT_WATCHDOG_WINDOW_SECONDS     # 60//6 == 10 < default
-assert watchdog_window_seconds(180) == DEFAULT_WATCHDOG_WINDOW_SECONDS     # 180//6 == 30 < default
-assert watchdog_window_seconds(1800) == 300                                # 1800//6 == 300
-assert watchdog_window_seconds(3600) == 600                                # 3600//6 == 600
-assert watchdog_window_seconds(7200) == 1200                               # 7200//6 == 1200
-print("PASS watchdog_window_seconds honors bounded floor+budget // 6")
+# Floor+budget-4th for reasonable budgets
+assert watchdog_window_seconds(60)   == DEFAULT_WATCHDOG_WINDOW_SECONDS   # 60//4 == 15 < default
+assert watchdog_window_seconds(600)  == DEFAULT_WATCHDOG_WINDOW_SECONDS   # 600//4 == 150 < default
+assert watchdog_window_seconds(1800) == DEFAULT_WATCHDOG_WINDOW_SECONDS   # 1800//4 == 450 < default
+assert watchdog_window_seconds(2400) == 600                                # 2400//4 == 600 == default
+assert watchdog_window_seconds(3600) == 900                                # 3600//4 == 900
+assert watchdog_window_seconds(7200) == 1800                               # 7200//4 == 1800
+print("PASS watchdog_window_seconds honors bounded floor+budget // 4")
 PY
 
 # ---------------------------------------------------------------------------
