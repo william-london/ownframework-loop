@@ -579,6 +579,14 @@ def tick(
             continue
 
         # Mark stalled attempt and request retry.
+        # v1.0.0 race fix: do not constrain by status='RUNNING'.
+        # The dispatcher's exit handler runs under BEGIN IMMEDIATE and
+        # may have already moved status to BACKOFF/QUEUED before this
+        # UPDATE acquires the lock. Constraining the watchdog UPDATE
+        # would silently no-op and let the dispatcher's runner-classifier
+        # overwrite the watchdog's authoritative progress_stalled
+        # classification. The watchdog is the authority for stalled
+        # workers; this UPDATE always wins.
         try:
             conn.execute(
                 """
@@ -598,7 +606,7 @@ def tick(
                     transient_failures = transient_failures + 1,
                     next_attempt_at = MAX(next_attempt_at, ?),
                     updated_at = ?
-                WHERE id = ? AND status = 'RUNNING'
+                WHERE id = ?
                 """,
                 (
                     f"watchdog_no_progress_window={int(window)}",
@@ -609,6 +617,8 @@ def tick(
             )
             # Append a FAILED attempt row bound to the latest attempt so
             # callers watching semantic_attempts see the watchdog kill.
+            # v1.0.0 race fix: do not constrain by status='RUNNING'
+            # (same reason as the jobs UPDATE above).
             latest_attempt = str(row["latest_attempt_id"] or "")
             if latest_attempt:
                 conn.execute(
@@ -621,7 +631,7 @@ def tick(
                         tokens_known=0,
                         failure_class='progress_stalled',
                         failure_reason=?
-                    WHERE attempt_id=? AND job_id=? AND status='RUNNING'
+                    WHERE attempt_id=? AND job_id=?
                     """,
                     (
                         float(now),
