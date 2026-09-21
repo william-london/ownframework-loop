@@ -28,12 +28,33 @@ Architectural shape:
 
     semantic worker (Bash sandbox unchanged)
         |
-        |  ofloop-research-broker --op read --url <u> --evidence-dir <e>
+        |  ofloop-research-broker --op <op> --<args> --evidence-dir <e>
         |                            --run-id <r> --attempt <a>
-        |                            --max-bytes N --kind <k>
+        |                            --request-id <UUIDv4>
+        |                            --request-digest <64-hex>
         |
         v
-    broker validates -> reads -> writes evidence -> returns receipt path
+    broker validates -> _browse() SSRF-primed read -> writes evidence
+    -> returns receipt path
+
+Every outbound HTTP exchange (read / asset-read / search) routes
+through the single ``_browse()`` transport, which:
+
+- DNS-pre-resolves every host and refuses private/loopback/link-local/
+  multicast/metadata/documentation/benchmarking/reserved/unique-local
+  /IPv4-mapped-IPv6/6to4/TEREDO addresses (RFC 6890 + IANA) BEFORE
+  socket connect;
+- re-validates the redirect chain at every hop with the same rules;
+- caps response bytes (decompressed) per op;
+- caps asset bytes via content-addressed artifact dir;
+- scrubs credential-shaped env vars before any request;
+- inherits no Authorization / Cookie / X-API-Key headers.
+
+Search is GET-only via wikipedia's REST endpoint. The historical
+``ddg-lite`` backend (form-POST) was removed in the third mid-run
+bridge repair because its POST transport bypassed ``_browse()``;
+no operator-controlled network call may bypass the canonical SSRF
+primitive.
 
 Run ``ofloop-research-broker --help`` for operation reference. Run
 ``ofloop-research-broker --op ping`` for identity / version / SHA-256,
@@ -47,7 +68,6 @@ import datetime as _dt
 import hashlib
 import hmac
 import html as _html
-import http.client as _http_client
 import ipaddress
 import json
 import os
@@ -107,13 +127,22 @@ SEARCH_USER_AGENT = f"OwnFrameworkLoop-ResearchBroker/{BROKER_VERSION}"
 
 # Provider-neutral search backend abstraction. The worker contract
 # says ``--op search --query <q>``; the broker chooses the backend.
-# Wikipedia REST query remains the default because it is unauthenticated,
-# stable, and free of anti-bot restrictions. Additional backends can be
-# commissioned by the operator by adding a name to ``SEARCH_BACKENDS``
-# and an ``_search_<name>`` function. Backend credentials (if any) live
-# in supervisor-side env (e.g. ``OFLOOP_SEARCH_BRAVE_TOKEN``); the
-# worker never sees them.
-SEARCH_BACKENDS = frozenset(("wikipedia", "ddg-lite"))
+#
+# The whole broker is HTTP/HTTPS GET-only — there is no POST path.
+# The historical ``ddg-lite`` backend required a form-POST to
+# ``https://lite.duckduckgo.com/lite/`` and therefore bypassed the
+# unified ``_browse()`` SSRF / byte-cap / redirect-re-validate
+# transport, which violated the third-mid-run bridge boundary
+# invariant (no operator-controlled network call may bypass the
+# canonical SSRF primitive). ddg-lite is REMOVED; only wikipedia
+# (the GET endpoint) remains. Operator-commissioned search providers
+# (Brave, Kagi, etc.) can be re-added ONLY by adding an
+# ``_search_<name>`` function whose outbound transport is
+# ``_browse()`` — there is no path for a backend to bypass it.
+#
+# The worker contract is unchanged: ``--op search --query <q>``.
+# The broker is the only authority that picks a search provider.
+SEARCH_BACKENDS = frozenset(("wikipedia",))
 SEARCH_DEFAULT_BACKEND = "wikipedia"
 
 
@@ -522,8 +551,14 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--kind-cap", type=int, default=128,
                    help="Maximum bytes for --kind (default 128).")
     p.add_argument("--search-backend", default=None,
-                   choices=("wikipedia", "ddg-lite"),
-                   help="Provider-neutral search backend (default: wikipedia).")
+                   choices=("wikipedia",),
+                   help=(
+                       "Provider-neutral search backend (default: wikipedia). "
+                       "ddg-lite was REMOVED in the third mid-run bridge "
+                       "repair because its form-POST transport bypassed the "
+                       "canonical _browse() SSRF primitive; only wikipedia "
+                       "(GET-only via _browse()) is currently commissioned."
+                   ))
     return p
 
 
@@ -580,8 +615,10 @@ def _emit_help() -> dict[str, Any]:
             "from URL path.",
             "Inherited credential env vars stripped before any request.",
             "Provider-neutral search: --op search dispatches to wikipedia "
-            "(default) or ddg-lite based on --search-backend; backend "
-            "identity is recorded in the receipt.",
+            "(the only commissioned backend); backend identity is "
+            "recorded in the receipt. ddg-lite was removed because "
+            "its POST transport bypassed the canonical _browse() "
+            "SSRF primitive (third mid-run bridge repair).",
         ],
     }
 
@@ -1173,89 +1210,25 @@ def _search_wikipedia(query: str) -> tuple[list[dict[str, str]], dict[str, Any]]
 
 
 def _search_ddg_lite(query: str) -> tuple[list[dict[str, str]], dict[str, Any]]:
-    """DuckDuckGo Lite HTML backend (https://lite.duckduckgo.com/lite/).
+    """REMOVED — was the historical DuckDuckGo Lite HTML backend.
 
-    The lite endpoint is unauthenticated and HTML-rendered, with no
-    anti-bot restrictions on the worker side. We POST-form-encode the
-    query and parse the result table. Operator-supplied query only;
-    no credentials needed.
+    The whole broker is HTTP/HTTPS GET-only. ddg-lite requires a
+    form-POST to ``https://lite.duckduckgo.com/lite/``, which would
+    bypass the canonical ``_browse()`` SSRF primitive. The third
+    mid-run repair removes this backend entirely.
+
+    This function is preserved as a hard refusal so any caller
+    (including stale tests or a future operator regression that
+    re-enables the dispatcher branch) gets a fail-closed response
+    instead of silently using a non-canonical transport.
     """
-    endpoint = "https://lite.duckduckgo.com/lite/"
-    body = _urllib_parse.urlencode({"q": query}).encode("utf-8")
-    parsed = _urllib_parse.urlparse(endpoint)
-    host = parsed.hostname
-    if host is None:
-        raise InvalidRequest("ddg-lite endpoint unparseable")
-    conn = _http_client.HTTPSConnection(
-        host, 443, timeout=READ_CONNECT_TIMEOUT,
-        context=_ssl.create_default_context(),
+    raise InvalidRequest(
+        "search backend 'ddg-lite' is removed; the only commissioned "
+        "search backend is 'wikipedia' (GET-only, via _browse()). "
+        "Any new backend must route its outbound transport through "
+        "_browse(); POST-only / connection-pool / non-_browse() "
+        "transports are not part of the public-network authority."
     )
-    try:
-        conn.request(
-            "POST", parsed.path or "/", body=body,
-            headers={
-                "User-Agent": SEARCH_USER_AGENT,
-                "Content-Type": "application/x-www-form-urlencoded",
-                "Accept": "text/html,application/xhtml+xml",
-            },
-        )
-        resp = conn.getresponse()
-        raw = resp.read(SEARCH_DEFAULT_MAX_BYTES + 1)
-        if len(raw) > SEARCH_DEFAULT_MAX_BYTES:
-            raw = raw[:SEARCH_DEFAULT_MAX_BYTES]
-            truncated = True
-        else:
-            truncated = False
-        status_code = resp.status
-        reason = resp.reason
-    finally:
-        conn.close()
-    if status_code != 200:
-        raise TransientFailure(
-            f"ddg-lite search backend returned HTTP {status_code} {reason}"
-        )
-    text = raw.decode("utf-8", errors="replace")
-    # DDG Lite result links live in <a class="result-link" href="..."> and
-    # snippets live in <td class="result-snippet">. We grab the pairs.
-    link_re = _re.compile(
-        r'<a[^>]+class="result-link"[^>]+href="([^"]+)"[^>]*>(.*?)</a>',
-        _re.IGNORECASE | _re.DOTALL,
-    )
-    snippet_re = _re.compile(
-        r'<td[^>]+class="result-snippet"[^>]*>(.*?)</td>',
-        _re.IGNORECASE | _re.DOTALL,
-    )
-    raw_links = link_re.findall(text)
-    raw_snippets = snippet_re.findall(text)
-    results: list[dict[str, str]] = []
-    for i, (href, title_html) in enumerate(raw_links):
-        title = _re.sub(r"<[^>]+>", "", title_html).strip()
-        if not title:
-            continue
-        snippet_html = raw_snippets[i] if i < len(raw_snippets) else ""
-        snippet = _re.sub(r"<[^>]+>", "", snippet_html).strip()
-        # DDG sometimes gives redirect-style URLs; pass through as-is —
-        # the worker may need to follow them with op=read.
-        results.append({
-            "url": href,
-            "title": title,
-            "snippet": snippet,
-            "rank": str(i),
-        })
-        if len(results) >= SEARCH_MAX_RESULTS:
-            break
-    debug = {
-        "status_code": status_code,
-        "response_bytes": len(raw),
-        "response_sha256": hashlib.sha256(raw).hexdigest(),
-        "redirect_chain": [],
-        "connect_log": [],
-        "final_url": endpoint,
-        "request_url": endpoint,
-        "endpoint": endpoint,
-        "truncated": truncated,
-    }
-    return results, debug
 
 
 def _op_search(args: argparse.Namespace) -> dict[str, Any]:
@@ -1272,12 +1245,18 @@ def _op_search(args: argparse.Namespace) -> dict[str, Any]:
     query = _sanitize_query(args.query or "")
     evidence_dir = Path(args.evidence_dir).expanduser()
     backend = str(args.search_backend or SEARCH_DEFAULT_BACKEND)
+    # Backend selection. The broker is the ONLY authority that picks a
+    # search provider; the worker contract is ``--op search --query <q>``.
+    # Wikipedia is the only currently-commissioned backend, and it
+    # MUST route through ``_browse()`` (which it does).
     if backend == "wikipedia":
         results, debug = _search_wikipedia(query)
         search_backend_label = "wikipedia-rest-query"
     elif backend == "ddg-lite":
-        results, debug = _search_ddg_lite(query)
-        search_backend_label = "ddg-lite-html"
+        # Hard refusal. ddg-lite was removed in the third mid-run
+        # repair because its POST transport bypassed _browse().
+        results, debug = _search_ddg_lite(query)  # raises InvalidRequest
+        search_backend_label = "ddg-lite-refused"  # unreachable
     else:  # pragma: no cover -- argparse choices pre-validate
         raise InvalidRequest(f"unknown search backend: {backend!r}")
     op_id = _op_id()

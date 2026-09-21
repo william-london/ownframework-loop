@@ -57,6 +57,118 @@ def _trusted_executable(value: Any, *, field: str) -> tuple[str, str]:
     return str(p), h.hexdigest()
 
 
+def read_commissioning_evidence(
+    name: str,
+    *,
+    evidence_dir: Path | None = None,
+) -> dict[str, Any]:
+    """Canonical read/verify API for privileged-capability evidence.
+
+    Returns the FULL evidence document (the same shape
+    ``commission_capability`` wrote) AFTER verifying:
+
+      - evidence file exists and is a regular non-symlink file
+        with private mode;
+      - evidence JSON is a single object;
+      - ``schema`` matches the canonical ``EVIDENCE_SCHEMA``;
+      - ``evidence_sha256`` matches the canonical SHA-256 over the
+        rest of the document (i.e. the receipt is intact);
+      - ``capability`` matches the requested ``name``;
+      - the broker executable path resolves to a regular
+        non-symlink file, has private mode, and its CURRENT bytes
+        hash to the expected ``provider_identity.executable_sha256``;
+      - the expected ``provider_identity.executable_sha256`` is
+        non-empty and canonical (64-char lowercase hex).
+
+    Returns the broker executable path + current SHA on success.
+
+    Raises ``CommissioningError`` on any drift / missing / private /
+    unsymlink / sha-mismatch condition. Does NOT catch and return
+    a soft error — callers must treat CommissioningError as fail
+    closed.
+    """
+    ev_dir = Path(evidence_dir).expanduser() if evidence_dir is not None else default_evidence_dir()
+    path = evidence_path(name, ev_dir)
+    if not path.is_file() or path.is_symlink():
+        raise CommissioningError(
+            f"{name} commissioning evidence missing or symlink: {path}"
+        )
+    st = path.stat()
+    if not stat.S_ISREG(st.st_mode):
+        raise CommissioningError(
+            f"{name} commissioning evidence not a regular file: {path}"
+        )
+    if stat.S_IMODE(st.st_mode) & 0o022:
+        raise CommissioningError(
+            f"{name} commissioning evidence must not be group/world writable"
+        )
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise CommissioningError(
+            f"{name} commissioning evidence unreadable: {exc}"
+        )
+    try:
+        doc = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise CommissioningError(
+            f"{name} commissioning evidence not JSON: {exc}"
+        )
+    if not isinstance(doc, dict):
+        raise CommissioningError(
+            f"{name} commissioning evidence is not a JSON object"
+        )
+    if doc.get("schema") != EVIDENCE_SCHEMA:
+        raise CommissioningError(
+            f"{name} commissioning evidence schema mismatch"
+        )
+    if doc.get("capability") != name:
+        raise CommissioningError(
+            f"{name} commissioning evidence capability mismatch"
+        )
+    expected_digest = doc.get("evidence_sha256")
+    if not isinstance(expected_digest, str) or not expected_digest:
+        raise CommissioningError(
+            f"{name} commissioning evidence digest missing"
+        )
+    raw = dict(doc)
+    raw.pop("evidence_sha256", None)
+    if expected_digest != hashlib.sha256(_canonical(raw)).hexdigest():
+        raise CommissioningError(
+            f"{name} commissioning evidence digest mismatch"
+        )
+    provider_identity = doc.get("provider_identity") or {}
+    if not isinstance(provider_identity, dict):
+        raise CommissioningError(
+            f"{name} commissioning evidence provider_identity missing"
+        )
+    executable_path = provider_identity.get("executable")
+    expected_sha = provider_identity.get("executable_sha256")
+    if not isinstance(executable_path, str) or not executable_path:
+        raise CommissioningError(
+            f"{name} commissioning evidence missing broker executable"
+        )
+    if (
+        not isinstance(expected_sha, str)
+        or len(expected_sha) != 64
+        or any(c not in "0123456789abcdef" for c in expected_sha)
+    ):
+        raise CommissioningError(
+            f"{name} commissioning evidence missing canonical broker SHA"
+        )
+    actual_path, current_sha = _trusted_executable(
+        executable_path, field=f"{name}.provider_identity.executable"
+    )
+    if current_sha != expected_sha:
+        raise CommissioningError(
+            f"{name} commissioning broker executable SHA drift: "
+            f"expected={expected_sha} current={current_sha}"
+        )
+    doc["_broker_path"] = actual_path
+    doc["_broker_sha256"] = current_sha
+    return doc
+
+
 def _provider_identity(name: str, entry: dict[str, Any]) -> dict[str, Any]:
     from . import capabilities as cap
     if name == "container.docker":
@@ -293,5 +405,5 @@ def verify_commissioning(
 __all__ = [
     "CANARY_RESULT_SCHEMA", "CANARY_VERSION", "CommissioningError",
     "EVIDENCE_SCHEMA", "commission_capability", "default_evidence_dir",
-    "evidence_path", "verify_commissioning",
+    "evidence_path", "read_commissioning_evidence", "verify_commissioning",
 ]
