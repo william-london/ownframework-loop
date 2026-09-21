@@ -31,6 +31,14 @@ CAPABILITY_ENV_ALLOWED_KEYS = frozenset({
     "npm_config_store_dir",
     "PLAYWRIGHT_BROWSERS_PATH",
     "PLAYWRIGHT_SKIP_BROWSER_GC",
+    # Governed public research authority (ADR
+    # docs/architecture/RESEARCH_AUTHORITY.md): non-secret capability
+    # identity that lets the worker invoke the commissioned broker.
+    # None of these are credentials; the broker is the authority surface.
+    "OFLOOP_RESEARCH_BROKER",
+    "OFLOOP_RESEARCH_BROKER_SHA256",
+    "OFLOOP_RESEARCH_BROKER_VERSION",
+    "OFLOOP_RESEARCH_EVIDENCE_DIR",
 })
 
 HOST_IPC_ENV_KEYS = frozenset({
