@@ -392,6 +392,21 @@ def _apply_failure_policy(
     if row is None:
         raise RuntimeError(f"supervisor job missing during failure policy: {job_id}")
 
+    # v1.0.0 progress-watchdog: when the no-progress watchdog already
+    # marked this attempt, do not let a later dispatcher exit handler
+    # overwrite the watchdog's classification. Watchdog's failure_class
+    # is authoritative for that kill: we keep its failure_class /
+    # failure_reason, only re-derive the operational retry policy
+    # (status, counters, backoff) from the watchdog's signal.
+    watchdog_already_classified = (
+        str(row["last_failure_class"] or "") == "progress_stalled"
+    )
+    if watchdog_already_classified:
+        # Reuse the watchdog's authoritative classification; the
+        # dispatcher's runner-classifier output is discarded.
+        failure_class = "progress_stalled"
+        failure_reason = str(row["last_failure_reason"] or failure_reason)
+
     immediate = failure_class in {
         "configuration",
         "invariant",

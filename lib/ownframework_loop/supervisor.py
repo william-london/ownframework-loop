@@ -2270,6 +2270,25 @@ def run_one(*, db_path: Path | None = None, timeout_seconds: int = 0) -> dict[st
                     )
                 else:
                     failure_class, failure_reason = _classify_runner_failure(result)
+                # v1.0.0 progress-watchdog: if the watchdog already
+                # classified this kill as progress_stalled, keep its
+                # authoritative classification and skip overwriting the
+                # semantic_attempts row with the runner classifier's
+                # output. Watchdog already wrote 'progress_stalled'
+                # before this exit handler ran.
+                try:
+                    current_lfc_row = conn.execute(
+                        "SELECT last_failure_class FROM jobs WHERE id=?",
+                        (int(job["id"]),),
+                    ).fetchone()
+                    if (
+                        current_lfc_row is not None
+                        and str(current_lfc_row[0] or "") == "progress_stalled"
+                    ):
+                        failure_class = "progress_stalled"
+                        failure_reason = "watchdog_no_progress_window"
+                except sqlite3.Error:
+                    pass
                 detail = (
                     f"runner rc={result.returncode}: "
                     f"{result.stderr or result.stdout}"
