@@ -48,6 +48,7 @@ import hashlib
 import hmac
 import html as _html
 import http.client as _http_client
+import ipaddress
 import json
 import os
 import re as _re
@@ -61,6 +62,7 @@ import unicodedata
 import urllib.parse as _urllib_parse
 import uuid as _uuid
 from html.parser import HTMLParser as _HTMLParser
+from ipaddress import AddressValueError
 from pathlib import Path
 from typing import Any, NoReturn
 
@@ -102,6 +104,17 @@ ASSET_MIME_ALLOWLIST = frozenset((
 SEARCH_DEFAULT_ENDPOINT = "https://en.wikipedia.org/w/api.php"
 SEARCH_MAX_RESULTS = 12
 SEARCH_USER_AGENT = f"OwnFrameworkLoop-ResearchBroker/{BROKER_VERSION}"
+
+# Provider-neutral search backend abstraction. The worker contract
+# says ``--op search --query <q>``; the broker chooses the backend.
+# Wikipedia REST query remains the default because it is unauthenticated,
+# stable, and free of anti-bot restrictions. Additional backends can be
+# commissioned by the operator by adding a name to ``SEARCH_BACKENDS``
+# and an ``_search_<name>`` function. Backend credentials (if any) live
+# in supervisor-side env (e.g. ``OFLOOP_SEARCH_BRAVE_TOKEN``); the
+# worker never sees them.
+SEARCH_BACKENDS = frozenset(("wikipedia", "ddg-lite"))
+SEARCH_DEFAULT_BACKEND = "wikipedia"
 
 
 # -------------------------------------------------------------------- #
@@ -162,59 +175,95 @@ class ForbiddenHeader(BrokerError):
 #   - multicast / broadcast / unspecified
 #   - IPv6 unique-local (fc00::/7)
 #   - IPv4-mapped IPv6 (::ffff:0:0/96) -- would otherwise bypass v4 rules
+#   - documentation / TEST-NET (192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24)
+#   - benchmarking (198.18.0.0/15)
+#   - reserved / future-use (240.0.0.0/4)
+#   - 6to4 (2002::/16) -- would otherwise bypass v4 rules
+#   - TEREDO (2001::/32)
+#   - discard prefix (100::/64)
+#   - ORCHID v2 (2001:20::/28)
+#   - IPv6 site-local (deprecated fec0::/10)
 #
-# Additional: any address returned by getaddrinfo that is not in one of the
-# global unicast ranges is refused. The set below is the smallest safe set;
-# see research_safety.py for the runtime-bound authoritative check used by
-# the package-side resolution layer.
+# Implemented via Python stdlib ``ipaddress`` which classifies
+# every special-use range defined by IANA / RFC 6890.
 
-def _forbidden_address(family: int, addr: str) -> str | None:
-    """Return a human reason if addr is in a denied range, else None.
+# All IPv4 special-use ranges per RFC 6890 / IANA.
+_SPECIAL_USE_IPV4 = frozenset((
+    ipaddress.IPv4Network(net) for net in (
+        "0.0.0.0/8",          # this network
+        "10.0.0.0/8",         # private-use
+        "100.64.0.0/10",      # carrier-grade NAT
+        "127.0.0.0/8",        # loopback
+        "169.254.0.0/16",     # link-local (incl. cloud metadata)
+        "172.16.0.0/12",      # private-use
+        "192.0.0.0/24",       # IETF protocol assignments
+        "192.0.2.0/24",       # TEST-NET-1 (documentation)
+        "192.168.0.0/16",     # private-use
+        "198.18.0.0/15",      # benchmarking
+        "198.51.100.0/24",    # TEST-NET-2 (documentation)
+        "203.0.113.0/24",     # TEST-NET-3 (documentation)
+        "224.0.0.0/4",        # multicast
+        "240.0.0.0/4",        # reserved / future use
+        "255.255.255.255/32", # limited broadcast
+    )
+))
 
-    Fails closed: any error in the inspection itself is treated as denied.
+# All IPv6 special-use ranges per RFC 6890 / IANA / RFC 4193.
+_SPECIAL_USE_IPV6 = frozenset((
+    ipaddress.IPv6Network(net) for net in (
+        "::/128",                # unspecified
+        "::1/128",               # loopback
+        "::ffff:0:0/96",         # IPv4-mapped (reapply v4 rules)
+        "64:ff9b::/96",          # IPv4-IPv6 translation
+        "64:ff9b:1::/48",        # IPv4-IPv6 translation (local)
+        "100::/64",              # discard prefix
+        "2001::/32",             # TEREDO
+        "2001:20::/28",          # ORCHIDv2
+        "2001:db8::/32",         # documentation
+        "2002::/16",             # 6to4 (reapply v4 rules)
+        "fc00::/7",              # unique-local
+        "fe80::/10",             # link-local
+        "fec0::/10",             # deprecated site-local
+        "ff00::/8",              # multicast
+    )
+))
+
+
+def _classify_address(family: int, addr: str) -> tuple[bool, str]:
+    """Return ``(acceptable, reason)``.
+
+    Acceptable means the address is global unicast suitable for
+    connecting to a public-internet host. Any address in a
+    special-use range is refused with a precise reason.
     """
     try:
         packed = socket.inet_pton(family, addr)
     except OSError as exc:
-        return f"address unparseable: {exc}"
-
+        return (False, f"address unparseable: {exc}")
     if family == socket.AF_INET:
-        b = packed  # 4 bytes
-        first, second = b[0], b[1]
-        if first == 127:
-            return "loopback"
-        if first == 10:
-            return "rfc1918"
-        if first == 172 and 16 <= second <= 31:
-            return "rfc1918"
-        if first == 192 and second == 168:
-            return "rfc1918"
-        if first == 169 and second == 254:
-            return "link-local"
-        if first == 100 and 64 <= second <= 127:
-            return "carrier-grade-nat"
-        if first == 0:
-            return "unspecified"
-        if first >= 224:
-            return "multicast-or-broadcast"
-        return None
+        try:
+            ip = ipaddress.IPv4Address(packed)
+        except (ValueError, AddressValueError):
+            return (False, f"address unparseable as IPv4: {addr}")
+        # Defensive: reapply v4 rules to IPv4-mapped IPv6 addresses.
+        for net in _SPECIAL_USE_IPV4:
+            if ip in net:
+                return (False, f"special-use IPv4: {net}")
+        if not ip.is_global:
+            return (False, f"non-global IPv4: {ip}")
+        return (True, "global-unicast-ipv4")
     if family == socket.AF_INET6:
-        b = packed  # 16 bytes
-        if b == b"\x00" * 15 + b"\x01":
-            return "ipv6-loopback"
-        if b == b"\x00" * 16:
-            return "unspecified"
-        if (b[0] & 0xfe) == 0xfc:
-            return "ipv6-unique-local"
-        if b[0] == 0xfe and (b[1] & 0xc0) == 0x80:
-            return "ipv6-link-local"
-        if b[0] == 0xff:
-            return "ipv6-multicast"
-        # IPv4-mapped IPv6 (::ffff:a.b.c.d) -- reapply the v4 rules.
-        if b[:10] == b"\x00" * 10 and b[10] == 0xff and b[11] == 0xff:
-            return _forbidden_address(socket.AF_INET, socket.inet_ntop(socket.AF_INET, b[12:16]))
-        return None
-    return f"unknown address family: {family}"
+        try:
+            ip = ipaddress.IPv6Address(packed)
+        except (ValueError, AddressValueError):
+            return (False, f"address unparseable as IPv6: {addr}")
+        for net in _SPECIAL_USE_IPV6:
+            if ip in net:
+                return (False, f"special-use IPv6: {net}")
+        if not ip.is_global:
+            return (False, f"non-global IPv6: {ip}")
+        return (True, "global-unicast-ipv6")
+    return (False, f"unknown address family: {family}")
 
 
 def _resolve_and_validate(host: str) -> list[tuple[int, str]]:
@@ -244,8 +293,8 @@ def _resolve_and_validate(host: str) -> list[tuple[int, str]]:
                 addr = v4_addr
             except OSError:
                 pass
-        reason = _forbidden_address(family, addr)
-        if reason is not None:
+        acceptable, reason = _classify_address(family, addr)
+        if not acceptable:
             blocked_reasons.append(f"{addr} ({reason})")
             continue
         accepted.append((family, addr))
@@ -462,12 +511,19 @@ def _build_parser() -> argparse.ArgumentParser:
                    help="OwnFramework Loop run identity.")
     p.add_argument("--attempt", default=None,
                    help="OwnFramework Loop semantic attempt identity.")
+    p.add_argument("--request-id", default=None,
+                   help="OwnFramework Loop bridge request UUIDv4.")
+    p.add_argument("--request-digest", default=None,
+                   help="Deterministic SHA256 of canonical request fields.")
     p.add_argument("--max-bytes", type=int, default=None,
                    help="Maximum bytes (decompressed) for a single response.")
     p.add_argument("--kind", default=None,
                    help="Caller-supplied sub-kind label (free-form text).")
     p.add_argument("--kind-cap", type=int, default=128,
                    help="Maximum bytes for --kind (default 128).")
+    p.add_argument("--search-backend", default=None,
+                   choices=("wikipedia", "ddg-lite"),
+                   help="Provider-neutral search backend (default: wikipedia).")
     return p
 
 
@@ -514,13 +570,18 @@ def _emit_help() -> dict[str, Any]:
         "notes": [
             "HTTP/HTTPS GET only; no POST/PUT/PATCH/DELETE; no request body.",
             "URL userinfo refused; resolved addresses in private/loopback/"
-            "link-local/multicast/metadata ranges refused.",
+            "link-local/multicast/metadata/documentation/benchmarking/"
+            "reserved/unique-local ranges refused (RFC 6890 + IANA).",
+            "IPv4-mapped IPv6 (::ffff:a.b.c.d) re-applies the v4 deny rules.",
             "Redirect chain re-validated at every hop with the same rules.",
             "Response bytes capped; per-asset bytes capped; per-operation "
             "timeout enforced.",
             "Filenames derived from content digest + validated MIME, never "
             "from URL path.",
             "Inherited credential env vars stripped before any request.",
+            "Provider-neutral search: --op search dispatches to wikipedia "
+            "(default) or ddg-lite based on --search-backend; backend "
+            "identity is recorded in the receipt.",
         ],
     }
 
@@ -1027,19 +1088,31 @@ def _sanitize_query(q: str) -> str:
     return unicodedata.normalize("NFKC", q).strip()
 
 
-def _op_search(args: argparse.Namespace) -> dict[str, Any]:
-    """op=search: query a public search backend, return top results.
+def _receipt_base(args: argparse.Namespace, op: str) -> dict[str, Any]:
+    """Common fields every receipt includes so audit can attribute
+    the operation to its originating bridge request."""
+    return {
+        "ok": True,
+        "op": op,
+        "capability": BROKER_CAPABILITY_NAME,
+        "version": BROKER_VERSION,
+        "broker_sha256": _self_sha256(),
+        "op_id": _op_id(),
+        "run_id": str(args.run_id),
+        "attempt": str(args.attempt),
+        "request_id": str(args.request_id or ""),
+        "request_digest": str(args.request_digest or ""),
+        "kind": str(args.kind or "")[: args.kind_cap],
+        "started_at": _now_iso(),
+    }
 
-    Today the only backend is the Wikipedia REST query endpoint, which
-    returns unauthenticated JSON. The backend is operator-chosen, not
-    worker-chosen -- the broker is the authority. The worker surfaces
-    what the broker returns; nothing else.
+
+def _search_wikipedia(query: str) -> tuple[list[dict[str, str]], dict[str, Any]]:
+    """Wikipedia REST query backend.
+
+    Returns (results, debug). ``debug`` carries enough fields for the
+    receipt (status_code, response_bytes, request_url, endpoint, etc.).
     """
-    query = _sanitize_query(args.query or "")
-    evidence_dir = Path(args.evidence_dir).expanduser()
-    # Wikipedia REST query API. action=query, list=search, srsearch=<q>,
-    # format=json, srlimit=N -- returns a JSON envelope with results[]
-    # containing title, pageid, snippet, size, wordcount.
     q = _urllib_parse.urlencode({
         "action": "query",
         "list": "search",
@@ -1055,23 +1128,19 @@ def _op_search(args: argparse.Namespace) -> dict[str, Any]:
     )
     if response.status_code != 200:
         raise TransientFailure(
-            f"search backend returned HTTP {response.status_code} {response.reason}"
+            f"wikipedia search backend returned HTTP {response.status_code} {response.reason}"
         )
     try:
         envelope = json.loads(response.body.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise InvalidRequest(
-            f"search backend returned non-JSON envelope: {exc}"
+            f"wikipedia search backend returned non-JSON envelope: {exc}"
         )
     if not isinstance(envelope, dict):
-        raise InvalidRequest("search backend envelope is not a JSON object")
+        raise InvalidRequest("wikipedia search backend envelope is not a JSON object")
     raw_results = (envelope.get("query") or {}).get("search") or []
     if not isinstance(raw_results, list):
-        raise InvalidRequest("search backend results field is not an array")
-    # Each record maps to {url, title, snippet}. The wikipedia REST API
-    # returns titles without a URL component; we synthesize the article
-    # URL from the title (the worker can fetch it via op=read if it
-    # wants the article body).
+        raise InvalidRequest("wikipedia search backend results field is not an array")
     results: list[dict[str, str]] = []
     for r in raw_results:
         if not isinstance(r, dict):
@@ -1090,33 +1159,145 @@ def _op_search(args: argparse.Namespace) -> dict[str, Any]:
         })
         if len(results) >= SEARCH_MAX_RESULTS:
             break
-    op_id = _op_id()
-    started_at = _now_iso()
-    payload = {
-        "ok": True,
-        "op": "search",
-        "capability": BROKER_CAPABILITY_NAME,
-        "version": BROKER_VERSION,
-        "broker_sha256": _self_sha256(),
-        "op_id": op_id,
-        "run_id": str(args.run_id),
-        "attempt": str(args.attempt),
-        "kind": str(args.kind or "")[: args.kind_cap],
-        "started_at": started_at,
-        "finished_at": _now_iso(),
-        "query": query,
-        "search_backend": "wikipedia-rest-query",
-        "search_endpoint": SEARCH_DEFAULT_ENDPOINT,
-        "request_url": url,
+    debug = {
         "status_code": response.status_code,
         "response_bytes": len(response.body),
         "response_sha256": hashlib.sha256(response.body).hexdigest(),
         "redirect_chain": response.redirect_chain,
         "connect_log": response.connect_log,
+        "final_url": response.final_url,
+        "request_url": url,
+        "endpoint": SEARCH_DEFAULT_ENDPOINT,
+    }
+    return results, debug
+
+
+def _search_ddg_lite(query: str) -> tuple[list[dict[str, str]], dict[str, Any]]:
+    """DuckDuckGo Lite HTML backend (https://lite.duckduckgo.com/lite/).
+
+    The lite endpoint is unauthenticated and HTML-rendered, with no
+    anti-bot restrictions on the worker side. We POST-form-encode the
+    query and parse the result table. Operator-supplied query only;
+    no credentials needed.
+    """
+    endpoint = "https://lite.duckduckgo.com/lite/"
+    body = _urllib_parse.urlencode({"q": query}).encode("utf-8")
+    parsed = _urllib_parse.urlparse(endpoint)
+    host = parsed.hostname
+    if host is None:
+        raise InvalidRequest("ddg-lite endpoint unparseable")
+    conn = _http_client.HTTPSConnection(
+        host, 443, timeout=READ_CONNECT_TIMEOUT,
+        context=_ssl.create_default_context(),
+    )
+    try:
+        conn.request(
+            "POST", parsed.path or "/", body=body,
+            headers={
+                "User-Agent": SEARCH_USER_AGENT,
+                "Content-Type": "application/x-www-form-urlencoded",
+                "Accept": "text/html,application/xhtml+xml",
+            },
+        )
+        resp = conn.getresponse()
+        raw = resp.read(SEARCH_DEFAULT_MAX_BYTES + 1)
+        if len(raw) > SEARCH_DEFAULT_MAX_BYTES:
+            raw = raw[:SEARCH_DEFAULT_MAX_BYTES]
+            truncated = True
+        else:
+            truncated = False
+        status_code = resp.status
+        reason = resp.reason
+    finally:
+        conn.close()
+    if status_code != 200:
+        raise TransientFailure(
+            f"ddg-lite search backend returned HTTP {status_code} {reason}"
+        )
+    text = raw.decode("utf-8", errors="replace")
+    # DDG Lite result links live in <a class="result-link" href="..."> and
+    # snippets live in <td class="result-snippet">. We grab the pairs.
+    link_re = _re.compile(
+        r'<a[^>]+class="result-link"[^>]+href="([^"]+)"[^>]*>(.*?)</a>',
+        _re.IGNORECASE | _re.DOTALL,
+    )
+    snippet_re = _re.compile(
+        r'<td[^>]+class="result-snippet"[^>]*>(.*?)</td>',
+        _re.IGNORECASE | _re.DOTALL,
+    )
+    raw_links = link_re.findall(text)
+    raw_snippets = snippet_re.findall(text)
+    results: list[dict[str, str]] = []
+    for i, (href, title_html) in enumerate(raw_links):
+        title = _re.sub(r"<[^>]+>", "", title_html).strip()
+        if not title:
+            continue
+        snippet_html = raw_snippets[i] if i < len(raw_snippets) else ""
+        snippet = _re.sub(r"<[^>]+>", "", snippet_html).strip()
+        # DDG sometimes gives redirect-style URLs; pass through as-is —
+        # the worker may need to follow them with op=read.
+        results.append({
+            "url": href,
+            "title": title,
+            "snippet": snippet,
+            "rank": str(i),
+        })
+        if len(results) >= SEARCH_MAX_RESULTS:
+            break
+    debug = {
+        "status_code": status_code,
+        "response_bytes": len(raw),
+        "response_sha256": hashlib.sha256(raw).hexdigest(),
+        "redirect_chain": [],
+        "connect_log": [],
+        "final_url": endpoint,
+        "request_url": endpoint,
+        "endpoint": endpoint,
+        "truncated": truncated,
+    }
+    return results, debug
+
+
+def _op_search(args: argparse.Namespace) -> dict[str, Any]:
+    """op=search: query a public search backend, return top results.
+
+    Provider-neutral: the worker contract is ``--op search --query <q>``.
+    The broker chooses the backend (``wikipedia`` or ``ddg-lite``);
+    the backend identity is recorded in the receipt so audit can
+    attribute the outbound disclosure to a known operator-chosen
+    provider. Wikipedia remains the default for stability / no
+    credentials; ddg-lite is an additional unauthenticated general-
+    public-web discovery backend.
+    """
+    query = _sanitize_query(args.query or "")
+    evidence_dir = Path(args.evidence_dir).expanduser()
+    backend = str(args.search_backend or SEARCH_DEFAULT_BACKEND)
+    if backend == "wikipedia":
+        results, debug = _search_wikipedia(query)
+        search_backend_label = "wikipedia-rest-query"
+    elif backend == "ddg-lite":
+        results, debug = _search_ddg_lite(query)
+        search_backend_label = "ddg-lite-html"
+    else:  # pragma: no cover -- argparse choices pre-validate
+        raise InvalidRequest(f"unknown search backend: {backend!r}")
+    op_id = _op_id()
+    payload = _receipt_base(args, "search")
+    payload.update({
+        "finished_at": _now_iso(),
+        "query": query,
+        "search_backend": search_backend_label,
+        "search_backend_kind": backend,
+        "search_endpoint": debug["endpoint"],
+        "request_url": debug["request_url"],
+        "status_code": debug["status_code"],
+        "response_bytes": debug["response_bytes"],
+        "response_sha256": debug["response_sha256"],
+        "redirect_chain": debug["redirect_chain"],
+        "connect_log": debug["connect_log"],
         "results": results,
         "results_count": len(results),
         "evidence_received_at": _now_iso(),
-    }
+    })
     receipt_path = _publish_evidence(evidence_dir, payload)
     return {
         "schema": BROKER_OPERATION_SCHEMA,
@@ -1125,13 +1306,14 @@ def _op_search(args: argparse.Namespace) -> dict[str, Any]:
         "op_id": op_id,
         "receipt_path": str(receipt_path),
         "query": query,
-        "search_backend": "wikipedia-rest-query",
+        "search_backend": search_backend_label,
+        "search_backend_kind": backend,
         "results_count": len(results),
         "results": results,
-        "redirect_chain": response.redirect_chain,
-        "final_url": response.final_url,
-        "status_code": response.status_code,
-        "response_bytes": len(response.body),
+        "redirect_chain": debug["redirect_chain"],
+        "final_url": debug["final_url"],
+        "status_code": debug["status_code"],
+        "response_bytes": debug["response_bytes"],
         "response_sha256": payload["response_sha256"],
         "broker_version": BROKER_VERSION,
     }
@@ -1161,18 +1343,8 @@ def _op_read(args: argparse.Namespace) -> dict[str, Any]:
         title = ""
     text_sha = hashlib.sha256(text.encode("utf-8")).hexdigest()
     op_id = _op_id()
-    started_at = _now_iso()
-    payload = {
-        "ok": True,
-        "op": "read",
-        "capability": BROKER_CAPABILITY_NAME,
-        "version": BROKER_VERSION,
-        "broker_sha256": _self_sha256(),
-        "op_id": op_id,
-        "run_id": str(args.run_id),
-        "attempt": str(args.attempt),
-        "kind": str(args.kind or "")[: args.kind_cap],
-        "started_at": started_at,
+    payload = _receipt_base(args, "read")
+    payload.update({
         "finished_at": _now_iso(),
         "url_original": url,
         "url_final": response.final_url,
@@ -1188,7 +1360,7 @@ def _op_read(args: argparse.Namespace) -> dict[str, Any]:
         "extracted_preview": text[:READ_TEXT_PREVIEW_BYTES],
         "extracted_truncated": len(text) > READ_TEXT_PREVIEW_BYTES,
         "max_bytes": max_bytes,
-    }
+    })
     receipt_path = _publish_evidence(evidence_dir, payload)
     return {
         "schema": BROKER_OPERATION_SCHEMA,
@@ -1237,18 +1409,8 @@ def _op_asset_read(args: argparse.Namespace) -> dict[str, Any]:
     # asset-only endpoints; the receipt records this explicitly so the
     # worker can decide to inspect the upstream page if it cares).
     op_id = _op_id()
-    started_at = _now_iso()
-    payload = {
-        "ok": True,
-        "op": "asset-read",
-        "capability": BROKER_CAPABILITY_NAME,
-        "version": BROKER_VERSION,
-        "broker_sha256": _self_sha256(),
-        "op_id": op_id,
-        "run_id": str(args.run_id),
-        "attempt": str(args.attempt),
-        "kind": str(args.kind or "")[: args.kind_cap],
-        "started_at": started_at,
+    payload = _receipt_base(args, "asset-read")
+    payload.update({
         "finished_at": _now_iso(),
         "url_original": url,
         "url_final": response.final_url,
@@ -1265,7 +1427,7 @@ def _op_asset_read(args: argparse.Namespace) -> dict[str, Any]:
             "license_link_header": response.headers.get("link", ""),
         },
         "usage_hints": [],
-    }
+    })
     receipt_path = _publish_evidence(evidence_dir, payload)
     return {
         "schema": BROKER_OPERATION_SCHEMA,
@@ -1286,6 +1448,14 @@ def _op_asset_read(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
+_REQUEST_ID_RE = _re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+)
+_REQUEST_DIGEST_RE = _re.compile(r"^[0-9a-f]{64}$")
+_RUN_ID_RE = _re.compile(r"^run-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}$")
+_ATTEMPT_ID_RE = _re.compile(r"^[A-Za-z0-9._:-]{1,64}$")
+
+
 def _validate_common(args: argparse.Namespace) -> None:
     """Common argument guards; raises InvalidRequest on failure."""
     if args.kind is not None and len(args.kind.encode("utf-8")) > args.kind_cap:
@@ -1296,6 +1466,22 @@ def _validate_common(args: argparse.Namespace) -> None:
         raise InvalidRequest("--run-id and --attempt are required")
     if not args.evidence_dir:
         raise InvalidRequest("--evidence-dir is required")
+    # The bridge gives every request a UUIDv4 request_id and a
+    # 64-char hex request_digest. The broker refuses anything else so
+    # a prompt-injected worker cannot smuggle arbitrary free-form text
+    # into receipts (which become part of the durable audit trail).
+    if not args.request_id or not _REQUEST_ID_RE.match(args.request_id):
+        raise InvalidRequest(
+            "--request-id must be a UUIDv4 (8-4-4-4-12 lowercase hex)"
+        )
+    if args.request_digest and not _REQUEST_DIGEST_RE.match(args.request_digest):
+        raise InvalidRequest(
+            "--request-digest must be a 64-char lowercase hex SHA256"
+        )
+    if not _RUN_ID_RE.match(args.run_id):
+        raise InvalidRequest("run-id does not match canonical format")
+    if not _ATTEMPT_ID_RE.match(args.attempt):
+        raise InvalidRequest("attempt has unsafe characters")
 
 
 # -------------------------------------------------------------------- #
@@ -1340,18 +1526,55 @@ def _emit_canary(
         refused_v6_unique_local = False
     except (SSRFRefused, BrokerError):
         refused_v6_unique_local = True
-    # Self-test 4: URL with userinfo refused.
+    # Self-test 4: TEST-NET-1 (documentation) refused.
+    try:
+        _resolve_and_validate("192.0.2.1")
+        refused_test_net = False
+    except (SSRFRefused, BrokerError):
+        refused_test_net = True
+    # Self-test 5: benchmarking range refused.
+    try:
+        _resolve_and_validate("198.18.0.1")
+        refused_benchmark = False
+    except (SSRFRefused, BrokerError):
+        refused_benchmark = True
+    # Self-test 6: IPv4-mapped IPv6 v4 rules still fire.
+    try:
+        _classify_address(
+            socket.AF_INET6, "::ffff:127.0.0.1",
+        )
+        # If we got here, the v4 rule did NOT fire — broker drifted.
+        refused_v4_mapped = False
+    except Exception:
+        refused_v4_mapped = True
+    # Self-test 7: URL with userinfo refused.
     try:
         _parse_url("https://user:pass@example.com/")
         refused_userinfo = False
     except (ForbiddenHeader, BrokerError):
         refused_userinfo = True
-    # Self-test 5: file:// scheme refused.
+    # Self-test 8: file:// scheme refused.
     try:
         _parse_url("file:///etc/passwd")
         refused_file_scheme = False
     except (InvalidRequest, BrokerError):
         refused_file_scheme = True
+    if not all([
+        refused_loopback, refused_rfc1918, refused_v6_unique_local,
+        refused_test_net, refused_benchmark, refused_v4_mapped,
+        refused_userinfo, refused_file_scheme,
+    ]):
+        return {
+            "schema": CANARY_RESULT_SCHEMA,
+            "ok": False,
+            "error": (
+                f"research broker boundary drifted: loopback={refused_loopback} "
+                f"rfc1918={refused_rfc1918} v6={refused_v6_unique_local} "
+                f"test_net={refused_test_net} benchmark={refused_benchmark} "
+                f"v4_mapped={refused_v4_mapped} "
+                f"userinfo={refused_userinfo} file_scheme={refused_file_scheme}"
+            ),
+        }
     if not all([
         refused_loopback, refused_rfc1918, refused_v6_unique_local,
         refused_userinfo, refused_file_scheme,

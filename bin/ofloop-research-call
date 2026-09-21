@@ -5,57 +5,51 @@ The semantic worker's ONE AND ONLY public-research surface. This
 binary is in the worker's ``allowRead`` and PATH (added by the
 ``research.public`` capability resolution). The worker invokes
 this helper from sandboxed Bash. The helper has no network
-authority of its own — it can only write to the supervisor
-research queue and read from the per-attempt scratch
-RESPONSE file.
+authority of its own — it can only write to the worker's own
+per-run request inbox (operator-owned) and read from the
+per-run response directory (operator-owned, supervisor-writable,
+worker-readable).
+
+Authority invariants (enforced in the helper itself):
+
+* ``request_id`` is exactly a UUID4 string. No path separators,
+  no control characters, no overlong values, no free-form text.
+  This is the ONLY identifier that ever becomes part of a
+  filesystem path under the bridge — the supervisor derives the
+  final canonical response path from this single field plus
+  run + attempt + role. A prompt-injected worker cannot
+  escape the response root by controlling any other field.
+* The request inbox path is taken from
+  ``OFLOOP_RESEARCH_REQUESTS`` and is the worker's OWN run-scoped
+  inbox only. The worker cannot publish into another run's
+  inbox because the supervisor derives the inbox from the
+  run context frozen in the capability binding.
+* The response directory path is taken from
+  ``OFLOOP_RESEARCH_RESPONSES``. The helper does NOT create any
+  marker file there — the supervisor is the only writer.
 
 Flow:
 
-    1. Worker invokes ``ofloop-research-call --op read --url <u>`` etc.
-    2. Helper validates request shape (no SSRF validation here —
-       that is the supervisor's job once the request is queued;
-       the broker re-validates too).
+    1. Worker invokes
+       ``ofloop-research-call --op read --url <u> --request-id <UUIDv4> ...``.
+    2. Helper validates request shape (UUID4, run/attempt/role
+       non-empty, url/query shape, no userinfo, no credentials).
     3. Helper atomically publishes an immutable REQUEST file to
-       ``$OFLOOP_RESEARCH_QUEUE/req-<uuid>.json`` with
-       ``request_id``, ``run_id``, ``attempt_id``, ``role``, ``op``,
-       ``url``, ``query``, ``max_bytes``, ``kind``, ``requested_at``.
+       ``$OFLOOP_RESEARCH_REQUESTS/req-<UUIDv4>.json``.
     4. Helper blocks waiting for the supervisor's RESPONSE file at
-       ``<OFLOOP_RESEARCH_SCRATCH_RESP>/resp-<uuid>.json``; the
-       helper polls every poll_ms milliseconds up to a per-call
-       request-timeout (default 90s).
+       ``$OFLOOP_RESEARCH_RESPONSES/resp-<UUIDv4>.json``;
+       polls every ``--poll-ms`` up to ``--timeout-seconds``.
     5. When the supervisor publishes the response, the helper reads
        it and emits the response body on stdout. On timeout /
-       failure, the helper emits a structured ``BrokerError``
+       failure the helper emits a structured ``BrokerError``
        envelope and exits non-zero.
 
 The helper is **not** authoritative. The supervisor validates the
-request against the run's frozen capability binding before the
-broker is invoked. The broker validates SSRF before any network
-attempt. The worker cannot widen its authority by writing a
-malformed request — every layer fails closed.
-
-CLI surface
------------
-
-::
-
-    ofloop-research-call \
-        --op search|read|asset-read \
-        [--url <url>] [--query <query>] \
-        [--max-bytes <n>] [--kind <label>] \
-        --request-id <uuid> \
-        --run-id <run> --attempt <attempt> --role <role> \
-        [--poll-ms <n>] [--timeout-seconds <n>]
-
-Required env vars (set by supervisor-mediated resolution):
-  - ``OFLOOP_RESEARCH_QUEUE`` (e.g.
-    ``~/.local/state/ownframework-loop/research/queue``).
-  - ``OFLOOP_RESEARCH_SCRATCH_RESP`` (the per-attempt scratch
-    RESPONSE dir under which the helper polls). The supervisor
-    publishes the response here so the worker (with
-    ``allowRead`` on the scratch) can read it without breaking
-    isolation. The helper uses this exact path to look for its
-    response file by request-id.
+request against the run's frozen capability binding AND the live
+DB (run + active attempt + worker pid alive) before the broker is
+invoked. The broker validates SSRF before any network attempt.
+The worker cannot widen its authority by writing a malformed
+request — every layer fails closed.
 """
 from __future__ import annotations
 
@@ -72,10 +66,28 @@ REQUEST_SCHEMA = "ownframework-loop-research-request/v1"
 RESPONSE_SCHEMA = "ownframework-loop-research-response/v1"
 
 VALID_OPS = ("search", "read", "asset-read")
-URL_RE = _re.compile(
-    r"^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)*[a-z0-9]"
-    r"(?:[a-z0-9-]{0,61}[a-z0-9])?$"
+VALID_ROLES = ("builder", "reviewer")
+
+# Strict request-id format: exactly a UUID4 lowercase with hyphens.
+# This is the ONLY path-bearing identifier the worker controls;
+# every other identifier is canonical (run_id regex, attempt_id
+# regex, role enum). Restricting request_id to a single fixed
+# format means a prompt-injected worker cannot craft a request
+# that escapes the response root via path traversal in the id.
+REQUEST_ID_RE = _re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
 )
+
+# Canonical run-id and attempt-id allow shapes (used to defend
+# against hostile payloads before the supervisor validates again
+# — defence in depth, not authority).
+RUN_ID_RE = _re.compile(r"^run-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}$")
+ATTEMPT_ID_RE = _re.compile(r"^[A-Za-z0-9._:-]{1,64}$")
+
+# Cheap pre-screen for userinfo and obvious dangerous schemes.
+# The broker is authoritative; this is just enough to refuse
+# to *queue* an obviously-invalid request.
+USERINFO_RE = _re.compile(r"://[^/]*@")
 
 
 class HelperError(Exception):
@@ -102,22 +114,45 @@ def _check_shape(args: argparse.Namespace) -> None:
     SSRF / destination validation lives in the broker, run by the
     supervisor under its own network namespace. This helper only
     refuses malformed argument shapes so the helper can't be used
-    as an SSRF bypass.
+    as an SSRF bypass or a response-forgery primitive.
     """
     if args.op not in VALID_OPS:
         raise HelperError(f"op must be one of {VALID_OPS}", code="InvalidRequest")
+    if args.role not in VALID_ROLES:
+        raise HelperError(
+            f"role must be one of {VALID_ROLES}", code="InvalidRequest"
+        )
+    if not args.run_id or not args.attempt:
+        raise HelperError(
+            "--run-id, --attempt are required", code="InvalidRequest"
+        )
+    # Strict canonical id checks (defence in depth; the supervisor
+    # validates again at request consumption).
+    if not RUN_ID_RE.match(args.run_id or ""):
+        raise HelperError(
+            "run_id does not match canonical OwnFramework Loop run-id format",
+            code="InvalidRequest",
+        )
+    if not ATTEMPT_ID_RE.match(args.attempt or ""):
+        raise HelperError(
+            "attempt_id has unsafe characters", code="InvalidRequest",
+        )
+    if not args.request_id or not REQUEST_ID_RE.match(args.request_id):
+        raise HelperError(
+            "--request-id must be a UUID4 (8-4-4-4-12 lowercase hex)",
+            code="InvalidRequest",
+        )
     if args.op == "read" or args.op == "asset-read":
         if not args.url:
             raise HelperError(
-                f"--url is required for op={args.op}",
-                code="InvalidRequest",
+                f"--url is required for op={args.op}", code="InvalidRequest",
             )
         if "://" not in args.url:
             raise HelperError("url must have scheme://", code="InvalidRequest")
-        # Cheap pre-screen for userinfo and obvious dangerous schemes.
-        # The broker is authoritative; this is just enough to refuse
-        # to *queue* an obviously-invalid request.
-        if "@" in args.url.split("://", 1)[1].split("/", 1)[0]:
+        # Refuse any path-traversal-ish chars in the URL — the broker
+        # will SSRF-validate the resolved address; we don't want a
+        # request that even *looks* like a credential leak queued.
+        if USERINFO_RE.search(args.url):
             raise HelperError(
                 "url contains userinfo (refused pre-queue)",
                 code="ForbiddenHeader",
@@ -130,11 +165,9 @@ def _check_shape(args: argparse.Namespace) -> None:
     if args.op == "search":
         if not args.query:
             raise HelperError(
-                "--query is required for op=search",
-                code="InvalidRequest",
+                "--query is required for op=search", code="InvalidRequest",
             )
-        # Refuse obvious credential-shaped queries at the gate. The
-        # broker is authoritative; this is a cheap defense in depth.
+        # Refuse obvious credential-shaped queries at the gate.
         bad_patterns = (
             _re.compile(r"\b[A-Za-z0-9_]{40,}\b"),
             _re.compile(r"(?i)\bgh[oprsu]_[A-Za-z0-9]{20,}\b"),
@@ -147,13 +180,6 @@ def _check_shape(args: argparse.Namespace) -> None:
                     "query contains credential-shaped token (refused pre-queue)",
                     code="ForbiddenHeader",
                 )
-    if not args.request_id:
-        raise HelperError("--request-id is required", code="InvalidRequest")
-    if not args.run_id or not args.attempt or not args.role:
-        raise HelperError(
-            "--run-id, --attempt, --role are required",
-            code="InvalidRequest",
-        )
 
 
 def _atomic_write_json(path, payload: dict[str, Any]) -> None:
@@ -174,7 +200,28 @@ def _atomic_write_json(path, payload: dict[str, Any]) -> None:
             pass
 
 
-def _build_request(args: argparse.Namespace) -> dict[str, Any]:
+def _canonical_request_payload(
+    args: argparse.Namespace, request_digest: str,
+) -> dict[str, Any]:
+    """Build the REQUEST envelope.
+
+    The ``canonical_request`` field is a JSON-canonical form of the
+    operator-meaningful fields (everything except ``requested_at`` /
+    ``kind``). It is what the supervisor and broker use to detect
+    duplicate / replayed requests without depending on the
+    ``request_id`` being globally unique.
+    """
+    canonical = {
+        "schema": REQUEST_SCHEMA,
+        "request_id": args.request_id,
+        "run_id": args.run_id,
+        "attempt_id": args.attempt,
+        "role": args.role,
+        "op": args.op,
+        "url": args.url,
+        "query": args.query,
+        "max_bytes": int(args.max_bytes) if args.max_bytes is not None else None,
+    }
     return {
         "schema": REQUEST_SCHEMA,
         "ok": True,
@@ -188,7 +235,17 @@ def _build_request(args: argparse.Namespace) -> dict[str, Any]:
         "max_bytes": int(args.max_bytes) if args.max_bytes is not None else None,
         "kind": args.kind,
         "requested_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+        "request_digest": request_digest,
+        "canonical_request": canonical,
     }
+
+
+def _compute_request_digest(payload: dict[str, Any]) -> str:
+    """Deterministic digest over the canonical request fields."""
+    import hashlib
+    canonical = payload.get("canonical_request") or {}
+    encoded = json.dumps(canonical, sort_keys=True, ensure_ascii=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
 def main() -> int:
@@ -201,7 +258,7 @@ def main() -> int:
     p.add_argument("--request-id", default=None)
     p.add_argument("--run-id", default=None)
     p.add_argument("--attempt", default=None)
-    p.add_argument("--role", default=None, choices=("builder", "reviewer"))
+    p.add_argument("--role", default=None, choices=VALID_ROLES)
     p.add_argument("--poll-ms", type=int, default=200)
     p.add_argument("--timeout-seconds", type=float, default=90.0)
     args = p.parse_args()
@@ -212,28 +269,29 @@ def main() -> int:
         print(json.dumps(exc.to_dict(), sort_keys=True), flush=True)
         return 2
 
-    queue_dir = os.environ.get("OFLOOP_RESEARCH_QUEUE", "").strip()
-    scratch_resp = os.environ.get("OFLOOP_RESEARCH_SCRATCH_RESP", "").strip()
-    if not queue_dir or not scratch_resp:
-        # Without supervisor-mediated env vars, this helper has no
-        # path to a real transport. Refuse rather than silently
-        # succeed-without-evidence.
+    # Required env vars set by the capability resolver at attempt
+    # launch time. Without them the helper has no path to a real
+    # transport and must refuse rather than silently succeed.
+    requests_dir = os.environ.get("OFLOOP_RESEARCH_REQUESTS", "").strip()
+    responses_dir = os.environ.get("OFLOOP_RESEARCH_RESPONSES", "").strip()
+    if not requests_dir or not responses_dir:
         err = {
             "schema": RESPONSE_SCHEMA,
             "ok": False,
             "error_class": "ConfigurationError",
-            "error": "OFLOOP_RESEARCH_QUEUE / OFLOOP_RESEARCH_SCRATCH_RESP unset",
+            "error": "OFLOOP_RESEARCH_REQUESTS / OFLOOP_RESEARCH_RESPONSES unset",
             "timestamp": _dt.datetime.now(_dt.timezone.utc).isoformat(),
         }
         print(json.dumps(err, sort_keys=True), flush=True)
         return 3
 
     from pathlib import Path
-    queue_dir_p = Path(queue_dir)
-    scratch_resp_p = Path(scratch_resp)
+    requests_dir_p = Path(requests_dir)
+    responses_dir_p = Path(responses_dir)
 
-    request = _build_request(args)
-    request_path = queue_dir_p / f"req-{args.request_id}.json"
+    request = _canonical_request_payload(args, request_digest="")
+    request["request_digest"] = _compute_request_digest(request)
+    request_path = requests_dir_p / f"req-{args.request_id}.json"
     try:
         _atomic_write_json(request_path, request)
     except OSError as exc:
@@ -247,11 +305,13 @@ def main() -> int:
         print(json.dumps(err, sort_keys=True), flush=True)
         return 4
 
-    # Poll for response.
+    # Poll for response. The helper does NOT create any marker
+    # file in the responses dir; the supervisor is the only writer
+    # and must publish an authoritative response (or surface an
+    # error path) on its own clock.
     deadline = time.monotonic() + float(args.timeout_seconds)
     poll_ms = max(50, int(args.poll_ms))
-    response_path = scratch_resp_p / f"resp-{args.request_id}.json"
-    seen_dot = False
+    response_path = responses_dir_p / f"resp-{args.request_id}.json"
     while time.monotonic() < deadline:
         if response_path.exists():
             try:
@@ -268,11 +328,6 @@ def main() -> int:
                 }
                 print(json.dumps(err, sort_keys=True), flush=True)
                 return 5
-        # Emit a single "." per ~2s so callers can see liveness.
-        if not seen_dot and (time.monotonic() - (deadline - float(args.timeout_seconds))) > 0:
-            sys.stderr.write(".")
-            sys.stderr.flush()
-            seen_dot = True
         time.sleep(poll_ms / 1000.0)
 
     err = {

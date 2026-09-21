@@ -678,24 +678,31 @@ def resolve_capabilities(
             # CORRECTED design (RESEARCH_AUTHORITY.md §5.a / §5.d):
             # the worker NEVER invokes the broker directly. The worker
             # only invokes a helper binary (ofloop-research-call) which
-            # queues a REQUEST into a supervisor-owned queue and blocks
-            # for a RESPONSE. The supervisor's serve() loop consumes the
-            # queue, validates the request against the run's frozen
-            # capability binding and the live jobs table, and dispatches
-            # the broker via subprocess.run — the broker runs OUTSIDE
-            # Claude's Bash sandbox with full DNS/TCP egress under the
-            # operator's authority.
+            # queues a REQUEST into the worker's own per-run inbox and
+            # blocks for a RESPONSE. The supervisor's serve() loop
+            # consumes the inbox, validates the request against the
+            # run's frozen capability binding and the live jobs table,
+            # and dispatches the broker via subprocess.run — the broker
+            # runs OUTSIDE Claude's Bash sandbox with full DNS/TCP
+            # egress under the operator's authority.
             #
-            # Therefore:
+            # Hardened (2026-09-21 mid-run adjudication):
             #   - the broker executable is NOT in the worker's allowRead;
             #   - the helper executable IS in the worker's allowRead + PATH;
             #   - the worker's Bash allowedDomains is NOT widened by this
             #     capability (the rejected bash-widening concession of
-            #     commits 442901e / ef04f4d is reverted).
+            #     commits 442901e / ef04f4d is reverted);
+            #   - the worker writes REQUEST files ONLY into its OWN
+            #     per-run inbox (``<evidence_root>/<run-id>/requests/``),
+            #     not into a shared global queue (B-QUEUE-ISOLATION);
+            #   - the supervisor writes RESPONSE files to
+            #     ``<evidence_root>/<run-id>/responses/resp-<UUIDv4>.json``
+            #     — the worker has READ authority over responses but
+            #     NEVER WRITE authority (A-RESEARCH-RESPONSE-FORGE).
             # Evidence directory: per-run, operator-owned; absolute,
             # create-on-demand, private (mode 0o700). The worker can
             # READ receipts prior passes produced (allowRead) but cannot
-            # write to it (NOT in allowWrite).
+            # write to them (NOT in allowWrite).
             evidence_dir = runtime_env_mod.research_evidence_dir(evidence_run_key)
             evidence_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
             try:
@@ -719,48 +726,36 @@ def resolve_capabilities(
             path_prepend.append(str(helper_path.parent))
             # Env vars published to the worker (NON-SECRET identity
             # only). The worker uses these to call the helper; the
-            # helper uses them to publish requests into the supervisor
-            # queue and poll responses out of the per-attempt scratch.
+            # helper uses them to publish requests into the worker's
+            # own per-run inbox and poll responses out of the
+            # operator-owned responses dir.
+            run_id = str(evidence_run_key or "")
             environment["OFLOOP_RESEARCH_BROKER"] = broker_executable
             environment["OFLOOP_RESEARCH_BROKER_SHA256"] = str(broker_sha256 or "")
             environment["OFLOOP_RESEARCH_BROKER_VERSION"] = str(broker_version or "")
             environment["OFLOOP_RESEARCH_EVIDENCE_DIR"] = str(evidence_dir)
-            environment["OFLOOP_RESEARCH_QUEUE"] = str(evidence_dir.parent / "queue")
-            # The worker must be able to PUBLISH REQUEST envelopes into
-            # the supervisor-owned queue. The helper writes the REQUEST
-            # file (helper is in allowRead, not allowWrite, because
-            # the helper subprocess inherits the parent process's
-            # sandbox restrictions). Add the queue dir to the worker's
-            # allowWrite so the helper can O_EXCL + write + chmod 0o600.
-            queue_dir = str(evidence_dir.parent / "queue")
-            queue_dir_path = Path(queue_dir)
-            queue_dir_path.mkdir(parents=True, exist_ok=True, mode=0o700)
+            # Per-run request inbox: worker-writable ONLY for this run.
+            # The supervisor derives the run context from the run_id in
+            # the canonical path formula; the worker cannot publish into
+            # another run's inbox because it has no write authority there.
+            requests_dir = evidence_dir / "requests"
+            requests_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
             try:
-                os.chmod(queue_dir_path, 0o700)
+                os.chmod(requests_dir, 0o700)
             except OSError:
                 pass
-            allow_write.add(queue_dir)
-            # Per-attempt scratch RESPONSE dir: the supervisor publishes
-            # responses there; the worker reads them. The helper uses
-            # OFLOOP_RESEARCH_SCRATCH_RESP + --request-id to find its
-            # own file. This is the bridge between worker-readable
-            # (scratch is allowRead) and broker-writable (only the
-            # supervisor's process writes via subprocess.run). The
-            # worker also needs allowWrite here for the helper to
-            # create its response marker file.
-            scratch_resp = (
-                Path(canonical_repo).expanduser().resolve(strict=False)
-                / ".ownframework-loop" / (evidence_run_key or "")
-                / "scratch" / "builder" / "pass-anon"
-                / "research"
-            )
-            environment["OFLOOP_RESEARCH_SCRATCH_RESP"] = str(scratch_resp)
-            scratch_resp.mkdir(parents=True, exist_ok=True, mode=0o700)
+            environment["OFLOOP_RESEARCH_REQUESTS"] = str(requests_dir)
+            allow_write.add(str(requests_dir))
+            # Per-run response dir: supervisor-writable, worker-readable.
+            # Worker NEVER gets write authority here (A-RESEARCH-RESPONSE-FORGE).
+            responses_dir = evidence_dir / "responses"
+            responses_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
             try:
-                os.chmod(scratch_resp, 0o700)
+                os.chmod(responses_dir, 0o700)
             except OSError:
                 pass
-            allow_write.add(str(scratch_resp))
+            environment["OFLOOP_RESEARCH_RESPONSES"] = str(responses_dir)
+            allow_read.add(str(responses_dir))
             resolved.append({
                 "name": name, "kind": "read-only-network", "privileged": True,
                 "provider": "core_research_broker",
