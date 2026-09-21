@@ -134,3 +134,4 @@ tests/integration/test_v10b_finalize_proof.sh
 tests/integration/test_v10c_supervisor_dependency_direction.sh
 tests/integration/test_v10d_pre1_adversarial_fixes.sh
 tests/integration/test_v10e_pre1_behavioral_proofs.sh
+tests/unit/test_v100_progress_watchdog.sh

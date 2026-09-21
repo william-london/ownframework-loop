@@ -72,7 +72,7 @@ from . import supervisor_identity as _identity_mod
 # import rewrite.
 
 SCHEMA = "ownframework-loop-supervisor/v1"
-SCHEMA_DATA_VERSION = 7
+SCHEMA_DATA_VERSION = 8
 DEFAULT_MAX_CONCURRENCY = 1
 IMPLEMENTATION_MAX_CONCURRENCY = 64
 _CONFIG_MAX_CONCURRENCY = "max_concurrency"
@@ -210,6 +210,16 @@ def bootstrap_schema(
           execution_mode TEXT NOT NULL DEFAULT 'SINGLE',
           dispatch_count INTEGER NOT NULL DEFAULT 0,
           last_dispatch_sequence INTEGER NOT NULL DEFAULT 0,
+          progress_signature_stdout_size INTEGER NOT NULL DEFAULT -1,
+          progress_signature_stdout_mtime REAL NOT NULL DEFAULT 0,
+          progress_signature_stderr_size INTEGER NOT NULL DEFAULT -1,
+          progress_signature_stderr_mtime REAL NOT NULL DEFAULT 0,
+          progress_signature_worktree_head TEXT NOT NULL DEFAULT '',
+          progress_signature_worktree_max_mtime REAL NOT NULL DEFAULT 0,
+          progress_signature_worktree_file_count INTEGER NOT NULL DEFAULT -1,
+          progress_signature_at REAL NOT NULL DEFAULT 0,
+          progress_stall_count INTEGER NOT NULL DEFAULT 0,
+          progress_watchdog_window_seconds INTEGER NOT NULL DEFAULT 0,
           UNIQUE(repo, run_id)
         );
         CREATE TABLE IF NOT EXISTS cost_attempts (
@@ -322,6 +332,16 @@ def bootstrap_schema(
         "execution_mode": "ALTER TABLE jobs ADD COLUMN execution_mode TEXT NOT NULL DEFAULT 'SINGLE'",
         "dispatch_count": "ALTER TABLE jobs ADD COLUMN dispatch_count INTEGER NOT NULL DEFAULT 0",
         "last_dispatch_sequence": "ALTER TABLE jobs ADD COLUMN last_dispatch_sequence INTEGER NOT NULL DEFAULT 0",
+        "progress_signature_stdout_size": "ALTER TABLE jobs ADD COLUMN progress_signature_stdout_size INTEGER NOT NULL DEFAULT -1",
+        "progress_signature_stdout_mtime": "ALTER TABLE jobs ADD COLUMN progress_signature_stdout_mtime REAL NOT NULL DEFAULT 0",
+        "progress_signature_stderr_size": "ALTER TABLE jobs ADD COLUMN progress_signature_stderr_size INTEGER NOT NULL DEFAULT -1",
+        "progress_signature_stderr_mtime": "ALTER TABLE jobs ADD COLUMN progress_signature_stderr_mtime REAL NOT NULL DEFAULT 0",
+        "progress_signature_worktree_head": "ALTER TABLE jobs ADD COLUMN progress_signature_worktree_head TEXT NOT NULL DEFAULT ''",
+        "progress_signature_worktree_max_mtime": "ALTER TABLE jobs ADD COLUMN progress_signature_worktree_max_mtime REAL NOT NULL DEFAULT 0",
+        "progress_signature_worktree_file_count": "ALTER TABLE jobs ADD COLUMN progress_signature_worktree_file_count INTEGER NOT NULL DEFAULT -1",
+        "progress_signature_at": "ALTER TABLE jobs ADD COLUMN progress_signature_at REAL NOT NULL DEFAULT 0",
+        "progress_stall_count": "ALTER TABLE jobs ADD COLUMN progress_stall_count INTEGER NOT NULL DEFAULT 0",
+        "progress_watchdog_window_seconds": "ALTER TABLE jobs ADD COLUMN progress_watchdog_window_seconds INTEGER NOT NULL DEFAULT 0",
     }
     for name, statement in job_migrations.items():
         if name not in columns:

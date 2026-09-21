@@ -11,6 +11,24 @@ immutable historical baseline of the previous published line.
 The complete historical changelog through 0.5.2 is preserved at
 [`docs/history/CHANGELOG-through-0.5.2.md`](docs/history/CHANGELOG-through-0.5.2.md).
 
+## Unreleased - Post-v1 Mac Production Commissioning Hardening (2026-09-20)
+
+- New: `progress_watchdog` detects the "Claude alive but zero observable
+  progress" failure mode that the wallclock deadline alone cannot. Each
+  supervisor tick computes a per-attempt signature from worker stdout
+  size/mtime, worker stderr size/mtime, worktree HEAD, and worktree
+  max-mtime; if the signature does not advance within
+  `max(180s, max_pass_runtime_seconds // 6)`, the watchdog force-terminates
+  the worker's process group (ownership-proven), marks the attempt
+  `progress_stalled`, increments `progress_stall_count` and
+  `transient_failures`, and queues a bounded retry — instead of letting a
+  stalled worker occupy the full per-pass slot. Schema version bumped to
+  8 with persistent signature columns on `jobs`. Verified end-to-end
+  with `tests/unit/test_v100_progress_watchdog.sh`.
+- Fix: `supervisor_attempts._set_worker_pid` now writes the initial
+  progress signature at dispatch time so the first watchdog tick has a
+  baseline rather than treating a freshly spawned worker as stalled.
+
 ## 1.0.0 - Stable Autonomous Engineering Runtime (2026-09-19)
 
 - Deterministic packet and source authority with exact execution binding and

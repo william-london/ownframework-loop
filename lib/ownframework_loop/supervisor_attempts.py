@@ -45,6 +45,7 @@ from pathlib import Path
 from typing import Any
 
 from . import packet as packet_mod
+from . import progress_watchdog as progress_watchdog_mod
 from . import util
 from . import git_checks
 from . import state as state_mod
@@ -484,12 +485,25 @@ def _set_worker_pid(
 ) -> None:
     _read_pid_start_identity = _process_mod._read_pid_start_identity
     started = time.time()
+    # Establish the supervisor's first-observation progress signature at
+    # dispatch time so the no-progress watchdog can compare subsequent
+    # ticks against an honest baseline rather than treating a freshly
+    # spawned worker as already stalled.
+    progress_cols, progress_at = progress_watchdog_mod.initial_signature_for_dispatch(
+        stdout_path=out_path,
+        stderr_path=err_path,
+        worktree=None,
+    )
     cur = conn.execute(
         """
         UPDATE jobs SET worker_pid=?, worker_started_at=?, worker_pgid=?,
           worker_deadline_at=?, worker_start_identity=?, worker_role=?,
           worker_stdout_path=?, worker_stderr_path=?,
-          worker_attempt_id=COALESCE(?, worker_attempt_id), updated_at=?
+          worker_attempt_id=COALESCE(?, worker_attempt_id), updated_at=?,
+          progress_signature_stdout_size=?, progress_signature_stdout_mtime=?,
+          progress_signature_stderr_size=?, progress_signature_stderr_mtime=?,
+          progress_signature_worktree_head=?, progress_signature_worktree_max_mtime=?,
+          progress_signature_worktree_file_count=?, progress_signature_at=?
         WHERE id=? AND status='RUNNING'
         """,
         (
@@ -503,6 +517,14 @@ def _set_worker_pid(
             str(err_path) if err_path else None,
             attempt_id,
             started,
+            int(progress_cols["progress_signature_stdout_size"]),
+            float(progress_cols["progress_signature_stdout_mtime"]),
+            int(progress_cols["progress_signature_stderr_size"]),
+            float(progress_cols["progress_signature_stderr_mtime"]),
+            str(progress_cols["progress_signature_worktree_head"]),
+            float(progress_cols["progress_signature_worktree_max_mtime"]),
+            int(progress_cols["progress_signature_worktree_file_count"]),
+            float(progress_at),
             job_id,
         ),
     )
