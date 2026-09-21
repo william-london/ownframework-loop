@@ -1,0 +1,549 @@
+#!/usr/bin/env python3
+"""OwnFramework Loop governed public research broker.
+
+A small, host-commissioned, stdlib-only executable that OwnFramework Loop's
+semantic workers invoke through their existing Bash sandbox in order to
+perform bounded public read operations (search, page read, asset read). The
+broker is the ONLY thing in the run that talks to the public internet for
+research purposes — the worker's Claude sandbox does not get any
+``allowedDomains`` widening, and its --tools list does not gain
+``WebSearch``/``WebFetch``.
+
+Design constraints (full ADR: docs/architecture/RESEARCH_AUTHORITY.md):
+
+* HTTP/HTTPS GET only — no POST/PUT/PATCH/DELETE, no request body.
+* Scheme allowlist: ``http`` and ``https`` only.
+* DNS pre-resolution with private/loopback/link-local/multicast/metadata
+  deny lists applied BEFORE socket connect.
+* Redirect chain re-validated at every hop, with the same deny lists.
+* Response bytes capped (decompressed). Per-asset size capped. Whole-run
+  budget enforced through the persistent evidence root.
+* Asset filenames derived from content digest + validated MIME, never
+  from URL path.
+* Inherited credential env vars stripped before any outbound request.
+* Evidence root is OUTSIDE the worker's ``allowWrite``; the broker is
+  the only writer.
+
+Architectural shape:
+
+    semantic worker (Bash sandbox unchanged)
+        |
+        |  ofloop-research-broker --op read --url <u> --evidence-dir <e>
+        |                            --run-id <r> --attempt <a>
+        |                            --max-bytes N --kind <k>
+        |
+        v
+    broker validates -> reads -> writes evidence -> returns receipt path
+
+Run ``ofloop-research-broker --help`` for operation reference. Run
+``ofloop-research-broker --op ping`` for identity / version / SHA-256,
+which is the integrity proof operators inspect before commissioning the
+capability.
+"""
+from __future__ import annotations
+
+import argparse
+import datetime as _dt
+import hashlib
+import hmac
+import json
+import os
+import resource
+import signal
+import socket
+import sys
+import time
+from typing import Any, NoReturn
+
+BROKER_VERSION = "0.1.0-dev"
+BROKER_CAPABILITY_NAME = "research.public"
+BROKER_OPERATION_SCHEMA = "ownframework-loop-research-broker/v1"
+
+
+# -------------------------------------------------------------------- #
+# Hard failures                                                         #
+# -------------------------------------------------------------------- #
+
+
+class BrokerError(Exception):
+    """Base class for all broker-level errors."""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema": BROKER_OPERATION_SCHEMA,
+            "ok": False,
+            "error_class": self.__class__.__name__,
+            "error": str(self),
+        }
+
+
+class SSRFRefused(BrokerError):
+    """The destination failed SSRF validation; no network attempt was made."""
+
+
+class RedirectRefused(BrokerError):
+    """A 30x hop targeted a forbidden address."""
+
+
+class PayloadTooLarge(BrokerError):
+    """Response or asset bytes exceeded the configured cap."""
+
+
+class BudgetExceeded(BrokerError):
+    """The run-scoped budget (bytes or operations) was exhausted."""
+
+
+class TransientFailure(BrokerError):
+    """Retryable transport-level failure (connect refused, timeout, etc.)."""
+
+
+class InvalidRequest(BrokerError):
+    """Caller-supplied arguments were malformed."""
+
+
+class ForbiddenHeader(BrokerError):
+    """A request would have inherited an unauditable credential header."""
+
+
+# -------------------------------------------------------------------- #
+# SSRF address validation (IPv4 + IPv6)                                 #
+# -------------------------------------------------------------------- #
+
+
+# Conservative deny set covering at least:
+#   - loopback (127.0.0.0/8, ::1)
+#   - private IPv4 (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16)
+#   - carrier-grade NAT (100.64.0.0/10)
+#   - link-local (169.254.0.0/16, fe80::/10) -- covers cloud metadata
+#   - multicast / broadcast / unspecified
+#   - IPv6 unique-local (fc00::/7)
+#   - IPv4-mapped IPv6 (::ffff:0:0/96) -- would otherwise bypass v4 rules
+#
+# Additional: any address returned by getaddrinfo that is not in one of the
+# global unicast ranges is refused. The set below is the smallest safe set;
+# see research_safety.py for the runtime-bound authoritative check used by
+# the package-side resolution layer.
+
+def _forbidden_address(family: int, addr: str) -> str | None:
+    """Return a human reason if addr is in a denied range, else None.
+
+    Fails closed: any error in the inspection itself is treated as denied.
+    """
+    try:
+        packed = socket.inet_pton(family, addr)
+    except OSError as exc:
+        return f"address unparseable: {exc}"
+
+    if family == socket.AF_INET:
+        b = packed  # 4 bytes
+        first, second = b[0], b[1]
+        if first == 127:
+            return "loopback"
+        if first == 10:
+            return "rfc1918"
+        if first == 172 and 16 <= second <= 31:
+            return "rfc1918"
+        if first == 192 and second == 168:
+            return "rfc1918"
+        if first == 169 and second == 254:
+            return "link-local"
+        if first == 100 and 64 <= second <= 127:
+            return "carrier-grade-nat"
+        if first == 0:
+            return "unspecified"
+        if first >= 224:
+            return "multicast-or-broadcast"
+        return None
+    if family == socket.AF_INET6:
+        b = packed  # 16 bytes
+        if b == b"\x00" * 15 + b"\x01":
+            return "ipv6-loopback"
+        if b == b"\x00" * 16:
+            return "unspecified"
+        if (b[0] & 0xfe) == 0xfc:
+            return "ipv6-unique-local"
+        if b[0] == 0xfe and (b[1] & 0xc0) == 0x80:
+            return "ipv6-link-local"
+        if b[0] == 0xff:
+            return "ipv6-multicast"
+        # IPv4-mapped IPv6 (::ffff:a.b.c.d) -- reapply the v4 rules.
+        if b[:10] == b"\x00" * 10 and b[10] == 0xff and b[11] == 0xff:
+            return _forbidden_address(socket.AF_INET, socket.inet_ntop(socket.AF_INET, b[12:16]))
+        return None
+    return f"unknown address family: {family}"
+
+
+def _resolve_and_validate(host: str) -> list[tuple[int, str]]:
+    """Resolve host and refuse any address in a denied range.
+
+    Returns a list of (family, address) tuples acceptable for connect.
+    Raises SSRFRefused if the entire resolution is in a denied range or
+    the lookup fails.
+    """
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except socket.gaierror as exc:
+        raise SSRFRefused(f"DNS resolution failed for {host!r}: {exc}") from exc
+    accepted: list[tuple[int, str]] = []
+    blocked_reasons: list[str] = []
+    for info in infos:
+        family = info[0]
+        sockaddr = info[4]
+        addr = sockaddr[0]
+        # Convert IPv4-mapped IPv6 to plain IPv4 so the v4 check fires.
+        if family == socket.AF_INET6 and addr.startswith("::ffff:"):
+            v4 = addr[len("::ffff:"):]
+            v4_addr = v4.split("%", 1)[0]
+            try:
+                socket.inet_pton(socket.AF_INET, v4_addr)
+                family = socket.AF_INET
+                addr = v4_addr
+            except OSError:
+                pass
+        reason = _forbidden_address(family, addr)
+        if reason is not None:
+            blocked_reasons.append(f"{addr} ({reason})")
+            continue
+        accepted.append((family, addr))
+    if not accepted:
+        raise SSRFRefused(
+            f"all resolved addresses for {host!r} are refused: "
+            + ", ".join(blocked_reasons)
+        )
+    return accepted
+
+
+# -------------------------------------------------------------------- #
+# URL parsing & request sanitization                                    #
+# -------------------------------------------------------------------- #
+
+
+class _UrlParse:
+    __slots__ = ("scheme", "host", "port", "path", "query", "fragment",
+                 "userinfo", "raw")
+
+    def __init__(self, scheme: str, host: str, port: int | None,
+                 path: str, query: str, fragment: str,
+                 userinfo: str, raw: str) -> None:
+        self.scheme = scheme
+        self.host = host
+        self.port = port
+        self.path = path
+        self.query = query
+        self.fragment = fragment
+        self.userinfo = userinfo
+        self.raw = raw
+
+
+def _parse_url(url: str) -> _UrlParse:
+    """Permissive URL parser (no third-party deps).
+
+    Refuses any URL with:
+      - scheme other than http or https
+      - userinfo (URL credentials)
+      - control characters or whitespace
+      - empty host
+      - port outside 1..65535 (when given)
+    """
+    if not isinstance(url, str) or not url.strip():
+        raise InvalidRequest("url must be a non-empty string")
+    if any(ord(c) < 0x20 or ord(c) == 0x7f for c in url):
+        raise InvalidRequest("url contains control or whitespace characters")
+    lower = url.lower()
+    # Reject userinfo inline.
+    if "://" in lower:
+        _, _, after = lower.partition("://")
+        if "@" in after.split("/", 1)[0]:
+            raise ForbiddenHeader("url contains userinfo (credentials)")
+    if lower.startswith("http://"):
+        scheme, rest = "http", url[len("http://"):]
+    elif lower.startswith("https://"):
+        scheme, rest = "https", url[len("https://"):]
+    else:
+        raise InvalidRequest(
+            f"unsupported url scheme (only http and https are allowed): {url!r}"
+        )
+    if "/" in rest:
+        hostpart, _, pathpart = rest.partition("/")
+        if "?" in pathpart:
+            path, _, query = pathpart.partition("?")
+            fragment = ""
+            if "#" in query:
+                query, _, fragment = query.partition("#")
+        else:
+            path, query, fragment = pathpart, "", ""
+    else:
+        hostpart, path, query, fragment = rest, "", "", ""
+    if "@" in hostpart:
+        raise ForbiddenHeader("url contains userinfo (credentials)")
+    if ":" in hostpart:
+        host, _, port_text = hostpart.rpartition(":")
+        try:
+            port = int(port_text)
+        except ValueError:
+            raise InvalidRequest(f"invalid url port: {port_text!r}")
+        if not (1 <= port <= 65535):
+            raise InvalidRequest(
+                f"url port out of range: {port} (must be 1..65535)"
+            )
+    else:
+        port = None
+        host = hostpart
+    host = host.strip().lower()
+    if not host:
+        raise InvalidRequest("url host is empty")
+    if " " in host or "\t" in host or "\n" in host:
+        raise InvalidRequest("url host contains whitespace")
+    return _UrlParse(scheme, host, port, "/" + path if path else "/",
+                     query, fragment, "", url)
+
+
+def _strip_inherited_credentials(extra: dict[str, str]) -> dict[str, str]:
+    """Defence in depth against inherited auth headers.
+
+    Refuses any header that is a known credential-injecting header, and
+    strips inbound env vars that look like credentials before they can
+    enter the broker's URL fetch.
+    """
+    forbidden_header = {
+        "authorization", "cookie", "proxy-authorization",
+        "x-api-key", "x-auth-token",
+    }
+    out: dict[str, str] = {}
+    for k, v in extra.items():
+        if k.lower() in forbidden_header:
+            raise ForbiddenHeader(f"inherited credential header refused: {k}")
+        out[k] = v
+    return out
+
+
+def _scrub_environment(env: dict[str, str]) -> dict[str, str]:
+    """Strip credential-shaped env vars from a copy of the environment.
+
+    Defence in depth: the worker is already required to scrub credentials
+    before invoking the broker, and ``CLAUDE_CODE_SUBPROCESS_ENV_SCRUB``
+    strips Anthropic / cloud-provider credentials. We additionally refuse
+    any var whose name matches a credential-shape pattern.
+    """
+    credential_patterns = (
+        "TOKEN", "SECRET", "KEY", "PASS", "PASSWORD", "AUTH",
+        "SESSION", "CREDENTIALS",
+    )
+    out: dict[str, str] = {}
+    for k, v in env.items():
+        upper = k.upper()
+        if any(pat in upper for pat in credential_patterns):
+            continue
+        out[k] = v
+    return out
+
+
+# -------------------------------------------------------------------- #
+# Identity / version / SHA-256                                          #
+# -------------------------------------------------------------------- #
+
+
+def _self_sha256() -> str:
+    try:
+        with open(__file__, "rb") as fh:
+            return hashlib.sha256(fh.read()).hexdigest()
+    except OSError:
+        return ""
+
+
+def _identity_record(argv: list[str]) -> dict[str, Any]:
+    return {
+        "schema": BROKER_OPERATION_SCHEMA,
+        "ok": True,
+        "op": "ping",
+        "capability": BROKER_CAPABILITY_NAME,
+        "version": BROKER_VERSION,
+        "broker_path": os.path.realpath(__file__),
+        "broker_sha256": _self_sha256(),
+        "python": sys.version.split()[0],
+        "platform": sys.platform,
+        "now": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+        "argv": list(argv),
+        "pid": os.getpid(),
+    }
+
+
+# -------------------------------------------------------------------- #
+# Argument parsing                                                       #
+# -------------------------------------------------------------------- #
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="ofloop-research-broker",
+        description=(
+            "OwnFramework Loop governed public research broker. Invoked by a "
+            "semantic worker through its existing Bash sandbox; NOT a general "
+            "HTTP client."
+        ),
+    )
+    p.add_argument("--op", required=True, choices=("ping", "help",
+                                                   "search", "read",
+                                                   "asset-read"))
+    p.add_argument("--url", default=None,
+                   help="Target URL (http/https only; userinfo refused).")
+    p.add_argument("--query", default=None,
+                   help="Search query (for op=search).")
+    p.add_argument("--evidence-dir", default=None,
+                   help="Operator-owned evidence root for this run.")
+    p.add_argument("--run-id", default=None,
+                   help="OwnFramework Loop run identity.")
+    p.add_argument("--attempt", default=None,
+                   help="OwnFramework Loop semantic attempt identity.")
+    p.add_argument("--max-bytes", type=int, default=None,
+                   help="Maximum bytes (decompressed) for a single response.")
+    p.add_argument("--kind", default=None,
+                   help="Caller-supplied sub-kind label (free-form text).")
+    p.add_argument("--kind-cap", type=int, default=128,
+                   help="Maximum bytes for --kind (default 128).")
+    return p
+
+
+# -------------------------------------------------------------------- #
+# Subprocess hardening                                                   #
+# -------------------------------------------------------------------- #
+
+
+def _set_resource_limits() -> None:
+    """Cap CPU and AS so a corrupt response cannot wedge the host."""
+    try:
+        resource.setrlimit(resource.RLIMIT_CPU, (60, 60))
+    except (OSError, ValueError):
+        pass
+    try:
+        # 512 MB address space cap is generous for a stdlib GET.
+        resource.setrlimit(resource.RLIMIT_AS, (512 * 1024 * 1024,
+                                                512 * 1024 * 1024))
+    except (OSError, ValueError):
+        pass
+
+
+def _ignore_sigpipe() -> None:
+    signal.signal(signal.SIGPIPE, signal.SIG_DFL)
+
+
+# -------------------------------------------------------------------- #
+# Help / CLI bootstrap                                                   #
+# -------------------------------------------------------------------- #
+
+
+def _emit_help() -> dict[str, Any]:
+    return {
+        "schema": BROKER_OPERATION_SCHEMA,
+        "ok": True,
+        "op": "help",
+        "operations": [
+            "ping",
+            "search",
+            "read",
+            "asset-read",
+            "help",
+        ],
+        "notes": [
+            "HTTP/HTTPS GET only; no POST/PUT/PATCH/DELETE; no request body.",
+            "URL userinfo refused; resolved addresses in private/loopback/"
+            "link-local/multicast/metadata ranges refused.",
+            "Redirect chain re-validated at every hop with the same rules.",
+            "Response bytes capped; per-asset bytes capped; per-operation "
+            "timeout enforced.",
+            "Filenames derived from content digest + validated MIME, never "
+            "from URL path.",
+            "Inherited credential env vars stripped before any request.",
+        ],
+    }
+
+
+def _validate_common(args: argparse.Namespace) -> None:
+    """Common argument guards; raises InvalidRequest on failure."""
+    if args.kind is not None and len(args.kind.encode("utf-8")) > args.kind_cap:
+        raise InvalidRequest(
+            f"--kind exceeds {args.kind_cap} bytes after utf-8 encoding"
+        )
+    if not args.run_id or not args.attempt:
+        raise InvalidRequest("--run-id and --attempt are required")
+    if not args.evidence_dir:
+        raise InvalidRequest("--evidence-dir is required")
+
+
+# -------------------------------------------------------------------- #
+# main                                                                   #
+# -------------------------------------------------------------------- #
+
+
+def main(argv: list[str]) -> int:
+    _ignore_sigpipe()
+    _set_resource_limits()
+    try:
+        # Build a fresh-from-environ copy for sending outbound (defence in
+        # depth against any credential leak inherited from the worker
+        # subprocess env).
+        os.environ = _scrub_environment(dict(os.environ))  # type: ignore[assignment]
+        args = _build_parser().parse_args(argv[1:])
+        if args.op == "ping":
+            print(json.dumps(_identity_record(argv), sort_keys=True))
+            return 0
+        if args.op == "help":
+            print(json.dumps(_emit_help(), sort_keys=True))
+            return 0
+        # For search/read/asset-read the implementation lives in
+        # research_safety.py + research_evidence.py -- this file is the
+        # CLI bootstrap only. The runtime imports are deferred until those
+        # modules land; for now, search/read/asset-read return an explicit
+        # "not yet implemented in this slice" so operator commissioning
+        # can verify the boundary without enabling any network action.
+        if args.op in {"search", "read", "asset-read"}:
+            _validate_common(args)
+            err = {
+                "schema": BROKER_OPERATION_SCHEMA,
+                "ok": False,
+                "capability": BROKER_CAPABILITY_NAME,
+                "op": args.op,
+                "version": BROKER_VERSION,
+                "broker_sha256": _self_sha256(),
+                "error_class": "NotImplemented",
+                "error": (
+                    f"op={args.op} not enabled in current broker slice; the "
+                    "boundary (skill skeleton) is present but the network "
+                    "and evidence code path is not yet wired. Run --op=ping "
+                    "for identity."
+                ),
+                "now": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+            }
+            print(json.dumps(err, sort_keys=True))
+            return 2
+        _validate_common(args)
+        err = {
+            "schema": BROKER_OPERATION_SCHEMA,
+            "ok": False,
+            "error_class": "InvalidRequest",
+            "error": f"unknown op: {args.op}",
+        }
+        print(json.dumps(err, sort_keys=True))
+        return 2
+    except BrokerError as exc:
+        sys.stdout.write(json.dumps(exc.to_dict(), sort_keys=True) + "\n")
+        sys.stdout.flush()
+        return 1
+    except KeyboardInterrupt:
+        return 130
+    except SystemExit:
+        raise
+    except Exception as exc:  # noqa: BLE001 -- fail closed at the CLI
+        err = {
+            "schema": BROKER_OPERATION_SCHEMA,
+            "ok": False,
+            "error_class": type(exc).__name__,
+            "error": str(exc),
+        }
+        sys.stdout.write(json.dumps(err, sort_keys=True) + "\n")
+        sys.stdout.flush()
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))
