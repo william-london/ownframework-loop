@@ -2538,6 +2538,21 @@ def serve(
                     )
             except (OSError, sqlite3.Error, ValueError):
                 configured = DEFAULT_MAX_CONCURRENCY
+            # v1.0.0 progress-watchdog: force-terminate any inflight attempt
+            # whose observable durable IO has not advanced within the bounded
+            # window (ownframework_loop.progress_watchdog for the model).
+            # This catches the "Claude alive but producing 0 tokens/0 stdout
+            # for the full per-pass deadline" failure mode that the wallclock
+            # deadline alone cannot detect.  The tick MUST run BEFORE we
+            # process completed futures: a force-terminated worker's pool
+            # future can become done before the watchdog tick in the same
+            # iteration; processing it first would let the dispatcher's
+            # runner-classifier overwrite the watchdog's authoritative
+            # progress_stalled classification on jobs/semantic_attempts.
+            try:
+                _progress_watchdog_tick(Path(db))
+            except Exception:
+                pass
             # Retire completed lanes and emit their durable result. A failed
             # lane is isolated; the scheduler continues to reconcile others.
             completed = {f for f in futures if f.done()}
@@ -2553,16 +2568,6 @@ def serve(
                 if action != "IDLE" or (now - last_emit) >= idle_log_interval:
                     print(json.dumps(event, sort_keys=True), flush=True)
                     last_emit = now
-            # v1.0.0 progress-watchdog: force-terminate any inflight attempt
-            # whose observable durable IO has not advanced within the bounded
-            # window (ownframework_loop.progress_watchdog for the model).
-            # This catches the "Claude alive but producing 0 tokens/0 stdout
-            # for the full per-pass deadline" failure mode that the wallclock
-            # deadline alone cannot detect.
-            try:
-                _progress_watchdog_tick(Path(db))
-            except Exception:
-                pass
             # SQLite remains authority; this projection only limits pointless
             # idle probes when configured capacity is much larger than demand.
             submit_count = _scheduler_submission_budget(
