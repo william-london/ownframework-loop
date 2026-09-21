@@ -52,6 +52,61 @@ The complete historical changelog through 0.5.2 is preserved at
   `status = 'RUNNING'` guard for the same reason: the dispatcher's exit
   handler can mark the attempt row before the watchdog acquires the lock.
 
+## Unreleased - Post-v1 Deep Sweep + Final Production Hardening (2026-09-21)
+
+- Fix: `Signature.from_row` in `progress_watchdog` used unprefixed column
+  names that did not match the production tick SELECT, latent-crashing any
+  external caller that tried to reconstruct a Signature from a persisted
+  `jobs` row. Replaced with the prefixed column names.
+- Fix: `compute_signature` walked `.git`, `.claude`, `.ownframework-loop`,
+  and `.worktrees` bookkeeping directories and counted their internal
+  file mtimes as semantic progress, letting normal git/Claude/Loop
+  internal activity silently reset the watchdog stall window. Added a
+  top-level filter so only semantic work surface advances count.
+- Fix: `PRAGMA user_version` never bumped past v7 once the watchdog
+  column migrations had run in-place. The supervisor-owned migration
+  ladder only updates user_version inside version-specific blocks, so
+  a DB already at v7 stayed at v7 even after the new columns landed.
+  Added an unconditional bump at the end of `_apply_data_migrations`
+  that fires on every connect.
+- Fix: watchdog terminate UPDATE narrowed its status guard to
+  `status IN ('RUNNING', 'BACKOFF')` plus a `cur.rowcount` check so
+  operator-driven terminal states (`DONE`, `RETIRED`, `QUARANTINED`,
+  `CANCELED`) are NEVER resurrected by the watchdog. Watchdog refuses
+  to mutate any row whose status is outside the bounded
+  in-progress set.
+- Fix: watchdog `semantic_attempts` UPDATE mirrored the same
+  `status IN ('RUNNING', 'RESERVED')` guard for the same terminal-respect
+  invariant.
+- Fix: progress-watchdog SELECT now restricts to
+  `worker_role = 'builder'`. Reviewers legitimately spend long
+  periods in silent thinking phases that produce zero stdout/stderr
+  bytes and no worktree mutation; the watchdog signature has no clean
+  signal for reviewer activity. The wallclock deadline still bounds
+  the reviewer runtime; the watchdog's purpose is to bound the
+  "Claude alive but no observable progress" failure mode that the
+  wallclock deadline alone cannot detect — and that failure mode is
+  specifically a builder failure mode (tool-result files, candidate
+  branch advance). Live canary job 80 reviewer was force-terminated at
+  t=180s before this fix.
+- Fix: `compute_signature` additionally walks
+  `.ownframework-loop/<run-id>/scratch/<role>/<pass-N>/` so the watchdog
+  sees Claude's actual progress output (`BUILD_AGENT_RESULT.json`,
+  `REVIEW_AGENT_ASSESSMENT.json`) instead of being blind to it.
+  Bookkeeping filenames (`STATE.json`, `EVENTS.log`, `*.lock`,
+  `WORK_PACKET.md`, `APPROVAL.json`, etc.) are still excluded by name
+  from any walk so they never register as progress.
+- Fix: progress-watchdog window derivation widened to
+  `max(600s, max_pass_runtime_seconds // 4)`. The previous
+  `max(180s, budget // 6)` produced false-positive kills of legitimate
+  Claude work on the MiniMax-M3 provider, where non-trivial packets
+  can spend 5+ minutes in silent thinking phases. Live canary job 82
+  attempt 11999c96 produced a valid candidate commit but was
+  force-terminated at t=361s because the 180s window could not
+  tolerate a 5-minute thinking pause. The 600s floor gives the watchdog
+  reasonable lead time over the wallclock deadline while tolerating
+  realistic long-thinking pauses.
+
 ## 1.0.0 - Stable Autonomous Engineering Runtime (2026-09-19)
 
 - Deterministic packet and source authority with exact execution binding and
