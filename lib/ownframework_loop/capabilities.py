@@ -104,33 +104,32 @@ BUILTIN_CAPABILITIES: dict[str, CapabilityDefinition] = {
     ),
     "research.public": CapabilityDefinition(
         # Governed public read authority per docs/architecture/RESEARCH_AUTHORITY.md.
-        # Not a tool the worker invokes directly; the broker executable is the
-        # one and only thing in the run that publishes research receipts / asset
-        # provenance. The broker manages its own destination validation
-        # (SSRF, DNS rebinding, redirect revalidation).
+        # The transport is CORE-OWNED; the worker never speaks HTTP/HTTPS
+        # for research. The worker only invokes a small helper
+        # (bin/ofloop-research-call) which queues a request and blocks
+        # for a response. The supervisor's serve() loop consumes the queue,
+        # validates the request against the run's frozen capability binding,
+        # and invokes the broker (subprocess.run, NOT under Claude's Bash
+        # sandbox). The broker has the operator's full DNS/TCP egress;
+        # its own SSRF primitives validate destinations.
         #
-        # Sandbox reality: Claude's Bash sandbox blocks subprocess network
-        # access too, so the broker must be reachable from inside the worker's
-        # allowedDomains. We list the broker's specific research destinations
-        # here so the broker's HTTPS calls are permitted; the broker remains
-        # the only thing that produces durable receipts / content-addressed
-        # artifacts, so worker-level Curl against these domains produces no
-        # provenance and the audit trail still belongs to the broker.
-        #
-        # Only public read authority is enabled: HTTP/HTTPS GET-equivalent
-        # semantics, no POST/PUT/PATCH/DELETE/auth/cookies. The schema URLs
-        # below cover:
-        #   - Wikipedia REST + article bodies (search + read)
-        #   - Wikimedia Commons (asset-read for openly-licensed media)
-        #   - upload.wikimedia.org (asset-read direct CDN)
-        #   - commons.wikimedia.org (asset-read via Special:FilePath)
+        # Authoritative invariants on the worker side:
+        #   - Bash allowedDomains == []
+        #   - Bash strictAllowlist == true
+        #   - the worker can read the per-run evidence dir
+        #   - the worker CANNOT write to the per-run evidence dir
+        #   - the broker executable is NOT in the worker's allowRead
+        #   - the helper executable IS in the worker's allowRead + PATH
+        #   - the four OFLOOP_RESEARCH_* env vars are non-secret identity
+        #     strings only (path / digest / version / evidence-dir path)
+        # The capability contributes nothing to the worker's Bash
+        # allowedDomains. The post-v1 commits 442901e + ef04f4d added a
+        # temporary bash-widening concession that the corrected design
+        # reroutes: instead of widening Bash, the network effect is moved
+        # OUT of the worker entirely.
         "research.public", "read-only-network", privileged=True,
         requires_commissioned_provider=True,
-        network_domains=(
-            "en.wikipedia.org",
-            "commons.wikimedia.org",
-            "upload.wikimedia.org",
-        ),
+        network_domains=(),
     ),
 }
 
@@ -676,43 +675,70 @@ def resolve_capabilities(
                 raise CapabilityResolutionError(
                     "research.public broker executable must resolve exactly"
                 )
-            # Contribute the broker's research surface to the
-            # worker-Bash allowedDomains so the broker subprocess can
-            # actually reach public hosts. The domain list lives on the
-            # BUILTIN_CAPABILITIES definition; the manifest cannot widen
-            # it further (we still want the stricter "broker-managed
-            # destinations" semantics).
-            manifest_domains_research = _network_domains(
-                entry.get("network_domains"), name=name
-            ) if entry.get("network_domains") else []
-            effective_research_domains = sorted(
-                set(definition.network_domains) | set(manifest_domains_research)
-            )
-            network_domains.update(effective_research_domains)
+            # CORRECTED design (RESEARCH_AUTHORITY.md §5.a / §5.d):
+            # the worker NEVER invokes the broker directly. The worker
+            # only invokes a helper binary (ofloop-research-call) which
+            # queues a REQUEST into a supervisor-owned queue and blocks
+            # for a RESPONSE. The supervisor's serve() loop consumes the
+            # queue, validates the request against the run's frozen
+            # capability binding and the live jobs table, and dispatches
+            # the broker via subprocess.run — the broker runs OUTSIDE
+            # Claude's Bash sandbox with full DNS/TCP egress under the
+            # operator's authority.
+            #
+            # Therefore:
+            #   - the broker executable is NOT in the worker's allowRead;
+            #   - the helper executable IS in the worker's allowRead + PATH;
+            #   - the worker's Bash allowedDomains is NOT widened by this
+            #     capability (the rejected bash-widening concession of
+            #     commits 442901e / ef04f4d is reverted).
             # Evidence directory: per-run, operator-owned; absolute,
             # create-on-demand, private (mode 0o700). The worker can
-            # read receipts prior passes produced (allow_read) but
-            # cannot write to it (NOT in allow_write).
+            # READ receipts prior passes produced (allowRead) but cannot
+            # write to it (NOT in allowWrite).
             evidence_dir = runtime_env_mod.research_evidence_dir(evidence_run_key)
             evidence_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
             try:
                 os.chmod(evidence_dir, 0o700)
             except OSError:
                 pass
-            # Worker can read but never write the evidence dir.
             allow_read.add(str(evidence_dir))
             stable_allow_read.add(str(evidence_dir))
-            # Broker goes to the worker's PATH so the worker can
-            # spawn the broker without baking the absolute path into
-            # its Bash script. The broker executable itself is also
-            # in allow_read for safety.
-            allow_read.add(broker_executable)
-            stable_allow_read.add(broker_executable)
-            path_prepend.append(str(broker_path.parent))
+            # Helper binary: the worker's one and only research surface.
+            # Sits alongside the broker in the same install dir.
+            helper_path = broker_path.parent / "ofloop-research-call"
+            helper_str = str(helper_path)
+            if not helper_path.is_file() or not os.access(helper_path, os.X_OK):
+                raise CapabilityResolutionError(
+                    "research.public helper binary missing at "
+                    f"{helper_path}; install supervisor payload must "
+                    "include ofloop-research-call as the broker's sibling"
+                )
+            allow_read.add(helper_str)
+            stable_allow_read.add(helper_str)
+            path_prepend.append(str(helper_path.parent))
+            # Env vars published to the worker (NON-SECRET identity
+            # only). The worker uses these to call the helper; the
+            # helper uses them to publish requests into the supervisor
+            # queue and poll responses out of the per-attempt scratch.
             environment["OFLOOP_RESEARCH_BROKER"] = broker_executable
-            environment["OFLOOP_RESEARCH_EVIDENCE_DIR"] = str(evidence_dir)
             environment["OFLOOP_RESEARCH_BROKER_SHA256"] = str(broker_sha256 or "")
             environment["OFLOOP_RESEARCH_BROKER_VERSION"] = str(broker_version or "")
+            environment["OFLOOP_RESEARCH_EVIDENCE_DIR"] = str(evidence_dir)
+            environment["OFLOOP_RESEARCH_QUEUE"] = str(evidence_dir.parent / "queue")
+            # Per-attempt scratch RESPONSE dir: the supervisor publishes
+            # responses there; the worker reads them. The helper uses
+            # OFLOOP_RESEARCH_SCRATCH_RESP + --request-id to find its
+            # own file. This is the bridge between worker-readable
+            # (scratch is allowRead) and broker-writable (only the
+            # supervisor's process writes via subprocess.run).
+            scratch_resp = (
+                Path(canonical_repo).expanduser().resolve(strict=False)
+                / ".ownframework-loop" / (evidence_run_key or "")
+                / "scratch" / "builder" / "pass-anon"
+                / "research"
+            )
+            environment["OFLOOP_RESEARCH_SCRATCH_RESP"] = str(scratch_resp)
             resolved.append({
                 "name": name, "kind": "read-only-network", "privileged": True,
                 "provider": "core_research_broker",
@@ -720,9 +746,11 @@ def resolve_capabilities(
                 "version": broker_version,
                 "executable_sha256": broker_sha256,
                 "evidence_dir": str(evidence_dir),
-                # Network domains are intentionally empty: the broker
-                # owns its own outbound authority, and the worker's
-                # Bash allowedDomains are not widened.
+                "helper_executable": helper_str,
+                # The worker Bash's allowedDomains is NOT widened by
+                # this capability. The supervisor owns the public
+                # internet side; the worker has no Bash network
+                # authority.
                 "network_domains": [],
                 "commissioning_evidence_path": commissioned["evidence_path"],
                 "commissioning_evidence_sha256": commissioned["evidence_sha256"],

@@ -1097,6 +1097,59 @@ def _progress_watchdog_tick(db_path: Path) -> dict[str, int]:
         return {"considered": 0, "advanced": 0, "terminated": 0, "skipped": 0}
 
 
+def _research_bridge_tick(db_path: Path) -> dict[str, int]:
+    """One bounded governed-research bridge tick.
+
+    For every active non-terminal run, consume pending research
+    requests from the supervisor-owned queue, validate against
+    the run's frozen capability binding and the live jobs table,
+    dispatch the broker as a supervisor subprocess, and publish
+    responses back into the worker's per-attempt scratch research
+    dir.
+
+    Fail-closed: a tick error does NOT propagate to the
+    scheduler's main loop. Errors are surfaced as a
+    ``research_bridge_error`` count in the result.
+    """
+    from . import supervisor_research as _research_mod
+    result: dict[str, int] = {
+        "research_consumed": 0,
+        "research_processed": 0,
+        "research_rejected": 0,
+        "research_bridge_error": 0,
+    }
+    active_run_ids: list[tuple[str, Path]] = []
+    try:
+        with _managed_connect_readonly(db_path) as conn:
+            for row in conn.execute(
+                "SELECT run_id, repo FROM jobs WHERE status NOT IN "
+                "('DONE','QUARANTINED','RETIRED','CANCELED') AND run_id IS NOT NULL"
+            ).fetchall():
+                active_run_ids.append((row["run_id"], Path(row["repo"])))
+    except (OSError, sqlite3.Error):
+        result["research_bridge_error"] = 1
+        return result
+    for run_id, repo_path in active_run_ids:
+        try:
+            tick = _research_mod.process_research_queue(
+                db_path=db_path,
+                canonical_repo=repo_path,
+                run_id=run_id,
+            )
+            result["research_consumed"] += int(tick.get("consumed", 0))
+            result["research_processed"] += int(tick.get("processed", 0))
+            result["research_rejected"] += int(tick.get("rejected", 0))
+            if tick.get("deferred"):
+                result["research_bridge_error"] += 1
+        except Exception as exc:  # pragma: no cover
+            result["research_bridge_error"] += 1
+            sys.stderr.write(
+                f"research_bridge_tick run={run_id} error: "
+                f"{type(exc).__name__}: {exc}\n"
+            )
+    return result
+
+
 def _read_pid_start_time(pid: int) -> float | None:
     return _process_mod._read_pid_start_time(pid)
 
@@ -2564,6 +2617,21 @@ def serve(
                 _progress_watchdog_tick(Path(db))
             except Exception:
                 pass
+            # Governed-research transport (RESEARCH_AUTHORITY.md §5.a):
+            # the supervisor owns the broker subprocess. Each tick
+            # consumes queued research requests for active runs,
+            # validates against the run's frozen capability binding
+            # and the live jobs table, dispatches the broker via
+            # subprocess.run (NOT under Claude's Bash sandbox), and
+            # publishes responses back into the worker's per-attempt
+            # scratch research dir. Defensive try/except so a tick
+            # failure cannot bring down the scheduler.
+            try:
+                _research_bridge_tick(Path(db))
+            except Exception as exc:  # pragma: no cover
+                sys.stderr.write(
+                    f"research_bridge_tick error: {type(exc).__name__}: {exc}\n"
+                )
             # Retire completed lanes and emit their durable result. A failed
             # lane is isolated; the scheduler continues to reconcile others.
             completed = {f for f in futures if f.done()}
