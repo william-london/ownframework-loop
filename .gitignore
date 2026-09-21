@@ -15,3 +15,8 @@ logs/
 .install.log
 .uninstall.log
 .install.provenance
+*.sqlite3
+*.sqlite
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
