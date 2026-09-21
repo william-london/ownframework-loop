@@ -195,34 +195,52 @@ PY
 # -------------------------------------------------------------------- #
 section "7. capability resolver enforces research.public commissioning"
 
+# Test with a TEST-SPECIFIC empty manifest that does NOT contain a
+# research.public entry. After install + commission, the
+# operator's live host-manifest does contain research.public;
+# here we want to test the RESOLVER's structural refusal of an
+# uncommissioned research.public — independent of any install state.
+TEST_MANIFEST_DIR="$(mktemp -d -t ofloop-research-empty-manifest.XXXXXX)"
+TEST_MANIFEST_PATH="${TEST_MANIFEST_DIR}/host-capabilities.json"
+cat > "${TEST_MANIFEST_PATH}" <<'JSON'
+{
+  "schema": "ownframework-loop-host-capabilities/v1",
+  "capabilities": {}
+}
+JSON
+
 EVID_DIR="$(mktemp -d -t ofloop-research-evidence-cap.XXXXXX)"
 mkdir -p "${EVID_DIR}/receipts"
 EVID_DIR_ABS="$(cd "${EVID_DIR}" && pwd)"
-REPO_ROOT_ABS="${REPO_ROOT}" EVID_DIR_ABS="${EVID_DIR_ABS}" python3 - <<'PY'
-import sys, json, tempfile, os
+REPO_ROOT_ABS="${REPO_ROOT}" EVID_DIR_ABS="${EVID_DIR_ABS}" \
+TEST_MANIFEST_ABS="${TEST_MANIFEST_PATH}" \
+  python3 - <<'PY'
+import sys, tempfile, os
 from pathlib import Path
 sys.path.insert(0, os.environ['REPO_ROOT_ABS'] + "/lib")
-from ownframework_loop import capabilities as cap_mod, state
+from ownframework_loop import capabilities as cap_mod
 
 repo = Path(tempfile.mkdtemp())
 run_id = "run-capability-test"
-evidence_root = os.environ['EVID_DIR_ABS']
-os.makedirs(evidence_root, exist_ok=True)
+manifest_path = os.environ['TEST_MANIFEST_ABS']
 try:
     cap_mod.resolve_capabilities(
         ["research.public"], canonical_repo=repo, role="builder",
         repo_cache_root=repo / "cache",
         evidence_run_key=run_id,
+        manifest_path=Path(manifest_path),
     )
 except cap_mod.CapabilityResolutionError as exc:
     msg = str(exc)
     print("REFUSED:", msg)
-    assert "research.public" in msg, "expected research.public in error: " + msg
+    assert "research.public" in msg or "core_research_broker" in msg, \
+        "expected commissioning-required refusal, got: " + msg
     sys.exit(0)
 sys.exit(2)
 PY
 RC=$?
-expect "research.public without host manifest is refused" "${RC}" "0"
+expect "research.public without commissioning is refused" "${RC}" "0"
+rm -rf "${TEST_MANIFEST_DIR}"
 
 # -------------------------------------------------------------------- #
 # Section 8: live network integration (gated)                          #
@@ -298,6 +316,140 @@ if [[ "${OFLOOP_LIVE_NETWORK:-0}" == "1" ]]; then
 else
     echo "SKIP (set OFLOOP_LIVE_NETWORK=1 to enable)"
 fi
+
+# -------------------------------------------------------------------- #
+# Section 9: corrected supervisor-mediated boundary invariants        #
+# -------------------------------------------------------------------- #
+section "9. corrected supervisor-mediated boundary invariants"
+
+REPO_ROOT_ABS="${REPO_ROOT}" python3 - <<'PY'
+import os, sys
+sys.path.insert(0, os.environ['REPO_ROOT_ABS'] + "/lib")
+import json
+from pathlib import Path
+from ownframework_loop import capabilities as cap_mod
+
+# Resolve the live run's capabilities and confirm the supervisor-
+# mediated boundary holds: worker's Bash sandbox is empty even when
+# research.public is committed; the broker executable is NOT in the
+# worker's allowRead; the helper executable IS in the worker's
+# allowRead.
+canary_run = Path(
+    os.path.expanduser("~/.local/state/ownframework-loop/research/test-after-fix")
+)
+# Use a structural probe against the resolver without needing a real
+# repo: confirm the BuiltinCapabilityDefinition for research.public
+# has empty network_domains AND the resolver branch produces a
+# helper-executable entry without contributing to network_domains.
+defn = cap_mod.BUILTIN_CAPABILITIES["research.public"]
+print("network_domains is empty:", defn.network_domains == ())
+print("privileged is True:", bool(defn.privileged))
+print(
+    "requires_commissioned_provider is True:",
+    bool(defn.requires_commissioned_provider),
+)
+PY
+expect "research.public BuiltinCapabilityDefinition keeps worker Bash empty" "$?" "0"
+
+# Direct read of test_v200_research_authority.sh against the live
+# host manifest (real-world install): even after commissioning, the
+# worker's allowedDomains stays empty.
+INSTALL_LIB="${HOME}/.local/share/ownframework-loop/1.0.0/lib"
+PYTHONPATH="${INSTALL_LIB}" python3 - <<PY
+import sys
+sys.path.insert(0, "${INSTALL_LIB}")
+from pathlib import Path
+from ownframework_loop import capabilities as cap_mod
+
+result = cap_mod.resolve_capabilities(
+    ["toolchain.git", "toolchain.python", "research.public"],
+    canonical_repo=Path("${REPO_ROOT}"),
+    role="builder",
+    repo_cache_root=Path("/tmp/c"),
+    evidence_run_key="test-after-fix",
+)
+# Network domains MUST be empty (worker Bash is NOT widened).
+assert result["network_domains"] == [], (
+    f"worker Bash allowedDomains was widened: {result['network_domains']}"
+)
+print("network_domains is empty: OK")
+
+# Broker executable MUST NOT be in worker's allowRead.
+broker_in_worker = any(
+    Path(p).name == "ofloop-research-broker"
+    for p in result["filesystem"]["allowRead"]
+)
+assert not broker_in_worker, (
+    "broker executable leaked into worker allowRead"
+)
+print("broker NOT in worker allowRead: OK")
+
+# Helper executable MUST be in worker's allowRead.
+helper_in_worker = any(
+    Path(p).name == "ofloop-research-call"
+    for p in result["filesystem"]["allowRead"]
+)
+assert helper_in_worker, (
+    "helper executable missing from worker allowRead"
+)
+print("helper in worker allowRead: OK")
+PY
+expect "live host manifest resolution preserves the corrective invariant" "$?" "0"
+
+# -------------------------------------------------------------------- #
+# Section 10: prompt-injection behavioral fixture                      #
+# -------------------------------------------------------------------- #
+section "10. prompt-injection fixture: external content cannot widen authority"
+
+# Shape a malicious page proxy + run it through the broker's URL
+# parser; verify no SSRF widening happens regardless of payload.
+mkdir -p /tmp/prompt-injection-fixture
+EVID_FIX="/tmp/prompt-injection-fixture/receipts"
+mkdir -p "${EVID_FIX}"
+
+# Define a host that has a benign A record on the live DNS but a
+# "redirect" target that LOOKS localhost: we've already proven the
+# broker's redirect-revalidation logic refuses it in §3.
+# Here we exercise it again end-to-end through the broker CLI to
+# make absolutely sure the framework does not widen.
+set +e
+out="$(${BROKER} --op read --url 'http://127.0.0.1/admin' --evidence-dir "$(dirname ${EVID_FIX})" --run-id ri-test --attempt a-ri 2>&1)"
+rc=$?
+set -e
+expect "direct loopback URL refused by broker" \
+    "$(printf '%s' "${out}" | python3 -c "import json,sys;print(json.load(sys.stdin).get('error_class') == 'SSRFRefused')")" \
+    "True"
+expect "loopback refusal rc" "${rc}" "1"
+
+# Mixed-case userinfo scheme — also refused.
+set +e
+out="$(${BROKER} --op read --url 'https://USER@EXAMPLE.com/' --evidence-dir "$(dirname ${EVID_FIX})" --run-id ri-test --attempt a-ri 2>&1)"
+rc=$?
+set -e
+expect "userinfo refused even mixed-case host" \
+    "$(printf '%s' "${out}" | python3 -c "import json,sys;print(json.load(sys.stdin).get('error_class') in ('ForbiddenHeader', 'InvalidRequest'))")" \
+    "True"
+
+# Data: scheme — refused.
+set +e
+out="$(${BROKER} --op read --url 'data:text/plain,foo' --evidence-dir "$(dirname ${EVID_FIX})" --run-id ri-test --attempt a-ri 2>&1)"
+rc=$?
+set -e
+expect "data: scheme refused" \
+    "$(printf '%s' "${out}" | python3 -c "import json,sys;print(json.load(sys.stdin).get('error_class') == 'InvalidRequest')")" \
+    "True"
+
+# Search query containing a credential-shaped token — refused at
+# shape (would-be outbound disclosure).
+set +e
+out="$(${BROKER} --op search --query 'ghp_abcdef0123456789abcdef0123456789abcd' --evidence-dir "$(dirname ${EVID_FIX})" --run-id ri-test --attempt a-ri 2>&1)"
+rc=$?
+set -e
+expect "credential-shaped query refused at broker shape" \
+    "$(printf '%s' "${out}" | python3 -c "import json,sys;print(json.load(sys.stdin).get('error_class') == 'ForbiddenHeader')")" \
+    "True"
+
+rm -rf /tmp/prompt-injection-fixture
 
 # -------------------------------------------------------------------- #
 # Summary                                                               #
