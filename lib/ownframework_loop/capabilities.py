@@ -102,6 +102,18 @@ BUILTIN_CAPABILITIES: dict[str, CapabilityDefinition] = {
     "container.docker": CapabilityDefinition(
         "container.docker", "privileged", privileged=True, requires_commissioned_provider=True,
     ),
+    "research.public": CapabilityDefinition(
+        # Governed public read authority per docs/architecture/RESEARCH_AUTHORITY.md.
+        # Not a tool the worker invokes directly; the broker executable is the
+        # one and only thing with public-internet reachability for the run, and
+        # it is commissioned via host-manifest entry + canary proof. Network
+        # domains are intentionally empty here: the broker manages its own
+        # outbound authority (and SSRF/destination validation), and the
+        # worker's Bash allowedDomains are NOT widened by this capability.
+        "research.public", "read-only-network", privileged=True,
+        requires_commissioned_provider=True,
+        network_domains=(),
+    ),
 }
 
 
@@ -503,6 +515,7 @@ def resolve_capabilities(
     packet_network_allowlist: list[str] | None = None,
     manifest_path: Path | None = None,
     browser_asset_root: Path | None = None,
+    evidence_run_key: str | None = None,
 ) -> dict[str, Any]:
     requested = list(requested or [])
     errors = validate_capability_names(requested)
@@ -551,8 +564,9 @@ def resolve_capabilities(
                 )
             definition = CapabilityDefinition(name, "tool", ())
 
-        if definition.name in {"container.docker", "local.http-service"}:
+        if definition.name in {"container.docker", "local.http-service", "research.public"}:
             from . import commissioning as commissioning_mod
+            from . import runtime_env as runtime_env_mod
             if definition.name == "container.docker" and entry.get("provider") != "broker":
                 raise CapabilityResolutionError("container.docker requires provider='broker'")
             if (
@@ -561,6 +575,10 @@ def resolve_capabilities(
             ):
                 raise CapabilityResolutionError(
                     "local.http-service requires the safe-local-binding provider"
+                )
+            if definition.name == "research.public" and entry.get("provider") != "core_research_broker":
+                raise CapabilityResolutionError(
+                    "research.public requires the core_research_broker provider"
                 )
             try:
                 commissioned = commissioning_mod.verify_commissioning(
@@ -593,7 +611,8 @@ def resolve_capabilities(
                     "commissioning_evidence_sha256": commissioned["evidence_sha256"],
                     "commissioning_canary_kind": commissioned["canary_kind"],
                 })
-            else:
+                continue
+            if definition.name == "local.http-service":
                 sandbox_network["allowLocalBinding"] = True
                 resolved.append({
                     "name": name, "kind": "local-service", "privileged": True,
@@ -602,6 +621,82 @@ def resolve_capabilities(
                     "commissioning_evidence_sha256": commissioned["evidence_sha256"],
                     "commissioning_canary_kind": commissioned["canary_kind"],
                 })
+                continue
+            # research.public -- the only remaining case in the
+            # commissioned set checked at the top of this branch.
+            # Governed public read authority per
+            # docs/architecture/RESEARCH_AUTHORITY.md. The broker
+            # executable is the ONLY thing in the run with public
+            # internet reachability; the worker's Bash sandbox is
+            # not widened by this capability and the --tools list
+            # does not gain WebSearch/WebFetch.
+            #
+            # IMPORTANT: the evidence dir is added to allow_read and
+            # to the worker env so prior-pass receipts are readable,
+            # but it MUST NOT appear in allow_write. That asymmetry
+            # makes the broker the only writer of research receipts,
+            # so even prompt-injection-perturbed workers cannot forge
+            # evidence. The broker's own code additionally restricts
+            # its writes to its configured --evidence-dir.
+            provider = commissioned["provider_identity"]
+            broker_executable = str(provider.get("executable") or "")
+            broker_version = provider.get("version")
+            broker_sha256 = provider.get("executable_sha256")
+            if not broker_executable:
+                raise CapabilityResolutionError(
+                    "research.public provider identity is missing broker_executable"
+                )
+            broker_path = Path(broker_executable)
+            if not broker_path.is_absolute() or broker_path.is_symlink():
+                raise CapabilityResolutionError(
+                    "research.public broker executable must be an absolute non-symlink path"
+                )
+            # Refuse respawn-by-path tricks: the broker identity must
+            # come from the same commissioning evidence the canonical
+            # resolver bound.
+            if str(broker_path.resolve(strict=False)) != str(broker_path):
+                raise CapabilityResolutionError(
+                    "research.public broker executable must resolve exactly"
+                )
+            # Evidence directory: per-run, operator-owned; absolute,
+            # create-on-demand, private (mode 0o700). The worker can
+            # read receipts prior passes produced (allow_read) but
+            # cannot write to it (NOT in allow_write).
+            evidence_dir = runtime_env_mod.research_evidence_dir(evidence_run_key)
+            evidence_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+            try:
+                os.chmod(evidence_dir, 0o700)
+            except OSError:
+                pass
+            # Worker can read but never write the evidence dir.
+            allow_read.add(str(evidence_dir))
+            stable_allow_read.add(str(evidence_dir))
+            # Broker goes to the worker's PATH so the worker can
+            # spawn the broker without baking the absolute path into
+            # its Bash script. The broker executable itself is also
+            # in allow_read for safety.
+            allow_read.add(broker_executable)
+            stable_allow_read.add(broker_executable)
+            path_prepend.append(str(broker_path.parent))
+            environment["OFLOOP_RESEARCH_BROKER"] = broker_executable
+            environment["OFLOOP_RESEARCH_EVIDENCE_DIR"] = str(evidence_dir)
+            environment["OFLOOP_RESEARCH_BROKER_SHA256"] = str(broker_sha256 or "")
+            environment["OFLOOP_RESEARCH_BROKER_VERSION"] = str(broker_version or "")
+            resolved.append({
+                "name": name, "kind": "read-only-network", "privileged": True,
+                "provider": "core_research_broker",
+                "executable": broker_executable,
+                "version": broker_version,
+                "executable_sha256": broker_sha256,
+                "evidence_dir": str(evidence_dir),
+                # Network domains are intentionally empty: the broker
+                # owns its own outbound authority, and the worker's
+                # Bash allowedDomains are not widened.
+                "network_domains": [],
+                "commissioning_evidence_path": commissioned["evidence_path"],
+                "commissioning_evidence_sha256": commissioned["evidence_sha256"],
+                "commissioning_canary_kind": commissioned["canary_kind"],
+            })
             continue
 
         executable, version, executable_sha256, extra_reads = _resolve_executable(

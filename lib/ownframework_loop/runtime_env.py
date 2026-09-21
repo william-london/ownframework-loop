@@ -331,6 +331,57 @@ def commissioned_validation_env(
     )
 
 
+def research_evidence_root() -> Path:
+    """Operator-owned research evidence root.
+
+    Lives one level DEEPER than the supervisor state root contents so the
+    resolution layer can decide independently what to put in the worker's
+    allowRead list. This is the only writer entry point for the
+    ``research.public`` capability.
+    """
+    explicit = os.environ.get("OFLOOP_RESEARCH_EVIDENCE_ROOT", "").strip()
+    if explicit:
+        return Path(explicit).expanduser().resolve(strict=False)
+    base = Path("~/.local/state").expanduser() / "ownframework-loop" / "research"
+    return base.resolve(strict=False)
+
+
+def research_evidence_dir(run_id: str | None = None) -> Path:
+    """Per-run research evidence directory.
+
+    Returns the operator-owned root when ``run_id`` is None. When ``run_id``
+    is supplied, the run_id is validated as a strict identity (it must match
+    OwnFramework Loop's own ``validate_run_id`` so the helper cannot be
+    coerced into path traversal) and the per-run leaf is appended.
+
+    Defense in depth: the resolved path is normalized and explicitly
+    asserted to remain inside ``research_evidence_root()`` before being
+    returned. Callers that deviate are refused.
+    """
+    base = research_evidence_root()
+    if run_id is None:
+        return base
+    # Reuse the durable identity validation the rest of Loop applies so the
+    # helper never builds a path under any non-Loop-controlled identifier.
+    from . import state as _state_mod
+    _state_mod.validate_run_id(run_id)
+    candidate = (base / run_id).resolve(strict=False)
+    try:
+        candidate.relative_to(base.resolve(strict=False))
+    except ValueError as exc:
+        raise ValueError(
+            f"research_evidence_dir escaped its root: {candidate!r}"
+        ) from exc
+    if os.path.sep + "" == "/":
+        # POSIX: refuse any control char in the path (paranoia after
+        # validate_run_id already passed).
+        if any(ord(c) < 0x20 or ord(c) == 0x7f for c in str(candidate)):
+            raise ValueError(
+                f"research_evidence_dir contains control characters: {candidate!r}"
+            )
+    return candidate
+
+
 __all__ = [
     "SCHEMA",
     "CAPABILITY_ENV_ALLOWED_KEYS",
@@ -343,4 +394,6 @@ __all__ = [
     "runtime_cache_dir",
     "runtime_cache_path",
     "commissioned_validation_env",
+    "research_evidence_root",
+    "research_evidence_dir",
 ]

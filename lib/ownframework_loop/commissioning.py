@@ -14,6 +14,7 @@ CANARY_VERSION = 1
 _CANARY_KINDS = {
     "container.docker": "docker-broker-local-control",
     "local.http-service": "claude-safe-local-binding",
+    "research.public": "core-research-broker-boundary",
 }
 
 
@@ -85,6 +86,73 @@ def _provider_identity(name: str, entry: dict[str, Any]) -> dict[str, Any]:
         if entry.get("provider") != "claude_native_safe_local_binding":
             raise CommissioningError("local.http-service provider is not commissioned")
         return {"provider": str(entry.get("provider"))}
+    if name == "research.public":
+        if entry.get("provider") != "core_research_broker":
+            raise CommissioningError(
+                "research.public provider must be 'core_research_broker'"
+            )
+        executable, digest = _trusted_executable(
+            entry.get("broker_executable"),
+            field="research.public.broker_executable",
+        )
+        if Path(executable).name != "ofloop-research-broker":
+            raise CommissioningError(
+                "research.public broker_executable must be named "
+                "'ofloop-research-broker' (not a drop-in replacer)"
+            )
+        args = entry.get("version_args", ["--op", "ping"])
+        if not isinstance(args, list) or not all(isinstance(x, str) for x in args):
+            raise CommissioningError(
+                "research.public.version_args must be an array of strings"
+            )
+        try:
+            proc = subprocess.run(
+                [executable, *args], capture_output=True, text=True,
+                check=False, timeout=5,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise CommissioningError(
+                f"research.public broker version proof failed: {exc}"
+            ) from exc
+        if proc.returncode != 0:
+            raise CommissioningError(
+                "research.public broker did not exit 0 on --op=ping; "
+                f"rc={proc.returncode}"
+            )
+        try:
+            payload = json.loads(proc.stdout)
+        except json.JSONDecodeError as exc:
+            raise CommissioningError(
+                "research.public broker --op=ping returned invalid JSON"
+            ) from exc
+        if not isinstance(payload, dict):
+            raise CommissioningError(
+                "research.public broker --op=ping did not return a JSON object"
+            )
+        if payload.get("ok") is not True or payload.get("op") != "ping":
+            raise CommissioningError(
+                "research.public broker --op=ping did not return a healthy "
+                "ping envelope"
+            )
+        if payload.get("capability") != "research.public":
+            raise CommissioningError(
+                "research.public broker --op=ping reports a different "
+                "capability name"
+            )
+        observed_sha = str(payload.get("broker_sha256") or "")
+        if not observed_sha or observed_sha != digest:
+            raise CommissioningError(
+                "research.public broker executable SHA-256 reported by "
+                "--op=ping does not match the file digest; the broker "
+                "identity is not self-consistent"
+            )
+        version = str(payload.get("version") or "")
+        return {
+            "provider": "core_research_broker",
+            "executable": executable,
+            "version": version,
+            "executable_sha256": digest,
+        }
     raise CommissioningError(f"unsupported privileged capability: {name}")
 
 

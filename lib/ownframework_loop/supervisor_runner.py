@@ -396,6 +396,7 @@ class ClaudeCodeRunner:
             packet_network_allowlist=[
                 str(item) for item in (work_order.get("network_read_allowlist") or [])
             ],
+            evidence_run_key=str(work_order.get("run_id") or "") or None,
         )
         runner_profile = runner_profiles_mod.resolve_profile(
             str(work_order.get("runner_profile") or "default"),
