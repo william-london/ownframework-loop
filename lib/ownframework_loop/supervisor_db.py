@@ -220,6 +220,7 @@ def bootstrap_schema(
           progress_signature_at REAL NOT NULL DEFAULT 0,
           progress_stall_count INTEGER NOT NULL DEFAULT 0,
           progress_watchdog_window_seconds INTEGER NOT NULL DEFAULT 0,
+          max_pass_runtime_seconds INTEGER NOT NULL DEFAULT 0,
           UNIQUE(repo, run_id)
         );
         CREATE TABLE IF NOT EXISTS cost_attempts (
@@ -342,6 +343,7 @@ def bootstrap_schema(
         "progress_signature_at": "ALTER TABLE jobs ADD COLUMN progress_signature_at REAL NOT NULL DEFAULT 0",
         "progress_stall_count": "ALTER TABLE jobs ADD COLUMN progress_stall_count INTEGER NOT NULL DEFAULT 0",
         "progress_watchdog_window_seconds": "ALTER TABLE jobs ADD COLUMN progress_watchdog_window_seconds INTEGER NOT NULL DEFAULT 0",
+        "max_pass_runtime_seconds": "ALTER TABLE jobs ADD COLUMN max_pass_runtime_seconds INTEGER NOT NULL DEFAULT 0",
     }
     for name, statement in job_migrations.items():
         if name not in columns:

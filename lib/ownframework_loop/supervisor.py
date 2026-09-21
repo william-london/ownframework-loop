@@ -2116,6 +2116,7 @@ def run_one(*, db_path: Path | None = None, timeout_seconds: int = 0) -> dict[st
                     err_path=durable_files[1],
                     attempt_id=attempt_id,
                     deadline_at=time.time() + semantic_timeout_seconds,
+                    max_pass_runtime_seconds=semantic_timeout_seconds,
                 ),
                 durable_files=durable_files,
             )

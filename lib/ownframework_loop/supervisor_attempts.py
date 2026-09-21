@@ -482,6 +482,7 @@ def _set_worker_pid(
     err_path: Path | None = None,
     attempt_id: str | None = None,
     deadline_at: float | None = None,
+    max_pass_runtime_seconds: int | None = None,
 ) -> None:
     _read_pid_start_identity = _process_mod._read_pid_start_identity
     started = time.time()
@@ -503,7 +504,8 @@ def _set_worker_pid(
           progress_signature_stdout_size=?, progress_signature_stdout_mtime=?,
           progress_signature_stderr_size=?, progress_signature_stderr_mtime=?,
           progress_signature_worktree_head=?, progress_signature_worktree_max_mtime=?,
-          progress_signature_worktree_file_count=?, progress_signature_at=?
+          progress_signature_worktree_file_count=?, progress_signature_at=?,
+          max_pass_runtime_seconds=COALESCE(?, max_pass_runtime_seconds)
         WHERE id=? AND status='RUNNING'
         """,
         (
@@ -525,6 +527,7 @@ def _set_worker_pid(
             float(progress_cols["progress_signature_worktree_max_mtime"]),
             int(progress_cols["progress_signature_worktree_file_count"]),
             float(progress_at),
+            int(max_pass_runtime_seconds) if max_pass_runtime_seconds is not None else None,
             job_id,
         ),
     )
