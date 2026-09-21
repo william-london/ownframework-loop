@@ -676,6 +676,19 @@ def resolve_capabilities(
                 raise CapabilityResolutionError(
                     "research.public broker executable must resolve exactly"
                 )
+            # Contribute the broker's research surface to the
+            # worker-Bash allowedDomains so the broker subprocess can
+            # actually reach public hosts. The domain list lives on the
+            # BUILTIN_CAPABILITIES definition; the manifest cannot widen
+            # it further (we still want the stricter "broker-managed
+            # destinations" semantics).
+            manifest_domains_research = _network_domains(
+                entry.get("network_domains"), name=name
+            ) if entry.get("network_domains") else []
+            effective_research_domains = sorted(
+                set(definition.network_domains) | set(manifest_domains_research)
+            )
+            network_domains.update(effective_research_domains)
             # Evidence directory: per-run, operator-owned; absolute,
             # create-on-demand, private (mode 0o700). The worker can
             # read receipts prior passes produced (allow_read) but
