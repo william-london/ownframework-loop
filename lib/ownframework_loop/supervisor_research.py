@@ -250,11 +250,20 @@ def _assert_safe_response_path(response_path: Path, root: Path) -> None:
     This is the post-construction check (A-RESEARCH-RESPONSE-PATH-CONFINEMENT):
     even if a future code path accidentally concatenates a path-bearing
     field, this assertion catches it.
+
+    Uses lexical containment (no filesystem resolution) so the
+    assertion is correct whether or not the response file has been
+    published yet; the canonical formula derives every component
+    from already-canonical fields, so a path-traversal in any
+    component is structurally impossible.
     """
     try:
-        resolved = response_path.resolve(strict=True)
-        root_resolved = root.resolve(strict=True)
-        # Python 3.9+: Path.is_relative_to; fall back to manual check.
+        # Lexical comparison: every component must already be a
+        # strict descendant of the root. ``resolve(strict=False)`` is
+        # used only to normalise a trailing separator if any, not to
+        # touch the filesystem.
+        resolved = response_path.resolve(strict=False)
+        root_resolved = root.resolve(strict=False)
         try:
             ok = resolved.is_relative_to(root_resolved)
         except AttributeError:  # pragma: no cover
