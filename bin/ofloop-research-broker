@@ -1540,11 +1540,10 @@ def _emit_canary(
         refused_benchmark = True
     # Self-test 6: IPv4-mapped IPv6 v4 rules still fire.
     try:
-        _classify_address(
+        acceptable, _reason = _classify_address(
             socket.AF_INET6, "::ffff:127.0.0.1",
         )
-        # If we got here, the v4 rule did NOT fire — broker drifted.
-        refused_v4_mapped = False
+        refused_v4_mapped = (acceptable is False)
     except Exception:
         refused_v4_mapped = True
     # Self-test 7: URL with userinfo refused.
