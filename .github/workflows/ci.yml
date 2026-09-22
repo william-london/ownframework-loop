@@ -45,6 +45,14 @@ jobs:
         run: |
           python3 --version
           git --version
+      - name: Install uv for candidate-bound project env tests
+        run: |
+          if ! command -v uv >/dev/null 2>&1; then
+            curl -LsSf https://astral.sh/uv/install.sh | sh
+            echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          fi
+          uv --version
       - name: Fetch canonical PR base
         if: github.event_name == 'pull_request'
         run: git fetch --no-tags https://github.com/${{ github.repository }}.git ${{ github.base_ref }}:refs/remotes/upstream/${{ github.base_ref }}
@@ -82,6 +90,14 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python }}
+      - name: Install uv for candidate-bound project env tests
+        run: |
+          if ! command -v uv >/dev/null 2>&1; then
+            curl -LsSf https://astral.sh/uv/install.sh | sh
+            echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          fi
+          uv --version
       - name: Release gate
         env:
           OFLOOP_RELEASE_GATE_EXPECTED_BRANCH: ${{ github.head_ref || github.ref_name }}
