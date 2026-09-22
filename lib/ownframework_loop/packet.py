@@ -19,6 +19,7 @@ from typing import Any
 from .util import sha256_text
 from .integrity import canonical_json_dumps
 from . import capabilities as capabilities_mod, git_checks, runner_profiles as runner_profiles_mod, schema_validate
+from . import validation_environment
 
 
 SCHEMA_VERSION = "ownframework-work-packet/v2"
@@ -390,7 +391,11 @@ def _declared_required_validations(meta: dict[str, Any]) -> list[dict[str, Any]]
 
 def _has_explicit_python_source_binding(command: str) -> bool:
     """Recognize bounded repo-local source-path/package execution contracts."""
-    if re.search(r"\buv\s+run\b", command):
+    # Canonical uv-subcommand predicate from validation_environment.
+    # The packet layer and the executor layer MUST agree on what counts
+    # as a uv-mediated command — extending the catalogue means
+    # editing UV_MEDIATED_SUBCOMMANDS in one place, not two.
+    if validation_environment.is_uv_command(command):
         return True
     if re.search(
         r"\bPYTHONPATH\s*=\s*(?:['\"]?)(?:\./)?src(?:[/:'\"]|\s|$)",
@@ -432,11 +437,14 @@ def validate_validation_contract(meta: dict[str, Any]) -> list[str]:
     }
     for validation in _declared_required_validations(meta):
         command = str(validation.get("command") or "")
-        if re.search(r"\buv\s+run\b", command) and "package.uv" not in capabilities:
+        if (
+            validation_environment.is_uv_command(command)
+            and "package.uv" not in capabilities
+        ):
             name = str(validation.get("name") or "validation")
             errors.append(
-                f"required_validation {name!r} uses uv run but packet capabilities "
-                "do not declare package.uv"
+                f"required_validation {name!r} uses a uv subcommand but packet "
+                "capabilities do not declare package.uv"
             )
             continue
         if not _PYTHON_VALIDATION_RE.search(command):

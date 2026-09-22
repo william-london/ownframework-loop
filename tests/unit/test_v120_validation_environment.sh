@@ -560,6 +560,219 @@ expect "project_environment_dir is pure (same input → same path)" "$PURE_EQ" "
 expect "project_environment_dir does not create the path" "$PURE_NO_CREATE" "True"
 
 # -------------------------------------------------------------------- #
+# Section 12: canonical is_uv_command predicate is the SOLE classifier   #
+# -------------------------------------------------------------------- #
+section "12. canonical is_uv_command predicate covers all uv subcommands"
+
+# The packet admission layer and the executor layer must consume the
+# SAME function. Adding a new uv subcommand → extend
+# UV_MEDIATED_SUBCOMMANDS in one place; both layers pick it up
+# automatically. Test every documented subcommand plus a non-uv control.
+CMD_RESULT="$(PYTHONDONTWRITEBYTECODE=1 python3 -B <<'PY'
+import sys
+sys.path.insert(0, "${LIB_DIR}")
+from ownframework_loop import validation_environment as ve
+
+expected_uv = ["uv run pytest", "uv sync", "uv exec python -V",
+               "uv test", "uv python list", "uv lock"]
+expected_not = ["pytest", "echo hello", "pip install foo",
+                "npm install", "uvx tool run", "tar -xzf foo.tar.gz"]
+
+uv_results = [(c, ve.is_uv_command(c)) for c in expected_uv]
+not_results = [(c, ve.is_uv_command(c)) for c in expected_not]
+print("UV_TRUE_ALL=", all(v for _, v in uv_results))
+print("UV_FALSE_ALL=", not any(v for _, v in not_results))
+# Verify the catalogue is exposed publicly so the packet layer can
+# rely on the same source.
+print("CATALOGUE_KNOWN=", "sync" in ve.UV_MEDIATED_SUBCOMMANDS)
+print("EMPTY_FALSE=", ve.is_uv_command("") is False)
+PY
+)"
+expect "every uv subcommand is_uv_command=True" \
+    "$(echo "${CMD_RESULT}" | awk -F= '/^UV_TRUE_ALL=/{gsub(/ /,"",$2); print $2}')" "True"
+expect "non-uv commands is_uv_command=False" \
+    "$(echo "${CMD_RESULT}" | awk -F= '/^UV_FALSE_ALL=/{gsub(/ /,"",$2); print $2}')" "True"
+expect "UV_MEDIATED_SUBCOMMANDS exposes 'sync'" \
+    "$(echo "${CMD_RESULT}" | awk -F= '/^CATALOGUE_KNOWN=/{gsub(/ /,"",$2); print $2}')" "True"
+expect "empty command is_uv_command=False" \
+    "$(echo "${CMD_RESULT}" | awk -F= '/^EMPTY_FALSE=/{gsub(/ /,"",$2); print $2}')" "True"
+
+# -------------------------------------------------------------------- #
+# Section 13: BoundUvIdentity refuses incomplete resolutions            #
+# -------------------------------------------------------------------- #
+section "13. BoundUvIdentity refuses to construct without executable/version/sha256"
+
+BOUND_RESULT="$(PYTHONDONTWRITEBYTECODE=1 python3 -B <<'PY'
+import sys
+sys.path.insert(0, "${LIB_DIR}")
+from ownframework_loop import validation_environment as ve
+
+# Missing executable
+try:
+    ve.build_bound_uv_identity({"version": "0.4.0", "executable_sha256": "abc"})
+    print("MISS_EXEC=FAIL_NO_RAISE")
+except ve.ValidationEnvironmentError:
+    print("MISS_EXEC=REFUSED")
+# Missing sha
+try:
+    ve.build_bound_uv_identity({"executable": "/bin/uv", "version": "0.4.0"})
+    print("MISS_SHA=FAIL_NO_RAISE")
+except ve.ValidationEnvironmentError:
+    print("MISS_SHA=REFUSED")
+# Complete resolution
+ident = ve.build_bound_uv_identity(
+    {"executable": "/bin/uv", "version": "0.4.0",
+     "executable_sha256": "deadbeef", "network_domains": ["pypi.org"]},
+    cache_path="/var/cache/uv", cache_scope="repository_durable",
+)
+print("COMPLETE_TYPE=", type(ident).__name__)
+print("COMPLETE_SHA=", ident.executable_sha256 == "deadbeef")
+print("COMPLETE_DOMAINS=", list(ident.network_domains) == ["pypi.org"])
+print("COMPLETE_CACHE_SCOPE=", ident.cache_scope == "repository_durable")
+PY
+)"
+expect "missing executable raises ValidationEnvironmentError" \
+    "$(echo "${BOUND_RESULT}" | awk -F= '/^MISS_EXEC=/{gsub(/ /,"",$2); print $2}')" "REFUSED"
+expect "missing sha raises ValidationEnvironmentError" \
+    "$(echo "${BOUND_RESULT}" | awk -F= '/^MISS_SHA=/{gsub(/ /,"",$2); print $2}')" "REFUSED"
+expect "complete resolution constructs BoundUvIdentity" \
+    "$(echo "${BOUND_RESULT}" | awk -F= '/^COMPLETE_TYPE=/{gsub(/ /,"",$2); print $2}')" "BoundUvIdentity"
+expect "bound identity preserves sha256" \
+    "$(echo "${BOUND_RESULT}" | awk -F= '/^COMPLETE_SHA=/{gsub(/ /,"",$2); print $2}')" "True"
+expect "bound identity preserves network_domains" \
+    "$(echo "${BOUND_RESULT}" | awk -F= '/^COMPLETE_DOMAINS=/{gsub(/ /,"",$2); print $2}')" "True"
+expect "bound identity preserves cache_scope" \
+    "$(echo "${BOUND_RESULT}" | awk -F= '/^COMPLETE_CACHE_SCOPE=/{gsub(/ /,"",$2); print $2}')" "True"
+
+# -------------------------------------------------------------------- #
+# Section 14: verify_bound_uv_identity refuses path drift               #
+# -------------------------------------------------------------------- #
+section "14. verify_bound_uv_identity refuses symlink / missing / byte mutation"
+
+TMP_DRIFT="$(mktemp -d -t ofloop-drift.XXXXXX)"
+trap 'rm -rf "${TMP_ID}" "${TMP_DRIFT}"' EXIT
+
+# Build a fake uv executable with a known SHA
+cat > "${TMP_DRIFT}/uv_real" <<'BIN'
+#!/usr/bin/env bash
+echo "uv 0.4.0"
+BIN
+chmod +x "${TMP_DRIFT}/uv_real"
+REAL_SHA="$(shasum -a 256 "${TMP_DRIFT}/uv_real" | awk '{print $1}')"
+
+# Create a symlink to that file
+ln -s "${TMP_DRIFT}/uv_real" "${TMP_DRIFT}/uv_symlink"
+
+# Create a mutated copy
+cp "${TMP_DRIFT}/uv_real" "${TMP_DRIFT}/uv_mutated"
+printf '#!/usr/bin/env bash\necho "attacker uv"\n' > "${TMP_DRIFT}/uv_mutated"
+chmod +x "${TMP_DRIFT}/uv_mutated"
+
+DRIFT_RESULT="$(PYTHONDONTWRITEBYTECODE=1 python3 -B <<PY
+import sys
+sys.path.insert(0, "${LIB_DIR}")
+from ownframework_loop import validation_environment as ve
+
+# 1. Missing path
+try:
+    ve.verify_bound_uv_identity(ve.BoundUvIdentity(
+        executable="/no/such/path", version="0.4.0",
+        executable_sha256="x", cache_path="", cache_scope="",
+        network_domains=()))
+    print("MISSING=FAIL_NO_RAISE")
+except ve.ValidationEnvironmentError as e:
+    print("MISSING=REFUSED:", "disappeared" in str(e))
+
+# 2. Symlink
+try:
+    ve.verify_bound_uv_identity(ve.BoundUvIdentity(
+        executable="${TMP_DRIFT}/uv_symlink", version="0.4.0",
+        executable_sha256="x", cache_path="", cache_scope="",
+        network_domains=()))
+    print("SYMLINK=FAIL_NO_RAISE")
+except ve.ValidationEnvironmentError as e:
+    print("SYMLINK=REFUSED:", "symlink" in str(e))
+
+# 3. SHA mismatch (same path, different bytes)
+try:
+    ve.verify_bound_uv_identity(ve.BoundUvIdentity(
+        executable="${TMP_DRIFT}/uv_mutated", version="0.4.0",
+        executable_sha256="${REAL_SHA}", cache_path="", cache_scope="",
+        network_domains=()))
+    print("DRIFT=FAIL_NO_RAISE")
+except ve.ValidationEnvironmentError as e:
+    print("DRIFT=REFUSED:", "CAPABILITY_DRIFT" in str(e))
+
+# 4. Real file with matching SHA passes
+try:
+    ve.verify_bound_uv_identity(ve.BoundUvIdentity(
+        executable="${TMP_DRIFT}/uv_real", version="0.4.0",
+        executable_sha256="${REAL_SHA}", cache_path="", cache_scope="",
+        network_domains=()))
+    print("MATCH=PASS")
+except ve.ValidationEnvironmentError as e:
+    print("MATCH=FAIL_RAISED:", str(e)[:80])
+PY
+)"
+expect "missing executable raises with 'disappeared'" \
+    "$(echo "${DRIFT_RESULT}" | grep '^MISSING=' | sed 's/^MISSING=REFUSED: //')" "True"
+expect "symlink executable raises with 'symlink'" \
+    "$(echo "${DRIFT_RESULT}" | grep '^SYMLINK=' | sed 's/^SYMLINK=REFUSED: //')" "True"
+expect "byte mutation raises CAPABILITY_DRIFT" \
+    "$(echo "${DRIFT_RESULT}" | grep '^DRIFT=' | sed 's/^DRIFT=REFUSED: //')" "True"
+expect "real file with matching SHA passes verification" \
+    "$(echo "${DRIFT_RESULT}" | awk -F= '/^MATCH=/{gsub(/ /,"",$2); print $2}')" "PASS"
+
+# -------------------------------------------------------------------- #
+# Section 15: package-network override env vars are stripped             #
+# -------------------------------------------------------------------- #
+section "15. ambient package-network overrides are stripped from hermetic env"
+
+# Seed base env with operator-shell-level overrides that would
+# otherwise widen the package network boundary past package.uv's
+# frozen allowlist. The hermetic env MUST remove every one of them.
+PKG_NET_RESULT="$(PYTHONDONTWRITEBYTECODE=1 python3 -B <<'PY'
+import os, sys
+sys.path.insert(0, "${LIB_DIR}")
+from ownframework_loop import runtime_env as re_mod
+
+# Inject ambient overrides into the base environment.
+overrides = {
+    "UV_INDEX_URL": "https://my-mirror.example.com/simple",
+    "UV_EXTRA_INDEX_URL": "https://other-mirror.example.com/simple",
+    "UV_DEFAULT_INDEX": "https://default-mirror.example.com/simple",
+    "UV_INDEX": "https://uv-index.example.com/simple",
+    "PIP_INDEX_URL": "https://pip-mirror.example.com/simple",
+    "PIP_EXTRA_INDEX_URL": "https://pip-extra.example.com/simple",
+    "PIP_DEFAULT_INDEX": "https://pip-default.example.com/simple",
+    "PIP_NO_INDEX": "1",
+    "NPM_CONFIG_REGISTRY": "https://npm-mirror.example.com",
+    "npm_config_registry": "https://npm-mirror.example.com",
+    "PNPM_REGISTRY": "https://pnpm-mirror.example.com",
+    "CARGO_REGISTRIES_CRATES_IO_PROTOCOL": "sparse",
+    "CARGO_REGISTRIES_CRATES_IO_INDEX": "https://cargo-mirror.example.com",
+}
+base = dict(os.environ)
+base.update(overrides)
+
+from pathlib import Path
+env = re_mod.hermetic_subprocess_env(
+    Path("${REPO_ROOT}"), "drift-fixture-run", "validation",
+    base_env=base,
+    capability_environment={},
+    path_prepend=[],
+)
+stripped = {k: k not in env for k in overrides}
+print("STRIPPED_ALL=", all(stripped.values()))
+print("STRIPPED_KEYS=", ",".join(sorted(stripped.keys())))
+PY
+)"
+expect "every ambient package-network override is stripped" \
+    "$(echo "${PKG_NET_RESULT}" | awk -F= '/^STRIPPED_ALL=/{gsub(/ /,"",$2); print $2}')" "True"
+expect "stripped key catalogue is non-empty" \
+    "$(echo "${PKG_NET_RESULT}" | awk -F= '/^STRIPPED_KEYS=/{print "SET"}')" "SET"
+
+# -------------------------------------------------------------------- #
 # Summary                                                                #
 # -------------------------------------------------------------------- #
 echo

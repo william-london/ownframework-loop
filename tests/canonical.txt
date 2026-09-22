@@ -143,3 +143,5 @@ tests/unit/test_v120_validation_environment.sh
 tests/integration/test_v120_real_uv_project.sh
 tests/integration/test_v120_stale_lock_repair.sh
 tests/integration/test_v120_genuine_infra_failure.sh
+tests/integration/test_v120_tool_swap_regression.sh
+tests/integration/test_v120_network_authority.sh

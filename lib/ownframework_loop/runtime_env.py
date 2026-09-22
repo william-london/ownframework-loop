@@ -56,6 +56,33 @@ HOST_IPC_ENV_KEYS = frozenset({
 })
 
 
+# Ambient uv / pip / package-manager network-authority env vars.
+# Stripped from every hermetic subprocess env so the frozen
+# ``package.uv`` capability is the SOLE network authority for uv
+# operations. Without this strip, an operator's shell-level
+# ``UV_INDEX_URL=https://my-mirror.example.com/`` (or an inherited
+# ``PIP_INDEX_URL`` from a developer's ~/.pip/pip.conf) would silently
+# route the validator's ``uv sync`` to a non-frozen mirror — outside
+# the ``pypi.org``/``files.pythonhosted.org`` allowlist enforced by
+# ``package.uv``. The network boundary is part of the capability
+# contract; ambient overrides MUST NOT widen it.
+PACKAGE_NETWORK_OVERRIDE_KEYS = frozenset({
+    "UV_INDEX_URL",
+    "UV_EXTRA_INDEX_URL",
+    "UV_DEFAULT_INDEX",
+    "UV_INDEX",
+    "PIP_INDEX_URL",
+    "PIP_EXTRA_INDEX_URL",
+    "PIP_DEFAULT_INDEX",
+    "PIP_NO_INDEX",
+    "NPM_CONFIG_REGISTRY",
+    "npm_config_registry",
+    "PNPM_REGISTRY",
+    "CARGO_REGISTRIES_CRATES_IO_PROTOCOL",
+    "CARGO_REGISTRIES_CRATES_IO_INDEX",
+})
+
+
 def _ensure_private_dir(path: Path) -> Path:
     """Create/repair runtime cache directories as 0700 on POSIX."""
     p = Path(path).expanduser().resolve(strict=False)
@@ -186,6 +213,14 @@ def hermetic_subprocess_env(
     for key in HOST_IPC_ENV_KEYS:
         env.pop(key, None)
 
+    # Ambient package-manager index / mirror env vars are authority.
+    # The frozen ``package.uv`` capability is the sole authority for
+    # which package registries a uv-mediated validator subprocess may
+    # reach. Operator-shell-level overrides (UV_INDEX_URL, mirror
+    # configs, etc.) MUST NOT widen the network boundary.
+    for key in PACKAGE_NETWORK_OVERRIDE_KEYS:
+        env.pop(key, None)
+
     # Capability resolution is core-owned.  Only a tiny non-secret environment
     # surface may be injected here; host manifests cannot smuggle arbitrary
     # credentials or loader/runtime overrides into semantic Bash.
@@ -265,19 +300,23 @@ def hermetic_subprocess_env(
     return env
 
 
-def commissioned_validation_env(
+def commissioned_validation_resolution(
     canonical_repo: Path,
     run_id: str,
     packet: dict[str, Any],
-) -> dict[str, str]:
-    """Build the deterministic validation environment from the sealed run binding.
+) -> dict[str, Any]:
+    """Re-resolve exactly the capability names frozen in the run binding.
 
-    Semantic workers receive a capability resolution at launch time.  Required
-    validation used to receive only the supervisor's ambient environment,
-    which made BUILD and REVIEW sensitive to PATH and cache differences.  A
-    validator instead re-resolves exactly the capability names frozen in the
-    run binding, verifies the current host resolution against that binding,
-    and uses one role-neutral validation cache for both finalizers.
+    Returns the full ``resolve_capabilities`` dict so callers (notably
+    the validation executor) can pull individual resolved items — e.g.
+    ``package.uv`` — and use them as the authoritative identity for
+    downstream subprocess launches. The capability resolution is the
+    single source of truth; we never let ``shutil.which("uv")`` act as
+    authority for which uv binary is launched.
+
+    Identity verification against the frozen CAPABILITY_BINDING.json
+    is enforced here. Callers that also need the hermetic env can
+    consume the returned dict directly.
     """
     from . import capability_binding, capabilities, runner_profiles
 
@@ -333,6 +372,24 @@ def commissioned_validation_env(
     capability_binding.verify_run_binding(
         canonical_repo, run_id, resolution, profile
     )
+    return resolution
+
+
+def commissioned_validation_env(
+    canonical_repo: Path,
+    run_id: str,
+    packet: dict[str, Any],
+) -> dict[str, str]:
+    """Build the deterministic validation environment from the sealed run binding.
+
+    Semantic workers receive a capability resolution at launch time.  Required
+    validation used to receive only the supervisor's ambient environment,
+    which made BUILD and REVIEW sensitive to PATH and cache differences.  A
+    validator instead re-resolves exactly the capability names frozen in the
+    run binding, verifies the current host resolution against that binding,
+    and uses one role-neutral validation cache for both finalizers.
+    """
+    resolution = commissioned_validation_resolution(canonical_repo, run_id, packet)
     return hermetic_subprocess_env(
         canonical_repo,
         run_id,
@@ -397,6 +454,7 @@ __all__ = [
     "SCHEMA",
     "CAPABILITY_ENV_ALLOWED_KEYS",
     "HOST_IPC_ENV_KEYS",
+    "PACKAGE_NETWORK_OVERRIDE_KEYS",
     "default_repo_tool_cache_root",
     "repo_tool_cache_dir",
     "repo_tool_cache_path",
@@ -405,6 +463,7 @@ __all__ = [
     "runtime_cache_dir",
     "runtime_cache_path",
     "commissioned_validation_env",
+    "commissioned_validation_resolution",
     "research_evidence_root",
     "research_evidence_dir",
 ]

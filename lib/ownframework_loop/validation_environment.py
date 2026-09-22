@@ -121,6 +121,104 @@ class ValidationEnvironmentError(RuntimeError):
 DEFAULT_PROVISION_TIMEOUT_SECONDS = 600
 
 
+@dataclass(frozen=True)
+class BoundUvIdentity:
+    """Exact identity of the bound ``package.uv`` capability.
+
+    Built from the resolved capability envelope (not from PATH
+    discovery) and used as the SOLE authority for any uv subprocess
+    invocation. Pre-launch drift checks refuse to launch when the
+    path/SHA/version no longer matches the frozen resolution.
+    """
+    executable: str
+    version: str
+    executable_sha256: str
+    cache_path: str
+    cache_scope: str
+    network_domains: tuple[str, ...]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "executable": self.executable,
+            "version": self.version,
+            "executable_sha256": self.executable_sha256,
+            "cache_path": self.cache_path,
+            "cache_scope": self.cache_scope,
+            "network_domains": list(self.network_domains),
+        }
+
+
+def build_bound_uv_identity(
+    resolved_item: dict[str, Any],
+    *,
+    cache_path: str = "",
+    cache_scope: str = "",
+) -> BoundUvIdentity:
+    """Construct a BoundUvIdentity from a resolved capability item.
+
+    Refuses to construct when the resolved item is missing the
+    minimal authority surface (executable / version / sha256) so
+    the caller cannot fall back to PATH-discovered uv.
+    """
+    executable = str(resolved_item.get("executable") or "")
+    version = str(resolved_item.get("version") or "")
+    sha = str(resolved_item.get("executable_sha256") or "")
+    if not executable or not version or not sha:
+        raise ValidationEnvironmentError(
+            "bound package.uv resolution missing executable/version/sha256; "
+            "cannot construct BoundUvIdentity from an untrusted resolution"
+        )
+    domains = tuple(str(d) for d in (resolved_item.get("network_domains") or ()))
+    return BoundUvIdentity(
+        executable=executable,
+        version=version,
+        executable_sha256=sha,
+        cache_path=str(cache_path),
+        cache_scope=str(cache_scope),
+        network_domains=domains,
+    )
+
+
+def verify_bound_uv_identity(bound: BoundUvIdentity) -> None:
+    """Re-prove the bound uv identity immediately before any subprocess.
+
+    Refuses to launch when:
+      - the executable path no longer exists;
+      - the executable path has been replaced by a symlink;
+      - the SHA-256 of the on-disk bytes no longer matches the
+        frozen binding (silent swap, byte mutation, reinstall);
+      - the executable is no longer a regular executable file.
+
+    Refusal raises ``ValidationEnvironmentError`` so the executor can
+    surface it as a terminal BLOCKED, infra-class, no-repair failure.
+    """
+    if not bound.executable:
+        raise ValidationEnvironmentError(
+            "bound package.uv executable path is empty"
+        )
+    p = Path(bound.executable)
+    if not p.exists():
+        raise ValidationEnvironmentError(
+            f"bound package.uv executable disappeared: {bound.executable}"
+        )
+    if p.is_symlink():
+        raise ValidationEnvironmentError(
+            f"bound package.uv executable is now a symlink: {bound.executable}"
+        )
+    if not p.is_file() or not os.access(bound.executable, os.X_OK):
+        raise ValidationEnvironmentError(
+            f"bound package.uv executable is no longer a regular runnable file: "
+            f"{bound.executable}"
+        )
+    actual = _sha256_file(Path(bound.executable)) or ""
+    if not actual or actual != bound.executable_sha256:
+        raise ValidationEnvironmentError(
+            "CAPABILITY_DRIFT: bound package.uv SHA mismatch — "
+            f"expected {bound.executable_sha256}, observed {actual or '<none>'}; "
+            f"refusing uv execution"
+        )
+
+
 # Outcome class constants. Use these strings verbatim; they are part
 # of the receipt/verdict contract surfaced by build_finalize and
 # review_finalize.
@@ -170,6 +268,33 @@ class ProvisionOutcome:
 _UV_COMMAND_RE = re.compile(
     r"\buv\s+(?:run|sync|exec|test|python|lock)\b"
 )
+
+# Canonical uv subcommands that require the candidate-bound project
+# environment. EVERY uv-mediated validation/provisioning operation that
+# could reach the package network MUST be declared via this predicate so
+# packet admission (which refuses undeclared `package.uv`) and the
+# validation executor (which provisions the project env) agree on the
+# exact same set. The packet layer imports
+# `validation_environment.is_uv_command`; the executor imports the
+# SAME function — never an independent regex.
+UV_MEDIATED_SUBCOMMANDS: tuple[str, ...] = (
+    "run", "sync", "exec", "test", "python", "lock",
+)
+
+
+def is_uv_command(command: str) -> bool:
+    """Return True when `command` invokes a uv subcommand that needs
+    the candidate-bound project environment.
+
+    This is THE canonical predicate. Both packet admission and
+    validation execution MUST consume it (never an independent regex)
+    so the two cannot drift. Adding a new uv subcommand that
+    requires the env → extend UV_MEDIATED_SUBCOMMANDS here; both
+    layers pick it up automatically.
+    """
+    if not command:
+        return False
+    return bool(_UV_COMMAND_RE.search(command))
 
 
 # Pattern catalogue: each tuple is (compiled-regex, class, label).
@@ -354,6 +479,14 @@ def project_environment_status(env_dir: Path) -> dict[str, Any]:
         "metadata_sha256": str(doc.get("metadata_sha256") or ""),
         "uv_executable": str(doc.get("uv_executable") or ""),
         "uv_version": str(doc.get("uv_version") or ""),
+        "package_uv_unbound": bool(doc.get("package_uv_unbound", False)),
+        "bound_uv_sha256": str(doc.get("bound_uv_sha256") or ""),
+        "bound_uv_version": str(doc.get("bound_uv_version") or ""),
+        "bound_uv_cache_path": str(doc.get("bound_uv_cache_path") or ""),
+        "bound_uv_cache_scope": str(doc.get("bound_uv_cache_scope") or ""),
+        "bound_uv_network_domains": list(
+            doc.get("bound_uv_network_domains") or []
+        ),
         "provisioned_at": str(doc.get("provisioned_at") or ""),
     })
     return state
@@ -494,9 +627,22 @@ def provision_project_environment(
     role: str,
     candidate_sha: str,
     candidate_worktree: Path,
+    bound_uv: BoundUvIdentity | None = None,
     timeout_seconds: int = DEFAULT_PROVISION_TIMEOUT_SECONDS,
 ) -> dict[str, Any]:
     """Provision the candidate-bound project environment.
+
+    The ``bound_uv`` argument is the EXACT ``package.uv`` resolution
+    from the frozen run's CAPABILITY_BINDING.json (re-verified against
+    the current platform by the validator before this call). The
+    provisioner NEVER uses ``shutil.which("uv")`` as authority — it
+    launches ``bound_uv.executable`` only after
+    :func:`verify_bound_uv_identity` confirms the on-disk bytes still
+    match the frozen SHA. ``bound_uv=None`` is a legacy escape hatch
+    for callers that have NOT yet been upgraded; it routes through
+    the old PATH discovery so the executor can be updated last, but
+    emits a ``package.uv_unbound`` deprecation flag so the operator
+    sees it is unsafe-by-default.
 
     Returns a dict with two compatible shapes layered on top of each
     other. Callers that only need the legacy ``project_environment_status``
@@ -518,7 +664,8 @@ def provision_project_environment(
         repair round.
       - ``OUTCOME_INFRA_FAILURE``: a genuine validator/host-side
         failure (uv executable missing, provisioning timeout,
-        runtime-cache filesystem refused, registry/network unreachable).
+        runtime-cache filesystem refused, registry/network unreachable,
+        or — with ``bound_uv`` — the frozen identity has drifted).
         The run terminalizes as ``BLOCKED`` without burning a repair
         round.
 
@@ -574,6 +721,22 @@ def provision_project_environment(
             "metadata_sha256": meta_id,
             "uv_executable": "",
             "uv_version": "",
+            "package_uv_unbound": bool(bound_uv is None),
+            "bound_uv_sha256": (
+                bound_uv.executable_sha256 if bound_uv is not None else ""
+            ),
+            "bound_uv_version": (
+                bound_uv.version if bound_uv is not None else ""
+            ),
+            "bound_uv_cache_path": (
+                bound_uv.cache_path if bound_uv is not None else ""
+            ),
+            "bound_uv_cache_scope": (
+                bound_uv.cache_scope if bound_uv is not None else ""
+            ),
+            "bound_uv_network_domains": (
+                list(bound_uv.network_domains) if bound_uv is not None else []
+            ),
             "provisioned_at": util.utc_now_iso(),
             "no_project": True,
         })
@@ -619,10 +782,25 @@ def provision_project_environment(
     except OSError as exc:
         return _infra(f"runtime_cache_create_failed:{exc.strerror or exc}")
 
-    try:
-        uv_executable = _resolve_uv_executable()
-    except ValidationEnvironmentError as exc:
-        return _infra(f"uv_executable_unavailable:{exc}")
+    # Authoritative uv identity: the bound package.uv resolution from
+    # the frozen CAPABILITY_BINDING. When provided, we (a) re-verify the
+    # on-disk SHA/version still matches the frozen binding, and (b) use
+    # bound_uv.executable verbatim — never PATH discovery. When NOT
+    # provided we fall through to legacy PATH resolution so callers can
+    # be upgraded last; the receipt records package_uv_unbound=yes.
+    package_uv_unbound = False
+    if bound_uv is not None:
+        try:
+            verify_bound_uv_identity(bound_uv)
+        except ValidationEnvironmentError as exc:
+            return _infra(f"bound_uv_drift:{exc}")
+        uv_executable = bound_uv.executable
+    else:
+        package_uv_unbound = True
+        try:
+            uv_executable = _resolve_uv_executable()
+        except ValidationEnvironmentError as exc:
+            return _infra(f"uv_executable_unavailable:{exc}")
     uv_version = _uv_version(uv_executable)
     sync_env = runtime_env.hermetic_subprocess_env(
         canonical_repo, run_id, "validation",
@@ -700,6 +878,22 @@ def provision_project_environment(
             "metadata_sha256": meta_id,
             "uv_executable": uv_executable,
             "uv_version": uv_version,
+            "package_uv_unbound": bool(package_uv_unbound),
+            "bound_uv_sha256": (
+                bound_uv.executable_sha256 if bound_uv is not None else ""
+            ),
+            "bound_uv_version": (
+                bound_uv.version if bound_uv is not None else ""
+            ),
+            "bound_uv_cache_path": (
+                bound_uv.cache_path if bound_uv is not None else ""
+            ),
+            "bound_uv_cache_scope": (
+                bound_uv.cache_scope if bound_uv is not None else ""
+            ),
+            "bound_uv_network_domains": (
+                list(bound_uv.network_domains) if bound_uv is not None else []
+            ),
             "provisioned_at": util.utc_now_iso(),
             "duration_seconds": float(duration),
         })
@@ -720,7 +914,7 @@ def provision_project_environment(
         stderr_bytes=stderr_bytes,
         stdout_bytes=stdout_bytes,
     )
-    return _outcome_dict(ProvisionOutcome(
+    result = _outcome_dict(ProvisionOutcome(
         outcome=outcome_class,
         reason=label,
         stderr_excerpt=excerpt,
@@ -729,6 +923,11 @@ def provision_project_environment(
         marker_path=str(env_dir),
         identity=env_id,
     ))
+    result["package_uv_unbound"] = bool(package_uv_unbound)
+    if bound_uv is not None:
+        result["bound_uv_sha256"] = bound_uv.executable_sha256
+        result["bound_uv_version"] = bound_uv.version
+    return result
 
 
 def command_uses_uv_run(command: str) -> bool:
@@ -751,18 +950,23 @@ def env_overrides(env_dir: Path) -> dict[str, str]:
 
 __all__ = [
     "ALL_OUTCOMES",
+    "BoundUvIdentity",
     "DEFAULT_PROVISION_TIMEOUT_SECONDS",
     "OUTCOME_CANDIDATE_INVALID",
     "OUTCOME_INFRA_FAILURE",
     "OUTCOME_PROVISIONED",
     "ProvisionOutcome",
     "SCHEMA",
+    "UV_MEDIATED_SUBCOMMANDS",
     "ValidationEnvironmentError",
+    "build_bound_uv_identity",
     "candidate_bound_environment_id",
     "classify_sync_failure",
     "command_uses_uv_run",
     "env_overrides",
+    "is_uv_command",
     "project_environment_dir",
     "project_environment_status",
     "provision_project_environment",
+    "verify_bound_uv_identity",
 ]
