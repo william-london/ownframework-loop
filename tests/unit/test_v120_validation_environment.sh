@@ -241,22 +241,24 @@ pyproject.write_text("[project]\nname='ofloop-infra'\nversion='0.0.1'\n")
 saved_path = os.environ.get("PATH")
 os.environ["PATH"] = "/tmp/no-such-dir-for-uv-test"
 try:
-    try:
-        ve.provision_project_environment(
-            canonical_repo=canonical_repo, run_id="run-2026-infra",
-            role="builder", candidate_sha="a"*40,
-            candidate_worktree=candidate_worktree, timeout_seconds=10,
-        )
-    except ve.ValidationEnvironmentError as exc:
-        print(json.dumps({"infra": True, "reason": str(exc)}))
-    else:
-        print(json.dumps({"infra": False, "reason": ""}))
+    result = ve.provision_project_environment(
+        canonical_repo=canonical_repo, run_id="run-2026-infra",
+        role="builder", candidate_sha="a"*40,
+        candidate_worktree=candidate_worktree, timeout_seconds=10,
+    )
+    print(json.dumps({
+        "infra": result.get("outcome") == ve.OUTCOME_INFRA_FAILURE,
+        "outcome": result.get("outcome"),
+        "reason": result.get("reason"),
+    }))
 finally:
     if saved_path is not None:
         os.environ["PATH"] = saved_path
 PY
 INFRA_OK="$(jq_field "${TMP_ID}/infra.json" infra)"
-expect "missing uv executable raises ValidationEnvironmentError" "$INFRA_OK" "True"
+INFRA_OUTCOME="$(jq_field "${TMP_ID}/infra.json" outcome)"
+expect "missing uv executable → OUTCOME_INFRA_FAILURE" "$INFRA_OK" "True"
+expect "missing uv executable outcome class is infra_failure" "$INFRA_OUTCOME" "infra_failure"
 
 # Now drive the full validation_executor contract end-to-end.
 PYTHONPATH="${LIB_DIR}" python3 -B - > "${TMP_ID}/exec.json" <<'PY'

@@ -43,18 +43,53 @@ is preserved. New dev installs land under the 1.1.0 identity
   burning a semantic repair round and WITHOUT triggering
   `CHANGES_REQUESTED` — the candidate author cannot fix these and the
   validator owner must.
+- Failure ownership taxonomy (2026-09-22 amendment): the provisioner
+  now distinguishes infra-level failures (terminal BLOCKED) from
+  candidate-repairable failures (CHANGES_REQUESTED, normal repair
+  entitlement) via a stderr-text classifier with two conservative
+  pattern catalogues. A `classify_sync_failure()` helper inspects the
+  redacted stderr excerpt plus the subprocess state to assign one of
+  three outcome classes:
+  - `OUTCOME_PROVISIONED`: env is usable.
+  - `OUTCOME_CANDIDATE_INVALID`: candidate's own metadata is
+    unprovable (stale uv.lock, malformed pyproject.toml, declared
+    but unresolvable dependency). The next builder pass can repair
+    this; the run transitions to `CHANGES_REQUESTED` with a normal
+    repair entitlement (NOT terminal BLOCKED).
+  - `OUTCOME_INFRA_FAILURE`: genuine validator/host failure
+    (uv executable missing, provisioning timeout, runtime-cache
+    filesystem refused, registry/network unreachable). The run
+    terminalizes as `BLOCKED` without burning a repair round.
+  Ambiguous cases default to INFRA so the run does not silently burn
+  repair rounds on validator-owned problems; the receipt records
+  the ambiguity explicitly.
 - Schemas: `build-receipt.schema.json` and `review-verdict.schema.json`
   gained `infra_failure`, `infra_failure_reason`, `validation_env_id`,
-  `validation_env_path`, and `infra_failure` envelope blocks; validation
-  rows accept `infra_failure` + `infra_failure_reason` + the env
-  identity fields and `exit_code` is now permitted to be `null` when
-  infra_failure is set.
-- Test: `tests/unit/test_v120_validation_environment.sh` (added to
-  `tests/canonical.txt`) exercises 28 behavioral checks across 11
-  sections — identity binding, worktree isolation, idempotency,
-  infra-failure classification, no worker authority leak, no HOME
-  reopening, classifier correctness, marker privacy, marker freshness
-  drift detection, and pure path derivation.
+  `validation_env_path`, `candidate_environment_invalid`,
+  `candidate_invalid`, `candidate_invalid_reason`, and
+  `candidate_invalid_excerpt` fields and envelope blocks. validation
+  rows accept the per-row signals and `exit_code` is permitted to be
+  `null` when the row is infra_failure or candidate_invalid.
+- Tests: `tests/unit/test_v120_validation_environment.sh` (28
+  behavioral checks across 11 sections) and three new integration
+  tests added to `tests/canonical.txt`:
+  - `tests/integration/test_v120_real_uv_project.sh`: real Python
+    project (pyproject.toml + uv.lock + src/samplepkg + tests/)
+    driven through the production executor with `uv run --no-sync
+    pytest -q` and `uv run --no-sync samplecmd`. Proves the env
+    lives outside the worktree, pytest/samplecmd are NOT globally
+    installed, the worktree gains no `.venv`, and builder/reviewer
+    env dirs are role-isolated yet semantically identical.
+  - `tests/integration/test_v120_stale_lock_repair.sh`: a stale
+    `uv.lock` (pyproject modified, lock left stale) classifies as
+    `CANDIDATE_INVALID`/`stale_lockfile` and routes to
+    `CHANGES_REQUESTED` with a normal repair entitlement; the
+    next pass with a regenerated `uv.lock` validates again.
+  - `tests/integration/test_v120_genuine_infra_failure.sh`:
+    three genuine-infra scenarios (uv missing, 1ms provisioning
+    timeout, runtime-cache write refusal) all classify as
+    `INFRA_FAILURE` and route to terminal `BLOCKED` without
+    burning a repair round.
 
 ## Unreleased - Post-v1 Mac Production Commissioning Hardening (2026-09-20)
 

@@ -299,6 +299,7 @@ def finalize_review(
     validations: list[dict[str, Any]] = []
     validation_pass = True
     infra_failure_count = 0
+    candidate_invalid_count = 0
     infra_failure_marker_path = (
         runtime_env.runtime_cache_dir(canonical_repo, run_id, "validation")
         / "infra_failures"
@@ -321,6 +322,8 @@ def finalize_review(
         )
         if bool(result.get("infra_failure")):
             infra_failure_count += 1
+        if bool(result.get("candidate_invalid")):
+            candidate_invalid_count += 1
         if not result["passed"]:
             validation_pass = False
         validations.append(result)
@@ -555,13 +558,24 @@ def finalize_review(
 
     # 17. Compute final verdict.
     if infra_failure_count > 0:
-        # Validation infrastructure failure (uv sync timeout / locked
-        # lockfile drift / missing uv executable / etc). The candidate
-        # author cannot fix this; the validator owner must. Terminalize
-        # the run WITHOUT burning a semantic repair round and WITHOUT
-        # attempting CHANGES_REQUESTED.
+        # Validation infrastructure failure (uv sync timeout / missing
+        # uv executable / runtime-cache filesystem refused / etc).
+        # The candidate author cannot fix this; the validator owner
+        # must. Terminalize the run WITHOUT burning a semantic repair
+        # round and WITHOUT attempting CHANGES_REQUESTED.
         verdict = "BLOCKED"
         failure_reason = "infra_failure"
+    elif candidate_invalid_count > 0:
+        # Candidate environment cannot be reconstructed from the
+        # candidate's own metadata (stale uv.lock / malformed
+        # pyproject.toml / declared-but-unresolvable dependency).
+        # The validator's outcome classifier flagged this as a
+        # candidate-repairable defect, NOT an infra failure. The next
+        # builder pass can regenerate uv.lock or fix the metadata.
+        # Route to CHANGES_REQUESTED with a normal repair entitlement
+        # — the same envelope as validation_failed.
+        verdict = "CHANGES_REQUESTED"
+        failure_reason = "candidate_environment_invalid"
     elif hard_secret_blocks:
         verdict = "BLOCKED"
         failure_reason = "hard_secret_detected"
@@ -685,6 +699,12 @@ def finalize_review(
                 if infra_failure_count > 0 else ""
             ),
             "burns_repair_round": False,
+        },
+        "candidate_environment_invalid": {
+            "result": "fail" if candidate_invalid_count > 0 else "pass",
+            "count": int(candidate_invalid_count),
+            "burns_repair_round": True,
+            "verdict_signal": "CHANGES_REQUESTED",
         },
         "reviewer_identity": "of-reviewer",
         "timestamp": util.utc_now_iso(),

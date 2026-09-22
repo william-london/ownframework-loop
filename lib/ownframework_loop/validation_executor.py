@@ -157,11 +157,16 @@ def run_required_validation(
     env_overrides: dict[str, str] = {}
     infra_failure = False
     infra_failure_reason = ""
+    candidate_invalid = False
+    candidate_invalid_reason = ""
+    candidate_invalid_excerpt = ""
     env_id = ""
     env_dir = None
     needs_uv = validation_environment.command_uses_uv_run(command)
     if needs_uv:
         if not candidate_sha:
+            # This is a finalizer wiring bug, not a candidate defect.
+            # Treat as infra: terminal BLOCKED, no repair round.
             infra_failure = True
             infra_failure_reason = (
                 "uv-mediated validation command requires candidate_sha; "
@@ -169,7 +174,7 @@ def run_required_validation(
             )
         else:
             try:
-                prov = validation_environment.provision_project_environment(
+                outcome = validation_environment.provision_project_environment(
                     canonical_repo=canonical_repo,
                     run_id=run_id,
                     role=role,
@@ -179,19 +184,41 @@ def run_required_validation(
             except validation_environment.ValidationEnvironmentError as exc:
                 infra_failure = True
                 infra_failure_reason = str(exc)
-                if infra_failure_path is not None:
-                    _write_infra_failure_marker(infra_failure_path, {
-                        "name": name,
-                        "command": command,
-                        "reason": infra_failure_reason,
-                        "recorded_at": time.strftime(
-                            "%Y-%m-%dT%H:%M:%SZ", time.gmtime()
-                        ),
-                    })
             else:
-                env_id = str(prov.get("identity") or "")
-                env_dir = Path(str(prov.get("path") or "")).expanduser().resolve(strict=False)
-                env_overrides = validation_environment.env_overrides(env_dir)
+                env_id = str(outcome.get("identity") or "")
+                env_dir = Path(str(outcome.get("marker_path") or "")).expanduser().resolve(strict=False)
+                outcome_class = str(outcome.get("outcome") or "")
+                if outcome_class == validation_environment.OUTCOME_PROVISIONED:
+                    env_overrides = validation_environment.env_overrides(env_dir)
+                elif outcome_class == validation_environment.OUTCOME_CANDIDATE_INVALID:
+                    # The candidate's own metadata is unprovable. The
+                    # next builder pass can repair this; the run
+                    # transitions to CHANGES_REQUESTED with a normal
+                    # repair entitlement (NOT a terminal infra block).
+                    candidate_invalid = True
+                    candidate_invalid_reason = str(outcome.get("reason") or "")
+                    candidate_invalid_excerpt = str(outcome.get("stderr_excerpt") or "")
+                else:
+                    # Genuine validator/host infrastructure failure.
+                    # Terminal BLOCKED without burning a repair round.
+                    infra_failure = True
+                    infra_failure_reason = str(outcome.get("reason") or "")
+
+    # Persist an infra-failure marker under the run's runtime cache so
+    # the build/review finalizer can distinguish infra_failure from
+    # validation_failed deterministically. Candidate-invalid markers
+    # are NOT recorded here: they go through the normal validation
+    # failure channel so the next builder pass receives a normal
+    # repair signal.
+    if infra_failure and infra_failure_path is not None:
+        _write_infra_failure_marker(infra_failure_path, {
+            "name": name,
+            "command": command,
+            "reason": infra_failure_reason,
+            "validation_env_id": env_id,
+            "validation_env_path": str(env_dir) if env_dir is not None else "",
+            "recorded_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        })
 
     # Infra failure: refuse to even launch the subprocess. The
     # validator's owner (build/review finalizer) classifies this as a
@@ -222,6 +249,46 @@ def run_required_validation(
             "diagnostic_stderr_path": str(stderr_path),
             "infra_failure": True,
             "infra_failure_reason": infra_failure_reason,
+            "candidate_invalid": False,
+            "validation_env_id": env_id,
+            "validation_env_path": (
+                str(env_dir) if env_dir is not None else ""
+            ),
+        }
+
+    # Candidate-invalid: the candidate's metadata is unprovable. The
+    # subprocess is not launched (the env is unusable); the result
+    # row surfaces ``candidate_invalid=True`` so the build/review
+    # finalizer can route it to ``validation_failed`` /
+    # ``CHANGES_REQUESTED`` with a normal repair entitlement.
+    if candidate_invalid:
+        return {
+            "name": name,
+            "command": command,
+            "kind": kind,
+            "exit_code": None,
+            "duration_seconds": 0.0,
+            "expected_exit_code": int(
+                validation.get("expected_exit_code")
+                if validation.get("expected_exit_code") is not None
+                else 0
+            ),
+            "passed": False,
+            "timed_out": False,
+            "marker_match": False,
+            "stdout_truncated": False,
+            "stderr_truncated": False,
+            "output_truncated": False,
+            "stdout_excerpt_redacted": "",
+            "stderr_excerpt_redacted": "",
+            "stdout_sha256": "",
+            "stderr_sha256": "",
+            "diagnostic_stdout_path": str(stdout_path),
+            "diagnostic_stderr_path": str(stderr_path),
+            "infra_failure": False,
+            "candidate_invalid": True,
+            "candidate_invalid_reason": candidate_invalid_reason,
+            "candidate_invalid_excerpt": candidate_invalid_excerpt,
             "validation_env_id": env_id,
             "validation_env_path": (
                 str(env_dir) if env_dir is not None else ""
@@ -300,6 +367,7 @@ def run_required_validation(
         "diagnostic_stdout_path": str(stdout_path),
         "diagnostic_stderr_path": str(stderr_path),
         "infra_failure": False,
+        "candidate_invalid": False,
         "validation_env_id": env_id,
         "validation_env_path": (
             str(env_dir) if env_dir is not None else ""

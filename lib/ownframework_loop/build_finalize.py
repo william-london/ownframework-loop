@@ -694,6 +694,7 @@ def finalize_build(
     # 15. Execute required validation commands.
     validations: list[dict[str, Any]] = []
     infra_failure_count = 0
+    candidate_invalid_count = 0
     infra_failure_marker_path = (
         runtime_env.runtime_cache_dir(canonical_repo, run_id, "validation")
         / "infra_failures"
@@ -714,6 +715,8 @@ def finalize_build(
         )
         if bool(result.get("infra_failure")):
             infra_failure_count += 1
+        if bool(result.get("candidate_invalid")):
+            candidate_invalid_count += 1
         validations.append(result)
 
     # v0.10.0-dev f022: validation is required iff the packet has any
@@ -819,6 +822,16 @@ def finalize_build(
         repair_causes.append("scope_drift")
     if not validation_pass:
         repair_causes.append("validation_failed")
+    if candidate_invalid_count > 0:
+        # Candidate environment cannot be reconstructed from the
+        # candidate's own metadata (stale uv.lock, malformed
+        # pyproject.toml, declared-but-unresolvable dependency). This
+        # is a candidate-repairable defect: the next builder pass can
+        # regenerate uv.lock or fix pyproject.toml. Treat as a
+        # validation_failed-class signal so the run transitions to
+        # CHANGES_REQUESTED with a normal repair entitlement rather
+        # than to terminal BLOCKED.
+        repair_causes.append("candidate_environment_invalid")
     if protected_drift_recovery is not None:
         repair_causes.append("protected_candidate_drift")
     program_source_breach = (
@@ -1011,6 +1024,12 @@ def finalize_build(
                 if infra_failure_count > 0 else ""
             ),
             "burns_repair_round": False,
+        },
+        "candidate_environment_invalid": {
+            "result": "fail" if candidate_invalid_count > 0 else "pass",
+            "count": int(candidate_invalid_count),
+            "burns_repair_round": True,
+            "repair_cause": "candidate_environment_invalid",
         },
         "protected_path_check": {
             "result": "fail" if protected_findings else "pass",
