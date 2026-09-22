@@ -327,6 +327,7 @@ def commissioned_validation_env(
         packet_network_allowlist=[
             str(item) for item in (packet.get("network_read_allowlist") or [])
         ],
+        evidence_run_key=run_id,
     )
     capabilities.verify_resolution_integrity(resolution)
     capability_binding.verify_run_binding(
