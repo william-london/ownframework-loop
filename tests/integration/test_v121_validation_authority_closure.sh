@@ -76,6 +76,77 @@ with tempfile.TemporaryDirectory(prefix="ofloop-v121-") as td:
     assert result["outcome"] == ve.OUTCOME_INFRA_FAILURE, result
     assert str(result["reason"]).startswith("bound_uv_required:"), result
 
+# The same authority requirement applies BEFORE a real-project cache hit.
+# A durable marker can never turn a direct unbound caller into a trusted one.
+with tempfile.TemporaryDirectory(prefix="ofloop-v121-direct-cache-") as td:
+    root = Path(td)
+    repo = root / "repo"
+    repo.mkdir()
+    candidate = root / "candidate"
+    candidate.mkdir()
+    (candidate / "pyproject.toml").write_text(
+        "[project]\nname='direct-cache'\nversion='0.0.1'\n",
+        encoding="utf-8",
+    )
+    fake_uv = root / "uv"
+    fake_uv.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    fake_uv.chmod(0o755)
+    fake_sha = hashlib.sha256(fake_uv.read_bytes()).hexdigest()
+    candidate_sha = "1" * 40
+    run_id = "run-v121-direct-cache"
+    env_id = ve.candidate_bound_environment_id(candidate_sha, candidate)
+    env_dir = ve.project_environment_dir(repo, run_id, "builder", env_id)
+    env_dir.mkdir(parents=True, mode=0o700)
+    ve._publish_marker(env_dir, {
+        "schema": ve.SCHEMA,
+        "identity": env_id,
+        "candidate_sha": candidate_sha,
+        "lock_sha256": "",
+        "metadata_sha256": ve._project_metadata_identity(candidate),
+        "uv_executable": str(fake_uv),
+        "uv_version": "uv-test",
+        "package_uv_unbound": False,
+        "bound_uv_sha256": fake_sha,
+        "bound_uv_version": "uv-test",
+        "bound_uv_cache_path": str(root / "cache"),
+        "bound_uv_cache_scope": "repository_durable",
+        "bound_uv_network_domains": ["pypi.org"],
+        "provisioned_at": "2026-09-22T00:00:00Z",
+    })
+
+    unbound_cached = ve.provision_project_environment(
+        canonical_repo=repo,
+        run_id=run_id,
+        role="builder",
+        candidate_sha=candidate_sha,
+        candidate_worktree=candidate,
+    )
+    assert unbound_cached["outcome"] == ve.OUTCOME_INFRA_FAILURE, unbound_cached
+    assert str(unbound_cached["reason"]).startswith(
+        "bound_uv_required:"
+    ), unbound_cached
+
+    wrong_binding = ve.BoundUvIdentity(
+        executable=str(fake_uv),
+        version="uv-test",
+        executable_sha256=fake_sha,
+        cache_path=str(root / "different-cache"),
+        cache_scope="repository_durable",
+        network_domains=("pypi.org",),
+    )
+    mismatched_cached = ve.provision_project_environment(
+        canonical_repo=repo,
+        run_id=run_id,
+        role="builder",
+        candidate_sha=candidate_sha,
+        candidate_worktree=candidate,
+        bound_uv=wrong_binding,
+    )
+    assert mismatched_cached["outcome"] == ve.OUTCOME_INFRA_FAILURE, mismatched_cached
+    assert str(mismatched_cached["reason"]).startswith(
+        "bound_uv_cached_environment_mismatch:"
+    ), mismatched_cached
+
 # No-project callers remain compatible because this path performs no uv effect.
 with tempfile.TemporaryDirectory(prefix="ofloop-v121-noproject-") as td:
     root = Path(td)
