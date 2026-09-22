@@ -24,15 +24,14 @@ That default breaks several invariants:
    reviewer is testing the builder's success rather than the candidate.
 
 3. ``uv sync`` failures must be classified correctly. Some are genuine
-   validator-owned infrastructure failures (uv missing, registry
-   unreachable, runtime-cache filesystem refused, provisioning
-   timeout). Others are candidate-repairable defects (the builder
-   modified ``pyproject.toml`` without regenerating ``uv.lock``;
-   declared a dependency that does not exist; produced invalid
-   metadata; etc.). The validator distinguishes them so infra
-   failures terminalize as ``BLOCKED`` (no repair round burned) and
-   candidate-repairable failures transition to ``CHANGES_REQUESTED``
-   (the next builder pass can fix the metadata mistake).
+   validator-owned infrastructure failures (bound uv unavailable or drifted,
+   registry unreachable, runtime-cache filesystem refused, provisioning
+   timeout). Others are candidate-repairable defects (the builder modified
+   ``pyproject.toml`` without regenerating ``uv.lock``; declared a dependency
+   that does not exist; produced invalid metadata; etc.). The validator
+   distinguishes them so infra failures terminalize as ``BLOCKED`` (no repair
+   round burned) and candidate-repairable failures transition to
+   ``CHANGES_REQUESTED`` (the next builder pass can fix the metadata mistake).
 
 Design
 ======
@@ -79,11 +78,11 @@ three outcome classes are:
     entitlement. This is the Sourcecard-failure-class behavior.
 
   - ``INFRA_FAILURE``: the validator/host cannot prove the environment
-    (uv executable missing, provisioning timeout, runtime-cache
-    filesystem/permission refused, external registry/network
+    (bound package.uv identity missing or drifted, provisioning timeout,
+    runtime-cache filesystem/permission refused, external registry/network
     unreachable, host tool execution failure independent of candidate
-    contents). The candidate author cannot fix this; the run
-    terminalizes as ``BLOCKED`` without burning a repair round.
+    contents). The candidate author cannot fix this; the run terminalizes
+    as ``BLOCKED`` without burning a repair round.
 
 The classifier inspects the redacted stderr excerpt plus the exit
 state to assign the class. Ambiguous cases fail closed as infra
@@ -239,7 +238,7 @@ class ProvisionOutcome:
       - reason: short human-readable classifier reason.
       - stderr_excerpt: bounded (4096 chars) redacted stderr excerpt.
       - returncode: ``uv sync`` exit code when captured; ``None`` for
-        timeout / uv-missing / FS-refused cases.
+        timeout / identity / FS-refused cases.
       - timed_out: True iff the subprocess exhausted the timeout budget.
       - marker_path: env_dir path when an env_dir was created.
       - identity: env_id when known.
@@ -265,10 +264,6 @@ class ProvisionOutcome:
         }
 
 
-_UV_COMMAND_RE = re.compile(
-    r"\buv\s+(?:run|sync|exec|test|python|lock)\b"
-)
-
 # Canonical uv subcommands that require the candidate-bound project
 # environment. EVERY uv-mediated validation/provisioning operation that
 # could reach the package network MUST be declared via this predicate so
@@ -279,6 +274,12 @@ _UV_COMMAND_RE = re.compile(
 # SAME function — never an independent regex.
 UV_MEDIATED_SUBCOMMANDS: tuple[str, ...] = (
     "run", "sync", "exec", "test", "python", "lock",
+)
+
+_UV_COMMAND_RE = re.compile(
+    r"\buv\s+(?:"
+    + "|".join(re.escape(subcommand) for subcommand in UV_MEDIATED_SUBCOMMANDS)
+    + r")\b"
 )
 
 
@@ -492,26 +493,6 @@ def project_environment_status(env_dir: Path) -> dict[str, Any]:
     return state
 
 
-def _resolve_uv_executable() -> str:
-    """Return the absolute path of the uv executable on PATH.
-
-    Raises :class:`ValidationEnvironmentError` (infra failure) when uv
-    cannot be resolved.
-    """
-    uv_path = shutil.which("uv")
-    if not uv_path:
-        raise ValidationEnvironmentError(
-            "uv executable not on PATH; cannot provision candidate-bound "
-            "project environment"
-        )
-    resolved = Path(uv_path).expanduser().resolve(strict=False)
-    if not resolved.is_file() or not os.access(resolved, os.X_OK):
-        raise ValidationEnvironmentError(
-            f"uv executable is not a runnable file: {resolved}"
-        )
-    return str(resolved)
-
-
 def _uv_version(uv_executable: str) -> str:
     try:
         proc = subprocess.run(
@@ -632,17 +613,14 @@ def provision_project_environment(
 ) -> dict[str, Any]:
     """Provision the candidate-bound project environment.
 
-    The ``bound_uv`` argument is the EXACT ``package.uv`` resolution
-    from the frozen run's CAPABILITY_BINDING.json (re-verified against
-    the current platform by the validator before this call). The
-    provisioner NEVER uses ``shutil.which("uv")`` as authority — it
-    launches ``bound_uv.executable`` only after
-    :func:`verify_bound_uv_identity` confirms the on-disk bytes still
-    match the frozen SHA. ``bound_uv=None`` is a legacy escape hatch
-    for callers that have NOT yet been upgraded; it routes through
-    the old PATH discovery so the executor can be updated last, but
-    emits a ``package.uv_unbound`` deprecation flag so the operator
-    sees it is unsafe-by-default.
+    The ``bound_uv`` argument is the EXACT ``package.uv`` resolution from the
+    frozen run's CAPABILITY_BINDING.json. The provisioner never uses PATH
+    discovery as authority: every real uv subprocess launches
+    ``bound_uv.executable`` only after :func:`verify_bound_uv_identity`
+    confirms the on-disk bytes still match the frozen SHA. ``bound_uv=None``
+    is accepted only for candidates without ``pyproject.toml``, where no uv
+    subprocess exists. A real project with no frozen uv identity fails closed
+    as ``OUTCOME_INFRA_FAILURE``.
 
     Returns a dict with two compatible shapes layered on top of each
     other. Callers that only need the legacy ``project_environment_status``
@@ -663,11 +641,9 @@ def provision_project_environment(
         transitions to ``CHANGES_REQUESTED`` and consumes a normal
         repair round.
       - ``OUTCOME_INFRA_FAILURE``: a genuine validator/host-side
-        failure (uv executable missing, provisioning timeout,
-        runtime-cache filesystem refused, registry/network unreachable,
-        or — with ``bound_uv`` — the frozen identity has drifted).
-        The run terminalizes as ``BLOCKED`` without burning a repair
-        round.
+        failure (bound identity missing/drifted, provisioning timeout,
+        runtime-cache filesystem refused, registry/network unreachable).
+        The run terminalizes as ``BLOCKED`` without burning a repair round.
 
     Raises :class:`ValidationEnvironmentError` only when the validator
     cannot even initialize a provisioning attempt (e.g. the candidate
@@ -701,9 +677,8 @@ def provision_project_environment(
 
     # No uv project in this candidate. There is nothing to sync, but we
     # still publish a marker so the rest of the system knows the env
-    # contract was honored. Subsequent ``uv run`` invocations inside
-    # this run will fail naturally (no project) and that failure is
-    # reported as ``validation_failed``, not ``infra_failure``.
+    # contract was honored. This compatibility path performs no uv effect,
+    # so it is not an unbound package-authority path.
     if not has_project:
         try:
             env_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -721,7 +696,7 @@ def provision_project_environment(
             "metadata_sha256": meta_id,
             "uv_executable": "",
             "uv_version": "",
-            "package_uv_unbound": bool(bound_uv is None),
+            "package_uv_unbound": False,
             "bound_uv_sha256": (
                 bound_uv.executable_sha256 if bound_uv is not None else ""
             ),
@@ -782,25 +757,18 @@ def provision_project_environment(
     except OSError as exc:
         return _infra(f"runtime_cache_create_failed:{exc.strerror or exc}")
 
-    # Authoritative uv identity: the bound package.uv resolution from
-    # the frozen CAPABILITY_BINDING. When provided, we (a) re-verify the
-    # on-disk SHA/version still matches the frozen binding, and (b) use
-    # bound_uv.executable verbatim — never PATH discovery. When NOT
-    # provided we fall through to legacy PATH resolution so callers can
-    # be upgraded last; the receipt records package_uv_unbound=yes.
-    package_uv_unbound = False
-    if bound_uv is not None:
-        try:
-            verify_bound_uv_identity(bound_uv)
-        except ValidationEnvironmentError as exc:
-            return _infra(f"bound_uv_drift:{exc}")
-        uv_executable = bound_uv.executable
-    else:
-        package_uv_unbound = True
-        try:
-            uv_executable = _resolve_uv_executable()
-        except ValidationEnvironmentError as exc:
-            return _infra(f"uv_executable_unavailable:{exc}")
+    # Authoritative uv identity: every uv subprocess must use the exact
+    # package.uv resolution frozen into CAPABILITY_BINDING. No PATH fallback
+    # exists. A missing binding is validator-owned infrastructure failure.
+    if bound_uv is None:
+        return _infra(
+            "bound_uv_required: package.uv must be frozen before uv provisioning"
+        )
+    try:
+        verify_bound_uv_identity(bound_uv)
+    except ValidationEnvironmentError as exc:
+        return _infra(f"bound_uv_drift:{exc}")
+    uv_executable = bound_uv.executable
     uv_version = _uv_version(uv_executable)
     sync_env = runtime_env.hermetic_subprocess_env(
         canonical_repo, run_id, "validation",
@@ -850,8 +818,6 @@ def provision_project_environment(
     stdout_bytes = stdout_path.read_bytes() if stdout_path.exists() else b""
     stderr_bytes = stderr_path.read_bytes() if stderr_path.exists() else b""
     excerpt = _excerpt(stderr_bytes, stdout_bytes)
-    # Best-effort: clean up the diagnostic artifacts (env_dir
-    # itself is the durable artifact, not these captures).
     try:
         stdout_path.unlink()
     except OSError:
@@ -862,10 +828,6 @@ def provision_project_environment(
         pass
 
     if returncode == 0 and not timed_out:
-        # Tighten the env_dir to supervisor-private mode after uv
-        # creates the venv (uv sets the venv to world-readable by
-        # default; we want 0700 because the env_dir is validator-
-        # owned and the validator subprocess is the only consumer).
         try:
             os.chmod(env_dir, 0o700)
         except OSError:
@@ -878,22 +840,12 @@ def provision_project_environment(
             "metadata_sha256": meta_id,
             "uv_executable": uv_executable,
             "uv_version": uv_version,
-            "package_uv_unbound": bool(package_uv_unbound),
-            "bound_uv_sha256": (
-                bound_uv.executable_sha256 if bound_uv is not None else ""
-            ),
-            "bound_uv_version": (
-                bound_uv.version if bound_uv is not None else ""
-            ),
-            "bound_uv_cache_path": (
-                bound_uv.cache_path if bound_uv is not None else ""
-            ),
-            "bound_uv_cache_scope": (
-                bound_uv.cache_scope if bound_uv is not None else ""
-            ),
-            "bound_uv_network_domains": (
-                list(bound_uv.network_domains) if bound_uv is not None else []
-            ),
+            "package_uv_unbound": False,
+            "bound_uv_sha256": bound_uv.executable_sha256,
+            "bound_uv_version": bound_uv.version,
+            "bound_uv_cache_path": bound_uv.cache_path,
+            "bound_uv_cache_scope": bound_uv.cache_scope,
+            "bound_uv_network_domains": list(bound_uv.network_domains),
             "provisioned_at": util.utc_now_iso(),
             "duration_seconds": float(duration),
         })
@@ -923,10 +875,9 @@ def provision_project_environment(
         marker_path=str(env_dir),
         identity=env_id,
     ))
-    result["package_uv_unbound"] = bool(package_uv_unbound)
-    if bound_uv is not None:
-        result["bound_uv_sha256"] = bound_uv.executable_sha256
-        result["bound_uv_version"] = bound_uv.version
+    result["package_uv_unbound"] = False
+    result["bound_uv_sha256"] = bound_uv.executable_sha256
+    result["bound_uv_version"] = bound_uv.version
     return result
 
 
@@ -934,7 +885,7 @@ def command_uses_uv_run(command: str) -> bool:
     """Return True when the command string invokes a uv subcommand that
     requires the project environment to exist.
     """
-    return bool(_UV_COMMAND_RE.search(command or ""))
+    return is_uv_command(command)
 
 
 def env_overrides(env_dir: Path) -> dict[str, str]:
