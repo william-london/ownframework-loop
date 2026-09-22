@@ -93,6 +93,36 @@ with tempfile.TemporaryDirectory(prefix="ofloop-v121-noproject-") as td:
     assert result["outcome"] == ve.OUTCOME_PROVISIONED, result
     assert result.get("package_uv_unbound") is False, result
 
+# A no-project marker has no uv executable because no uv subprocess ran, but
+# remains safely reusable when every frozen bound field matches.
+bound_no_project = ve.BoundUvIdentity(
+    executable="/bound/uv",
+    version="uv-test",
+    executable_sha256="f" * 64,
+    cache_path="/cache/uv",
+    cache_scope="repository_durable",
+    network_domains=("pypi.org", "files.pythonhosted.org"),
+)
+no_project_status = {
+    "provisioned": True,
+    "package_uv_unbound": False,
+    "metadata_sha256": "no-pyproject",
+    "uv_executable": "",
+    "bound_uv_sha256": bound_no_project.executable_sha256,
+    "bound_uv_version": bound_no_project.version,
+    "bound_uv_cache_path": bound_no_project.cache_path,
+    "bound_uv_cache_scope": bound_no_project.cache_scope,
+    "bound_uv_network_domains": list(bound_no_project.network_domains),
+}
+assert vx._cached_environment_matches_bound_uv(
+    no_project_status, bound_no_project
+), no_project_status
+real_project_status = dict(no_project_status)
+real_project_status["metadata_sha256"] = "a" * 64
+assert not vx._cached_environment_matches_bound_uv(
+    real_project_status, bound_no_project
+), real_project_status
+
 # Executor refuses a uv command when the frozen resolution lacks package.uv.
 with tempfile.TemporaryDirectory(prefix="ofloop-v121-executor-") as td:
     root = Path(td)
