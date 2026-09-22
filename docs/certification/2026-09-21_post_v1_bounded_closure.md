@@ -205,7 +205,7 @@ VERSION_TRUTH=PASS (source line = 1.1.0.dev0;
 ### Live bridge smoke
 
 Real helper-style REQUEST → supervisor tick → real broker
-subprocess → real public read (https://example.com/) → 
+subprocess → real public read (https://example.com/) →
 operator-owned RESPONSE file published → receipt persisted →
 claim removed. Two overlapping operations (one slow due to
 real network latency; one fast). Both received responses

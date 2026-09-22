@@ -378,8 +378,10 @@ expect "research.public BuiltinCapabilityDefinition keeps worker Bash empty" "$?
 
 # Direct read of test_v200_research_authority.sh against the live
 # host manifest (real-world install): even after commissioning, the
-# worker's allowedDomains stays empty.
-INSTALL_LIB="${HOME}/.local/share/ownframework-loop/1.0.0/lib"
+# worker's allowedDomains stays empty. Install root derives from
+# the canonical source version so the test does not depend on a
+# specific historical install slot.
+INSTALL_LIB="${HOME}/.local/share/ownframework-loop/$(python3 -c 'import sys; sys.path.insert(0, "'"${REPO_ROOT}"'/lib"); from ownframework_loop import __version__; print(__version__)')/lib"
 PYTHONPATH="${INSTALL_LIB}" python3 - <<PY
 import sys
 sys.path.insert(0, "${INSTALL_LIB}")
