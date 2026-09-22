@@ -8,7 +8,7 @@ or OS-level containment of arbitrary same-user code.
 
 ## Supported release posture
 
-- The source/master supported line in this repository is **1.0.0**. Source
+- The source/master supported line in this repository is **1.1.0.dev0**. Source
   version truth does not itself assert publication.
 - Publication authority is the immutable Git tag together with its corresponding
   GitHub Release. Static source documentation does not duplicate a mutable

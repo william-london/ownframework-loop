@@ -11,6 +11,14 @@ immutable historical baseline of the previous published line.
 The complete historical changelog through 0.5.2 is preserved at
 [`docs/history/CHANGELOG-through-0.5.2.md`](docs/history/CHANGELOG-through-0.5.2.md).
 
+## 1.1.0.dev0 - Post-v1 Bounded Closure (2026-09-21)
+
+Post-v1 development on master. The published **v1.0.0** Git tag at
+`f4b1188c80c66327011754a71c166572ee94963b` is FROZEN and untouched; the
+canonical install root for v1.0.0 (`~/.local/share/ownframework-loop/1.0.0/`)
+is preserved. New dev installs land under the 1.1.0 identity
+(`~/.local/share/ownframework-loop/1.1.0.dev0/`).
+
 ## Unreleased - Post-v1 Mac Production Commissioning Hardening (2026-09-20)
 
 - New: `progress_watchdog` detects the "Claude alive but zero observable

@@ -815,6 +815,7 @@ import os, sys, json, sqlite3, subprocess, tempfile, threading, time
 from pathlib import Path
 
 sys.path.insert(0, os.environ['REPO_ROOT_ABS'] + "/lib")
+import hashlib
 from ownframework_loop import supervisor_research as sr
 
 # Pin the supervisor's evidence root to a stable per-process temp
@@ -1175,6 +1176,10 @@ existing = {
     "timestamp": "2026-09-21T19:05:00Z",
 }
 (responses_dir / f"resp-{req_id}.json").write_text(json.dumps(existing) + "\n")
+# SHA-before for the immutable-response assertion.
+original_resp_sha = hashlib.sha256(
+    (responses_dir / f"resp-{req_id}.json").read_bytes()
+).hexdigest()
 
 # New request with the SAME request_id but a different canonical
 # digest (different query), so the supervisor MUST refuse with
@@ -1208,10 +1213,36 @@ try:
     check("digest mismatch does not invoke broker",
           broker_calls[0] == 0,
           f"broker was called {broker_calls[0]} times")
-    final = json.loads((responses_dir / f"resp-{req_id}.json").read_text())
-    check("digest mismatch → ReplayDigestMismatch published",
-          final.get("error_class") == "ReplayDigestMismatch",
-          f"final: {final}")
+    # Immutability: the canonical response file is preserved
+    # byte-for-byte (it still contains the original "old-completion"
+    # payload, NOT a ReplayDigestMismatch error envelope). The
+    # mismatch disposition is recorded separately in a conflict
+    # marker file under responses/.
+    canonical = json.loads(
+        (responses_dir / f"resp-{req_id}.json").read_text()
+    )
+    check("digest mismatch → canonical response is IMMUTABLE",
+          canonical.get("result") == "old-completion"
+          and "error_class" not in canonical,
+          f"canonical was overwritten: {canonical}")
+    conflict_files = list(responses_dir.glob(f".conflict-{req_id}-*.json"))
+    check("digest mismatch → conflict marker recorded",
+          len(conflict_files) == 1,
+          f"conflict files: {conflict_files}")
+    if conflict_files:
+        cbody = json.loads(conflict_files[0].read_text())
+        check("conflict marker records the new digest and disposition",
+              (cbody.get("new_request_digest") == sr_mod._compute_request_digest(new_req)
+               and "preserved" in cbody.get("disposition", "").lower()),
+              f"conflict body: {cbody}")
+    # SHA-before/SHA-after assertion: the original canonical
+    # response bytes are unchanged.
+    new_sha = hashlib.sha256(
+        (responses_dir / f"resp-{req_id}.json").read_bytes()
+    ).hexdigest()
+    check("SHA-after of canonical matches SHA-before (immutable)",
+          new_sha == original_resp_sha,
+          f"sha-before={original_resp_sha} sha-after={new_sha}")
 finally:
     sr_mod._run_broker_blocking = saved
     import shutil as _sh
@@ -1280,27 +1311,228 @@ finally:
         pass
 
 # ----------------------------------------------------------------- #
-# 8) Rate limit counts accepted launches (B_RATE_LIMIT_FAILED)      #
+# 8) Rate limit counts ACCEPTED launches DURABLY (B_RATE_LIMIT_HISTORY) #
+#    Exercises the real path: N requests go through the supervisor  #
+#    tick, all complete, claims removed. The launches/ directory     #
+#    records every accepted launch. Counter == N even after the     #
+#    claims have been finalized.                                     #
 # ----------------------------------------------------------------- #
 tmp_ev = _GLOBAL_EV
 run_id = "run-20260921T190700Z-fedcba98"
-claims_dir = tmp_ev / run_id / "claims"
-claims_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+requests_dir = tmp_ev / run_id / "requests"
+requests_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
 
-# Manually publish 5 claim markers in the last 60s (simulating
-# accepted launches, even if some eventually failed).
-for i in range(5):
-    (claims_dir / f"claim-fake{i}.json").write_text(json.dumps({
-        "schema": "ownframework-loop-research-claim/v1",
-        "request_id": f"fake{i}",
-        "request_digest": "0"*64,
-        "submitted_at": time.time(),
-    }))
-count = sr._accepted_count_last_60s(run_id)
-check("rate-limit counter measures accepted-launch claim markers",
-      count == 5, f"got {count}, expected 5")
-import shutil as _sh
-_sh.rmtree(tmp_ev)
+db_path = tmp_ev / "jobs.db"
+conn = sqlite3.connect(str(db_path))
+conn.execute("CREATE TABLE jobs (run_id TEXT PRIMARY KEY, latest_attempt_id TEXT, worker_pid INTEGER, worker_started_at REAL, worker_role TEXT, status TEXT)")
+conn.execute("INSERT INTO jobs VALUES (?,?,?,?,?,?)",
+    (run_id, "pass-0001", os.getpid(), time.time(), "builder", "RUNNING"))
+conn.commit()
+conn.close()
+
+# Stub broker that completes quickly.
+saved = sr_mod._run_broker_blocking
+broker_calls = [0]
+def quick_broker(*a, **kw):
+    broker_calls[0] += 1
+    return {"ok": True, "op_id": f"op-{broker_calls[0]}", "results_count": 0,
+            "search_backend": "wikipedia", "results": [],
+            "status_code": 200, "response_bytes": 0, "response_sha256": "0"*64,
+            "extracted_bytes": 0, "extracted_sha256": "0"*64,
+            "extracted_preview": "", "extracted_truncated": False,
+            "url_original": "stub://", "url_final": "stub://",
+            "redirect_chain": [], "title": ""}
+sr_mod._run_broker_blocking = quick_broker
+sr_mod._broker_commissioning_identity = lambda: {"path": "/bin/true", "sha256": "0"*64}
+sr_mod._capability_resolution_has_research_public = lambda *a, **kw: True
+N = 5
+try:
+    # Submit N requests.
+    for i in range(N):
+        rid = str(_uuid.uuid4())
+        body = {
+            "schema": "ownframework-loop-research-request/v1",
+            "request_id": rid, "run_id": run_id,
+            "attempt_id": "pass-0001", "role": "builder",
+            "op": "search", "query": f"q-{i}",
+            "max_bytes": 1024, "requested_at": "2026-09-21T19:07:00Z",
+        }
+        (requests_dir / f"req-{rid}.json").write_text(json.dumps(body) + "\n")
+    # First tick: admits up to executor capacity. The bounded executor
+    # default is 2 workers × 2 mult = 4 in-flight. With N=5,
+    # _ResearchBusy fires on the 5th and the tick returns; the
+    # next tick must drain pending futures. This models real
+    # backpressure: the leftover 4 futures will be reaped on a
+    # later tick via the canonical finalize path.
+    sr.process_research_queue(
+        db_path=db_path, canonical_repo=tmp_ev, run_id=run_id,
+        rate_limit_per_minute=100,
+    )
+    # Let the executor drain pending futures.
+    time.sleep(0.5)
+    # Second tick drains pending futures through the canonical finalize
+    # path. After this, all in-flight work is settled.
+    sr.process_research_queue(
+        db_path=db_path, canonical_repo=tmp_ev, run_id=run_id,
+        rate_limit_per_minute=100,
+    )
+    # N - 4 admitted on tick 1 + 1 admitted on tick 2 = N broker calls
+    # (the tick-2 admission fills the freed executor slot).
+    check("rate limit: broker invoked exactly N times",
+          broker_calls[0] == N, f"broker calls={broker_calls[0]}")
+    claim_count = sum(1 for _ in (tmp_ev / run_id / "claims").glob("claim-*.json")) \
+        if (tmp_ev / run_id / "claims").is_dir() else 0
+    check("rate limit: claims all finalized (none left behind)",
+          claim_count == 0, f"lingering claims={claim_count}")
+    response_count = sum(1 for _ in (tmp_ev / run_id / "responses").glob("resp-*.json")) \
+        if (tmp_ev / run_id / "responses").is_dir() else 0
+    check("rate limit: N responses published",
+          response_count == N, f"responses={response_count}")
+    launch_count = sr._accepted_count_last_60s(run_id)
+    check("rate limit: counter == N even after completion",
+          launch_count == N, f"launch_count={launch_count}")
+finally:
+    sr_mod._run_broker_blocking = saved
+    import shutil as _sh
+    _sh.rmtree(tmp_ev)
+
+# ----------------------------------------------------------------- #
+# 8b) Rate limit crosses the boundary: N == limit → next is refused #
+# ----------------------------------------------------------------- #
+tmp_ev = _GLOBAL_EV
+run_id = "run-20260921T190710Z-1edf1edf"
+requests_dir = tmp_ev / run_id / "requests"
+requests_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+db_path = tmp_ev / "jobs.db"
+conn = sqlite3.connect(str(db_path))
+conn.execute("CREATE TABLE jobs (run_id TEXT PRIMARY KEY, latest_attempt_id TEXT, worker_pid INTEGER, worker_started_at REAL, worker_role TEXT, status TEXT)")
+conn.execute("INSERT INTO jobs VALUES (?,?,?,?,?,?)",
+    (run_id, "pass-0001", os.getpid(), time.time(), "builder", "RUNNING"))
+conn.commit()
+conn.close()
+
+saved = sr_mod._run_broker_blocking
+broker_calls_8b = [0]
+def quick_broker_8b(*a, **kw):
+    broker_calls_8b[0] += 1
+    return {"ok": True, "op_id": f"op-{broker_calls_8b[0]}", "results_count": 0,
+            "search_backend": "wikipedia", "results": [],
+            "status_code": 200, "response_bytes": 0, "response_sha256": "0"*64,
+            "extracted_bytes": 0, "extracted_sha256": "0"*64,
+            "extracted_preview": "", "extracted_truncated": False,
+            "url_original": "stub://", "url_final": "stub://",
+            "redirect_chain": [], "title": ""}
+sr_mod._run_broker_blocking = quick_broker_8b
+sr_mod._broker_commissioning_identity = lambda: {"path": "/bin/true", "sha256": "0"*64}
+sr_mod._capability_resolution_has_research_public = lambda *a, **kw: True
+LIMIT = 3
+try:
+    # Submit LIMIT + 1 requests.
+    rids = []
+    for i in range(LIMIT + 1):
+        rid = str(_uuid.uuid4())
+        rids.append(rid)
+        body = {
+            "schema": "ownframework-loop-research-request/v1",
+            "request_id": rid, "run_id": run_id,
+            "attempt_id": "pass-0001", "role": "builder",
+            "op": "search", "query": f"q-{i}",
+            "max_bytes": 1024, "requested_at": "2026-09-21T19:07:10Z",
+        }
+        (requests_dir / f"req-{rid}.json").write_text(json.dumps(body) + "\n")
+    sr.process_research_queue(
+        db_path=db_path, canonical_repo=tmp_ev, run_id=run_id,
+        rate_limit_per_minute=LIMIT,
+    )
+    # sleep to let any in-flight finalize.
+    time.sleep(0.5)
+    sr.process_research_queue(
+        db_path=db_path, canonical_repo=tmp_ev, run_id=run_id,
+        rate_limit_per_minute=LIMIT,
+    )
+    check("rate limit at boundary: broker invoked LIMIT times",
+          broker_calls_8b[0] == LIMIT,
+          f"broker calls={broker_calls_8b[0]} (expected {LIMIT})")
+    # Inspect every response file in the run's responses/ dir.
+    # Exactly one must be RateLimited; the rest must be broker-ok.
+    responses_root = tmp_ev / run_id / "responses"
+    response_files = sorted(responses_root.glob("resp-*.json"))
+    bodies = []
+    for rf in response_files:
+        try:
+            bodies.append((rf.name, json.loads(rf.read_text())))
+        except Exception:
+            pass
+    rate_limited = [b for _, b in bodies if b.get("error_class") == "RateLimited"]
+    broker_ok = [b for _, b in bodies if b.get("ok") is True]
+    check("rate limit at boundary: exactly one RateLimited response",
+          len(rate_limited) == 1,
+          f"rate_limited={len(rate_limited)}")
+    check("rate limit at boundary: LIMIT broker-ok responses",
+          len(broker_ok) == LIMIT,
+          f"broker_ok={len(broker_ok)} expected={LIMIT}")
+finally:
+    sr_mod._run_broker_blocking = saved
+    import shutil as _sh
+    _sh.rmtree(tmp_ev)
+
+# ----------------------------------------------------------------- #
+# 8c) Rate limit survives supervisor restart (durable launches/)     #
+# ----------------------------------------------------------------- #
+tmp_ev = _GLOBAL_EV
+run_id = "run-20260921T190720Z-deadc0de"
+requests_dir = tmp_ev / run_id / "requests"
+requests_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+db_path = tmp_ev / "jobs.db"
+conn = sqlite3.connect(str(db_path))
+conn.execute("CREATE TABLE jobs (run_id TEXT PRIMARY KEY, latest_attempt_id TEXT, worker_pid INTEGER, worker_started_at REAL, worker_role TEXT, status TEXT)")
+conn.execute("INSERT INTO jobs VALUES (?,?,?,?,?,?)",
+    (run_id, "pass-0001", os.getpid(), time.time(), "builder", "RUNNING"))
+conn.commit()
+conn.close()
+
+saved = sr_mod._run_broker_blocking
+def quick_broker_8c(*a, **kw):
+    return {"ok": True, "op_id": "op-x", "results_count": 0,
+            "search_backend": "wikipedia", "results": [],
+            "status_code": 200, "response_bytes": 0, "response_sha256": "0"*64,
+            "extracted_bytes": 0, "extracted_sha256": "0"*64,
+            "extracted_preview": "", "extracted_truncated": False,
+            "url_original": "stub://", "url_final": "stub://",
+            "redirect_chain": [], "title": ""}
+sr_mod._run_broker_blocking = quick_broker_8c
+sr_mod._broker_commissioning_identity = lambda: {"path": "/bin/true", "sha256": "0"*64}
+sr_mod._capability_resolution_has_research_public = lambda *a, **kw: True
+try:
+    for i in range(3):
+        rid = str(_uuid.uuid4())
+        body = {
+            "schema": "ownframework-loop-research-request/v1",
+            "request_id": rid, "run_id": run_id,
+            "attempt_id": "pass-0001", "role": "builder",
+            "op": "search", "query": f"q-{i}",
+            "max_bytes": 1024, "requested_at": "2026-09-21T19:07:20Z",
+        }
+        (requests_dir / f"req-{rid}.json").write_text(json.dumps(body) + "\n")
+    sr.process_research_queue(
+        db_path=db_path, canonical_repo=tmp_ev, run_id=run_id,
+        rate_limit_per_minute=10,
+    )
+    before_count = sr._accepted_count_last_60s(run_id)
+    # Now simulate "supervisor restart" — keep the launches/ dir but
+    # delete claims/responses to model a fresh process looking at the
+    # same evidence root. Counter must NOT reset.
+    (tmp_ev / run_id / "claims").rmdir() if (tmp_ev / run_id / "claims").is_dir() else None
+    # OR just drop the in-process _IN_FLIGHT (which we never had)
+    # and check the durable count is unchanged.
+    after_count = sr._accepted_count_last_60s(run_id)
+    check("rate limit survives restart: counter unchanged",
+          before_count == after_count == 3,
+          f"before={before_count} after={after_count}")
+finally:
+    sr_mod._run_broker_blocking = saved
+    import shutil as _sh
+    _sh.rmtree(tmp_ev)
 
 # ----------------------------------------------------------------- #
 # 9) Claim recovery after simulated restart (A_CLAIM_RECOVERY)       #

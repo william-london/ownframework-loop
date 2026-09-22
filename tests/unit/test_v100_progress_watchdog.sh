@@ -254,8 +254,14 @@ for r in conn.execute(
 assert summary["terminated"] == 1, f"expected 1 terminate, got {summary['terminated']}"
 assert calls, "terminate callable not invoked"
 
-# Job should now be QUEUED with progress_stall_count incremented and
-# transient_failures incremented (bounded retry).
+# Job should now be QUEUED with progress_stall_count incremented
+# (the watchdog's own dedicated counter). Post-v1 closure: the watchdog
+# does NOT increment transient_failures directly; that would be a
+# double-charge against the canonical failure-policy owner's budget.
+# One stall consumes exactly one budget counter increment
+# (progress_stall_count += 1). The recovery path may later increment
+# transient_failures when it consumes the watchdog's classification,
+# but that consumes a single budget once.
 row = conn.execute(
     "SELECT status, last_failure_class, progress_stall_count, "
     "       transient_failures, worker_pid FROM jobs WHERE run_id='run-progress-stall-test'"
@@ -263,7 +269,9 @@ row = conn.execute(
 assert row[0] == "QUEUED", f"job status after stall: {row[0]}"
 assert row[1] == "progress_stalled", f"failure class: {row[1]}"
 assert int(row[2]) == 1, f"progress_stall_count: {row[2]}"
-assert int(row[3]) == 1, f"transient_failures: {row[3]}"
+# Watchdog no longer increments transient_failures. The recovery
+# path's progress_stalled branch will not double-charge either.
+assert int(row[3]) == 0, f"transient_failures (must stay 0): {row[3]}"
 assert row[4] is None, f"worker_pid: {row[4]} (should be NULL)"
 
 # semantic_attempts should now be FAILED with class progress_stalled

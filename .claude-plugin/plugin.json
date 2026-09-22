@@ -2,7 +2,7 @@
   "name": "of-loop",
   "displayName": "OwnFramework Loop",
   "description": "Stable Claude Code adapter for the vendor-neutral OwnFramework Loop autonomous engineering runtime.",
-  "version": "1.0.0",
+  "version": "1.1.0.dev0",
   "author": {
     "name": "OwnFramework"
   },

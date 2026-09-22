@@ -441,6 +441,19 @@ def _apply_failure_policy(
         quarantined = True
         streak = 1
         backoff = 0.0
+    elif failure_class == "progress_stalled":
+        # Post-v1 closure: the watchdog owns detect+terminate+classify
+        # for progress_stalled and incremented the dedicated
+        # ``progress_stall_count`` counter. The canonical failure-policy
+        # owner does NOT also increment transient_failures or
+        # infra_failures — that would be a double-charge. The stall is
+        # its own budget unit; quarantine for repeated stalls is
+        # governed by the stall count, not by infra/transient streaks.
+        # We still derive the operational backoff so a stalled attempt
+        # does not hot-loop.
+        quarantined = False
+        streak = 1
+        backoff = min(300.0, float(5 * (2 ** max(0, streak - 1))))
     else:
         infra_failures += 1
         ceiling = int(row["max_infra_failures"] or 0)

@@ -355,11 +355,16 @@ def _compute_request_digest(req: dict[str, Any]) -> str:
 class _InFlightEntry:
     __slots__ = (
         "run_id", "request_id", "request_digest", "attempt_id",
-        "role", "claim_path", "future", "submitted_at", "operator",
+        "role", "op", "url", "query", "max_bytes", "search_backend",
+        "claim_path", "future", "submitted_at", "operator",
+        "finalized",
     )
 
     def __init__(self, *, run_id: str, request_id: str, request_digest: str,
-                 attempt_id: str, role: str, claim_path: Path,
+                 attempt_id: str, role: str, op: str,
+                 url: str | None, query: str | None,
+                 max_bytes: int, search_backend: str | None,
+                 claim_path: Path,
                  future: "_futures.Future[Any]", submitted_at: float,
                  operator: str) -> None:
         self.run_id = run_id
@@ -367,10 +372,20 @@ class _InFlightEntry:
         self.request_digest = request_digest
         self.attempt_id = attempt_id
         self.role = role
+        self.op = op
+        self.url = url
+        self.query = query
+        self.max_bytes = int(max_bytes)
+        self.search_backend = search_backend
         self.claim_path = claim_path
         self.future = future
         self.submitted_at = submitted_at
         self.operator = operator
+        # Per-entry finalize sentinel. Set True exactly once when the
+        # entry's future has been reaped AND its response published
+        # AND its claim removed AND its executor slot released. The
+        # canonical finalize path is the ONLY writer of this flag.
+        self.finalized = False
 
     @property
     def key(self) -> tuple[str, str, str]:
@@ -404,6 +419,15 @@ class _InFlightRegistry:
     def insert(self, entry: _InFlightEntry) -> None:
         with self._lock:
             self._entries[entry.key] = entry
+
+    def remove(self, key: tuple[str, str, str]) -> _InFlightEntry | None:
+        """Atomically remove one entry. Returns the removed entry
+        or ``None``. The canonical finalize path uses this for
+        explicit single-entry finalization; the bulk finalize path
+        uses ``reap_completed`` instead.
+        """
+        with self._lock:
+            return self._entries.pop(key, None)
 
     def reap_completed(self) -> list[_InFlightEntry]:
         """Return and remove all entries whose futures have completed
@@ -728,19 +752,231 @@ def _summarize_for_worker(broker_result: dict[str, Any], request_id: str
 
 def _publish_response(
     run_id: str, request_id: str, payload: dict[str, Any],
+    *, allow_overwrite: bool = False,
 ) -> Path:
+    """Publish the authoritative RESPONSE atomically.
+
+    Immutability: an existing authoritative response file is
+    NEVER overwritten. The byte-for-byte identity of a published
+    response is the audit guarantee — once a (run_id, request_id)
+    pair has produced a response, every subsequent caller (including
+    a same-id different-digest replay attempt) sees the ORIGINAL
+    bytes. There is one exception: ``allow_overwrite=True`` is the
+    internal escape hatch used by the canonical finalize path when
+    the response is being constructed for the first time AND the
+    caller has confirmed no prior response exists. Production code
+    paths do NOT pass allow_overwrite.
+
+    Conflict policy: if a publish is requested but the path is
+    already occupied, the conflict is recorded as a separate
+    ``responses/.conflict-<request_id>-<digest8>.json`` marker so
+    the original authoritative response remains byte-identical.
+    """
     response_path = canonical_response_path(run_id, request_id)
-    # Idempotent re-publish on replay: if the file already exists,
-    # unlink then re-publish so the new payload wins. The replay
-    # path only re-publishes matching-digest responses, which are
-    # bit-identical to the existing authoritative response.
-    if response_path.is_file() or response_path.is_symlink():
+    if response_path.is_symlink():
+        # Defence in depth: never overwrite a symlink.
+        raise _ValidationError(
+            "InvalidRequest",
+            f"refusing to overwrite symlinked response path: {response_path}",
+        )
+    if response_path.is_file() and not allow_overwrite:
+        # Existing authoritative response is IMMUTABLE. Preserve
+        # byte-for-byte. Record the conflict separately.
+        existing_sha = ""
         try:
-            response_path.unlink()
-        except FileNotFoundError:
+            with response_path.open("rb") as fh:
+                existing_sha = hashlib.sha256(fh.read()).hexdigest()
+        except OSError:
             pass
+        conflict_path = _responses_dir(run_id) / (
+            f".conflict-{request_id}-{(payload.get('request_digest') or 'unknown')[:8]}.json"
+        )
+        conflict_payload = {
+            "schema": "ownframework-loop-research-conflict/v1",
+            "run_id": run_id,
+            "request_id": request_id,
+            "new_request_digest": payload.get("request_digest") or "",
+            "existing_response_sha256": existing_sha,
+            "new_payload_ok": bool(payload.get("ok")),
+            "new_payload_error_class": payload.get("error_class", ""),
+            "timestamp": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+            "disposition": (
+                "existing authoritative response preserved byte-for-byte; "
+                "conflict recorded"
+            ),
+        }
+        _atomic_write_json(conflict_path, conflict_payload)
+        return response_path
     _atomic_write_json(response_path, payload)
     return response_path
+
+
+def _atomic_write_json_with_allow(
+    path: Path, payload: dict[str, Any], *, allow_overwrite: bool = False,
+) -> None:
+    """Atomic JSON writer with optional overwrite.
+
+    Mirrors ``_atomic_write_json`` but refuses to clobber an
+    existing file unless explicitly allowed. Used by finalize path
+    that has confirmed there is no prior response.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if path.exists() or path.is_symlink():
+        if not allow_overwrite:
+            return
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+    tmp = path.with_name(
+        f".{path.name}.{os.getpid()}.{_uuid.uuid4().hex}.tmp"
+    )
+    encoded = json.dumps(payload, sort_keys=True, ensure_ascii=True, indent=2) + "\n"
+    fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(encoded)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.link(tmp, path)
+        try:
+            dir_fd = os.open(str(path.parent), os.O_RDONLY)
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
+        except OSError:
+            pass
+    finally:
+        try:
+            tmp.unlink()
+        except FileNotFoundError:
+            pass
+
+
+# --------------------------------------------------------------------------- #
+# Launch history (durable accepted-launch records — survives completion)      #
+# --------------------------------------------------------------------------- #
+
+
+def _launches_dir(run_id: str) -> Path:
+    """Operator-owned append-only launch-history directory.
+
+    Each accepted broker transport launch publishes
+    ``<launches>/launch-<UUID>.json`` here BEFORE the broker is
+    invoked. The record stays until natural cleanup after the
+    trailing rate-limit window expires. Successful completion of
+    the operation does NOT remove the record — the rate-limit
+    budget is consumed for the full trailing window regardless of
+    success/failure/timeout. Without this durability, a launch
+    counter that scans live claim markers would undercount after
+    completion (because completion removes the claim marker).
+    """
+    p = _run_evidence_dir(run_id) / "launches"
+    p.mkdir(parents=True, exist_ok=True, mode=0o700)
+    return p
+
+
+def _launch_record_path(run_id: str, request_id: str) -> Path:
+    _assert_canonical_run_id(run_id)
+    _assert_canonical_request_id(request_id)
+    return _launches_dir(run_id) / f"launch-{request_id}.json"
+
+
+def _publish_launch_record(
+    *,
+    run_id: str,
+    request_id: str,
+    request_digest: str,
+    attempt_id: str,
+    role: str,
+    op: str,
+    url: str | None,
+    query: str | None,
+    max_bytes: int,
+    search_backend: str | None,
+    submitted_at: float,
+) -> Path:
+    """Atomically publish one accepted-launch record. Idempotent on
+    re-publish for the same request_id (allow_overwrite is False;
+    existing record wins)."""
+    record_path = _launch_record_path(run_id, request_id)
+    payload = {
+        "schema": "ownframework-loop-research-launch/v1",
+        "run_id": run_id,
+        "request_id": request_id,
+        "request_digest": request_digest,
+        "attempt_id": attempt_id,
+        "role": role,
+        "op": op,
+        "url": url,
+        "query": query,
+        "max_bytes": int(max_bytes),
+        "search_backend": search_backend,
+        "accepted_at": submitted_at,
+        "accepted_at_iso": _dt.datetime.fromtimestamp(
+            submitted_at, tz=_dt.timezone.utc
+        ).isoformat(),
+    }
+    if record_path.is_symlink():
+        raise _ValidationError(
+            "InvalidRequest",
+            f"refusing to overwrite symlinked launch record: {record_path}",
+        )
+    if record_path.exists():
+        # Idempotent: an existing record already counted; preserve it.
+        return record_path
+    tmp = record_path.with_name(
+        f".{record_path.name}.{os.getpid()}.{_uuid.uuid4().hex}.tmp"
+    )
+    encoded = json.dumps(payload, sort_keys=True, ensure_ascii=True) + "\n"
+    fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(encoded)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.link(tmp, record_path)
+        try:
+            dir_fd = os.open(str(record_path.parent), os.O_RDONLY)
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
+        except OSError:
+            pass
+    finally:
+        try:
+            tmp.unlink()
+        except FileNotFoundError:
+            pass
+    return record_path
+
+
+def _cleanup_launch_history(run_id: str, *, window_seconds: float = 60.0
+                             ) -> int:
+    """Remove launch records older than ``window_seconds``. The
+    default rate-limit window is 60s; the records stay at least
+    that long so a completed launch still consumes budget. Returns
+    the count of removed records.
+    """
+    launches = _launches_dir(run_id)
+    if not launches.is_dir():
+        return 0
+    cutoff = time.time() - window_seconds
+    removed = 0
+    for path in launches.glob("launch-*.json"):
+        try:
+            st = path.stat()
+        except OSError:
+            continue
+        if st.st_mtime < cutoff:
+            try:
+                path.unlink()
+                removed += 1
+            except OSError:
+                pass
+    return removed
 
 
 # --------------------------------------------------------------------------- #
@@ -763,6 +999,13 @@ def _atomic_publish_claim(entry: _InFlightEntry) -> Path | None:
     collision (e.g. an existing claim for this request_id from a
     prior supervisor lifetime — caller must consult replay cache
     before claiming).
+
+    The claim marker persists enough canonical request metadata to
+    perform truthful recovery on supervisor restart WITHOUT
+    touching the worker-writable ``requests/`` inbox:
+    ``op``, ``url``, ``query``, ``max_bytes``, ``search_backend``,
+    plus the bound timestamps. No credentials, no per-search
+    operator approval, no arbitrary worker method selection.
     """
     claim_path = _claim_marker_path(entry.run_id, entry.request_id)
     payload = {
@@ -772,6 +1015,11 @@ def _atomic_publish_claim(entry: _InFlightEntry) -> Path | None:
         "request_digest": entry.request_digest,
         "attempt_id": entry.attempt_id,
         "role": entry.role,
+        "op": entry.op,
+        "url": entry.url,
+        "query": entry.query,
+        "max_bytes": entry.max_bytes,
+        "search_backend": entry.search_backend,
         "operator": entry.operator,
         "submitted_at": entry.submitted_at,
         "broker_launched_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
@@ -819,6 +1067,77 @@ def _remove_claim(claim_path: Path) -> None:
 
 
 # --------------------------------------------------------------------------- #
+# Authoritative finalize (single canonical path for reaping in-flight entries) #
+# --------------------------------------------------------------------------- #
+
+
+def _finalize_completed_entries(
+    entries: list[_InFlightEntry],
+) -> dict[str, int]:
+    """The ONE canonical finalize path for completed in-flight entries.
+
+    Invariant: every entry passed in is finalized EXACTLY ONCE.
+
+      1. future.result(timeout=0) is consumed EXACTLY ONCE per entry;
+      2. authoritative RESPONSE is published EXACTLY ONCE per entry
+         (replay path / mismatch / recovery path / first-time finalize
+         all flow through the same immutable-publish contract);
+      3. claim marker is removed EXACTLY ONCE per entry;
+      4. executor admission slot is released EXACTLY ONCE per entry.
+
+    An entry whose ``finalized`` flag is already True (already
+    processed by a prior tick) is skipped without re-publishing,
+    re-removing its claim, or re-releasing its slot. The flag is
+    the per-entry once-only sentinel that closes the async
+    completion race.
+
+    Returns ``{"finalized": <int>, "skipped": <int>, "errors": <int>}``.
+    """
+    finalized = 0
+    skipped = 0
+    errors = 0
+    for entry in entries:
+        if entry.finalized:
+            # Already processed by a prior tick; never re-finalize.
+            skipped += 1
+            continue
+        try:
+            broker_result = entry.future.result(timeout=0)
+        except _futures.TimeoutError:
+            # Future not yet done. Should not appear in the entries
+            # list passed to this function — caller is supposed to
+            # pass only completed entries. Defensive: leave for
+            # next tick.
+            continue
+        except Exception as exc:  # pragma: no cover
+            broker_result = {
+                "ok": False,
+                "error_class": "ExecutorFailed",
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+        response = _summarize_for_worker(broker_result, entry.request_id)
+        response["request_digest"] = entry.request_digest
+        # Immutable publish: if a response already exists at the
+        # canonical path (e.g. constructed earlier by replay cache
+        # or recovery), the conflict marker policy in _publish_response
+        # preserves the existing bytes and records the conflict.
+        _publish_response(entry.run_id, entry.request_id, response)
+        _remove_claim(entry.claim_path)
+        # Release the executor admission slot AFTER response publish
+        # and claim removal — order matters: the slot stays held
+        # until finalize succeeds so a flood of futures cannot
+        # exhaust capacity mid-finalize.
+        try:
+            _get_executor().release()
+        except Exception:
+            # release() is internally bounded; never raise.
+            pass
+        entry.finalized = True
+        finalized += 1
+    return {"finalized": finalized, "skipped": skipped, "errors": errors}
+
+
+# --------------------------------------------------------------------------- #
 # Durable rate limit (counts ACCEPTED broker transport launches)              #
 # --------------------------------------------------------------------------- #
 
@@ -826,18 +1145,23 @@ def _remove_claim(claim_path: Path) -> None:
 def _accepted_count_last_60s(run_id: str) -> int:
     """Count accepted broker transport launches in the trailing 60s.
 
-    Uses claim marker mtime (operator-owned, durable across
-    supervisor restarts) — NOT receipt mtime, because failed
-    network operations consume network budget whether or not the
-    broker wrote a receipt. Network attempt is the economically
-    meaningful unit.
+    Uses the durable launch-history directory
+    ``<evidence_root>/<run-id>/launches/launch-<UUID>.json`` —
+    operator-owned, append-only, NOT removed when the operation
+    completes. This is the smallest durable evidence model that
+    satisfies the rate-limit invariant: a launch (successful,
+    failed, timed-out, broker-error) consumes network budget for
+    the FULL trailing window regardless of completion state.
+    Without this durability, a counter that scans live claim
+    markers would silently undercount after completion because
+    completion removes the claim marker.
     """
     cutoff = time.time() - 60.0
-    claims = _claims_dir(run_id)
-    if not claims.is_dir():
+    launches = _launches_dir(run_id)
+    if not launches.is_dir():
         return 0
     count = 0
-    for path in claims.glob("claim-*.json"):
+    for path in launches.glob("launch-*.json"):
         try:
             st = path.stat()
         except OSError:
@@ -876,18 +1200,48 @@ def _replay_check(
 ) -> dict[str, Any] | None:
     """Replay identity is ``(request_id, request_digest)``.
 
-    Returns a response dict to publish OR an error dict. Caller
-    must NOT perform a second network call in either branch.
+    Returns a response dict the caller may act on, OR an error
+    dict, OR ``None`` to indicate "no prior response".
 
-    - existing response + matching digest → reuse (zero new transport)
+    Authoritative policy:
+
+    - existing response + matching digest → return existing
+      (zero new transport; existing bytes are preserved)
     - existing response + mismatching digest → ReplayDigestMismatch
+      (zero new transport; existing bytes are preserved)
+    - existing response MISSING request_digest (legacy file) →
+      legacy identity unknown → DO NOT silently treat as match.
+      Return ReplayDigestMismatch with an explicit "legacy
+      identity unknown" reason so the caller refuses to dispatch.
+      The original legacy response bytes remain immutable.
     - no existing response → None (caller decides)
     """
     existing = _read_authoritative_response(run_id, request_id)
     if existing is None:
         return None
     existing_digest = str(existing.get("request_digest") or "")
-    if existing_digest and expected_digest and existing_digest != expected_digest:
+    if not existing_digest:
+        # Legacy response without request_digest. Do NOT silently
+        # treat it as matching — that would let a later forged
+        # request reuse the request_id and overwrite the original
+        # bytes via a different digest. The legacy response stays
+        # immutable; the new request is rejected.
+        return {
+            "schema": RESPONSE_SCHEMA,
+            "ok": False,
+            "request_id": request_id,
+            "request_digest": expected_digest,
+            "error_class": "ReplayDigestMismatch",
+            "error": (
+                f"request_id {request_id} already has a legacy response "
+                f"without request_digest; legacy identity is unknown "
+                f"and cannot be proven identical to the new request; "
+                f"refusing replay"
+            ),
+            "timestamp": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+            "legacy_response_preserved": True,
+        }
+    if expected_digest and existing_digest != expected_digest:
         return {
             "schema": RESPONSE_SCHEMA,
             "ok": False,
@@ -898,6 +1252,7 @@ def _replay_check(
                 f"different request_digest; refusing replay"
             ),
             "timestamp": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+            "existing_response_preserved": True,
         }
     return existing
 
@@ -910,19 +1265,31 @@ def _replay_check(
 def recover_claims(run_id: str) -> dict[str, int]:
     """One-shot recovery of orphaned claim markers.
 
-    For each ``claims/claim-<UUID>.json`` that has no matching
-    ``receipts/op-*.json`` AND no matching ``responses/resp-<UUID>.json``:
+    The claim marker persists enough canonical request metadata to
+    perform truthful recovery on supervisor restart WITHOUT touching
+    the worker-writable ``requests/`` inbox: ``op``, ``url``,
+    ``query``, ``max_bytes``, ``search_backend``.
 
-    - For ``read`` / ``asset-read`` (free public GET), bounded retry
-      is acceptable. We mark the claim as ``recovery_outcome=retried``
-      by republishing a ``RecoveryRetried`` response that names the
-      original submission; the next tick will pick it up if it is
-      still in flight, otherwise the response stays authoritative.
-      This is the truthful "prior transport may have occurred" line.
-    - For ``search`` (potentially metered), we do NOT auto-retry.
-      We publish a ``RecoveryOutcomeUnknown`` response so a
-      subsequent replay of the same ``(request_id, request_digest)``
-      does NOT trigger another dispatch.
+    Recovery policy:
+
+    - existing authoritative response already present → drop the
+      claim, the run is settled.
+    - matching durable receipt (from a prior broker invocation)
+      present but no response → reconstruct the response from the
+      receipt (zero second network call), drop the claim.
+    - no durable completion evidence:
+        * ``op in ('read', 'asset-read')`` (free public GET) →
+          re-admit through the trusted transport by directly
+          submitting to the bounded executor; a fresh launches/
+          record is published (so the retry still consumes
+          rate-limit budget). The original claim marker is
+          preserved (the durable audit trail of the original
+          dispatch).
+        * ``op == 'search'`` (potentially metered) → do NOT
+          auto-retry. Publish ``RecoveryOutcomeUnknown`` so a
+          subsequent replay of the same
+          ``(request_id, request_digest)`` does NOT trigger
+          another dispatch.
 
     This function is called once per tick on the serviced run;
     idempotent. Returns a count summary.
@@ -930,9 +1297,9 @@ def recover_claims(run_id: str) -> dict[str, int]:
     _assert_canonical_run_id(run_id)
     claims = _claims_dir(run_id)
     receipts = _receipts_dir(run_id)
-    responses = _responses_dir(run_id)
     summary = {"scanned": 0, "republished_retry": 0,
-               "republished_unknown": 0, "skipped": 0}
+               "republished_unknown": 0, "reconstructed": 0,
+               "redispatched": 0, "skipped": 0}
     if not claims.is_dir():
         return summary
     for claim_path in claims.glob("claim-*.json"):
@@ -941,7 +1308,6 @@ def recover_claims(run_id: str) -> dict[str, int]:
             with claim_path.open("r", encoding="utf-8") as fh:
                 claim = json.load(fh)
         except (OSError, json.JSONDecodeError):
-            # Unreadable: leave the marker; supervisor tick will skip.
             summary["skipped"] += 1
             continue
         if not isinstance(claim, dict):
@@ -950,18 +1316,26 @@ def recover_claims(run_id: str) -> dict[str, int]:
         request_id = str(claim.get("request_id") or "")
         request_digest = str(claim.get("request_digest") or "")
         op = str(claim.get("op") or "")
-        if not request_id or not request_digest:
+        attempt_id = str(claim.get("attempt_id") or "")
+        role = str(claim.get("role") or "")
+        url = claim.get("url")
+        query = claim.get("query")
+        try:
+            max_bytes = int(claim.get("max_bytes") or 0)
+        except (TypeError, ValueError):
+            max_bytes = 0
+        search_backend = claim.get("search_backend")
+        if not request_id or not request_digest or not op:
             summary["skipped"] += 1
             continue
-        # Did a matching response land?
+        # Did a matching authoritative response already land?
         existing_resp = _read_authoritative_response(run_id, request_id)
         if existing_resp is not None:
             # Recovery already settled. Drop the claim.
             _remove_claim(claim_path)
             continue
-        # Did a matching receipt land? If so, the broker finished but
-        # the supervisor crashed before publishing the response.
-        # Reconstruct a minimal authoritative response from the receipt.
+        # Did a matching receipt persist? Reconstruct the response
+        # without re-dispatching.
         receipt_match = None
         if receipts.is_dir():
             for rp in receipts.glob("op-*.json"):
@@ -977,25 +1351,87 @@ def recover_claims(run_id: str) -> dict[str, int]:
                     receipt_match = rec
                     break
         if receipt_match is not None:
-            # Reconstruct and publish.
             response = _summarize_for_worker(receipt_match, request_id)
             response["request_digest"] = request_digest
             response["timestamp"] = _dt.datetime.now(_dt.timezone.utc).isoformat()
             response["recovery"] = "reconstructed_from_receipt"
             _publish_response(run_id, request_id, response)
             _remove_claim(claim_path)
-            summary["republished_retry"] += 1
+            summary["reconstructed"] += 1
             continue
-        # No matching durable completion evidence. The transport
-        # may or may not have happened.
+        # No matching durable completion evidence.
         if op in ("read", "asset-read"):
-            # Free public GET — bounded retry policy: re-admit for
-            # dispatch on the next tick (the in-flight registry does
-            # not have the future anymore; the claim marker is the
-            # only durable proof we want another chance).
-            # Don't unlink the claim here — leave it for the normal
-            # tick path to pick up.
-            summary["skipped"] += 1
+            # Bounded retry policy: re-admit through the trusted
+            # transport. Construct a synthetic _InFlightEntry from
+            # the durable claim marker, submit to the bounded
+            # executor. The next tick's finalize path publishes
+            # the response when the future completes. A fresh
+            # launches/ record is published so the retry consumes
+            # rate-limit budget.
+            try:
+                identity = _broker_commissioning_identity()
+                broker_path = identity["path"]
+            except _BrokerUnavailable:
+                summary["skipped"] += 1
+                continue
+            submitted_at = time.time()
+            entry = _InFlightEntry(
+                run_id=run_id,
+                request_id=request_id,
+                request_digest=request_digest,
+                attempt_id=attempt_id,
+                role=role,
+                op=op,
+                url=url,
+                query=query,
+                max_bytes=max_bytes or _DEFAULT_MAX_BROKER_BYTES,
+                search_backend=search_backend,
+                claim_path=claim_path,
+                future=None,
+                submitted_at=submitted_at,
+                operator="supervisor-research-recovery",
+            )
+            try:
+                _publish_launch_record(
+                    run_id=run_id,
+                    request_id=request_id,
+                    request_digest=request_digest,
+                    attempt_id=attempt_id,
+                    role=role,
+                    op=op,
+                    url=url,
+                    query=query,
+                    max_bytes=max_bytes or _DEFAULT_MAX_BROKER_BYTES,
+                    search_backend=search_backend,
+                    submitted_at=submitted_at,
+                )
+            except Exception:
+                summary["skipped"] += 1
+                continue
+            executor = _get_executor()
+            try:
+                fut = executor.submit(
+                    _run_broker_blocking,
+                    broker_path,
+                    op=op,
+                    url=url,
+                    query=query,
+                    max_bytes=max_bytes or _DEFAULT_MAX_BROKER_BYTES,
+                    evidence_dir=_run_evidence_dir(run_id),
+                    run_id=run_id,
+                    attempt=attempt_id,
+                    request_id=request_id,
+                    request_digest=request_digest,
+                    search_backend=search_backend if op == "search" else None,
+                    expected_broker_sha=identity.get("sha256"),
+                )
+            except _ResearchBusy:
+                summary["skipped"] += 1
+                continue
+            entry.future = fut
+            entry.claim_path = claim_path
+            _IN_FLIGHT.insert(entry)
+            summary["redispatched"] += 1
             continue
         # op=search (potentially metered) — do NOT auto-retry.
         response = {
@@ -1232,12 +1668,20 @@ def process_research_queue(
          different digest → publish ReplayDigestMismatch (no
          dispatch).
       6. Recompute canonical digest; compare to worker-supplied.
-      7. Rate-limit gate (durable, counts ACCEPTED launches).
+      7. Rate-limit gate (durable via launches/, counts ACCEPTED).
       8. Active-attempt gate.
       9. Role-mismatch gate.
      10. Submit to bounded executor with operator-owned claim
-         marker; persist claim atomically before dispatch.
-     11. Drain in-flight futures up to the per-tick budget.
+         marker; persist durable launches/ record BEFORE dispatch.
+     11. Drain newly-submitted futures up to the per-tick budget.
+     12. On the next tick, ``_IN_FLIGHT.reap_completed()`` returns
+         the entries whose futures became done during the previous
+         tick (including older entries that didn't finish in their
+         submitting tick). The single canonical
+         ``_finalize_completed_entries`` finishes them — see
+         A_ASYNC_COMPLETION_RACE in the closure report. This is
+         the only path that may call release / remove claim /
+         publish response for an in-flight entry.
     """
     _assert_canonical_run_id(run_id)
 
@@ -1252,14 +1696,17 @@ def process_research_queue(
             except FileNotFoundError:
                 pass
         return {"consumed": 0, "processed": 0, "rejected": 0,
-                "republished": 0, "recovered": 0}
+                "republished": 0, "recovered": 0,
+                "finalized": 0, "in_flight": len(_IN_FLIGHT)}
 
     # 2. DB connect.
     try:
         conn = sqlite3.connect(str(db_path))
     except sqlite3.Error:
         return {"consumed": 0, "processed": 0, "rejected": 0,
-                "republished": 0, "recovered": 0, "deferred": "db_unavailable"}
+                "republished": 0, "recovered": 0,
+                "finalized": 0, "in_flight": len(_IN_FLIGHT),
+                "deferred": "db_unavailable"}
     conn.row_factory = sqlite3.Row
 
     # 3. Broker identity — verify commission BEFORE admitting work.
@@ -1270,36 +1717,29 @@ def process_research_queue(
         conn.close()
         return {"consumed": 0, "processed": 0, "rejected": 0,
                 "republished": 0, "recovered": 0,
+                "finalized": 0, "in_flight": len(_IN_FLIGHT),
                 "deferred": "broker_unavailable", "detail": str(exc)}
 
-    # 4. STEP 1 — reap completed futures from the process-wide registry.
-    processed = 0
-    republish_reused = 0
+    # 4. STEP 1 — finalize entries whose futures completed in any
+    # previous tick. The SINGLE canonical finalize path is the
+    # ONLY writer of response / claim-removal / slot-release for
+    # an entry. This closes the async completion race: a future
+    # that started in tick N and finished during tick N+1 is
+    # finalized here, exactly once, by the per-entry `finalized`
+    # sentinel.
+    reaped_entries = _IN_FLIGHT.reap_completed()
+    finalize_result = _finalize_completed_entries(reaped_entries)
+    processed = finalize_result["finalized"]
+    republish_reused = processed  # all finalized responses are visible to workers
     republish_mismatch = 0
-    for entry in _IN_FLIGHT.reap_completed():
-        try:
-            broker_result = entry.future.result(timeout=0)
-        except Exception as exc:  # pragma: no cover
-            broker_result = {
-                "ok": False,
-                "error_class": "ExecutorFailed",
-                "error": f"{type(exc).__name__}: {exc}",
-            }
-        response = _summarize_for_worker(broker_result, entry.request_id)
-        response["request_digest"] = entry.request_digest
-        _publish_response(entry.run_id, entry.request_id, response)
-        if response.get("error_class") == "ReplayDigestMismatch":
-            republish_mismatch += 1
-        else:
-            republish_reused += 1
-        _remove_claim(entry.claim_path)
-        processed += 1
-        _get_executor().release()
 
     # 5. STEP 2 — claim recovery (durable, idempotent).
     recovered = recover_claims(run_id)
 
-    # 6. STEP 3 — durable rate limit (counts accepted launches).
+    # 6. STEP 3 — durable rate limit (counts accepted launches via
+    #    launches/ — NOT claim markers; completion does NOT clear
+    #    the rate-limit budget for the trailing window).
+    _cleanup_launch_history(run_id)
     already_accepted = _accepted_count_last_60s(run_id)
 
     # 7. STEP 4 — consume inbox (with file hardening).
@@ -1310,6 +1750,9 @@ def process_research_queue(
             "consumed": 0, "processed": processed,
             "rejected": 0, "republished": republish_reused,
             "recovered": 0,
+            "finalized": finalize_result["finalized"],
+            "skipped": finalize_result["skipped"],
+            "in_flight": len(_IN_FLIGHT),
         }
     consumed = len(candidates)
     rejected = 0
@@ -1326,11 +1769,12 @@ def process_research_queue(
         request_id = str(raw_req.get("request_id") or "")
         attempt_id = str(raw_req.get("attempt_id") or "")
         role = str(raw_req.get("role") or "")
+        op = str(raw_req.get("op") or "")
+        url = raw_req.get("url")
+        query = raw_req.get("query")
 
         # 7a. Recompute canonical digest (do not trust worker).
         canonical_req = dict(raw_req)
-        # Strip worker-supplied digest before recomputing; the
-        # recomputed value is what we use everywhere.
         worker_digest = str(raw_req.get("request_digest") or "")
         recomputed_digest = _compute_request_digest(canonical_req)
         if worker_digest and worker_digest != recomputed_digest:
@@ -1356,23 +1800,41 @@ def process_research_queue(
         request_digest = recomputed_digest
 
         # 7b. Replay cache (digest-aware). Done BEFORE admitting.
+        #    Note: _publish_response is the immutable publisher —
+        #    for an existing authoritative response, the conflict
+        #    marker policy preserves the original bytes; the
+        #    mismatch disposition goes to the conflict file (not to
+        #    the canonical response path).
         replay = _replay_check(run_id, request_id, request_digest)
         if replay is not None:
-            # Same id + digest → reuse (zero new transport).
-            # Same id + different digest → ReplayDigestMismatch.
-            # Either branch publishes exactly once; no dispatch.
-            if replay.get("error_class") == "ReplayDigestMismatch":
-                replay["timestamp"] = _dt.datetime.now(_dt.timezone.utc).isoformat()
-            replay["request_digest"] = request_digest
-            _publish_response(run_id, request_id, replay)
+            # Mark the canonical path's response as the visible
+            # disposition to the worker. For an existing response
+            # with a matching digest, this is a no-op (the file is
+            # already correct and is returned as-is). For a
+            # mismatch, the canonical file stays byte-for-byte
+            # unchanged and the disposition is recorded as a
+            # separate conflict marker; we still surface the
+            # disposition to the caller here for the rejected
+            # in-process flow (so the helper can see the error).
             try:
                 request_path.unlink()
             except FileNotFoundError:
                 pass
             if replay.get("error_class") == "ReplayDigestMismatch":
+                # Even though the canonical file is preserved, the
+                # conflict marker needs to be published. We compute
+                # the new (rejected) payload's digest and call
+                # _publish_response which detects the existing file
+                # and writes the conflict marker instead.
+                rejected_payload = dict(replay)
+                rejected_payload["request_digest"] = request_digest
+                _publish_response(run_id, request_id, rejected_payload)
                 republish_mismatch += 1
             else:
-                republish_reused += 1
+                # Same-digest reuse: the canonical file is already
+                # the right disposition; nothing to publish (write
+                # preserves immutable bytes).
+                pass
             continue
 
         # 7c. Active-attempt check.
@@ -1437,37 +1899,109 @@ def process_research_queue(
                 pass
             rejected += 1
             continue
-        # Accept the launch (counts the budget even if the eventual
-        # broker call fails — that is the point of counting accepted
-        # launches, not successful receipts).
         already_accepted += 1
 
-        # 7f. Compute provider-neutral search backend. Supervisor
-        # chooses; the worker contract never specifies this.
-        op = str(raw_req.get("op") or "")
-        # The host manifest commissioning evidence (if it carries a
-        # frozen ``search_backend`` policy) takes precedence; default
-        # to wikipedia.
-        search_backend = "wikipedia"
-        try:
+        # 7f. Search backend policy. The supervisor is the ONLY
+        #    authority that picks a search provider. The policy
+        #    MUST be one of the currently-commissioned providers;
+        #    anything else is fail-closed BEFORE the broker is
+        #    launched. ``ddg-lite`` is removed in the third mid-run
+        #    repair; ``wikipedia`` is the only currently-commissioned
+        #    search provider.
+        search_backend: str | None = None
+        if op == "search":
             policy = os.environ.get(
                 "OFLOOP_RESEARCH_DEFAULT_SEARCH_BACKEND", "wikipedia"
             )
-            if policy in ("wikipedia", "ddg-lite"):
-                search_backend = policy
-        except Exception:
-            pass
+            if policy not in ("wikipedia",):
+                # Fail-closed: do NOT launch the broker with a stale
+                # or unknown backend. The argparse layer would also
+                # refuse, but the supervisor rejects here so the
+                # request is refused consistently regardless of
+                # whether the supervisor is in a state where the
+                # broker has been re-sealed.
+                response = {
+                    "schema": RESPONSE_SCHEMA,
+                    "ok": False,
+                    "request_id": request_id,
+                    "request_digest": request_digest,
+                    "error_class": "SearchBackendRefused",
+                    "error": (
+                        f"OFLOOP_RESEARCH_DEFAULT_SEARCH_BACKEND={policy!r} "
+                        f"is not a currently-commissioned search backend; "
+                        f"only 'wikipedia' is accepted (ddg-lite REMOVED)"
+                    ),
+                    "timestamp": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+                }
+                _publish_response(run_id, request_id, response)
+                try:
+                    request_path.unlink()
+                except FileNotFoundError:
+                    pass
+                rejected += 1
+                # Roll back the rate-limit increment — no transport
+                # was launched.
+                already_accepted -= 1
+                continue
+            search_backend = policy
 
-        # 7g. Build the in-flight entry and persist the claim BEFORE
-        # submitting. The claim lives in operator-owned claims/, not
-        # the worker-writable requests/ inbox.
+        # 7g. Persist the durable launches/ record BEFORE submitting
+        #    the broker. This is the durable accepted-launch
+        #    evidence the rate-limit gate reads.
         submitted_at = time.time()
+        try:
+            _publish_launch_record(
+                run_id=run_id,
+                request_id=request_id,
+                request_digest=request_digest,
+                attempt_id=attempt_id,
+                role=role,
+                op=op,
+                url=url,
+                query=query,
+                max_bytes=_clamp_max_bytes(op, raw_req.get("max_bytes")),
+                search_backend=search_backend,
+                submitted_at=submitted_at,
+            )
+        except Exception as exc:
+            # If we cannot persist the durable launch record, the
+            # rate-limit invariant is broken. Fail closed: drop the
+            # claim, refuse the request, do not dispatch.
+            response = {
+                "schema": RESPONSE_SCHEMA,
+                "ok": False,
+                "request_id": request_id,
+                "request_digest": request_digest,
+                "error_class": "LaunchRecordFailed",
+                "error": f"durable launch record could not be published: {exc}",
+                "timestamp": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+            }
+            _publish_response(run_id, request_id, response)
+            try:
+                request_path.unlink()
+            except FileNotFoundError:
+                pass
+            rejected += 1
+            already_accepted -= 1
+            continue
+
+        # 7h. Build the in-flight entry and persist the claim BEFORE
+        #    submitting. The claim lives in operator-owned claims/,
+        #    not the worker-writable requests/ inbox. The entry
+        #    carries op/url/query/max_bytes/search_backend so the
+        #    claim marker has enough durable context for truthful
+        #    recovery on supervisor restart.
         entry = _InFlightEntry(
             run_id=run_id,
             request_id=request_id,
             request_digest=request_digest,
             attempt_id=attempt_id,
             role=role,
+            op=op,
+            url=url,
+            query=query,
+            max_bytes=_clamp_max_bytes(op, raw_req.get("max_bytes")),
+            search_backend=search_backend,
             claim_path=_claim_marker_path(run_id, request_id),
             future=None,  # set below
             submitted_at=submitted_at,
@@ -1481,9 +2015,12 @@ def process_research_queue(
                 request_path.unlink()
             except FileNotFoundError:
                 pass
+            # Roll back the rate-limit increment — no transport
+            # was launched by THIS tick.
+            already_accepted -= 1
             continue
 
-        # 7h. Submit to the bounded executor (non-blocking).
+        # 7i. Submit to the bounded executor (non-blocking).
         clamped_max_bytes = _clamp_max_bytes(op, raw_req.get("max_bytes"))
         broker_expected_sha = identity.get("sha256")
         try:
@@ -1491,8 +2028,8 @@ def process_research_queue(
                 _run_broker_blocking,
                 broker_path,
                 op=op,
-                url=raw_req.get("url"),
-                query=raw_req.get("query"),
+                url=url,
+                query=query,
                 max_bytes=clamped_max_bytes,
                 evidence_dir=evidence_dir,
                 run_id=run_id,
@@ -1503,15 +2040,23 @@ def process_research_queue(
                 expected_broker_sha=broker_expected_sha,
             )
         except _ResearchBusy as exc:
-            # Backpressure: drop the claim so the next tick retries.
+            # Backpressure: drop the claim and the durable launch
+            # record so the next tick retries the budget fairly.
             _remove_claim(claim_path)
+            try:
+                _launch_record_path(run_id, request_id).unlink()
+            except FileNotFoundError:
+                pass
             conn.close()
             return {
                 "consumed": consumed,
                 "processed": processed,
                 "rejected": rejected,
-                "republished": republish_reused + republish_mismatch,
+                "republished": republish_reused,
                 "recovered": recovered.get("scanned", 0),
+                "finalized": finalize_result["finalized"],
+                "skipped": finalize_result["skipped"],
+                "in_flight": len(_IN_FLIGHT),
                 "deferred": "research_executor_busy",
                 "detail": str(exc),
             }
@@ -1519,15 +2064,20 @@ def process_research_queue(
         _IN_FLIGHT.insert(entry)
         futures_submitted.append(entry)
 
-        # 7i. Drop the inbox file now that the claim is durable.
+        # 7j. Drop the inbox file now that the claim + launch record
+        #     are durable.
         try:
             request_path.unlink()
         except FileNotFoundError:
             pass
 
-    # 8. STEP 5 — drain in-flight futures up to the per-tick budget.
-    # Futures that exceed the budget remain in the in-flight
-    # registry and will be reaped on a later tick.
+    # 8. STEP 5 — drain newly-submitted futures up to the per-tick
+    #    budget. Futures that exceed the budget stay in
+    #    ``_IN_FLIGHT`` and are reaped on a LATER tick (via the
+    #    canonical finalize path). Futures that complete during
+    #    this drain are drained in-place AND also captured in the
+    #    registry, so the next tick's reap step picks up anything
+    #    that became done after our pass over futures_submitted.
     drained = 0
     for entry in futures_submitted:
         remaining = max(0.0, deadline - time.monotonic())
@@ -1544,14 +2094,30 @@ def process_research_queue(
                 "error_class": "ExecutorFailed",
                 "error": f"{type(exc).__name__}: {exc}",
             }
+        if entry.finalized:
+            # Some other tick already finalized this entry via the
+            # canonical path. Skip.
+            continue
         response = _summarize_for_worker(broker_result, entry.request_id)
         response["request_digest"] = entry.request_digest
         _publish_response(entry.run_id, entry.request_id, response)
         _remove_claim(entry.claim_path)
-        # Remove from in-flight registry; release executor slot.
-        _IN_FLIGHT.reap_completed()  # best-effort cleanup
-        _get_executor().release()
+        # Atomic single-shot remove from registry + sentinel flag.
+        _IN_FLIGHT.remove(entry.key)
+        entry.finalized = True
+        try:
+            _get_executor().release()
+        except Exception:
+            pass
         drained += 1
+
+    # 9. STEP 6 — re-finalize any newly-completed futures that other
+    #    entries' completions may have left in the registry (a
+    #    future that became done while we were draining others).
+    #    Same canonical finalize path; per-entry `finalized`
+    #    sentinel prevents double-publish / double-release.
+    final_pass = _finalize_completed_entries(_IN_FLIGHT.reap_completed())
+    drained += final_pass["finalized"]
 
     conn.close()
     return {
@@ -1560,6 +2126,8 @@ def process_research_queue(
         "rejected": rejected,
         "republished": republish_reused + republish_mismatch,
         "recovered": recovered.get("scanned", 0),
+        "finalized": finalize_result["finalized"] + final_pass["finalized"],
+        "skipped": finalize_result["skipped"] + final_pass["skipped"],
         "in_flight": len(_IN_FLIGHT),
     }
 

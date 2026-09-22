@@ -1,6 +1,6 @@
 # OwnFramework Loop
 
-Source/master release line: **1.0.0**. Source version truth does not itself assert publication.
+Source/master release line: **1.1.0.dev0**. Source version truth does not itself assert publication.
 
 Publication authority is the immutable Git tag together with its corresponding
 GitHub Release. Static source documentation does not duplicate a mutable

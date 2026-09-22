@@ -694,6 +694,23 @@ def tick(
         # watchdog's authoritative kill still applies).
         # Operator-driven terminal states (DONE, RETIRED, QUARANTINED,
         # CANCELED) are NEVER resurrected by the watchdog.
+        # Post-v1 closure: the watchdog does NOT consume retry budget
+        # counters (transient_failures / infra_failures). It only
+        # increments progress_stall_count — its own dedicated counter
+        # — so the canonical failure-policy owner consumes exactly one
+        # budget counter increment per stall. Without this discipline
+        # a single stall double-counts: watchdog increments
+        # transient_failures AND the recovery path increments
+        # infra_failures when classifying progress_stalled.
+        # Post-v1 closure: the watchdog does NOT seal
+        # ``cost_accounted=1`` on the attempt. Sealing the
+        # exactly-once accounting fence before the canonical
+        # accounting owner has had a chance to attach the provider
+        # envelope would permanently bury any real cost. The
+        # watchdog records ``cost_known=0`` (honest unknown) and
+        # ``failure_class='progress_stalled'``; the runner that
+        # later reads the provider envelope can still call
+        # ``_account_attempt_cost`` to attach real cost/tokens.
         try:
             cur = conn.execute(
                 """
@@ -710,7 +727,6 @@ def tick(
                     last_failure_class = 'progress_stalled',
                     last_failure_reason = ?,
                     progress_stall_count = progress_stall_count + 1,
-                    transient_failures = transient_failures + 1,
                     next_attempt_at = MAX(next_attempt_at, ?),
                     updated_at = ?
                 WHERE id = ? AND status IN ('RUNNING', 'BACKOFF')
@@ -735,16 +751,16 @@ def tick(
             # alone (same reason as the jobs UPDATE above); the
             # dispatcher may have already set the attempt to a
             # transition state.
+            # Post-v1: do NOT seal cost_accounted=1. Leave cost_known=0
+            # and cost_accounted=0 so the canonical accounting owner can
+            # still attach real cost/tokens from the provider envelope.
             latest_attempt = str(row["latest_attempt_id"] or "")
             if latest_attempt:
                 conn.execute(
                     """
                     UPDATE semantic_attempts SET
                         status='FAILED', completed_at=?, returncode=NULL,
-                        cost_usd=0, cost_accounted=1, cost_known=0,
-                        input_tokens=0, output_tokens=0,
-                        cache_read_tokens=0, cache_creation_tokens=0,
-                        tokens_known=0,
+                        cost_known=0,
                         failure_class='progress_stalled',
                         failure_reason=?
                     WHERE attempt_id=? AND job_id=?

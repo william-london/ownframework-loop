@@ -7,7 +7,7 @@
   "plugins": [
     {
       "name": "of-loop",
-      "version": "1.0.0",
+      "version": "1.1.0.dev0",
       "source": "./",
       "description": "Stable Claude Code adapter for OwnFramework Loop: execution-sealed work packets, autonomous supervisor-driven build/review cycles, exact-SHA verification, and operator-owned promotion."
     }
