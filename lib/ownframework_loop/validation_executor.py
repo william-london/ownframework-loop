@@ -85,11 +85,23 @@ def _cached_environment_matches_bound_uv(
     status: dict[str, Any],
     bound_uv: validation_environment.BoundUvIdentity,
 ) -> bool:
-    """True only when a reusable env marker proves the full frozen uv binding."""
+    """True only when a reusable env marker proves the full frozen uv binding.
+
+    A no-project marker legitimately has no ``uv_executable`` because no uv
+    subprocess was needed to provision it. It is reusable only when the marker
+    still proves every frozen bound-uv field. Real project environments must
+    additionally record the exact executable path used for provisioning.
+    """
     if not status.get("provisioned") or status.get("package_uv_unbound"):
         return False
+    no_project = str(status.get("metadata_sha256") or "") == "no-pyproject"
+    uv_executable = str(status.get("uv_executable") or "")
+    uv_executable_matches = (
+        (no_project and not uv_executable)
+        or uv_executable == bound_uv.executable
+    )
     return (
-        str(status.get("uv_executable") or "") == bound_uv.executable
+        uv_executable_matches
         and str(status.get("bound_uv_sha256") or "") == bound_uv.executable_sha256
         and str(status.get("bound_uv_version") or "") == bound_uv.version
         and str(status.get("bound_uv_cache_path") or "") == bound_uv.cache_path
