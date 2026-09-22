@@ -48,7 +48,8 @@ The deterministic validator owns a single project environment per
     metadata, or candidate produces a different env identity.
   - Is provisioned ONCE per env_id by running ``uv sync --project
     <candidate_worktree> --python-preference only-system --locked``
-    into the env_dir. Subsequent runs of the SAME env_id are no-ops.
+    into the env_dir. Subsequent runs of the SAME env_id are no-ops only
+    when the durable marker proves the same frozen ``package.uv`` identity.
   - Subprocesses that need the env (validation commands invoking
     ``uv run``, or any subprocess that should auto-activate the env)
     receive ``UV_PROJECT_ENVIRONMENT=<env_dir>`` and
@@ -493,6 +494,24 @@ def project_environment_status(env_dir: Path) -> dict[str, Any]:
     return state
 
 
+def _real_project_environment_matches_bound_uv(
+    status: dict[str, Any],
+    bound_uv: BoundUvIdentity,
+) -> bool:
+    """Return True only when a real-project marker proves the frozen uv identity."""
+    return (
+        bool(status.get("provisioned"))
+        and not bool(status.get("package_uv_unbound"))
+        and str(status.get("uv_executable") or "") == bound_uv.executable
+        and str(status.get("bound_uv_sha256") or "") == bound_uv.executable_sha256
+        and str(status.get("bound_uv_version") or "") == bound_uv.version
+        and str(status.get("bound_uv_cache_path") or "") == bound_uv.cache_path
+        and str(status.get("bound_uv_cache_scope") or "") == bound_uv.cache_scope
+        and sorted(str(value) for value in (status.get("bound_uv_network_domains") or []))
+        == sorted(bound_uv.network_domains)
+    )
+
+
 def _uv_version(uv_executable: str) -> str:
     try:
         proc = subprocess.run(
@@ -615,12 +634,10 @@ def provision_project_environment(
 
     The ``bound_uv`` argument is the EXACT ``package.uv`` resolution from the
     frozen run's CAPABILITY_BINDING.json. The provisioner never uses PATH
-    discovery as authority: every real uv subprocess launches
-    ``bound_uv.executable`` only after :func:`verify_bound_uv_identity`
-    confirms the on-disk bytes still match the frozen SHA. ``bound_uv=None``
-    is accepted only for candidates without ``pyproject.toml``, where no uv
-    subprocess exists. A real project with no frozen uv identity fails closed
-    as ``OUTCOME_INFRA_FAILURE``.
+    discovery as authority: every real uv subprocess or real-project cache
+    reuse requires ``bound_uv`` and verifies it against the current executable
+    plus the durable environment marker. ``bound_uv=None`` is accepted only
+    for candidates without ``pyproject.toml``, where no uv effect exists.
 
     Returns a dict with two compatible shapes layered on top of each
     other. Callers that only need the legacy ``project_environment_status``
@@ -726,8 +743,25 @@ def provision_project_environment(
             identity=env_id,
         ), status_fields=status)
 
+    # Real projects require frozen package.uv authority before ANY cache reuse
+    # or subprocess. This keeps the provisioner itself fail-closed, even for
+    # callers that bypass validation_executor.
+    if bound_uv is None:
+        return _infra(
+            "bound_uv_required: package.uv must be frozen before uv provisioning"
+        )
+    try:
+        verify_bound_uv_identity(bound_uv)
+    except ValidationEnvironmentError as exc:
+        return _infra(f"bound_uv_drift:{exc}")
+
     existing = project_environment_status(env_dir)
     if existing["provisioned"] and existing["identity"] == env_id:
+        if not _real_project_environment_matches_bound_uv(existing, bound_uv):
+            return _infra(
+                "bound_uv_cached_environment_mismatch: existing project "
+                "environment does not prove the current frozen package.uv identity"
+            )
         return _outcome_dict(ProvisionOutcome(
             outcome=OUTCOME_PROVISIONED,
             reason="already_provisioned",
@@ -757,17 +791,6 @@ def provision_project_environment(
     except OSError as exc:
         return _infra(f"runtime_cache_create_failed:{exc.strerror or exc}")
 
-    # Authoritative uv identity: every uv subprocess must use the exact
-    # package.uv resolution frozen into CAPABILITY_BINDING. No PATH fallback
-    # exists. A missing binding is validator-owned infrastructure failure.
-    if bound_uv is None:
-        return _infra(
-            "bound_uv_required: package.uv must be frozen before uv provisioning"
-        )
-    try:
-        verify_bound_uv_identity(bound_uv)
-    except ValidationEnvironmentError as exc:
-        return _infra(f"bound_uv_drift:{exc}")
     uv_executable = bound_uv.executable
     uv_version = _uv_version(uv_executable)
     sync_env = runtime_env.hermetic_subprocess_env(
