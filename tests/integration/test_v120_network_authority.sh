@@ -30,7 +30,7 @@ trap 'rm -rf "${TMP}"' EXIT
 RESULT="$(PYTHONDONTWRITEBYTECODE=1 python3 -B <<'PY'
 import os, sys
 from pathlib import Path
-sys.path.insert(0, "/Users/mr.mrs.london/projects/ownframework-loop/lib")
+sys.path.insert(0, "${LIB_DIR}")
 from ownframework_loop import runtime_env as re_mod
 
 # Seed EVERY documented ambient override that would otherwise widen
@@ -55,7 +55,7 @@ base.update(overrides)
 
 from ownframework_loop import validation_environment as ve
 env = re_mod.hermetic_subprocess_env(
-    Path("/Users/mr.mrs.london/projects/ownframework-loop"),
+    Path("${REPO_ROOT}"),
     "net-authority-fixture-run",
     "validation",
     base_env=base,
