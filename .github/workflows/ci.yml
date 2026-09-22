@@ -46,12 +46,16 @@ jobs:
           python3 --version
           git --version
       - name: Install uv for candidate-bound project env tests
+        # Install uv at a non-HOME location so the capability resolver
+        # does NOT refuse uv on HOME-fall-through grounds. HOME-bound
+        # executables require explicit host commissioning in CI runs
+        # that have no host manifest entry.
         run: |
           if ! command -v uv >/dev/null 2>&1; then
-            curl -LsSf https://astral.sh/uv/install.sh | sh
-            echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+            python3 -m pip install --break-system-packages uv || \
+              python3 -m pip install uv
           fi
+          which uv
           uv --version
       - name: Fetch canonical PR base
         if: github.event_name == 'pull_request'
@@ -93,10 +97,10 @@ jobs:
       - name: Install uv for candidate-bound project env tests
         run: |
           if ! command -v uv >/dev/null 2>&1; then
-            curl -LsSf https://astral.sh/uv/install.sh | sh
-            echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+            python3 -m pip install --break-system-packages uv || \
+              python3 -m pip install uv
           fi
+          which uv
           uv --version
       - name: Release gate
         env:
