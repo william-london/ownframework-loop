@@ -26,7 +26,7 @@ remediated before a final-closure claim is admissible:
 
 ```
 1. A_UV_CAPABILITY_DECLARATION_PARITY  → canonical
-   `validation_environment.is_uv_command(command)` predicate + 
+   `validation_environment.is_uv_command(command)` predicate +
    `UV_MEDIATED_SUBCOMMANDS` tuple; both packet admission and the
    validation executor consume the same function.
 
