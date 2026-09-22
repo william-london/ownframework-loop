@@ -49,8 +49,8 @@ from typing import Any
 
 from . import (
     approval, git_checks, guards, integrity, limits as limits_mod,
-    packet as packet_mod, program as program_mod, receipts, secrets_v2,
-    validation_executor,
+    packet as packet_mod, program as program_mod, receipts, runtime_env,
+    secrets_v2, validation_executor,
     state as state_mod, transitions, util, worktrees,
     build_agent as build_agent_mod,
     protected_recovery,
@@ -693,6 +693,12 @@ def finalize_build(
 
     # 15. Execute required validation commands.
     validations: list[dict[str, Any]] = []
+    infra_failure_count = 0
+    infra_failure_marker_path = (
+        runtime_env.runtime_cache_dir(canonical_repo, run_id, "validation")
+        / "infra_failures"
+        / "build.json"
+    )
     for v in program_mod.resolve_effective_required_validation(meta, state):
         timeout = int(meta.get("required_runtime_proof", {}).get("max_runtime_seconds") or 600)
         result = validation_executor.run_required_validation(
@@ -702,7 +708,12 @@ def finalize_build(
             canonical_repo=canonical_repo,
             run_id=run_id,
             packet=meta,
+            candidate_sha=candidate_sha,
+            role="builder",
+            infra_failure_path=infra_failure_marker_path,
         )
+        if bool(result.get("infra_failure")):
+            infra_failure_count += 1
         validations.append(result)
 
     # v0.10.0-dev f022: validation is required iff the packet has any
@@ -824,6 +835,14 @@ def finalize_build(
     # no path back to AWAITING_APPROVAL from BUILDING.)
     if state_mod.is_stop_requested(canonical_repo, run_id):
         next_state = "STOPPED"
+    elif infra_failure_count > 0:
+        # Validation infrastructure failure (e.g. uv sync timeout / locked
+        # lockfile drift / missing uv executable). The candidate author
+        # cannot fix this; the validator owner can. Terminalize
+        # WITHOUT consuming a repair round and WITHOUT triggering
+        # CHANGES_REQUESTED — see docs/architecture/RESEARCH_AUTHORITY.md
+        # for the symmetric infra-failure separation in research.
+        next_state = "BLOCKED"
     elif identity_reproof["result"] != "pass":
         # Validation mutated the candidate worktree or the canonical
         # branch behind the finalizer's back. The sealing contract is
@@ -984,6 +1003,15 @@ def finalize_build(
         "changed_paths": sorted(changed_paths),
         "validation": validations,
         "validation_status": validation_status,
+        "infra_failure": {
+            "result": "fail" if infra_failure_count > 0 else "pass",
+            "count": int(infra_failure_count),
+            "marker_path": (
+                str(infra_failure_marker_path)
+                if infra_failure_count > 0 else ""
+            ),
+            "burns_repair_round": False,
+        },
         "protected_path_check": {
             "result": "fail" if protected_findings else "pass",
             "offending_paths": [p["path"] for p in protected_findings],

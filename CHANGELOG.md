@@ -19,6 +19,43 @@ canonical install root for v1.0.0 (`~/.local/share/ownframework-loop/1.0.0/`)
 is preserved. New dev installs land under the 1.1.0 identity
 (`~/.local/share/ownframework-loop/1.1.0.dev0/`).
 
+## Unreleased - Post-v1 Candidate-Bound Validation Environment Parity (2026-09-22)
+
+- New: `lib/ownframework_loop/validation_environment.py` — deterministic
+  candidate-bound project environment. The validator owns one
+  per-(candidate SHA + uv.lock + pyproject.toml) env under the
+  supervisor-owned runtime cache, OUTSIDE the builder and reviewer
+  Git worktrees. The env lives at
+  `~/.local/state/ownframework-loop/runtime-cache/<repo_key>/<run_id>/validation/project-env/{builder,reviewer}/<env_id>/`
+  and is provisioned exactly once per identity. The provisioner runs
+  `uv sync --project <candidate_worktree> --python-preference only-system
+  --locked` so any registry drift fails closed against the candidate's
+  lockfile instead of silently mutating the worktree.
+- New: `validation_executor` invokes the environment owner before any
+  `uv run`-mediated validation command, layers `UV_PROJECT_ENVIRONMENT`
+  + `VIRTUAL_ENV` into the hermetic subprocess env so `uv run --no-sync`
+  honors the validator-owned path, and exposes a public
+  `command_uses_uv_run` classifier for upstream callers.
+- New: build and review finalizers record a structured `infra_failure`
+  block on the receipt/verdict. Infra failures (uv missing, uv sync
+  timeout, locked lockfile drift, missing `pyproject.toml`-driven
+  install path) transition the run to terminal `BLOCKED` WITHOUT
+  burning a semantic repair round and WITHOUT triggering
+  `CHANGES_REQUESTED` — the candidate author cannot fix these and the
+  validator owner must.
+- Schemas: `build-receipt.schema.json` and `review-verdict.schema.json`
+  gained `infra_failure`, `infra_failure_reason`, `validation_env_id`,
+  `validation_env_path`, and `infra_failure` envelope blocks; validation
+  rows accept `infra_failure` + `infra_failure_reason` + the env
+  identity fields and `exit_code` is now permitted to be `null` when
+  infra_failure is set.
+- Test: `tests/unit/test_v120_validation_environment.sh` (added to
+  `tests/canonical.txt`) exercises 28 behavioral checks across 11
+  sections — identity binding, worktree isolation, idempotency,
+  infra-failure classification, no worker authority leak, no HOME
+  reopening, classifier correctness, marker privacy, marker freshness
+  drift detection, and pure path derivation.
+
 ## Unreleased - Post-v1 Mac Production Commissioning Hardening (2026-09-20)
 
 - New: `progress_watchdog` detects the "Claude alive but zero observable

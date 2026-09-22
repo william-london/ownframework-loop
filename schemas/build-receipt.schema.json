@@ -115,7 +115,7 @@
             "type": "string"
           },
           "exit_code": {
-            "type": "integer"
+            "type": ["integer", "null"]
           },
           "duration_seconds": {
             "type": "number",
@@ -167,6 +167,18 @@
           },
           "marker_match": {
             "type": "boolean"
+          },
+          "infra_failure": {
+            "type": "boolean"
+          },
+          "infra_failure_reason": {
+            "type": "string"
+          },
+          "validation_env_id": {
+            "type": "string"
+          },
+          "validation_env_path": {
+            "type": "string"
           }
         }
       }
@@ -314,6 +326,32 @@
               }
             }
           }
+        }
+      }
+    },
+    "infra_failure": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "result"
+      ],
+      "properties": {
+        "result": {
+          "type": "string",
+          "enum": [
+            "pass",
+            "fail"
+          ]
+        },
+        "count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "marker_path": {
+          "type": "string"
+        },
+        "burns_repair_round": {
+          "type": "boolean"
         }
       }
     },

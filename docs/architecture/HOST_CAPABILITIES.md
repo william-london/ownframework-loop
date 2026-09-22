@@ -244,3 +244,44 @@ current byte-bound Claude runtime fingerprint. A Claude update or profile change
 stales it and requires explicit re-attestation. Preflight is execution-ready
 proof: requested browser capabilities must already have a valid exact-asset
 runtime canary proof, and strict effort must already be attested.
+
+## Candidate-bound validation project environment
+
+The `package.uv` capability only governs uv-as-package-manager: it provides
+the executable, the network authority, and a per-(repo, run) `UV_CACHE_DIR`
+that the supervisor externalizes out of the worktree. A separate, validator-
+owned layer handles the *project environment* itself (the `.venv`-equivalent
+`uv run` activates).
+
+The validator owns the project environment instead of letting uv auto-sync
+it next to the candidate. The environment:
+
+- Lives under the supervisor-owned runtime cache, OUTSIDE the builder and
+  reviewer Git worktrees:
+  `<runtime_cache>/<repo_key>/<run_id>/validation/project-env/{builder,reviewer}/<env_id>/`
+- Is identified by `sha256(candidate_sha || uv.lock_sha256 ||
+  pyproject.toml_sha256)`. Different candidate, lock, or metadata produces a
+  different env identity; the same triple produces the same env identity.
+- Is provisioned exactly once per identity. The provisioner runs
+  `uv sync --project <candidate_worktree> --python-preference only-system
+  --locked`. The `--locked` flag refuses silent lockfile drift; the
+  pinned `--python-preference` makes the env reproducible across hosts.
+- Is bound into the validator subprocess env via `UV_PROJECT_ENVIRONMENT`
+  + `VIRTUAL_ENV` only. The worker's allowRead/allowWrite is unchanged;
+  the env dir is validator-owned and never leaks into worker authority.
+- Survives across validations of the same candidate. A re-validation of
+  the same candidate (same SHA + same lock + same metadata) reuses the
+  cached env without re-running `uv sync`. A re-validation after a
+  lockfile change produces a fresh env identity.
+
+A `uv run` (or any `uv sync` / `uv exec` / `uv test` / `uv python` /
+`uv lock`) invocation against an unprovisioned env is refused before the
+subprocess is launched: the executor classifies the missing
+provisioning as `infra_failure`, records a redacted `infra_failure` marker
+under the runtime cache, and short-circuits to terminal `BLOCKED` without
+burning a semantic repair round. The candidate author cannot fix infra
+failures; the validator owner must.
+
+The validator never reopens HOME, never widens any worker's authority
+surface, and never lets the in-worktree `.venv` appear (the env path is
+a different filesystem location entirely).

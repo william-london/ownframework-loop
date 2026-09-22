@@ -58,8 +58,8 @@ from typing import Any
 
 from . import (
     approval, git_checks, guards, integrity, limits as limits_mod,
-    packet as packet_mod, program as program_mod, receipts, secrets_v2,
-    validation_executor,
+    packet as packet_mod, program as program_mod, receipts, runtime_env,
+    secrets_v2, validation_executor,
     state as state_mod, transitions, util, verdicts, worktrees,
     assessment as assessment_mod,
 )
@@ -298,6 +298,12 @@ def finalize_review(
     # 12. Run required validations from the packet (re-run for verifier freshness).
     validations: list[dict[str, Any]] = []
     validation_pass = True
+    infra_failure_count = 0
+    infra_failure_marker_path = (
+        runtime_env.runtime_cache_dir(canonical_repo, run_id, "validation")
+        / "infra_failures"
+        / "review.json"
+    )
     for v in program_mod.resolve_effective_required_validation(meta, active_state):
         if not _validation_shape_ok(v):
             continue
@@ -309,7 +315,12 @@ def finalize_review(
             canonical_repo=canonical_repo,
             run_id=run_id,
             packet=meta,
+            candidate_sha=receipt_candidate_sha,
+            role="reviewer",
+            infra_failure_path=infra_failure_marker_path,
         )
+        if bool(result.get("infra_failure")):
+            infra_failure_count += 1
         if not result["passed"]:
             validation_pass = False
         validations.append(result)
@@ -543,7 +554,15 @@ def finalize_review(
     }
 
     # 17. Compute final verdict.
-    if hard_secret_blocks:
+    if infra_failure_count > 0:
+        # Validation infrastructure failure (uv sync timeout / locked
+        # lockfile drift / missing uv executable / etc). The candidate
+        # author cannot fix this; the validator owner must. Terminalize
+        # the run WITHOUT burning a semantic repair round and WITHOUT
+        # attempting CHANGES_REQUESTED.
+        verdict = "BLOCKED"
+        failure_reason = "infra_failure"
+    elif hard_secret_blocks:
         verdict = "BLOCKED"
         failure_reason = "hard_secret_detected"
     elif protected_findings:
@@ -657,6 +676,15 @@ def finalize_review(
         "sensitive_path_assessment": {
             "result": "elevated" if sensitive_findings else "none",
             "paths": [p["path"] for p in sensitive_findings],
+        },
+        "infra_failure": {
+            "result": "fail" if infra_failure_count > 0 else "pass",
+            "count": int(infra_failure_count),
+            "marker_path": (
+                str(infra_failure_marker_path)
+                if infra_failure_count > 0 else ""
+            ),
+            "burns_repair_round": False,
         },
         "reviewer_identity": "of-reviewer",
         "timestamp": util.utc_now_iso(),

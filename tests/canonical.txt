@@ -11,6 +11,7 @@ tests/unit/test_v046_hardening.sh
 tests/unit/test_v050_hardening.sh
 tests/unit/test_lifecycle.sh
 tests/unit/test_no_silent_tests.sh
+tests/unit/test_v120_validation_environment.sh
 tests/unit/test_v200_research_authority.sh
 
 # Core integration and portability
