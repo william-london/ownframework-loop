@@ -67,13 +67,9 @@ def _extract_bound_uv_from_resolution(
 ) -> validation_environment.BoundUvIdentity | None:
     """Build a ``BoundUvIdentity`` from the frozen capability resolution.
 
-    Returns ``None`` when the packet does not request ``package.uv`` at
-    all — i.e. the validation command is NOT uv-mediated, so there is
-    no bound identity to enforce. Returns ``None`` AND surfaces a
-    soft-mismatch when ``package.uv`` is requested but the resolved
-    item is missing executable/version/sha256; the caller turns that
-    into an infra-class refusal because the resolution itself is
-    incomplete.
+    Returns ``None`` only when ``package.uv`` is absent. An incomplete
+    ``package.uv`` item raises ``ValidationEnvironmentError`` so the caller can
+    classify the malformed frozen authority as an infra failure.
     """
     for item in (resolution.get("resolved") or []):
         if str(item.get("name") or "") == "package.uv":
@@ -83,6 +79,24 @@ def _extract_bound_uv_from_resolution(
                 cache_scope=str(item.get("cache_scope") or ""),
             )
     return None
+
+
+def _cached_environment_matches_bound_uv(
+    status: dict[str, Any],
+    bound_uv: validation_environment.BoundUvIdentity,
+) -> bool:
+    """True only when a reusable env marker proves the full frozen uv binding."""
+    if not status.get("provisioned") or status.get("package_uv_unbound"):
+        return False
+    return (
+        str(status.get("uv_executable") or "") == bound_uv.executable
+        and str(status.get("bound_uv_sha256") or "") == bound_uv.executable_sha256
+        and str(status.get("bound_uv_version") or "") == bound_uv.version
+        and str(status.get("bound_uv_cache_path") or "") == bound_uv.cache_path
+        and str(status.get("bound_uv_cache_scope") or "") == bound_uv.cache_scope
+        and sorted(str(v) for v in (status.get("bound_uv_network_domains") or []))
+        == sorted(bound_uv.network_domains)
+    )
 
 
 def _file_snapshot(path: Path) -> tuple[bytes, int, str]:
@@ -222,15 +236,45 @@ def run_required_validation(
                     f"bound_uv_resolution_failed:{exc}"
                 )
             else:
-                bound_uv = _extract_bound_uv_from_resolution(resolution)
-                if bound_uv is None and (
-                    "package.uv" in _resolution_names(resolution)
-                ):
+                resolution_names = _resolution_names(resolution)
+                try:
+                    bound_uv = _extract_bound_uv_from_resolution(resolution)
+                except validation_environment.ValidationEnvironmentError as exc:
                     infra_failure = True
                     infra_failure_reason = (
                         "bound_uv_resolution_missing_fields: package.uv "
-                        "resolved but executable/version/sha256 absent"
+                        f"resolution is incomplete: {exc}"
                     )
+                else:
+                    if bound_uv is None:
+                        infra_failure = True
+                        if "package.uv" in resolution_names:
+                            infra_failure_reason = (
+                                "bound_uv_resolution_missing_fields: package.uv "
+                                "resolved but executable/version/sha256 absent"
+                            )
+                        else:
+                            infra_failure_reason = (
+                                "bound_uv_capability_not_bound: uv-mediated validation "
+                                "requires frozen package.uv authority"
+                            )
+                    else:
+                        env_id = validation_environment.candidate_bound_environment_id(
+                            str(candidate_sha), cwd
+                        )
+                        env_dir = validation_environment.project_environment_dir(
+                            canonical_repo, run_id, role, env_id
+                        )
+                        existing = validation_environment.project_environment_status(env_dir)
+                        if existing.get("provisioned") and not _cached_environment_matches_bound_uv(
+                            existing, bound_uv
+                        ):
+                            infra_failure = True
+                            infra_failure_reason = (
+                                "bound_uv_cached_environment_mismatch: existing project "
+                                "environment was not provisioned under the full frozen "
+                                "package.uv binding"
+                            )
             if not infra_failure:
                 try:
                     outcome = validation_environment.provision_project_environment(
