@@ -362,6 +362,100 @@ def validate_packet_self_consistency(meta: dict[str, Any]) -> list[str]:
     return errors
 
 
+_PYTHON_VALIDATION_RE = re.compile(r"(?<![\w-])python(?:3(?:\.\d+)?)?(?=\s|$)")
+_PYTHON_IMPORT_RE = re.compile(
+    r"\b(?:from|import)\s+([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+)"
+)
+_PYTHON_MODULE_RE = re.compile(
+    r"(?:^|\s)-m\s+([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+)"
+)
+
+
+def _declared_required_validations(meta: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return top-level and checkpoint-local validation declarations."""
+    values: list[dict[str, Any]] = []
+    for item in meta.get("required_validation") or []:
+        if isinstance(item, dict):
+            values.append(item)
+    graph = meta.get("checkpoint_graph")
+    if isinstance(graph, dict):
+        for checkpoint in graph.get("checkpoints") or []:
+            if not isinstance(checkpoint, dict):
+                continue
+            for item in checkpoint.get("required_validation") or []:
+                if isinstance(item, dict):
+                    values.append(item)
+    return values
+
+
+def _has_explicit_python_source_binding(command: str) -> bool:
+    """Recognize bounded repo-local source-path/package execution contracts."""
+    if re.search(r"\buv\s+run\b", command):
+        return True
+    if re.search(
+        r"\bPYTHONPATH\s*=\s*(?:['\"]?)(?:\./)?src(?:[/:'\"]|\s|$)",
+        command,
+    ):
+        return True
+    if re.search(
+        r"sys\.path\.(?:insert|append)\s*\([^)]*(?:['\"])(?:\./)?src(?:['\"])",
+        command,
+    ):
+        return True
+    if re.search(r"\bcd\s+(?:\./)?src\s*&&", command):
+        return True
+    return False
+
+
+def validate_validation_contract(meta: dict[str, Any]) -> list[str]:
+    """Reject obvious validation commands whose source-layout assumptions conflict.
+
+    This is intentionally structural rather than a shell or language analyzer.
+    When a packet declares a ``src/`` source layout, a dotted Python import
+    authored as a plain root-working-directory command is not self-consistent:
+    the deterministic validator does not install the future package or inject
+    ``src/`` into ``sys.path``. The packet must bind that fact explicitly with
+    a repo-relative ``PYTHONPATH=src`` contract, a ``uv run`` project
+    environment, an equivalent ``sys.path`` insertion, or a ``cd src`` command.
+    """
+    allowed = {
+        _normalize_scope_prefix(p)
+        for p in (meta.get("allowed_paths") or [])
+        if isinstance(p, str)
+    }
+    if not any(p == "src" or p.startswith("src/") for p in allowed):
+        return []
+
+    errors: list[str] = []
+    capabilities = {
+        str(value) for value in (meta.get("capabilities") or [])
+    }
+    for validation in _declared_required_validations(meta):
+        command = str(validation.get("command") or "")
+        if re.search(r"\buv\s+run\b", command) and "package.uv" not in capabilities:
+            name = str(validation.get("name") or "validation")
+            errors.append(
+                f"required_validation {name!r} uses uv run but packet capabilities "
+                "do not declare package.uv"
+            )
+            continue
+        if not _PYTHON_VALIDATION_RE.search(command):
+            continue
+        imports = [m.split(".", 1)[0] for m in _PYTHON_IMPORT_RE.findall(command)]
+        modules = [m.split(".", 1)[0] for m in _PYTHON_MODULE_RE.findall(command)]
+        dotted_repo_import = any(root != "src" for root in (*imports, *modules))
+        if not dotted_repo_import or _has_explicit_python_source_binding(command):
+            continue
+        name = str(validation.get("name") or "validation")
+        errors.append(
+            f"required_validation {name!r} uses a dotted Python import from a "
+            "src-layout packet without an explicit repo-local source binding; "
+            "use PYTHONPATH=src, uv run, an equivalent sys.path insertion, or "
+            "a source-directory working-directory command"
+        )
+    return errors
+
+
 def validate_packet_for_approval(meta: dict[str, Any]) -> list[str]:
     """Fail-closed admission validator for packets entering execution.
 
@@ -382,6 +476,7 @@ def validate_packet_for_approval(meta: dict[str, Any]) -> list[str]:
 
     errors: list[str] = list(validate_packet_metadata(meta))
     errors.extend(validate_packet_self_consistency(meta))
+    errors.extend(validate_validation_contract(meta))
     return errors
 
 

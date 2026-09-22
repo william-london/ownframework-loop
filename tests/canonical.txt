@@ -89,6 +89,7 @@ tests/integration/test_v092_protected_drift_context.sh
 tests/integration/test_v085_commissioned_canary_restart_watcher.sh
 tests/integration/test_v086_dispatch_hold.sh
 tests/integration/test_v085_program_routing_semantics.sh
+tests/integration/test_v111_src_layout_validation_contract.sh
 
 # Capability and terminal authority
 tests/integration/test_v091_capability_runtime.sh

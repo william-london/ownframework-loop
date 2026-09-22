@@ -83,6 +83,10 @@ for spec_path in spec_contracts:
         "MUST be satisfiable from the first checkpoint onward",
         "belongs in that checkpoint's",
         "never place a known\n  later-only gate in the top-level list",
+        "src/` package layout must not use a plain",
+        "deterministic packet preflight must\n  reject an obvious contradiction",
+        "do not narrow ordinary repository write authority merely",
+        "artificial\n  path minimization that prevents legitimate engineering",
     )
     missing = [fragment for fragment in required if fragment not in text]
     assert not missing, (

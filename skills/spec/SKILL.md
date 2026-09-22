@@ -183,6 +183,23 @@ Before a v3 PROGRAM is considered ready:
   `checkpoint_graph.checkpoints[N].required_validation` (and in later
   checkpoints too when continuous proof is intended); never place a known
   later-only gate in the top-level list.
+- before sealing any packet, make each required-validation command
+  self-consistent with the repository layout and the frozen capability
+  envelope. In particular, a `src/` package layout must not use a plain
+  root-working-directory command such as `python -c 'import package.module'`
+  when the validator will not install the package or add `src/` to `sys.path`.
+  Bind that assumption explicitly with a repo-relative contract such as
+  `PYTHONPATH=src python -c ...`, the repository's commissioned `uv run`
+  environment, an equivalent source-path setup, or a source-directory working
+  directory. Do not rely on ambient shell state, absolute machine paths, or
+  future files outside `allowed_paths`; deterministic packet preflight must
+  reject an obvious contradiction before semantic BUILD spending.
+- do not narrow ordinary repository write authority merely to make a
+  validation command appear satisfiable. Grant the smallest complete scope
+  reasonably required by the mission, including packaging, tests,
+  configuration, documentation, and build metadata when relevant; artificial
+  path minimization that prevents legitimate engineering is itself a packet
+  defect.
 - choose `max_pass_runtime_seconds` for the complexity of one semantic pass
   (up to 28800 per pass; the undeclared fallback fuse is 3600, so any pass
   that legitimately needs longer than one hour must declare its budget);
