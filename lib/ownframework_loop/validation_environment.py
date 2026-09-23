@@ -80,7 +80,7 @@ three outcome classes are:
 
   - ``INFRA_FAILURE``: the validator/host cannot prove the environment
     (bound package.uv identity missing or drifted, provisioning timeout,
-    runtime-cache filesystem/permission refused, external registry/network
+    runtime-cache filesystem refused, external registry/network
     unreachable, host tool execution failure independent of candidate
     contents). The candidate author cannot fix this; the run terminalizes
     as ``BLOCKED`` without burning a repair round.
@@ -97,6 +97,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import stat
 import subprocess
 import time
@@ -119,6 +120,34 @@ class ValidationEnvironmentError(RuntimeError):
 # Maximum time to wait for uv sync to finish. Network registries can be
 # slow; this is intentionally generous.
 DEFAULT_PROVISION_TIMEOUT_SECONDS = 600
+
+
+def _terminate_process_group(
+    process: subprocess.Popen[Any], grace_seconds: float = 3.0
+) -> None:
+    """Terminate and reap one validator-owned subprocess tree.
+
+    Bound tools are executable authority, but they may themselves be wrappers
+    or spawn helpers. Timeout ownership therefore applies to the whole process
+    group, not only the direct child PID. Every process launched through this
+    module starts a new session before this helper may be used.
+    """
+    if process.poll() is not None:
+        return
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    try:
+        process.wait(timeout=grace_seconds)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    process.wait()
 
 
 @dataclass(frozen=True)
@@ -513,15 +542,30 @@ def _real_project_environment_matches_bound_uv(
 
 
 def _uv_version(uv_executable: str) -> str:
+    process: subprocess.Popen[str] | None = None
     try:
-        proc = subprocess.run(
+        process = subprocess.Popen(
             [uv_executable, "--version"],
-            capture_output=True, text=True, check=False, timeout=5,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            start_new_session=True,
         )
-        text = (proc.stdout or proc.stderr or "").strip()
+        stdout, stderr = process.communicate(timeout=5)
+        text = (stdout or stderr or "").strip()
         return text.splitlines()[0][:512] if text else ""
-    except (OSError, subprocess.SubprocessError):
+    except subprocess.TimeoutExpired:
+        if process is not None:
+            _terminate_process_group(process)
         return ""
+    except OSError:
+        if process is not None:
+            _terminate_process_group(process)
+        return ""
+    except BaseException:
+        if process is not None:
+            _terminate_process_group(process)
+        raise
 
 
 def _uuid_name() -> str:
@@ -587,9 +631,6 @@ def classify_sync_failure(
     for pattern, label in _CANDIDATE_PATTERNS:
         if pattern.search(text):
             return OUTCOME_CANDIDATE_INVALID, label
-    # No decisive pattern matched. Default to INFRA so the run
-    # terminalizes without burning a repair round; the validator
-    # owner can reclassify after inspection.
     return (
         OUTCOME_INFRA_FAILURE,
         f"unclassified_sync_failure_rc={returncode or 'unknown'}",
@@ -692,10 +733,6 @@ def provision_project_environment(
             identity=env_id,
         ), status_fields=fields)
 
-    # No uv project in this candidate. There is nothing to sync, but we
-    # still publish a marker so the rest of the system knows the env
-    # contract was honored. This compatibility path performs no uv effect,
-    # so it is not an unbound package-authority path.
     if not has_project:
         try:
             env_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -743,9 +780,6 @@ def provision_project_environment(
             identity=env_id,
         ), status_fields=status)
 
-    # Real projects require frozen package.uv authority before ANY cache reuse
-    # or subprocess. This keeps the provisioner itself fail-closed, even for
-    # callers that bypass validation_executor.
     if bound_uv is None:
         return _infra(
             "bound_uv_required: package.uv must be frozen before uv provisioning"
@@ -772,13 +806,6 @@ def provision_project_environment(
             identity=env_id,
         ), status_fields=existing)
 
-    # Clean any partial / stale provisioning state before re-provisioning.
-    # uv refuses to write into a non-empty target when UV_PROJECT_ENVIRONMENT
-    # is set, so we must remove any stale partial env first. We do NOT
-    # pre-create the env_dir as an empty directory: uv also rejects that
-    # ("not a valid Python environment (no Python executable was found)").
-    # We let uv create the env itself; a chmod 0700 pass at the end
-    # enforces the supervisor-private mode.
     if env_dir.is_symlink():
         return _infra("env_dir_is_symlink")
     if env_dir.exists():
@@ -811,6 +838,7 @@ def provision_project_environment(
     start = time.monotonic()
     timed_out = False
     returncode: int | None = None
+    process: subprocess.Popen[bytes] | None = None
     try:
         with stdout_path.open("wb") as stdout_fh, stderr_path.open("wb") as stderr_fh:
             try:
@@ -822,20 +850,27 @@ def provision_project_environment(
             except OSError:
                 pass
             try:
-                proc = subprocess.run(
+                process = subprocess.Popen(
                     cmd,
                     cwd=str(candidate_worktree),
                     env=sync_env,
                     stdout=stdout_fh,
                     stderr=stderr_fh,
-                    check=False,
-                    timeout=timeout_seconds,
+                    start_new_session=True,
                 )
-                returncode = int(proc.returncode)
+                returncode = int(process.wait(timeout=timeout_seconds))
             except subprocess.TimeoutExpired:
                 timed_out = True
+                if process is not None:
+                    _terminate_process_group(process)
                 returncode = 124
+            except BaseException:
+                if process is not None:
+                    _terminate_process_group(process)
+                raise
     except OSError as exc:
+        if process is not None:
+            _terminate_process_group(process)
         return _infra(f"subprocess_spawn_failed:{exc.strerror or exc}")
     duration = time.monotonic() - start
     stdout_bytes = stdout_path.read_bytes() if stdout_path.exists() else b""
