@@ -188,6 +188,11 @@ def _provider_identity(name: str, entry: dict[str, Any]) -> dict[str, Any]:
             )
         except (OSError, subprocess.SubprocessError) as exc:
             raise CommissioningError(f"Docker broker version proof failed: {exc}") from exc
+        if proc.returncode != 0:
+            raise CommissioningError(
+                "Docker broker version proof did not exit 0; "
+                f"rc={proc.returncode}"
+            )
         lines = (proc.stdout or proc.stderr or "").strip().splitlines()
         if not lines:
             raise CommissioningError("Docker broker version could not be proven")
