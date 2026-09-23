@@ -1,0 +1,83 @@
+name: Final authoritative artifact binding closure
+
+on:
+  push:
+    branches:
+      - hardening/github-authority-closure-2026-09-22
+    paths:
+      - .github/workflows/final-artifact-binding-closure.yml
+
+permissions:
+  contents: write
+
+jobs:
+  close:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: hardening/github-authority-closure-2026-09-22
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Make event writer own artifact digests
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${GITHUB_SHA}"
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path('lib/ownframework_loop/state.py')
+          text = p.read_text(encoding='utf-8')
+          old = '''_EVENT_AUTHORITATIVE_FIELDS = frozenset({\n    "ts", "run_id", "event_type", "old_state", "new_state", "actor",\n    "commit_sha", "reason", "state_sha256", "event_chain_sha256",\n})\n'''
+          new = '''_EVENT_AUTHORITATIVE_FIELDS = frozenset({\n    "ts", "run_id", "event_type", "old_state", "new_state", "actor",\n    "commit_sha", "reason", "state_sha256", "event_chain_sha256",\n} | set(integrity.ARTIFACT_EVENT_KEYS.values()))\n'''
+          if old in text:
+              text = text.replace(old, new, 1)
+          elif 'set(integrity.ARTIFACT_EVENT_KEYS.values())' not in text:
+              raise SystemExit('authoritative event-field anchor missing')
+
+          old = '''    record: dict[str, Any] = {\n        "ts": utc_now_iso(),\n        "run_id": run_id,\n        "event_type": event_type,\n        "old_state": old_state,\n        "new_state": new_state,\n        "actor": actor,\n        "commit_sha": commit_sha,\n        "reason": reason,\n        "state_sha256": state_sha_now,\n        "event_chain_sha256": "0" * 64,\n    }\n    if extras:\n        record.update(extras)\n'''
+          new = '''    record: dict[str, Any] = {\n        "ts": utc_now_iso(),\n        "run_id": run_id,\n        "event_type": event_type,\n        "old_state": old_state,\n        "new_state": new_state,\n        "actor": actor,\n        "commit_sha": commit_sha,\n        "reason": reason,\n        "state_sha256": state_sha_now,\n        "event_chain_sha256": "0" * 64,\n    }\n    # Core-owned publication binding: every event snapshots every currently\n    # present authoritative artifact. Callers cannot spoof these keys because\n    # they are part of _EVENT_AUTHORITATIVE_FIELDS above.\n    record.update(integrity.artifact_event_hashes(run_dir(canonical_repo, run_id)))\n    if extras:\n        record.update(extras)\n'''
+          if old in text:
+              text = text.replace(old, new, 1)
+          elif 'record.update(integrity.artifact_event_hashes' not in text:
+              raise SystemExit('event artifact snapshot anchor missing')
+          p.write_text(text, encoding='utf-8')
+
+          p = Path('tests/integration/test_v061_evidence_fail_closed.sh')
+          text = p.read_text(encoding='utf-8')
+          old = '''# The generic artifact verifier preserves optional-before-publication behavior,\n# but a missing artifact becomes an integrity failure once its digest exists in\n# EVENTS. Use a synthetic chain with no event_chain_sha256 field so this unit is\n# focused strictly on artifact-presence semantics.\nartifact = root / "BUILD_RECEIPT.json"\nartifact.write_text('{"ok":true}\\n', encoding="utf-8")\nevents = root / "artifact-events.log"\ndigest = integrity.sha256_file(artifact)\nevents.write_text(\n    json.dumps({"BUILD_RECEIPT.json_sha256": digest}) + "\\n",\n    encoding="utf-8",\n)\nok, failures = integrity.verify_all_artifacts(\n    {"BUILD_RECEIPT.json": artifact}, events\n)\nassert ok and not failures, failures\nartifact.unlink()\nok, failures = integrity.verify_all_artifacts(\n    {"BUILD_RECEIPT.json": artifact}, events\n)\nassert not ok and any("missing but recorded sha exists" in row for row in failures), failures\n\nnever_published = root / "REVIEW_VERDICT.json"\nok, failures = integrity.verify_all_artifacts(\n    {"REVIEW_VERDICT.json": never_published}, events\n)\nassert ok and not failures, failures\n'''
+          new = '''# Artifact binding is owned by the event writer, not by individual finalizers.\n# Publish a receipt into a real run, append an ordinary event, and prove the\n# canonical build_receipt_sha256 field appears automatically. Deletion after\n# that publication must fail closed, while never-published optional artifacts\n# remain benign.\nrepo2 = root / "artifact-delete-repo"\nrepo2.mkdir()\nrun2 = "run-artifact-delete"\nstate.run_dir(repo2, run2).mkdir(parents=True)\nstate.save(repo2, run2, state.initial_state(run2))\nartifact = state.run_dir(repo2, run2) / "BUILD_RECEIPT.json"\nartifact.write_text('{"ok":true}\\n', encoding="utf-8")\nstate.append_event(\n    repo2, run2, event_type="artifact_published", old_state=None,\n    new_state=None, actor="test",\n)\nevents = state.events_path(repo2, run2)\ndigest = integrity.sha256_file(artifact)\nassert integrity.last_recorded_artifact_sha(\n    events, "BUILD_RECEIPT.json"\n) == digest\nok, failures = integrity.verify_all_artifacts(\n    {"BUILD_RECEIPT.json": artifact}, events\n)\nassert ok and not failures, failures\nartifact.unlink()\nok, failures = integrity.verify_all_artifacts(\n    {"BUILD_RECEIPT.json": artifact}, events\n)\nassert not ok and any("missing but recorded sha exists" in row for row in failures), failures\n\nnever_published = state.run_dir(repo2, run2) / "REVIEW_VERDICT.json"\nok, failures = integrity.verify_all_artifacts(\n    {"REVIEW_VERDICT.json": never_published}, events\n)\nassert ok and not failures, failures\n'''
+          if old in text:
+              text = text.replace(old, new, 1)
+          elif 'Artifact binding is owned by the event writer' not in text:
+              raise SystemExit('artifact binding regression anchor missing')
+          p.write_text(text, encoding='utf-8')
+          PY
+
+          export PYTHONPATH="$PWD/lib${PYTHONPATH:+:$PYTHONPATH}"
+          python3 -m compileall -q lib/ownframework_loop
+          bash tests/integration/test_v061_evidence_fail_closed.sh
+          bash tests/integration/test_v084_state_transaction_recovery.sh
+          bash tests/integration/test_v084_authoritative_state_reads.sh
+          bash tests/integration/test_final_source_closure.sh
+          git diff --check
+
+      - name: Publish and self-delete
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin hardening/github-authority-closure-2026-09-22
+          test "$(git rev-parse HEAD)" = "$(git rev-parse origin/hardening/github-authority-closure-2026-09-22)"
+          git rm .github/workflows/final-artifact-binding-closure.yml
+          git add lib/ownframework_loop/state.py tests/integration/test_v061_evidence_fail_closed.sh
+          git diff --cached --check
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'hardening: bind published artifacts into event authority'
+          git push origin HEAD:hardening/github-authority-closure-2026-09-22
