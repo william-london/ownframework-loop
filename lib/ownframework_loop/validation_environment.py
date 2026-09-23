@@ -40,55 +40,21 @@ The deterministic validator owns a single project environment per
 (candidate, project lock, project metadata) triple. The environment:
 
   - Lives under the supervisor-owned runtime cache, OUTSIDE the builder
-    and reviewer worktrees. Builder and reviewer worktrees can never
-    observe a ``.venv`` because the env is provisioned in a different
-    filesystem location entirely.
-  - Is identified by ``env_id = sha256(candidate_sha ||
-    uv_lock_sha256 || project_metadata_sha256)``. A different lock,
-    metadata, or candidate produces a different env identity.
-  - Is provisioned ONCE per env_id by running ``uv sync --project
-    <candidate_worktree> --python-preference only-system --locked``
-    into the env_dir. Subsequent runs of the SAME env_id are no-ops only
-    when the durable marker proves the same frozen ``package.uv`` identity.
-  - Subprocesses that need the env (validation commands invoking
-    ``uv run``, or any subprocess that should auto-activate the env)
-    receive ``UV_PROJECT_ENVIRONMENT=<env_dir>`` and
-    ``VIRTUAL_ENV=<env_dir>`` in their hermetic subprocess environment.
-
-The module does NOT widen any worker's authority. The env_dir is not in
-any worker's allowRead/allowWrite; it is the validator's exclusive
-runtime artifact.
+    and reviewer worktrees.
+  - Is identified by ``env_id = sha256(candidate_sha || uv_lock_sha256 ||
+    project_metadata_sha256)``.
+  - Is provisioned once per env_id with the exact frozen ``package.uv``
+    executable and accepts cache reuse only when the durable marker proves
+    the same frozen identity.
+  - Binds downstream validation through ``UV_PROJECT_ENVIRONMENT`` and
+    ``VIRTUAL_ENV`` without widening semantic-worker authority.
 
 Failure classification
 ======================
 
-``provision_project_environment`` returns a structured
-``ProvisionOutcome`` rather than raising on every non-zero exit. The
-three outcome classes are:
-
-  - ``PROVISIONED``: ``uv sync --project <candidate> --locked`` wrote a
-    usable project environment into the env_dir. The marker is published
-    and downstream ``uv run --no-sync`` invocations will succeed.
-
-  - ``CANDIDATE_INVALID``: the candidate's own metadata is unprovable
-    (stale lockfile, missing dependency in pyproject, malformed
-    pyproject.toml, etc.). The candidate author / next builder pass
-    can repair this; the validator records
-    ``validation_failed/candidate_environment_invalid`` and the run
-    transitions to ``CHANGES_REQUESTED`` with a normal repair
-    entitlement. This is the Sourcecard-failure-class behavior.
-
-  - ``INFRA_FAILURE``: the validator/host cannot prove the environment
-    (bound package.uv identity missing or drifted, provisioning timeout,
-    runtime-cache filesystem refused, external registry/network
-    unreachable, host tool execution failure independent of candidate
-    contents). The candidate author cannot fix this; the run terminalizes
-    as ``BLOCKED`` without burning a repair round.
-
-The classifier inspects the redacted stderr excerpt plus the exit
-state to assign the class. Ambiguous cases fail closed as infra
-``BLOCKED`` and record the ambiguity explicitly rather than falsely
-asserting that the validator can prove the environment is good.
+``provision_project_environment`` returns ``PROVISIONED``,
+``CANDIDATE_INVALID``, or ``INFRA_FAILURE``. Ambiguous host/tool failures fail
+closed as infra rather than consuming a candidate repair round.
 """
 from __future__ import annotations
 
@@ -97,7 +63,6 @@ import json
 import os
 import re
 import shutil
-import signal
 import stat
 import subprocess
 import time
@@ -105,60 +70,29 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import runtime_env, util
+from . import process_runner, runtime_env, util
 
 
 SCHEMA = "ownframework-loop-validation-environment/v1"
 
 
 class ValidationEnvironmentError(RuntimeError):
-    """A validator/host-side infrastructure failure (cannot be fixed by
-    the candidate author). Always terminal BLOCKED, never repairable.
-    """
+    """Validator/host-side infrastructure failure."""
 
 
-# Maximum time to wait for uv sync to finish. Network registries can be
-# slow; this is intentionally generous.
 DEFAULT_PROVISION_TIMEOUT_SECONDS = 600
 
 
 def _terminate_process_group(
     process: subprocess.Popen[Any], grace_seconds: float = 3.0
 ) -> None:
-    """Terminate and reap one validator-owned subprocess tree.
-
-    Bound tools are executable authority, but they may themselves be wrappers
-    or spawn helpers. Timeout ownership therefore applies to the whole process
-    group, not only the direct child PID. Every process launched through this
-    module starts a new session before this helper may be used.
-    """
-    if process.poll() is not None:
-        return
-    try:
-        os.killpg(process.pid, signal.SIGTERM)
-    except ProcessLookupError:
-        return
-    try:
-        process.wait(timeout=grace_seconds)
-        return
-    except subprocess.TimeoutExpired:
-        pass
-    try:
-        os.killpg(process.pid, signal.SIGKILL)
-    except ProcessLookupError:
-        pass
-    process.wait()
+    """Delegate process-tree cleanup to the canonical bounded runner."""
+    process_runner.terminate_process_group(process, grace_seconds=grace_seconds)
 
 
 @dataclass(frozen=True)
 class BoundUvIdentity:
-    """Exact identity of the bound ``package.uv`` capability.
-
-    Built from the resolved capability envelope (not from PATH
-    discovery) and used as the SOLE authority for any uv subprocess
-    invocation. Pre-launch drift checks refuse to launch when the
-    path/SHA/version no longer matches the frozen resolution.
-    """
+    """Exact identity of the bound ``package.uv`` capability."""
     executable: str
     version: str
     executable_sha256: str
@@ -183,12 +117,6 @@ def build_bound_uv_identity(
     cache_path: str = "",
     cache_scope: str = "",
 ) -> BoundUvIdentity:
-    """Construct a BoundUvIdentity from a resolved capability item.
-
-    Refuses to construct when the resolved item is missing the
-    minimal authority surface (executable / version / sha256) so
-    the caller cannot fall back to PATH-discovered uv.
-    """
     executable = str(resolved_item.get("executable") or "")
     version = str(resolved_item.get("version") or "")
     sha = str(resolved_item.get("executable_sha256") or "")
@@ -209,22 +137,9 @@ def build_bound_uv_identity(
 
 
 def verify_bound_uv_identity(bound: BoundUvIdentity) -> None:
-    """Re-prove the bound uv identity immediately before any subprocess.
-
-    Refuses to launch when:
-      - the executable path no longer exists;
-      - the executable path has been replaced by a symlink;
-      - the SHA-256 of the on-disk bytes no longer matches the
-        frozen binding (silent swap, byte mutation, reinstall);
-      - the executable is no longer a regular executable file.
-
-    Refusal raises ``ValidationEnvironmentError`` so the executor can
-    surface it as a terminal BLOCKED, infra-class, no-repair failure.
-    """
+    """Re-prove the bound uv identity immediately before any subprocess."""
     if not bound.executable:
-        raise ValidationEnvironmentError(
-            "bound package.uv executable path is empty"
-        )
+        raise ValidationEnvironmentError("bound package.uv executable path is empty")
     p = Path(bound.executable)
     if not p.exists():
         raise ValidationEnvironmentError(
@@ -236,7 +151,7 @@ def verify_bound_uv_identity(bound: BoundUvIdentity) -> None:
         )
     if not p.is_file() or not os.access(bound.executable, os.X_OK):
         raise ValidationEnvironmentError(
-            f"bound package.uv executable is no longer a regular runnable file: "
+            "bound package.uv executable is no longer a regular runnable file: "
             f"{bound.executable}"
         )
     actual = _sha256_file(Path(bound.executable)) or ""
@@ -244,36 +159,18 @@ def verify_bound_uv_identity(bound: BoundUvIdentity) -> None:
         raise ValidationEnvironmentError(
             "CAPABILITY_DRIFT: bound package.uv SHA mismatch — "
             f"expected {bound.executable_sha256}, observed {actual or '<none>'}; "
-            f"refusing uv execution"
+            "refusing uv execution"
         )
 
 
-# Outcome class constants. Use these strings verbatim; they are part
-# of the receipt/verdict contract surfaced by build_finalize and
-# review_finalize.
 OUTCOME_PROVISIONED = "provisioned"
 OUTCOME_CANDIDATE_INVALID = "candidate_invalid"
 OUTCOME_INFRA_FAILURE = "infra_failure"
-
 ALL_OUTCOMES = (OUTCOME_PROVISIONED, OUTCOME_CANDIDATE_INVALID, OUTCOME_INFRA_FAILURE)
 
 
 @dataclass(frozen=True)
 class ProvisionOutcome:
-    """Structured outcome of one ``provision_project_environment`` call.
-
-    Attributes:
-      - outcome: one of ``OUTCOME_PROVISIONED`` / ``OUTCOME_CANDIDATE_INVALID``
-        / ``OUTCOME_INFRA_FAILURE``.
-      - reason: short human-readable classifier reason.
-      - stderr_excerpt: bounded (4096 chars) redacted stderr excerpt.
-      - returncode: ``uv sync`` exit code when captured; ``None`` for
-        timeout / identity / FS-refused cases.
-      - timed_out: True iff the subprocess exhausted the timeout budget.
-      - marker_path: env_dir path when an env_dir was created.
-      - identity: env_id when known.
-    """
-
     outcome: str
     reason: str
     stderr_excerpt: str
@@ -294,18 +191,9 @@ class ProvisionOutcome:
         }
 
 
-# Canonical uv subcommands that require the candidate-bound project
-# environment. EVERY uv-mediated validation/provisioning operation that
-# could reach the package network MUST be declared via this predicate so
-# packet admission (which refuses undeclared `package.uv`) and the
-# validation executor (which provisions the project env) agree on the
-# exact same set. The packet layer imports
-# `validation_environment.is_uv_command`; the executor imports the
-# SAME function — never an independent regex.
 UV_MEDIATED_SUBCOMMANDS: tuple[str, ...] = (
     "run", "sync", "exec", "test", "python", "lock",
 )
-
 _UV_COMMAND_RE = re.compile(
     r"\buv\s+(?:"
     + "|".join(re.escape(subcommand) for subcommand in UV_MEDIATED_SUBCOMMANDS)
@@ -314,26 +202,13 @@ _UV_COMMAND_RE = re.compile(
 
 
 def is_uv_command(command: str) -> bool:
-    """Return True when `command` invokes a uv subcommand that needs
-    the candidate-bound project environment.
-
-    This is THE canonical predicate. Both packet admission and
-    validation execution MUST consume it (never an independent regex)
-    so the two cannot drift. Adding a new uv subcommand that
-    requires the env → extend UV_MEDIATED_SUBCOMMANDS here; both
-    layers pick it up automatically.
-    """
     if not command:
         return False
     return bool(_UV_COMMAND_RE.search(command))
 
 
-# Pattern catalogue: each tuple is (compiled-regex, class, label).
-# Matched against uv's stderr text after lowercasing. Order matters:
-# the first match wins. INFRA patterns are deliberately conservative —
-# they only fire on signatures uv emits for genuine host/registry
-# problems, not on metadata problems that look superficially similar.
 _INFRA_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"ofloop_process_group_leak"), "subprocess_process_group_leak"),
     (re.compile(r"failed to connect"), "registry_network_unreachable"),
     (re.compile(r"could not connect"), "registry_network_unreachable"),
     (re.compile(r"connection (timed out|refused|reset)"), "registry_network_unreachable"),
@@ -352,20 +227,17 @@ _INFRA_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"failed to invoke"), "host_tool_execution_failed"),
 )
 
-
 _CANDIDATE_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"the lockfile at .* needs to be updated"), "stale_lockfile"),
     (re.compile(r"the lockfile would have been updated"), "stale_lockfile"),
     (re.compile(r"would be updated to"), "stale_lockfile"),
-    (re.compile(r"unidentified error .* look.* like a stale lockfile"),
-     "stale_lockfile"),
+    (re.compile(r"unidentified error .* look.* like a stale lockfile"), "stale_lockfile"),
     (re.compile(r"failed to parse .*pyproject\.toml"), "invalid_pyproject"),
     (re.compile(r"toml decode error"), "invalid_pyproject"),
     (re.compile(r"no `?project\.?workspace`? found"), "no_pyproject"),
     (re.compile(r"failed to read (lock|pyproject)"), "unreadable_metadata"),
     (re.compile(r"distribution .* not found"), "missing_dependency"),
-    (re.compile(r"package .* not found in package list"),
-     "missing_dependency"),
+    (re.compile(r"package .* not found in package list"), "missing_dependency"),
     (re.compile(r"requires-python .* does not match"), "python_version_mismatch"),
     (re.compile(r"no matching distribution"), "missing_dependency"),
     (re.compile(r"invalid project name"), "invalid_project_name"),
@@ -393,33 +265,24 @@ def _sha256_file(path: Path) -> str | None:
 
 
 def _project_lock_identity(candidate_worktree: Path) -> str | None:
-    """Return the sha256 of the candidate's uv.lock, or None if absent."""
-    lock = candidate_worktree / "uv.lock"
-    return _sha256_file(lock)
+    return _sha256_file(candidate_worktree / "uv.lock")
 
 
 def _project_metadata_identity(candidate_worktree: Path) -> str:
-    """Return the sha256 of the candidate's pyproject.toml."""
-    pyproject = candidate_worktree / "pyproject.toml"
-    digest = _sha256_file(pyproject)
-    if digest is None:
-        return "no-pyproject"
-    return digest
+    digest = _sha256_file(candidate_worktree / "pyproject.toml")
+    return "no-pyproject" if digest is None else digest
 
 
 def candidate_bound_environment_id(
     candidate_sha: str,
     candidate_worktree: Path,
 ) -> str:
-    """Derive the deterministic env identity for one candidate."""
     if not candidate_sha or not isinstance(candidate_sha, str):
         raise ValidationEnvironmentError("candidate_sha is required")
     lock_id = _project_lock_identity(candidate_worktree)
     meta_id = _project_metadata_identity(candidate_worktree)
     material = "\0".join([
-        str(candidate_sha),
-        str(lock_id or ""),
-        str(meta_id),
+        str(candidate_sha), str(lock_id or ""), str(meta_id),
     ]).encode("utf-8")
     return hashlib.sha256(material).hexdigest()
 
@@ -430,51 +293,27 @@ def project_environment_dir(
     role: str,
     env_id: str,
 ) -> Path:
-    """Pure derivation of the per-(repo, run, role, env_id) env path.
-
-    Role isolation: ``builder`` and ``reviewer`` validators get
-    independent env dirs even when their candidate_sha/lock/metadata
-    triple is identical. The reviewer's env_dir must NEVER alias the
-    builder's so the immutable reviewer worktree can never observe
-    the builder's freshly-provisioned env through shared filesystem
-    state.
-
-    This is a PURE path derivation. It does NOT touch the filesystem
-    and does NOT require the runtime-cache root to exist or be
-    writable. The provisioner is responsible for catching any
-    filesystem failures that occur during actual provisioning.
-    """
     safe_role = "validation-builder" if role == "builder" else (
         "validation-reviewer" if role == "reviewer" else (
-            role if role in (
-                "validation", "validation-builder", "validation-reviewer",
-            ) else "validation"
+            role if role in ("validation", "validation-builder", "validation-reviewer")
+            else "validation"
         )
     )
     return (
         runtime_env.runtime_cache_path(canonical_repo, run_id, "validation")
-        / "project-env"
-        / safe_role
-        / _slug(env_id)
+        / "project-env" / safe_role / _slug(env_id)
     ).resolve(strict=False)
 
 
 def project_environment_status(env_dir: Path) -> dict[str, Any]:
-    """Snapshot the provisioning state of one env directory."""
     raw = Path(env_dir).expanduser().resolve(strict=False)
     exists = raw.is_dir()
     marker = raw / ".ofloop-env-provisioned.json"
     state: dict[str, Any] = {
-        "path": str(raw),
-        "exists": exists,
-        "provisioned": False,
-        "identity": "",
-        "candidate_sha": "",
-        "lock_sha256": "",
-        "metadata_sha256": "",
-        "provisioned_at": "",
-        "uv_executable": "",
-        "uv_version": "",
+        "path": str(raw), "exists": exists, "provisioned": False,
+        "identity": "", "candidate_sha": "", "lock_sha256": "",
+        "metadata_sha256": "", "provisioned_at": "",
+        "uv_executable": "", "uv_version": "",
     }
     if not exists:
         return state
@@ -515,19 +354,15 @@ def project_environment_status(env_dir: Path) -> dict[str, Any]:
         "bound_uv_version": str(doc.get("bound_uv_version") or ""),
         "bound_uv_cache_path": str(doc.get("bound_uv_cache_path") or ""),
         "bound_uv_cache_scope": str(doc.get("bound_uv_cache_scope") or ""),
-        "bound_uv_network_domains": list(
-            doc.get("bound_uv_network_domains") or []
-        ),
+        "bound_uv_network_domains": list(doc.get("bound_uv_network_domains") or []),
         "provisioned_at": str(doc.get("provisioned_at") or ""),
     })
     return state
 
 
 def _real_project_environment_matches_bound_uv(
-    status: dict[str, Any],
-    bound_uv: BoundUvIdentity,
+    status: dict[str, Any], bound_uv: BoundUvIdentity,
 ) -> bool:
-    """Return True only when a real-project marker proves the frozen uv identity."""
     return (
         bool(status.get("provisioned"))
         and not bool(status.get("package_uv_unbound"))
@@ -542,30 +377,16 @@ def _real_project_environment_matches_bound_uv(
 
 
 def _uv_version(uv_executable: str) -> str:
-    process: subprocess.Popen[str] | None = None
     try:
-        process = subprocess.Popen(
-            [uv_executable, "--version"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            start_new_session=True,
+        proc = process_runner.run_bounded_capture(
+            [uv_executable, "--version"], timeout_seconds=5,
         )
-        stdout, stderr = process.communicate(timeout=5)
-        text = (stdout or stderr or "").strip()
-        return text.splitlines()[0][:512] if text else ""
-    except subprocess.TimeoutExpired:
-        if process is not None:
-            _terminate_process_group(process)
+    except (OSError, subprocess.SubprocessError):
         return ""
-    except OSError:
-        if process is not None:
-            _terminate_process_group(process)
+    if proc.returncode != 0:
         return ""
-    except BaseException:
-        if process is not None:
-            _terminate_process_group(process)
-        raise
+    text = (proc.stdout or proc.stderr or "").strip()
+    return text.splitlines()[0][:512] if text else ""
 
 
 def _uuid_name() -> str:
@@ -603,23 +424,6 @@ def classify_sync_failure(
     stderr_bytes: bytes,
     stdout_bytes: bytes,
 ) -> tuple[str, str]:
-    """Return (outcome, reason) for a uv sync failure.
-
-    The classifier inspects the redacted stderr text and the exit
-    state to assign one of:
-      - (OUTCOME_INFRA_FAILURE, ``<reason>``)
-      - (OUTCOME_CANDIDATE_INVALID, ``<reason>``)
-
-    Order of preference:
-      1. Timed-out subprocess → INFRA (timeout is a host/network signal,
-         never a candidate defect).
-      2. INFRA pattern matched in stderr → INFRA.
-      3. CANDIDATE pattern matched in stderr → CANDIDATE_INVALID.
-      4. Default: INFRA. The conservative default prevents a builder
-         from burning a repair round on something that is genuinely the
-         validator's responsibility; the receipt records the default
-         reason and the operator can reclassify if needed.
-    """
     if timed_out:
         return OUTCOME_INFRA_FAILURE, "provisioning_timeout"
     text = _excerpt(stderr_bytes, stdout_bytes, limit=8192).lower()
@@ -631,20 +435,12 @@ def classify_sync_failure(
     for pattern, label in _CANDIDATE_PATTERNS:
         if pattern.search(text):
             return OUTCOME_CANDIDATE_INVALID, label
-    return (
-        OUTCOME_INFRA_FAILURE,
-        f"unclassified_sync_failure_rc={returncode or 'unknown'}",
-    )
+    return OUTCOME_INFRA_FAILURE, f"unclassified_sync_failure_rc={returncode or 'unknown'}"
 
 
-def _outcome_dict(o: ProvisionOutcome, *, status_fields: dict[str, Any] | None = None) -> dict[str, Any]:
-    """Render a ProvisionOutcome as the legacy dict shape.
-
-    The legacy status dict (path / provisioned / identity / ...) is
-    preserved for backward compatibility with code that pre-dates the
-    outcome classifier. The outcome / reason / returncode / timed_out
-    fields are added so callers can act on the classification.
-    """
+def _outcome_dict(
+    o: ProvisionOutcome, *, status_fields: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     base = {
         "outcome": o.outcome,
         "reason": o.reason,
@@ -671,43 +467,6 @@ def provision_project_environment(
     bound_uv: BoundUvIdentity | None = None,
     timeout_seconds: int = DEFAULT_PROVISION_TIMEOUT_SECONDS,
 ) -> dict[str, Any]:
-    """Provision the candidate-bound project environment.
-
-    The ``bound_uv`` argument is the EXACT ``package.uv`` resolution from the
-    frozen run's CAPABILITY_BINDING.json. The provisioner never uses PATH
-    discovery as authority: every real uv subprocess or real-project cache
-    reuse requires ``bound_uv`` and verifies it against the current executable
-    plus the durable environment marker. ``bound_uv=None`` is accepted only
-    for candidates without ``pyproject.toml``, where no uv effect exists.
-
-    Returns a dict with two compatible shapes layered on top of each
-    other. Callers that only need the legacy ``project_environment_status``
-    shape (``provisioned``, ``path``, ``identity``, ...) keep working.
-    Callers that need the outcome classifier consume ``outcome``,
-    ``reason``, ``returncode``, ``timed_out``, ``stderr_excerpt``,
-    ``marker_path``.
-
-    The ``outcome`` field is one of:
-
-      - ``OUTCOME_PROVISIONED``: env_dir has a usable project
-        environment. The marker is published; ``uv run --no-sync``
-        downstream will succeed.
-      - ``OUTCOME_CANDIDATE_INVALID``: the candidate's own metadata
-        is unprovable (stale lockfile, malformed pyproject.toml,
-        declared-but-unresolvable dependency). The next builder pass
-        can fix this; the validator surfaces this so the run
-        transitions to ``CHANGES_REQUESTED`` and consumes a normal
-        repair round.
-      - ``OUTCOME_INFRA_FAILURE``: a genuine validator/host-side
-        failure (bound identity missing/drifted, provisioning timeout,
-        runtime-cache filesystem refused, registry/network unreachable).
-        The run terminalizes as ``BLOCKED`` without burning a repair round.
-
-    Raises :class:`ValidationEnvironmentError` only when the validator
-    cannot even initialize a provisioning attempt (e.g. the candidate
-    worktree itself is missing — both indicators that state is
-    corrupt rather than candidate-fixable).
-    """
     canonical_repo = Path(canonical_repo).resolve(strict=False)
     candidate_worktree = Path(candidate_worktree).resolve(strict=False)
     if not candidate_worktree.is_dir():
@@ -751,21 +510,11 @@ def provision_project_environment(
             "uv_executable": "",
             "uv_version": "",
             "package_uv_unbound": False,
-            "bound_uv_sha256": (
-                bound_uv.executable_sha256 if bound_uv is not None else ""
-            ),
-            "bound_uv_version": (
-                bound_uv.version if bound_uv is not None else ""
-            ),
-            "bound_uv_cache_path": (
-                bound_uv.cache_path if bound_uv is not None else ""
-            ),
-            "bound_uv_cache_scope": (
-                bound_uv.cache_scope if bound_uv is not None else ""
-            ),
-            "bound_uv_network_domains": (
-                list(bound_uv.network_domains) if bound_uv is not None else []
-            ),
+            "bound_uv_sha256": bound_uv.executable_sha256 if bound_uv else "",
+            "bound_uv_version": bound_uv.version if bound_uv else "",
+            "bound_uv_cache_path": bound_uv.cache_path if bound_uv else "",
+            "bound_uv_cache_scope": bound_uv.cache_scope if bound_uv else "",
+            "bound_uv_network_domains": list(bound_uv.network_domains) if bound_uv else [],
             "provisioned_at": util.utc_now_iso(),
             "no_project": True,
         })
@@ -820,12 +569,9 @@ def provision_project_environment(
 
     uv_executable = bound_uv.executable
     uv_version = _uv_version(uv_executable)
-    sync_env = runtime_env.hermetic_subprocess_env(
-        canonical_repo, run_id, "validation",
-    )
+    sync_env = runtime_env.hermetic_subprocess_env(canonical_repo, run_id, "validation")
     sync_env["UV_PROJECT_ENVIRONMENT"] = str(env_dir)
     sync_env["VIRTUAL_ENV"] = str(env_dir)
-
     cmd = [
         uv_executable, "sync",
         "--project", str(candidate_worktree),
@@ -838,14 +584,11 @@ def provision_project_environment(
     start = time.monotonic()
     timed_out = False
     returncode: int | None = None
-    process: subprocess.Popen[bytes] | None = None
+    process: subprocess.Popen[Any] | None = None
     try:
         with stdout_path.open("wb") as stdout_fh, stderr_path.open("wb") as stderr_fh:
             try:
                 os.chmod(stdout_path, 0o600)
-            except OSError:
-                pass
-            try:
                 os.chmod(stderr_path, 0o600)
             except OSError:
                 pass
@@ -868,6 +611,14 @@ def provision_project_environment(
                 if process is not None:
                     _terminate_process_group(process)
                 raise
+            else:
+                if process_runner.process_group_exists(process.pid):
+                    _terminate_process_group(process)
+                    returncode = process_runner.PROCESS_GROUP_LEAK_RC
+                    stderr_fh.write(
+                        ("\n" + process_runner.PROCESS_GROUP_LEAK_MARKER + "\n").encode("utf-8")
+                    )
+                    stderr_fh.flush()
     except OSError as exc:
         if process is not None:
             _terminate_process_group(process)
@@ -940,16 +691,10 @@ def provision_project_environment(
 
 
 def command_uses_uv_run(command: str) -> bool:
-    """Return True when the command string invokes a uv subcommand that
-    requires the project environment to exist.
-    """
     return is_uv_command(command)
 
 
 def env_overrides(env_dir: Path) -> dict[str, str]:
-    """Return the hermetic subprocess environment keys required to bind
-    the project env into a child process.
-    """
     env_dir = Path(env_dir).expanduser().resolve(strict=False)
     return {
         "UV_PROJECT_ENVIRONMENT": str(env_dir),
