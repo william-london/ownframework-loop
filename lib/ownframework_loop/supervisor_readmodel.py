@@ -275,7 +275,7 @@ def _run_git_readonly(repo: Path, args: list[str], *, timeout: int = 10) -> dict
             ["git", "-C", str(repo), *args],
             timeout_seconds=timeout,
         )
-    except (OSError, subprocess.TimeoutExpired) as exc:
+    except (OSError, subprocess.SubprocessError) as exc:
         return {
             "ok": False,
             "returncode": None,

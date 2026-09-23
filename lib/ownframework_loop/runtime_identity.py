@@ -105,7 +105,7 @@ def _git_head(root: Path) -> str:
     try:
         top = _git(root, "rev-parse", "--show-toplevel")
         r = _git(root, "rev-parse", "HEAD")
-    except (OSError, subprocess.TimeoutExpired):
+    except (OSError, subprocess.SubprocessError):
         return ""
     if top.returncode != 0 or r.returncode != 0:
         return ""
@@ -123,7 +123,7 @@ def _dirty_git_digest(root: Path, head: str) -> str:
     try:
         diff = _git(root, "diff", "--binary", "HEAD", "--", text=False)
         untracked = _git(root, "ls-files", "--others", "--exclude-standard", "-z", text=False)
-    except (OSError, subprocess.TimeoutExpired) as exc:
+    except (OSError, subprocess.SubprocessError) as exc:
         raise RuntimeIdentityError("git worktree identity probe failed") from exc
     if diff.returncode != 0 or untracked.returncode != 0:
         raise RuntimeIdentityError("git worktree identity probe returned non-zero")
@@ -153,7 +153,7 @@ def runtime_generation_for_root(root: Path, version: str) -> str:
     if head:
         try:
             status_probe = _git(root, "status", "--porcelain=v1", "--untracked-files=all")
-        except (OSError, subprocess.TimeoutExpired) as exc:
+        except (OSError, subprocess.SubprocessError) as exc:
             raise RuntimeIdentityError("git status identity probe failed") from exc
         if status_probe.returncode != 0:
             raise RuntimeIdentityError("git status identity probe returned non-zero")

@@ -665,6 +665,10 @@ def _run_cli(
             f"ofloop {' '.join(args)} exceeded finalization wall budget "
             f"({int(timeout_seconds or 0)}s)"
         ) from exc
+    except process_runner.ProcessGroupLeakError as exc:
+        raise DispatchError(
+            f"ofloop {' '.join(args)} left descendant processes after command exit"
+        ) from exc
     if proc.returncode != 0:
         raise DispatchError(
             f"ofloop {' '.join(args)} failed rc={proc.returncode}: "
