@@ -83,13 +83,6 @@ class ValidationEnvironmentError(RuntimeError):
 DEFAULT_PROVISION_TIMEOUT_SECONDS = 600
 
 
-def _terminate_process_group(
-    process: subprocess.Popen[Any], grace_seconds: float = 3.0
-) -> None:
-    """Delegate process-tree cleanup to the canonical bounded runner."""
-    process_runner.terminate_process_group(process, grace_seconds=grace_seconds)
-
-
 @dataclass(frozen=True)
 class BoundUvIdentity:
     """Exact identity of the bound ``package.uv`` capability."""
@@ -584,7 +577,6 @@ def provision_project_environment(
     start = time.monotonic()
     timed_out = False
     returncode: int | None = None
-    process: subprocess.Popen[Any] | None = None
     try:
         with stdout_path.open("wb") as stdout_fh, stderr_path.open("wb") as stderr_fh:
             try:
@@ -592,36 +584,17 @@ def provision_project_environment(
                 os.chmod(stderr_path, 0o600)
             except OSError:
                 pass
-            try:
-                process = subprocess.Popen(
-                    cmd,
-                    cwd=str(candidate_worktree),
-                    env=sync_env,
-                    stdout=stdout_fh,
-                    stderr=stderr_fh,
-                    start_new_session=True,
-                )
-                returncode = int(process.wait(timeout=timeout_seconds))
-            except subprocess.TimeoutExpired:
-                timed_out = True
-                if process is not None:
-                    _terminate_process_group(process)
-                returncode = 124
-            except BaseException:
-                if process is not None:
-                    _terminate_process_group(process)
-                raise
-            else:
-                if process_runner.process_group_exists(process.pid):
-                    _terminate_process_group(process)
-                    returncode = process_runner.PROCESS_GROUP_LEAK_RC
-                    stderr_fh.write(
-                        ("\n" + process_runner.PROCESS_GROUP_LEAK_MARKER + "\n").encode("utf-8")
-                    )
-                    stderr_fh.flush()
+            result = process_runner.run_bounded_to_files(
+                cmd,
+                cwd=candidate_worktree,
+                timeout_seconds=timeout_seconds,
+                env=sync_env,
+                stdout_fh=stdout_fh,
+                stderr_fh=stderr_fh,
+            )
+            returncode = result.returncode
+            timed_out = result.timed_out
     except OSError as exc:
-        if process is not None:
-            _terminate_process_group(process)
         return _infra(f"subprocess_spawn_failed:{exc.strerror or exc}")
     duration = time.monotonic() - start
     stdout_bytes = stdout_path.read_bytes() if stdout_path.exists() else b""
