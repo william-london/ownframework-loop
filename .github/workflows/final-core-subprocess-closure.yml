@@ -59,7 +59,8 @@ jobs:
           bash tests/integration/test_gate_fault_injection.sh
           bash tests/integration/test_v082_production_hardening.sh
           bash tests/integration/test_v090_bounded_concurrency.sh
-          bash tests/integration/test_v122_final_source_hardening.sh
+          bash tests/integration/test_final_source_closure.sh
+          bash tests/integration/test_source_authority_final.sh
           bash tests/integration/test_runtime_recovery_lane.sh
           python3 -B -m ownframework_loop.static_checks "$PWD"
           git diff --check
