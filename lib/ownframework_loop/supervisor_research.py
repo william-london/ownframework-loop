@@ -53,9 +53,12 @@ Key invariants:
   trailing-window rate gate → durable launch-record publish →
   claim publish (or reuse) → bounded executor submit.
 * Restart recovery (``recover_claims``) MUST reprove live-attempt
-  authority via ``_recovery_authority_proof`` before re-using a
-  persisted claim marker; the persisted marker is durable evidence
-  of historical ownership, NOT perpetual authorization.
+  authority via ``_prove_live_semantic_attempt_authority`` before
+  re-using a persisted claim marker; the persisted marker is
+  durable evidence of historical ownership, NOT perpetual
+  authorization. Every transport launch carries a fresh
+  ``launch_id`` (UUIDv4) as its physical-launch identity, distinct
+  from the semantic ``request_id`` + ``request_digest``.
 * Rate limit counts ACCEPTED broker transport launches (success,
   broker error, timeout) per run over the trailing 60 seconds via
   the durable ``launches/launch-<launch_id>.json`` directory.
@@ -1333,14 +1336,45 @@ def _admit_research_transport(
         equals ``already_accepted + 1``.
       - ``REFUSED_ALREADY_IN_FLIGHT``: the returned ``entry`` is the
         EXISTING canonical owner; the caller MUST NOT submit another
-        transport and MUST NOT increment any rate counter.
+        transport, MUST NOT increment any rate counter, and MUST
+        NOT publish any canonical response file — the existing
+        owner's eventual finalize is the one that publishes the
+        response. The caller drops the orphan inbox file safely.
       - other refusal statuses: ``entry is None``; ``already_accepted``
         is unchanged (the launcher record was not published).
+
+    Pre-transport exception safety: every step after the
+    preconditions (authority proof, in-flight absence, rate gate)
+    that reserves state — registry insertion, launch record, claim
+    marker, executor submit — is wrapped such that on any failure
+    the reserved state is rolled back BEFORE the function returns.
+    In particular the in-flight registry never holds an entry
+    whose ``future`` is ``None``. Historic recovery claims (passed
+    via ``claim_already_published=True``) are NEVER deleted by a
+    fault in re-admission — only the launch record and the freshly-
+    inserted registry entry are rolled back.
     """
-    if not _db_attempt_is_active(conn, run_id, attempt_id):
+    ok, reason = _prove_live_semantic_attempt_authority(
+        conn,
+        run_id=run_id,
+        attempt_id=attempt_id,
+        role=role,
+    )
+    if not ok:
+        # Map the predicate's specific reason to the precise refusal
+        # status so the caller can produce a precise response/error
+        # class. The canonical failure policy is fail-closed and uses
+        # the strongest evidence available.
+        if reason in ("role_mismatch",):
+            return (_AdmissionStatus.REFUSED_ROLE_MISMATCH, None, already_accepted)
+        # All other failure reasons (run_not_found, job_not_running,
+        # attempt_stale, worker_attempt_mismatch, no_live_worker,
+        # worker_not_alive, process_identity_mismatch,
+        # semantic_attempt_missing, semantic_attempt_not_current)
+        # all mean "the run is no longer a live semantic attempt";
+        # collapse them to a single authoritative refusal status.
         return (_AdmissionStatus.REFUSED_ATTEMPT_NOT_LIVE, None, already_accepted)
-    if not _db_role_matches(conn, run_id, role):
-        return (_AdmissionStatus.REFUSED_ROLE_MISMATCH, None, already_accepted)
+
     if already_accepted >= rate_limit_per_minute:
         return (_AdmissionStatus.REFUSED_RATE_LIMITED, None, already_accepted)
 
@@ -1364,137 +1398,140 @@ def _admit_research_transport(
 
     registered = registry.insert_if_absent(entry)
     if registered is not entry:
+        # Canonical owner already exists for this key. Caller MUST
+        # NOT publish a response — the existing owner is the one
+        # authoritative terminal publisher.
         return (
             _AdmissionStatus.REFUSED_ALREADY_IN_FLIGHT,
             registered,
             already_accepted,
         )
 
+    # Pre-launch state has been reserved: registry entry inserted with
+    # future=None, no launch record, no new claim. From here on any
+    # exception must roll back the inserted registry entry AND the
+    # freshly-published claim/launch artefacts.
     try:
-        _publish_launch_record(
-            run_id=run_id,
-            launch_id=launch_id,
-            request_id=request_id,
-            request_digest=request_digest,
-            attempt_id=attempt_id,
-            role=role,
-            op=op,
-            url=url,
-            query=query,
-            max_bytes=max_bytes,
-            search_backend=search_backend,
-            submitted_at=submitted_at,
-        )
-    except Exception:
-        registry.remove(entry.key)
-        return (
-            _AdmissionStatus.REFUSED_LAUNCH_RECORD_FAILED,
-            None,
-            already_accepted,
-        )
+        try:
+            _publish_launch_record(
+                run_id=run_id,
+                launch_id=launch_id,
+                request_id=request_id,
+                request_digest=request_digest,
+                attempt_id=attempt_id,
+                role=role,
+                op=op,
+                url=url,
+                query=query,
+                max_bytes=max_bytes,
+                search_backend=search_backend,
+                submitted_at=submitted_at,
+            )
+        except Exception:
+            registry.remove(entry.key)
+            return (
+                _AdmissionStatus.REFUSED_LAUNCH_RECORD_FAILED,
+                None,
+                already_accepted,
+            )
 
-    if not claim_already_published:
-        published_claim = _atomic_publish_claim(entry)
-        if published_claim is None:
-            # Another tick / instance already claimed this request_id.
-            # Roll back: the registry has our entry but no broker
-            # has been launched yet, so remove + drop the launch
-            # record so the rate-limit counter stays clean.
+        if not claim_already_published:
+            published_claim = _atomic_publish_claim(entry)
+            if published_claim is None:
+                # Collision: another tick / instance already claimed
+                # this request_id. Roll back registry entry + launch
+                # record. The historical recovery claim is NOT
+                # touched in this branch (claim_already_published
+                # would be True for the recovery path; this branch
+                # only fires for the normal admission path whose
+                # claim is the one we just failed to atomically
+                # publish).
+                registry.remove(entry.key)
+                try:
+                    _launch_record_path(run_id, launch_id).unlink()
+                except FileNotFoundError:
+                    pass
+                return (
+                    _AdmissionStatus.REFUSED_ALREADY_IN_FLIGHT,
+                    None,
+                    already_accepted,
+                )
+            entry.claim_path = published_claim
+        else:
+            entry.claim_path = claim_path
+
+        try:
+            fut = executor.submit(
+                _run_broker_blocking,
+                broker_path,
+                op=op,
+                url=url,
+                query=query,
+                max_bytes=max_bytes,
+                evidence_dir=evidence_dir,
+                run_id=run_id,
+                attempt=attempt_id,
+                request_id=request_id,
+                request_digest=request_digest,
+                search_backend=search_backend if op == "search" else None,
+                expected_broker_sha=broker_expected_sha,
+            )
+        except _ResearchBusy:
+            # Backpressure: roll back registry entry + launch record
+            # + any claim we just published. Historical recovery
+            # claim is preserved (claim_already_published branch
+            # above does not call this publisher).
             registry.remove(entry.key)
             try:
                 _launch_record_path(run_id, launch_id).unlink()
             except FileNotFoundError:
                 pass
+            if not claim_already_published:
+                _remove_claim(entry.claim_path)
             return (
-                _AdmissionStatus.REFUSED_ALREADY_IN_FLIGHT,
+                _AdmissionStatus.REFUSED_BROKER_UNAVAILABLE,
                 None,
                 already_accepted,
             )
-        entry.claim_path = published_claim
-    else:
-        entry.claim_path = claim_path
-
-    try:
-        fut = executor.submit(
-            _run_broker_blocking,
-            broker_path,
-            op=op,
-            url=url,
-            query=query,
-            max_bytes=max_bytes,
-            evidence_dir=evidence_dir,
-            run_id=run_id,
-            attempt=attempt_id,
-            request_id=request_id,
-            request_digest=request_digest,
-            search_backend=search_backend if op == "search" else None,
-            expected_broker_sha=broker_expected_sha,
-        )
-    except _ResearchBusy:
-        # Backpressure: roll back the in-flight entry, launch
-        # record, and any claim we just published so the next
-        # tick retries the rate budget fairly.
-        registry.remove(entry.key)
+        except BaseException:
+            # Generic pre-launch fault (pool shutdown, RuntimeError,
+            # OSError, KeyboardInterrupt propagation). Same roll-back
+            # discipline as _ResearchBusy so the registry never holds
+            # an entry with future=None.
+            registry.remove(entry.key)
+            try:
+                _launch_record_path(run_id, launch_id).unlink()
+            except FileNotFoundError:
+                pass
+            if not claim_already_published:
+                _remove_claim(entry.claim_path)
+            return (
+                _AdmissionStatus.REFUSED_BROKER_UNAVAILABLE,
+                None,
+                already_accepted,
+            )
+    except BaseException:
+        # Defence in depth: any unexpected exception from the wrapped
+        # body (e.g. raw OSError on the atomic publish) still leaves
+        # the registry without a future-less entry and the launch
+        # record removed. Historical recovery claim is preserved.
         try:
-            _launch_record_path(run_id, launch_id).unlink()
-        except FileNotFoundError:
+            registry.remove(entry.key)
+        except Exception:
+            pass
+        try:
+            _launch_record_path(run_id, launch_id).unlink(missing_ok=True)
+        except Exception:
             pass
         if not claim_already_published:
-            _remove_claim(entry.claim_path)
-        return (
-            _AdmissionStatus.REFUSED_BROKER_UNAVAILABLE,
-            None,
-            already_accepted,
-        )
+            try:
+                _remove_claim(entry.claim_path)
+            except Exception:
+                pass
+        raise
 
     entry.future = fut
     return (_AdmissionStatus.ADMITTED, entry, already_accepted + 1)
-
-
-def _recovery_authority_proof(
-    conn: sqlite3.Connection,
-    run_id: str,
-    attempt_id: str,
-    role: str,
-) -> tuple[bool, str]:
-    """Canonical live-attempt predicate for RESTART RECOVERY.
-
-    A persisted research claim is durable evidence of historical
-    ownership; it is NOT perpetual authorization for future network
-    effects. Recovery redispatch MUST first re-prove, from the
-    canonical supervisor DB state, that:
-
-      - the run still exists (``_db_get_job`` returns a row);
-      - the job's ``latest_attempt_id`` matches the persisted
-        ``attempt_id`` (a new attempt makes the persisted claim
-        stale);
-      - the job is non-terminal AND has a live worker pid whose
-        process is still alive (a worker that died between dispatch
-        and restart would otherwise reissue a stale transport);
-      - the worker's role currently equals the persisted role
-        (an attempted cross-role replay is refused).
-
-    Returns ``(ok, reason)``. ``reason`` is empty on success and
-    a stable string identifier on failure.
-    """
-    row = _db_get_job(conn, run_id)
-    if row is None:
-        return (False, "run_not_found")
-    if (row["latest_attempt_id"] or "") != attempt_id:
-        return (False, "attempt_stale_or_unknown")
-    status = str(row["status"] or "")
-    if status in _ACCEPTED_TERMINAL_STATUSES:
-        return (False, "run_terminal")
-    if str(row["worker_pid"] or "") == "":
-        return (False, "no_live_worker")
-    try:
-        os.kill(int(row["worker_pid"]), 0)
-    except (OSError, ProcessLookupError):
-        return (False, "no_live_worker")
-    worker_role = str(row["worker_role"] or "")
-    if worker_role and worker_role != role:
-        return (False, "role_mismatch")
-    return (True, "")
 
 
 # --------------------------------------------------------------------------- #
@@ -1588,8 +1625,19 @@ def _replay_check(
 # --------------------------------------------------------------------------- #
 
 
-def recover_claims(run_id: str, *, rate_limit_per_minute: int | None = None) -> dict[str, int]:
+def recover_claims(
+    run_id: str,
+    *,
+    rate_limit_per_minute: int | None = None,
+    conn: sqlite3.Connection | None = None,
+) -> dict[str, int]:
     """One-shot recovery of orphaned claim markers.
+
+    If ``conn`` is supplied (production caller pattern via
+    ``process_research_queue``), the SAME canonical supervisor DB
+    authority is reused so normal admission and recovery share
+    context. If omitted (legacy test wrappers), the function opens
+    its own connection from ``OFLOOP_SUPERVISOR_DB``.
 
     The claim marker persists enough canonical request metadata to
     perform truthful recovery on supervisor restart WITHOUT touching
@@ -1700,21 +1748,34 @@ def recover_claims(run_id: str, *, rate_limit_per_minute: int | None = None) -> 
             except _BrokerUnavailable:
                 summary["skipped"] += 1
                 continue
+            # Resolve the exact DB authority context. Production
+            # callers (``process_research_queue``) pass the SAME
+            # connection so normal admission and recovery observe
+            # the same row snapshot. Tests / legacy wrappers pass
+            # ``conn=None`` and get an independent connection from
+            # ``OFLOOP_SUPERVISOR_DB`` so the function remains
+            # exercisable in isolation.
+            conn_owned = False
+            if conn is None:
+                try:
+                    db_path = Path(
+                        os.environ.get(
+                            "OFLOOP_SUPERVISOR_DB",
+                            f"{Path.home()}/.local/state/ownframework-loop/supervisor.sqlite3",
+                        )
+                    ).expanduser()
+                    conn = sqlite3.connect(str(db_path))
+                    conn.row_factory = sqlite3.Row
+                    conn_owned = True
+                except sqlite3.Error:
+                    summary["skipped"] += 1
+                    continue
             try:
-                db_path = Path(
-                    os.environ.get(
-                        "OFLOOP_SUPERVISOR_DB",
-                        f"{Path.home()}/.local/state/ownframework-loop/supervisor.sqlite3",
-                    )
-                ).expanduser()
-                conn = sqlite3.connect(str(db_path))
-                conn.row_factory = sqlite3.Row
-            except sqlite3.Error:
-                summary["skipped"] += 1
-                continue
-            try:
-                ok, _reason = _recovery_authority_proof(
-                    conn, run_id, attempt_id, role,
+                ok, _reason = _prove_live_semantic_attempt_authority(
+                    conn,
+                    run_id=run_id,
+                    attempt_id=attempt_id,
+                    role=role,
                 )
                 if not ok:
                     # Stale claim: refuse to redispatch. The
@@ -1726,6 +1787,22 @@ def recover_claims(run_id: str, *, rate_limit_per_minute: int | None = None) -> 
                     continue
                 launch_id = _uuid.uuid4().hex
                 submitted_at = time.time()
+                # One rate-limit value resolved ONCE and passed
+                # into the canonical admission primitive. The
+                # default resolution chain is:
+                #   explicit caller value (this parameter) →
+                #   OFLOOP_RESEARCH_RATE_LIMIT_PER_MINUTE env →
+                #   DEFAULT_PER_ATTEMPT_RATE_LIMIT (30). Normal and
+                # recovery resolve via the SAME chain so neither
+                # path obtains a secret bypass lane.
+                effective_rate_limit = (
+                    int(rate_limit_per_minute)
+                    if rate_limit_per_minute is not None
+                    else int(os.environ.get(
+                        "OFLOOP_RESEARCH_RATE_LIMIT_PER_MINUTE",
+                        str(DEFAULT_PER_ATTEMPT_RATE_LIMIT),
+                    ))
+                )
                 status, entry, _accepted_after = _admit_research_transport(
                     conn=conn,
                     registry=_IN_FLIGHT,
@@ -1747,48 +1824,34 @@ def recover_claims(run_id: str, *, rate_limit_per_minute: int | None = None) -> 
                     evidence_dir=_run_evidence_dir(run_id),
                     operator="supervisor-research-recovery",
                     submitted_at=submitted_at,
-                    rate_limit_per_minute=(
-                        int(rate_limit_per_minute)
-                        if rate_limit_per_minute is not None
-                        else int(os.environ.get(
-                            "OFLOOP_RESEARCH_RATE_LIMIT_PER_MINUTE",
-                            str(DEFAULT_PER_ATTEMPT_RATE_LIMIT),
-                        ))
-                    ),
+                    rate_limit_per_minute=effective_rate_limit,
                     already_accepted=_accepted_count_last_60s(run_id),
                     claim_already_published=True,
                 )
             except Exception:
                 summary["skipped"] += 1
                 continue
-            finally:
+            if status is not _AdmissionStatus.ADMITTED:
+                # All refusal branches (already-in-flight,
+                # rate-limited, attempt-not-live, role-mismatch,
+                # launch-record-failed, broker-unavailable) leave
+                # the durable claim preserved and the in-flight
+                # registry untouched. The existing in-flight owner
+                # is the one authoritative response publisher if
+                # applicable; the canonical response file path is
+                # singletons so we MUST NOT publish any
+                # ``AlreadyInFlight``-style response here — those
+                # would poison the eventual real response.
+                # The next tick's recovery scan will see the same
+                # claim again unless the registry finalizes a
+                # response in the meantime.
+                summary["skipped"] += 1
+                continue
+            entry.claim_path = claim_path
+            summary["redispatched"] += 1
+            continue
+            if conn_owned:
                 conn.close()
-            if status is not _AdmissionStatus.ADMITTED:
-                # All refusal branches (already-in-flight,
-                # rate-limited, attempt-not-live, role-mismatch,
-                # launch-record-failed, broker-unavailable) leave
-                # the durable claim preserved and the in-flight
-                # registry untouched. The next tick's recovery
-                # scan will see the same claim again unless the
-                # registry finalizes a response in the meantime.
-                summary["skipped"] += 1
-                continue
-            entry.claim_path = claim_path
-            summary["redispatched"] += 1
-            continue
-            if status is not _AdmissionStatus.ADMITTED:
-                # All refusal branches (already-in-flight,
-                # rate-limited, attempt-not-live, role-mismatch,
-                # launch-record-failed, broker-unavailable) leave
-                # the durable claim preserved and the in-flight
-                # registry untouched. The next tick's recovery
-                # scan will see the same claim again unless the
-                # registry finalizes a response in the meantime.
-                summary["skipped"] += 1
-                continue
-            entry.claim_path = claim_path
-            summary["redispatched"] += 1
-            continue
         # op=search (potentially metered) — do NOT auto-retry.
         response = {
             "schema": RESPONSE_SCHEMA,
@@ -1810,8 +1873,17 @@ def recover_claims(run_id: str, *, rate_limit_per_minute: int | None = None) -> 
 
 
 # --------------------------------------------------------------------------- #
-# DB-backed attempt liveness                                                #
+# Canonical research live-attempt authority (single owner)                    #
 # --------------------------------------------------------------------------- #
+#
+# ONE canonical predicate consumed by:
+#   - normal per-tick inbox admission (process_research_queue)
+#   - restart recovery admission (recover_claims)
+# Both paths must converge on this exact proof; no separate definitions.
+
+
+_AUTHORITATIVE_JOB_STATUS = "RUNNING"
+_SEMANTIC_ATTEMPT_LIVE_STATUSES = frozenset(("RUNNING", "RESERVED"))
 
 
 def _db_get_job(conn: sqlite3.Connection, run_id: str) -> sqlite3.Row | None:
@@ -1819,42 +1891,98 @@ def _db_get_job(conn: sqlite3.Connection, run_id: str) -> sqlite3.Row | None:
     return cur.fetchone()
 
 
-def _db_attempt_is_active(
-    conn: sqlite3.Connection, run_id: str, attempt_id: str,
-) -> bool:
-    """Strongest identity check the existing schema supports.
+def _prove_live_semantic_attempt_authority(
+    conn: sqlite3.Connection,
+    *,
+    run_id: str,
+    attempt_id: str,
+    role: str,
+) -> tuple[bool, str]:
+    """The single canonical research live-attempt authority proof.
 
-    Binds (run_id, attempt_id) to the LIVE attempt AND verifies the
-    worker pid is alive AND the job is non-terminal AND the role
-    matches. PID reuse ambiguity is mitigated by the requirement
-    that the attempt_id is the canonical latest_attempt_id (a
-    fresh restart produces a new attempt id).
+    Both normal admission and restart recovery MUST consume this
+    predicate. Fail-closed; returns ``(ok, reason)``. ``reason`` is
+    a stable identifier (one of ``run_not_found`` /
+    ``job_not_running`` / ``attempt_stale`` / ``worker_attempt_mismatch``
+    / ``role_mismatch`` / ``no_live_worker`` / ``worker_not_alive`` /
+    ``process_identity_mismatch`` / ``semantic_attempt_missing`` /
+    ``semantic_attempt_not_current``); ``""`` on success.
+
+    Required evidence chain (in order):
+
+      1. job row exists for ``run_id``;
+      2. ``jobs.status == 'RUNNING'`` — the canonical
+         ``active-semantic-worker`` state. Anything else
+         (BACKOFF, QUEUED, DONE, RETIRED, QUARANTINED, CANCELED) is
+         refused; a bare PID probe is not sufficient ownership
+         evidence;
+      3. ``jobs.latest_attempt_id == requested attempt_id`` — the
+         attempt is the most recent one the supervisor knows about;
+      4. ``jobs.worker_attempt_id == requested attempt_id`` — the
+         recorded worker IS in fact binding for this attempt, not
+         only the most recent attempt the supervisor has ever seen;
+      5. ``jobs.worker_role == requested role`` — exact match.
+         Empty/missing worker_role is fail-closed;
+      6. the recorded worker PID is alive per the canonical
+         supervisor_process liveness helper, which already cross-
+         checks ``worker_started_at`` against the kernel-recorded
+         start time (defending against PID reuse);
+      7. ``_read_pid_start_identity(worker_pid)`` matches the
+         recorded ``worker_start_identity`` exactly — the kernel-
+         bound start identity (Linux boot_id+startticks; Darwin
+         libproc proc_bsdinfo) provides fail-safe ownership proof;
+      8. the semantic_attempts row keyed by
+         ``(jobs.id, attempt_id)`` exists and its status is in
+         ``{RUNNING, RESERVED}`` — i.e. it is the currently live
+         semantic attempt for this job, not a terminal or abort
+         row.
     """
+    from . import supervisor_process as _sp
     row = _db_get_job(conn, run_id)
     if row is None:
-        return False
-    if (row["latest_attempt_id"] or "") != attempt_id:
-        return False
-    status = str(row["status"] or "")
-    if status in _ACCEPTED_TERMINAL_STATUSES:
-        return False
-    if not row["worker_pid"]:
-        return False
-    try:
-        os.kill(int(row["worker_pid"]), 0)
-    except (OSError, ProcessLookupError):
-        return False
-    return True
-
-
-def _db_role_matches(conn: sqlite3.Connection, run_id: str, role: str) -> bool:
-    row = _db_get_job(conn, run_id)
-    if row is None:
-        return False
+        return (False, "run_not_found")
+    job_id = int(row["id"])
+    if str(row["status"] or "") != _AUTHORITATIVE_JOB_STATUS:
+        return (False, "job_not_running")
+    if str(row["latest_attempt_id"] or "") != attempt_id:
+        return (False, "attempt_stale")
+    if str(row["worker_attempt_id"] or "") != attempt_id:
+        return (False, "worker_attempt_mismatch")
     worker_role = str(row["worker_role"] or "")
-    if worker_role and worker_role != role:
-        return False
-    return True
+    if not worker_role or worker_role != role:
+        return (False, "role_mismatch")
+    pid_raw = row["worker_pid"]
+    if not pid_raw:
+        return (False, "no_live_worker")
+    try:
+        pid = int(pid_raw)
+    except (TypeError, ValueError):
+        return (False, "no_live_worker")
+    started_at = row["worker_started_at"]
+    try:
+        started_at_f = float(started_at) if started_at else None
+    except (TypeError, ValueError):
+        started_at_f = None
+    if not _sp._pid_alive(pid, started_at_f):
+        return (False, "worker_not_alive")
+    recorded_identity = str(row["worker_start_identity"] or "")
+    actual_identity = _sp._read_pid_start_identity(pid)
+    if (
+        not recorded_identity
+        or not actual_identity
+        or recorded_identity != actual_identity
+    ):
+        return (False, "process_identity_mismatch")
+    sa = conn.execute(
+        "SELECT status FROM semantic_attempts "
+        "WHERE job_id = ? AND attempt_id = ?",
+        (job_id, attempt_id),
+    ).fetchone()
+    if sa is None:
+        return (False, "semantic_attempt_missing")
+    if str(sa["status"] or "") not in _SEMANTIC_ATTEMPT_LIVE_STATUSES:
+        return (False, "semantic_attempt_not_current")
+    return (True, "")
 
 
 # --------------------------------------------------------------------------- #
@@ -2089,8 +2217,17 @@ def process_research_queue(
     republish_reused = processed  # all finalized responses are visible to workers
     republish_mismatch = 0
 
-    # 5. STEP 2 — claim recovery (durable, idempotent).
-    recovered = recover_claims(run_id)
+    # 5. STEP 2 — claim recovery (durable, idempotent). Pass the
+    # exact connection AND the exact resolved rate limit so normal
+    # admission and recovery consume the SAME authoritative
+    # context. Neither path opens its own DB connection nor
+    # resolves its own rate ceiling when this endpoint is the
+    # production caller.
+    recovered = recover_claims(
+        run_id,
+        rate_limit_per_minute=rate_limit_per_minute,
+        conn=conn,
+    )
 
     # 6. STEP 3 — durable rate limit (counts accepted launches via
     #    launches/ — NOT claim markers; completion does NOT clear
@@ -2288,12 +2425,28 @@ def process_research_queue(
                 "deferred": "research_executor_busy",
             }
 
+        if status is _AdmissionStatus.REFUSED_ALREADY_IN_FLIGHT:
+            # A canonical owner already exists for this key. The
+            # response pathname is request-id singleton authority,
+            # so publishing any new response here — even an
+            # "AlreadyInFlight" error — would race the existing
+            # owner's eventual finalize and could poison the
+            # canonical response bytes. We refuse the duplicate
+            # admission, drop the redundant inbox request file
+            # safely, and let the existing in-flight owner
+            # publish exactly one canonical response when it
+            # completes.
+            try:
+                request_path.unlink()
+            except FileNotFoundError:
+                pass
+            continue
+
         if status is not _AdmissionStatus.ADMITTED:
             error_class = {
                 _AdmissionStatus.REFUSED_ATTEMPT_NOT_LIVE: "AttemptNotActive",
                 _AdmissionStatus.REFUSED_ROLE_MISMATCH: "RoleMismatch",
                 _AdmissionStatus.REFUSED_RATE_LIMITED: "RateLimited",
-                _AdmissionStatus.REFUSED_ALREADY_IN_FLIGHT: "AlreadyInFlight",
                 _AdmissionStatus.REFUSED_LAUNCH_RECORD_FAILED: "LaunchRecordFailed",
             }.get(status, "ResearchRefused")
             response = {

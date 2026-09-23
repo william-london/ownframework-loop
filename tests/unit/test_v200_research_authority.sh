@@ -701,9 +701,15 @@ class FakeReq:
     def __init__(self, d): self.d = d
 import sqlite3
 db = sqlite3.connect(":memory:")
-db.execute("CREATE TABLE jobs (run_id TEXT PRIMARY KEY, latest_attempt_id TEXT, worker_pid INTEGER, worker_started_at REAL, worker_role TEXT, status TEXT)")
-db.execute("INSERT INTO jobs VALUES (?,?,?,?,?,?)",
-    (worker_run, "pass-0001", os.getpid(), 0.0, "builder", "RUNNING"))
+db.execute("CREATE TABLE jobs (run_id TEXT PRIMARY KEY, latest_attempt_id TEXT, worker_attempt_id TEXT, worker_pid INTEGER, worker_started_at REAL, worker_role TEXT, worker_start_identity TEXT, status TEXT)")
+from ownframework_loop import supervisor_process as sp
+sr = importlib.import_module("ownframework_loop.supervisor_research")
+db.execute("INSERT INTO jobs (run_id, latest_attempt_id, worker_attempt_id, "
+                  "worker_pid, worker_started_at, worker_role, "
+                  "worker_start_identity, status) "
+                  "VALUES (?,?,?,?,?,?,?,?)",
+    (worker_run, "pass-0001", "pass-0001", os.getpid(), 0.0, "builder",
+     sp._read_pid_start_identity(os.getpid()) or "", "RUNNING"))
 
 # Simulate a request claiming to be from other_run (a forge attempt).
 # The canonical run_id regex matches other_run's run-id format too;
@@ -845,6 +851,11 @@ from pathlib import Path
 sys.path.insert(0, os.environ['REPO_ROOT_ABS'] + "/lib")
 import hashlib
 from ownframework_loop import supervisor_research as sr
+from ownframework_loop import supervisor_process as sp
+# Pre-compute the live worker process identity so test fixture rows
+# pass the canonical _prove_live_semantic_attempt_authority predicate
+# (worker_start_identity must match the kernel-bound start identity).
+_TEST_WSID = sp._read_pid_start_identity(os.getpid()) or ""
 
 # Pin the supervisor's evidence root to a stable per-process temp
 # directory. Each test below creates its own subdir under it.
@@ -893,11 +904,19 @@ responses_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
 db_path = tmp_ev / "jobs.db"
 conn = sqlite3.connect(str(db_path))
 conn.execute(
-    "CREATE TABLE jobs (run_id TEXT PRIMARY KEY, latest_attempt_id TEXT, "
-    "worker_pid INTEGER, worker_started_at REAL, worker_role TEXT, status TEXT)"
+    "CREATE TABLE jobs (id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL UNIQUE, "
+    "latest_attempt_id TEXT, worker_attempt_id TEXT, worker_pid INTEGER, "
+    "worker_started_at REAL, worker_role TEXT, worker_start_identity TEXT, status TEXT)"
 )
-conn.execute("INSERT INTO jobs VALUES (?,?,?,?,?,?)",
-    (run_id, "pass-0001", os.getpid(), time.time(), "builder", "RUNNING"))
+conn.execute("INSERT INTO jobs (run_id, latest_attempt_id, worker_attempt_id, "
+                  "worker_pid, worker_started_at, worker_role, "
+                  "worker_start_identity, status) "
+                  "VALUES (?,?,?,?,?,?,?,?)",
+    (run_id, "pass-0001", "pass-0001", os.getpid(), time.time(), "builder",
+     _TEST_WSID, "RUNNING"))
+conn.execute("CREATE TABLE semantic_attempts (attempt_id TEXT PRIMARY KEY, job_id INTEGER NOT NULL, role TEXT NOT NULL, status TEXT NOT NULL, started_at REAL NOT NULL, completed_at REAL, worker_pid INTEGER, stdout_path TEXT NOT NULL, stderr_path TEXT NOT NULL, returncode INTEGER, cost_usd REAL NOT NULL DEFAULT 0, cost_accounted INTEGER NOT NULL DEFAULT 0, input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0, cache_read_tokens INTEGER NOT NULL DEFAULT 0, cache_creation_tokens INTEGER NOT NULL DEFAULT 0, tokens_known INTEGER NOT NULL DEFAULT 0, cost_known INTEGER NOT NULL DEFAULT 1, failure_class TEXT, failure_reason TEXT)")
+conn.execute("INSERT INTO semantic_attempts(attempt_id, job_id, role, status, started_at, stdout_path, stderr_path) VALUES (?,?,?,?,?,?,?)",
+    ("pass-0001", 1, "builder", "RUNNING", time.time() - 1, "/dev/null", "/dev/null"))
 conn.commit()
 conn.close()
 
@@ -998,9 +1017,16 @@ requests_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
 
 db_path = tmp_ev / "jobs.db"
 conn = sqlite3.connect(str(db_path))
-conn.execute("CREATE TABLE jobs (run_id TEXT PRIMARY KEY, latest_attempt_id TEXT, worker_pid INTEGER, worker_started_at REAL, worker_role TEXT, status TEXT)")
-conn.execute("INSERT INTO jobs VALUES (?,?,?,?,?,?)",
-    (run_id, "pass-0001", os.getpid(), time.time(), "builder", "RUNNING"))
+conn.execute("CREATE TABLE jobs (id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL UNIQUE, latest_attempt_id TEXT, worker_attempt_id TEXT, worker_pid INTEGER, worker_started_at REAL, worker_role TEXT, worker_start_identity TEXT, status TEXT)")
+conn.execute("INSERT INTO jobs (run_id, latest_attempt_id, worker_attempt_id, "
+                  "worker_pid, worker_started_at, worker_role, "
+                  "worker_start_identity, status) "
+                  "VALUES (?,?,?,?,?,?,?,?)",
+    (run_id, "pass-0001", "pass-0001", os.getpid(), time.time(), "builder",
+     _TEST_WSID, "RUNNING"))
+conn.execute("CREATE TABLE semantic_attempts (attempt_id TEXT PRIMARY KEY, job_id INTEGER NOT NULL, role TEXT NOT NULL, status TEXT NOT NULL, started_at REAL NOT NULL, completed_at REAL, worker_pid INTEGER, stdout_path TEXT NOT NULL, stderr_path TEXT NOT NULL, returncode INTEGER, cost_usd REAL NOT NULL DEFAULT 0, cost_accounted INTEGER NOT NULL DEFAULT 0, input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0, cache_read_tokens INTEGER NOT NULL DEFAULT 0, cache_creation_tokens INTEGER NOT NULL DEFAULT 0, tokens_known INTEGER NOT NULL DEFAULT 0, cost_known INTEGER NOT NULL DEFAULT 1, failure_class TEXT, failure_reason TEXT)")
+conn.execute("INSERT INTO semantic_attempts(attempt_id, job_id, role, status, started_at, stdout_path, stderr_path) VALUES (?,?,?,?,?,?,?)",
+    ("pass-0001", 1, "builder", "RUNNING", time.time() - 1, "/dev/null", "/dev/null"))
 conn.commit()
 conn.close()
 
@@ -1054,10 +1080,17 @@ requests_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
 
 db_path = tmp_ev / "jobs.db"
 conn = sqlite3.connect(str(db_path))
-conn.execute("CREATE TABLE jobs (run_id TEXT PRIMARY KEY, latest_attempt_id TEXT, worker_pid INTEGER, worker_started_at REAL, worker_role TEXT, status TEXT)")
+conn.execute("CREATE TABLE jobs (id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL UNIQUE, latest_attempt_id TEXT, worker_attempt_id TEXT, worker_pid INTEGER, worker_started_at REAL, worker_role TEXT, worker_start_identity TEXT, status TEXT)")
 # Live job is a BUILDER.
-conn.execute("INSERT INTO jobs VALUES (?,?,?,?,?,?)",
-    (run_id, "pass-0001", os.getpid(), time.time(), "builder", "RUNNING"))
+conn.execute("INSERT INTO jobs (run_id, latest_attempt_id, worker_attempt_id, "
+                  "worker_pid, worker_started_at, worker_role, "
+                  "worker_start_identity, status) "
+                  "VALUES (?,?,?,?,?,?,?,?)",
+    (run_id, "pass-0001", "pass-0001", os.getpid(), time.time(), "builder",
+     _TEST_WSID, "RUNNING"))
+conn.execute("CREATE TABLE semantic_attempts (attempt_id TEXT PRIMARY KEY, job_id INTEGER NOT NULL, role TEXT NOT NULL, status TEXT NOT NULL, started_at REAL NOT NULL, completed_at REAL, worker_pid INTEGER, stdout_path TEXT NOT NULL, stderr_path TEXT NOT NULL, returncode INTEGER, cost_usd REAL NOT NULL DEFAULT 0, cost_accounted INTEGER NOT NULL DEFAULT 0, input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0, cache_read_tokens INTEGER NOT NULL DEFAULT 0, cache_creation_tokens INTEGER NOT NULL DEFAULT 0, tokens_known INTEGER NOT NULL DEFAULT 0, cost_known INTEGER NOT NULL DEFAULT 1, failure_class TEXT, failure_reason TEXT)")
+conn.execute("INSERT INTO semantic_attempts(attempt_id, job_id, role, status, started_at, stdout_path, stderr_path) VALUES (?,?,?,?,?,?,?)",
+    ("pass-0001", 1, "builder", "RUNNING", time.time() - 1, "/dev/null", "/dev/null"))
 conn.commit()
 conn.close()
 
@@ -1113,9 +1146,16 @@ responses_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
 
 db_path = tmp_ev / "jobs.db"
 conn = sqlite3.connect(str(db_path))
-conn.execute("CREATE TABLE jobs (run_id TEXT PRIMARY KEY, latest_attempt_id TEXT, worker_pid INTEGER, worker_started_at REAL, worker_role TEXT, status TEXT)")
-conn.execute("INSERT INTO jobs VALUES (?,?,?,?,?,?)",
-    (run_id, "pass-0001", os.getpid(), time.time(), "builder", "RUNNING"))
+conn.execute("CREATE TABLE jobs (id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL UNIQUE, latest_attempt_id TEXT, worker_attempt_id TEXT, worker_pid INTEGER, worker_started_at REAL, worker_role TEXT, worker_start_identity TEXT, status TEXT)")
+conn.execute("INSERT INTO jobs (run_id, latest_attempt_id, worker_attempt_id, "
+                  "worker_pid, worker_started_at, worker_role, "
+                  "worker_start_identity, status) "
+                  "VALUES (?,?,?,?,?,?,?,?)",
+    (run_id, "pass-0001", "pass-0001", os.getpid(), time.time(), "builder",
+     _TEST_WSID, "RUNNING"))
+conn.execute("CREATE TABLE semantic_attempts (attempt_id TEXT PRIMARY KEY, job_id INTEGER NOT NULL, role TEXT NOT NULL, status TEXT NOT NULL, started_at REAL NOT NULL, completed_at REAL, worker_pid INTEGER, stdout_path TEXT NOT NULL, stderr_path TEXT NOT NULL, returncode INTEGER, cost_usd REAL NOT NULL DEFAULT 0, cost_accounted INTEGER NOT NULL DEFAULT 0, input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0, cache_read_tokens INTEGER NOT NULL DEFAULT 0, cache_creation_tokens INTEGER NOT NULL DEFAULT 0, tokens_known INTEGER NOT NULL DEFAULT 0, cost_known INTEGER NOT NULL DEFAULT 1, failure_class TEXT, failure_reason TEXT)")
+conn.execute("INSERT INTO semantic_attempts(attempt_id, job_id, role, status, started_at, stdout_path, stderr_path) VALUES (?,?,?,?,?,?,?)",
+    ("pass-0001", 1, "builder", "RUNNING", time.time() - 1, "/dev/null", "/dev/null"))
 conn.commit()
 conn.close()
 
@@ -1187,9 +1227,16 @@ responses_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
 
 db_path = tmp_ev / "jobs.db"
 conn = sqlite3.connect(str(db_path))
-conn.execute("CREATE TABLE jobs (run_id TEXT PRIMARY KEY, latest_attempt_id TEXT, worker_pid INTEGER, worker_started_at REAL, worker_role TEXT, status TEXT)")
-conn.execute("INSERT INTO jobs VALUES (?,?,?,?,?,?)",
-    (run_id, "pass-0001", os.getpid(), time.time(), "builder", "RUNNING"))
+conn.execute("CREATE TABLE jobs (id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL UNIQUE, latest_attempt_id TEXT, worker_attempt_id TEXT, worker_pid INTEGER, worker_started_at REAL, worker_role TEXT, worker_start_identity TEXT, status TEXT)")
+conn.execute("INSERT INTO jobs (run_id, latest_attempt_id, worker_attempt_id, "
+                  "worker_pid, worker_started_at, worker_role, "
+                  "worker_start_identity, status) "
+                  "VALUES (?,?,?,?,?,?,?,?)",
+    (run_id, "pass-0001", "pass-0001", os.getpid(), time.time(), "builder",
+     _TEST_WSID, "RUNNING"))
+conn.execute("CREATE TABLE semantic_attempts (attempt_id TEXT PRIMARY KEY, job_id INTEGER NOT NULL, role TEXT NOT NULL, status TEXT NOT NULL, started_at REAL NOT NULL, completed_at REAL, worker_pid INTEGER, stdout_path TEXT NOT NULL, stderr_path TEXT NOT NULL, returncode INTEGER, cost_usd REAL NOT NULL DEFAULT 0, cost_accounted INTEGER NOT NULL DEFAULT 0, input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0, cache_read_tokens INTEGER NOT NULL DEFAULT 0, cache_creation_tokens INTEGER NOT NULL DEFAULT 0, tokens_known INTEGER NOT NULL DEFAULT 0, cost_known INTEGER NOT NULL DEFAULT 1, failure_class TEXT, failure_reason TEXT)")
+conn.execute("INSERT INTO semantic_attempts(attempt_id, job_id, role, status, started_at, stdout_path, stderr_path) VALUES (?,?,?,?,?,?,?)",
+    ("pass-0001", 1, "builder", "RUNNING", time.time() - 1, "/dev/null", "/dev/null"))
 conn.commit()
 conn.close()
 
@@ -1286,9 +1333,16 @@ requests_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
 
 db_path = tmp_ev / "jobs.db"
 conn = sqlite3.connect(str(db_path))
-conn.execute("CREATE TABLE jobs (run_id TEXT PRIMARY KEY, latest_attempt_id TEXT, worker_pid INTEGER, worker_started_at REAL, worker_role TEXT, status TEXT)")
-conn.execute("INSERT INTO jobs VALUES (?,?,?,?,?,?)",
-    (run_id, "pass-0001", os.getpid(), time.time(), "builder", "RUNNING"))
+conn.execute("CREATE TABLE jobs (id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL UNIQUE, latest_attempt_id TEXT, worker_attempt_id TEXT, worker_pid INTEGER, worker_started_at REAL, worker_role TEXT, worker_start_identity TEXT, status TEXT)")
+conn.execute("INSERT INTO jobs (run_id, latest_attempt_id, worker_attempt_id, "
+                  "worker_pid, worker_started_at, worker_role, "
+                  "worker_start_identity, status) "
+                  "VALUES (?,?,?,?,?,?,?,?)",
+    (run_id, "pass-0001", "pass-0001", os.getpid(), time.time(), "builder",
+     _TEST_WSID, "RUNNING"))
+conn.execute("CREATE TABLE semantic_attempts (attempt_id TEXT PRIMARY KEY, job_id INTEGER NOT NULL, role TEXT NOT NULL, status TEXT NOT NULL, started_at REAL NOT NULL, completed_at REAL, worker_pid INTEGER, stdout_path TEXT NOT NULL, stderr_path TEXT NOT NULL, returncode INTEGER, cost_usd REAL NOT NULL DEFAULT 0, cost_accounted INTEGER NOT NULL DEFAULT 0, input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0, cache_read_tokens INTEGER NOT NULL DEFAULT 0, cache_creation_tokens INTEGER NOT NULL DEFAULT 0, tokens_known INTEGER NOT NULL DEFAULT 0, cost_known INTEGER NOT NULL DEFAULT 1, failure_class TEXT, failure_reason TEXT)")
+conn.execute("INSERT INTO semantic_attempts(attempt_id, job_id, role, status, started_at, stdout_path, stderr_path) VALUES (?,?,?,?,?,?,?)",
+    ("pass-0001", 1, "builder", "RUNNING", time.time() - 1, "/dev/null", "/dev/null"))
 conn.commit()
 conn.close()
 
@@ -1352,9 +1406,16 @@ requests_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
 
 db_path = tmp_ev / "jobs.db"
 conn = sqlite3.connect(str(db_path))
-conn.execute("CREATE TABLE jobs (run_id TEXT PRIMARY KEY, latest_attempt_id TEXT, worker_pid INTEGER, worker_started_at REAL, worker_role TEXT, status TEXT)")
-conn.execute("INSERT INTO jobs VALUES (?,?,?,?,?,?)",
-    (run_id, "pass-0001", os.getpid(), time.time(), "builder", "RUNNING"))
+conn.execute("CREATE TABLE jobs (id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL UNIQUE, latest_attempt_id TEXT, worker_attempt_id TEXT, worker_pid INTEGER, worker_started_at REAL, worker_role TEXT, worker_start_identity TEXT, status TEXT)")
+conn.execute("INSERT INTO jobs (run_id, latest_attempt_id, worker_attempt_id, "
+                  "worker_pid, worker_started_at, worker_role, "
+                  "worker_start_identity, status) "
+                  "VALUES (?,?,?,?,?,?,?,?)",
+    (run_id, "pass-0001", "pass-0001", os.getpid(), time.time(), "builder",
+     _TEST_WSID, "RUNNING"))
+conn.execute("CREATE TABLE semantic_attempts (attempt_id TEXT PRIMARY KEY, job_id INTEGER NOT NULL, role TEXT NOT NULL, status TEXT NOT NULL, started_at REAL NOT NULL, completed_at REAL, worker_pid INTEGER, stdout_path TEXT NOT NULL, stderr_path TEXT NOT NULL, returncode INTEGER, cost_usd REAL NOT NULL DEFAULT 0, cost_accounted INTEGER NOT NULL DEFAULT 0, input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0, cache_read_tokens INTEGER NOT NULL DEFAULT 0, cache_creation_tokens INTEGER NOT NULL DEFAULT 0, tokens_known INTEGER NOT NULL DEFAULT 0, cost_known INTEGER NOT NULL DEFAULT 1, failure_class TEXT, failure_reason TEXT)")
+conn.execute("INSERT INTO semantic_attempts(attempt_id, job_id, role, status, started_at, stdout_path, stderr_path) VALUES (?,?,?,?,?,?,?)",
+    ("pass-0001", 1, "builder", "RUNNING", time.time() - 1, "/dev/null", "/dev/null"))
 conn.commit()
 conn.close()
 
@@ -1433,9 +1494,16 @@ requests_dir = tmp_ev / run_id / "requests"
 requests_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
 db_path = tmp_ev / "jobs.db"
 conn = sqlite3.connect(str(db_path))
-conn.execute("CREATE TABLE jobs (run_id TEXT PRIMARY KEY, latest_attempt_id TEXT, worker_pid INTEGER, worker_started_at REAL, worker_role TEXT, status TEXT)")
-conn.execute("INSERT INTO jobs VALUES (?,?,?,?,?,?)",
-    (run_id, "pass-0001", os.getpid(), time.time(), "builder", "RUNNING"))
+conn.execute("CREATE TABLE jobs (id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL UNIQUE, latest_attempt_id TEXT, worker_attempt_id TEXT, worker_pid INTEGER, worker_started_at REAL, worker_role TEXT, worker_start_identity TEXT, status TEXT)")
+conn.execute("INSERT INTO jobs (run_id, latest_attempt_id, worker_attempt_id, "
+                  "worker_pid, worker_started_at, worker_role, "
+                  "worker_start_identity, status) "
+                  "VALUES (?,?,?,?,?,?,?,?)",
+    (run_id, "pass-0001", "pass-0001", os.getpid(), time.time(), "builder",
+     _TEST_WSID, "RUNNING"))
+conn.execute("CREATE TABLE semantic_attempts (attempt_id TEXT PRIMARY KEY, job_id INTEGER NOT NULL, role TEXT NOT NULL, status TEXT NOT NULL, started_at REAL NOT NULL, completed_at REAL, worker_pid INTEGER, stdout_path TEXT NOT NULL, stderr_path TEXT NOT NULL, returncode INTEGER, cost_usd REAL NOT NULL DEFAULT 0, cost_accounted INTEGER NOT NULL DEFAULT 0, input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0, cache_read_tokens INTEGER NOT NULL DEFAULT 0, cache_creation_tokens INTEGER NOT NULL DEFAULT 0, tokens_known INTEGER NOT NULL DEFAULT 0, cost_known INTEGER NOT NULL DEFAULT 1, failure_class TEXT, failure_reason TEXT)")
+conn.execute("INSERT INTO semantic_attempts(attempt_id, job_id, role, status, started_at, stdout_path, stderr_path) VALUES (?,?,?,?,?,?,?)",
+    ("pass-0001", 1, "builder", "RUNNING", time.time() - 1, "/dev/null", "/dev/null"))
 conn.commit()
 conn.close()
 
@@ -1513,9 +1581,16 @@ requests_dir = tmp_ev / run_id / "requests"
 requests_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
 db_path = tmp_ev / "jobs.db"
 conn = sqlite3.connect(str(db_path))
-conn.execute("CREATE TABLE jobs (run_id TEXT PRIMARY KEY, latest_attempt_id TEXT, worker_pid INTEGER, worker_started_at REAL, worker_role TEXT, status TEXT)")
-conn.execute("INSERT INTO jobs VALUES (?,?,?,?,?,?)",
-    (run_id, "pass-0001", os.getpid(), time.time(), "builder", "RUNNING"))
+conn.execute("CREATE TABLE jobs (id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL UNIQUE, latest_attempt_id TEXT, worker_attempt_id TEXT, worker_pid INTEGER, worker_started_at REAL, worker_role TEXT, worker_start_identity TEXT, status TEXT)")
+conn.execute("INSERT INTO jobs (run_id, latest_attempt_id, worker_attempt_id, "
+                  "worker_pid, worker_started_at, worker_role, "
+                  "worker_start_identity, status) "
+                  "VALUES (?,?,?,?,?,?,?,?)",
+    (run_id, "pass-0001", "pass-0001", os.getpid(), time.time(), "builder",
+     _TEST_WSID, "RUNNING"))
+conn.execute("CREATE TABLE semantic_attempts (attempt_id TEXT PRIMARY KEY, job_id INTEGER NOT NULL, role TEXT NOT NULL, status TEXT NOT NULL, started_at REAL NOT NULL, completed_at REAL, worker_pid INTEGER, stdout_path TEXT NOT NULL, stderr_path TEXT NOT NULL, returncode INTEGER, cost_usd REAL NOT NULL DEFAULT 0, cost_accounted INTEGER NOT NULL DEFAULT 0, input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0, cache_read_tokens INTEGER NOT NULL DEFAULT 0, cache_creation_tokens INTEGER NOT NULL DEFAULT 0, tokens_known INTEGER NOT NULL DEFAULT 0, cost_known INTEGER NOT NULL DEFAULT 1, failure_class TEXT, failure_reason TEXT)")
+conn.execute("INSERT INTO semantic_attempts(attempt_id, job_id, role, status, started_at, stdout_path, stderr_path) VALUES (?,?,?,?,?,?,?)",
+    ("pass-0001", 1, "builder", "RUNNING", time.time() - 1, "/dev/null", "/dev/null"))
 conn.commit()
 conn.close()
 
@@ -1655,9 +1730,13 @@ try:
     sr_mod._capability_resolution_has_research_public = lambda *a, **kw: True
     db_path = tmp_ev / "jobs.db"
     conn = sqlite3.connect(str(db_path))
-    conn.execute("CREATE TABLE jobs (run_id TEXT PRIMARY KEY, latest_attempt_id TEXT, worker_pid INTEGER, worker_started_at REAL, worker_role TEXT, status TEXT)")
-    conn.execute("INSERT INTO jobs VALUES (?,?,?,?,?,?)",
-        (run_id, "pass-0001", os.getpid(), time.time(), "builder", "RUNNING"))
+    conn.execute("CREATE TABLE jobs (id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL UNIQUE, latest_attempt_id TEXT, worker_attempt_id TEXT, worker_pid INTEGER, worker_started_at REAL, worker_role TEXT, worker_start_identity TEXT, status TEXT)")
+    conn.execute("INSERT INTO jobs (run_id, latest_attempt_id, worker_attempt_id, "
+                  "worker_pid, worker_started_at, worker_role, "
+                  "worker_start_identity, status) "
+                  "VALUES (?,?,?,?,?,?,?,?)",
+        (run_id, "pass-0001", "pass-0001", os.getpid(), time.time(), "builder",
+         _TEST_WSID, "RUNNING"))
     conn.commit()
     conn.close()
     req_id = str(_uuid.uuid4())
@@ -1755,9 +1834,16 @@ sr_mod._broker_commissioning_identity = lambda: {"path": "/bin/true", "sha256": 
 sr_mod._capability_resolution_has_research_public = lambda *a, **kw: True
 db_path = tmp_ev / "jobs.db"
 conn = sqlite3.connect(str(db_path))
-conn.execute("CREATE TABLE jobs (run_id TEXT PRIMARY KEY, latest_attempt_id TEXT, worker_pid INTEGER, worker_started_at REAL, worker_role TEXT, status TEXT)")
-conn.execute("INSERT INTO jobs VALUES (?,?,?,?,?,?)",
-    (run_id, "pass-0001", os.getpid(), time.time(), "builder", "RUNNING"))
+conn.execute("CREATE TABLE jobs (id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL UNIQUE, latest_attempt_id TEXT, worker_attempt_id TEXT, worker_pid INTEGER, worker_started_at REAL, worker_role TEXT, worker_start_identity TEXT, status TEXT)")
+conn.execute("INSERT INTO jobs (run_id, latest_attempt_id, worker_attempt_id, "
+                  "worker_pid, worker_started_at, worker_role, "
+                  "worker_start_identity, status) "
+                  "VALUES (?,?,?,?,?,?,?,?)",
+    (run_id, "pass-0001", "pass-0001", os.getpid(), time.time(), "builder",
+     _TEST_WSID, "RUNNING"))
+conn.execute("CREATE TABLE semantic_attempts (attempt_id TEXT PRIMARY KEY, job_id INTEGER NOT NULL, role TEXT NOT NULL, status TEXT NOT NULL, started_at REAL NOT NULL, completed_at REAL, worker_pid INTEGER, stdout_path TEXT NOT NULL, stderr_path TEXT NOT NULL, returncode INTEGER, cost_usd REAL NOT NULL DEFAULT 0, cost_accounted INTEGER NOT NULL DEFAULT 0, input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0, cache_read_tokens INTEGER NOT NULL DEFAULT 0, cache_creation_tokens INTEGER NOT NULL DEFAULT 0, tokens_known INTEGER NOT NULL DEFAULT 0, cost_known INTEGER NOT NULL DEFAULT 1, failure_class TEXT, failure_reason TEXT)")
+conn.execute("INSERT INTO semantic_attempts(attempt_id, job_id, role, status, started_at, stdout_path, stderr_path) VALUES (?,?,?,?,?,?,?)",
+    ("pass-0001", 1, "builder", "RUNNING", time.time() - 1, "/dev/null", "/dev/null"))
 conn.commit()
 conn.close()
 try:
@@ -1825,9 +1911,10 @@ def fresh_db(run_id, latest_attempt, status, role):
     conn.row_factory = sqlite3.Row
     conn.execute(
         "CREATE TABLE jobs ("
-        "id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL, "
-        "latest_attempt_id TEXT NOT NULL, worker_pid INTEGER, "
-        "worker_started_at REAL, worker_role TEXT, status TEXT)"
+        "id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL UNIQUE, "
+        "latest_attempt_id TEXT NOT NULL, worker_attempt_id TEXT, "
+        "worker_pid INTEGER, worker_started_at REAL, worker_role TEXT, "
+        "worker_start_identity TEXT, status TEXT)"
     )
     # attempt_id_only column is referenced from the watchdog's
     # progress-watchdog tick; recover_claims itself does not need
@@ -1835,11 +1922,52 @@ def fresh_db(run_id, latest_attempt, status, role):
     # downstream do.
     pid = os.getpid() if status == "RUNNING" else None
     started = time.time() if pid else None
+    # Canonical live-attempt predicate requires exact
+    # worker_attempt_id match AND exact recorded process identity.
+    # Read the live identity at insertion time so the row passes
+    # _prove_live_semantic_attempt_authority's strict chain.
+    if pid:
+        from ownframework_loop import supervisor_process as _sp
+        wsid = _sp._read_pid_start_identity(pid) or ""
+    else:
+        wsid = ""
     conn.execute(
-        "INSERT INTO jobs (run_id, latest_attempt_id, worker_pid, "
-        "worker_started_at, worker_role, status) "
-        "VALUES (?, ?, ?, ?, ?, ?)",
-        (run_id, latest_attempt, pid, started, role, status),
+        "INSERT INTO jobs (run_id, latest_attempt_id, worker_attempt_id, "
+        "worker_pid, worker_started_at, worker_role, "
+        "worker_start_identity, status) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (run_id, latest_attempt, latest_attempt, pid, started, role, wsid, status),
+    )
+    # Canonical research live-attempt predicate also checks the
+    # semantic_attempts row keyed by (jobs.id, attempt_id). For
+    # status != 'RUNNING' we still create a terminal shape so the
+    # predicate can refuse on the strongest evidence (the canonical
+    # attempt lifecycle status).
+    conn.execute(
+        "CREATE TABLE semantic_attempts ("
+        "attempt_id TEXT PRIMARY KEY, job_id INTEGER NOT NULL, "
+        "role TEXT NOT NULL, status TEXT NOT NULL, started_at REAL NOT NULL, "
+        "completed_at REAL, worker_pid INTEGER, "
+        "stdout_path TEXT NOT NULL, stderr_path TEXT NOT NULL, "
+        "returncode INTEGER, cost_usd REAL NOT NULL DEFAULT 0, "
+        "cost_accounted INTEGER NOT NULL DEFAULT 0, "
+        "input_tokens INTEGER NOT NULL DEFAULT 0, "
+        "output_tokens INTEGER NOT NULL DEFAULT 0, "
+        "cache_read_tokens INTEGER NOT NULL DEFAULT 0, "
+        "cache_creation_tokens INTEGER NOT NULL DEFAULT 0, "
+        "tokens_known INTEGER NOT NULL DEFAULT 0, "
+        "cost_known INTEGER NOT NULL DEFAULT 1, "
+        "failure_class TEXT, failure_reason TEXT)"
+    )
+    sa_status = "RUNNING" if status == "RUNNING" else "FAILED"
+    sa_completed = None if status == "RUNNING" else time.time()
+    sa_started = started if started is not None else (time.time() - 1)
+    conn.execute(
+        "INSERT INTO semantic_attempts(attempt_id, job_id, role, status, "
+        "started_at, completed_at, stdout_path, stderr_path) "
+        "VALUES (?,?,?,?,?,?,?,?)",
+        (latest_attempt, 1, role or "", sa_status, sa_started, sa_completed,
+         "/dev/null", "/dev/null"),
     )
     conn.commit()
     conn.close()
@@ -2105,6 +2233,10 @@ try:
     check("RECOVERED_COMPLETION: 1 redispatch",
           s["redispatched"] == 1,
           f"summary: {s}")
+    # Allow the bounded executor's worker thread to finish the
+    # stub broker before reaping; the canonical finalize path
+    # operates on whatever futures are `done` at reap time.
+    time.sleep(0.2)
     # Drain via the canonical finalize path.
     reg = sr_mod._registry_for_tests()
     reg_size_before = len(reg)
@@ -2355,6 +2487,951 @@ if FAIL:
 print(f"\nAll {len(PASS)} recovery-closure behavioral tests passed.")
 PY
 expect "section 13 research-recovery bounded closure" "$?" "0"
+
+# -------------------------------------------------------------------- #
+# Section 14: pass-2 adversarial suites                                #
+# -------------------------------------------------------------------- #
+section "14. pass-2 adversarial suites — canonical authority + crash window + transient shared semantics + exception safety"
+REPO_ROOT_ABS="${REPO_ROOT}" SUPERVISOR_DB_PATH="/tmp/ofloop-pass2-supervisor-$$.sqlite3" python3 - <<'PY'
+"""Pass-2 adversarial suites targeting the four remaining A/B defects:
+  1. ONE exact live-semantic-attempt authority owner
+  2. AlreadyInFlight must NEVER poison the canonical response
+  3. ONE rate-limit + DB authority context between normal and recovery
+  4. progress_stalled finite retry authority sharing transient semantics
+  5. Pre-transport admission must roll back on EVERY pre-launch failure
+"""
+import os, sys, json, sqlite3, uuid, time, shutil, tempfile, threading
+from pathlib import Path
+
+sys.path.insert(0, os.environ['REPO_ROOT_ABS'] + "/lib")
+from ownframework_loop import supervisor_research as sr
+from ownframework_loop import supervisor_recovery as svrec
+from ownframework_loop import supervisor_process as sp
+
+PASS, FAIL = [], []
+def check(name, cond, detail=""):
+    if cond:
+        PASS.append(name); print(f"PASS {name}")
+    else:
+        FAIL.append((name, detail)); print(f"FAIL {name} {detail}")
+
+# ----------------------------------------------------------------- #
+# 14.1 — Stale attempt_id must refuse (attempt_stale)              #
+# ----------------------------------------------------------------- #
+import hashlib as _hashlib
+db_path = "/tmp/ofloop-pass2-stale-attempt-$$.sqlite3"
+if os.path.exists(db_path): os.unlink(db_path)
+conn = sqlite3.connect(db_path)
+conn.row_factory = sqlite3.Row
+conn.executescript("""
+CREATE TABLE jobs (id INTEGER PRIMARY KEY AUTOINCREMENT,
+  run_id TEXT NOT NULL UNIQUE, latest_attempt_id TEXT NOT NULL,
+  worker_attempt_id TEXT, worker_pid INTEGER, worker_started_at REAL,
+  worker_role TEXT, worker_start_identity TEXT, status TEXT);
+CREATE TABLE semantic_attempts (attempt_id TEXT PRIMARY KEY,
+  job_id INTEGER NOT NULL, role TEXT NOT NULL, status TEXT NOT NULL,
+  started_at REAL NOT NULL, completed_at REAL, worker_pid INTEGER,
+  stdout_path TEXT NOT NULL, stderr_path TEXT NOT NULL,
+  returncode INTEGER, cost_usd REAL, cost_accounted INTEGER,
+  input_tokens INTEGER, output_tokens INTEGER, cache_read_tokens INTEGER,
+  cache_creation_tokens INTEGER, tokens_known INTEGER, cost_known INTEGER,
+  failure_class TEXT, failure_reason TEXT);
+""")
+wsid = sp._read_pid_start_identity(os.getpid()) or ""
+conn.execute(
+    "INSERT INTO jobs (run_id, latest_attempt_id, worker_attempt_id, "
+    "worker_pid, worker_started_at, worker_role, worker_start_identity, status) "
+    "VALUES (?,?,?,?,?,?,?,?)",
+    ("run-stale", "attempt-B", "attempt-B", os.getpid(), time.time(),
+     "builder", wsid, "RUNNING"),
+)
+conn.execute(
+    "INSERT INTO semantic_attempts(attempt_id, job_id, role, status, "
+    "started_at, stdout_path, stderr_path) VALUES (?,?,?,?,?,?,?)",
+    ("attempt-B", 1, "builder", "RUNNING", time.time(), "/dev/null", "/dev/null"),
+)
+conn.commit()
+ok, reason = sr._prove_live_semantic_attempt_authority(
+    conn, run_id="run-stale", attempt_id="attempt-A", role="builder",
+)
+check("STALE_ATTEMPT: refused with attempt_stale",
+      ok is False and reason == "attempt_stale", f"got ok={ok} reason={reason}")
+conn.close(); os.unlink(db_path)
+
+# ----------------------------------------------------------------- #
+# 14.2 — Worker attempt mismatch must refuse                        #
+# ----------------------------------------------------------------- #
+db_path = "/tmp/ofloop-pass2-wa-mismatch-$$.sqlite3"
+if os.path.exists(db_path): os.unlink(db_path)
+conn = sqlite3.connect(db_path)
+conn.row_factory = sqlite3.Row
+conn.executescript("""
+CREATE TABLE jobs (id INTEGER PRIMARY KEY AUTOINCREMENT,
+  run_id TEXT NOT NULL UNIQUE, latest_attempt_id TEXT NOT NULL,
+  worker_attempt_id TEXT, worker_pid INTEGER, worker_started_at REAL,
+  worker_role TEXT, worker_start_identity TEXT, status TEXT);
+CREATE TABLE semantic_attempts (attempt_id TEXT PRIMARY KEY,
+  job_id INTEGER NOT NULL, role TEXT NOT NULL, status TEXT NOT NULL,
+  started_at REAL NOT NULL, completed_at REAL, worker_pid INTEGER,
+  stdout_path TEXT NOT NULL, stderr_path TEXT NOT NULL,
+  returncode INTEGER, cost_usd REAL, cost_accounted INTEGER,
+  input_tokens INTEGER, output_tokens INTEGER, cache_read_tokens INTEGER,
+  cache_creation_tokens INTEGER, tokens_known INTEGER, cost_known INTEGER,
+  failure_class TEXT, failure_reason TEXT);
+""")
+wsid = sp._read_pid_start_identity(os.getpid()) or ""
+conn.execute(
+    "INSERT INTO jobs (run_id, latest_attempt_id, worker_attempt_id, "
+    "worker_pid, worker_started_at, worker_role, worker_start_identity, status) "
+    "VALUES (?,?,?,?,?,?,?,?)",
+    ("run-wa", "attempt-B", "attempt-C", os.getpid(), time.time(),
+     "builder", wsid, "RUNNING"),
+)
+conn.execute(
+    "INSERT INTO semantic_attempts(attempt_id, job_id, role, status, "
+    "started_at, stdout_path, stderr_path) VALUES (?,?,?,?,?,?,?)",
+    ("attempt-B", 1, "builder", "RUNNING", time.time(), "/dev/null", "/dev/null"),
+)
+conn.commit()
+ok, reason = sr._prove_live_semantic_attempt_authority(
+    conn, run_id="run-wa", attempt_id="attempt-B", role="builder",
+)
+check("WORKER_ATTEMPT_MISMATCH: refused",
+      ok is False and reason == "worker_attempt_mismatch",
+      f"got ok={ok} reason={reason}")
+conn.close(); os.unlink(db_path)
+
+# ----------------------------------------------------------------- #
+# 14.3 — Empty worker_role must refuse                             #
+# ----------------------------------------------------------------- #
+db_path = "/tmp/ofloop-pass2-empty-role-$$.sqlite3"
+if os.path.exists(db_path): os.unlink(db_path)
+conn = sqlite3.connect(db_path)
+conn.row_factory = sqlite3.Row
+conn.executescript("""
+CREATE TABLE jobs (id INTEGER PRIMARY KEY AUTOINCREMENT,
+  run_id TEXT NOT NULL UNIQUE, latest_attempt_id TEXT NOT NULL,
+  worker_attempt_id TEXT, worker_pid INTEGER, worker_started_at REAL,
+  worker_role TEXT, worker_start_identity TEXT, status TEXT);
+CREATE TABLE semantic_attempts (attempt_id TEXT PRIMARY KEY,
+  job_id INTEGER NOT NULL, role TEXT NOT NULL, status TEXT NOT NULL,
+  started_at REAL NOT NULL, completed_at REAL, worker_pid INTEGER,
+  stdout_path TEXT NOT NULL, stderr_path TEXT NOT NULL,
+  returncode INTEGER, cost_usd REAL, cost_accounted INTEGER,
+  input_tokens INTEGER, output_tokens INTEGER, cache_read_tokens INTEGER,
+  cache_creation_tokens INTEGER, tokens_known INTEGER, cost_known INTEGER,
+  failure_class TEXT, failure_reason TEXT);
+""")
+conn.execute(
+    "INSERT INTO jobs (run_id, latest_attempt_id, worker_attempt_id, "
+    "worker_pid, worker_started_at, worker_role, worker_start_identity, status) "
+    "VALUES (?,?,?,?,?,?,?,?)",
+    ("run-empty-role", "attempt-A", "attempt-A", os.getpid(), time.time(),
+     "", wsid, "RUNNING"),
+)
+conn.execute(
+    "INSERT INTO semantic_attempts(attempt_id, job_id, role, status, "
+    "started_at, stdout_path, stderr_path) VALUES (?,?,?,?,?,?,?)",
+    ("attempt-A", 1, "builder", "RUNNING", time.time(), "/dev/null", "/dev/null"),
+)
+conn.commit()
+ok, reason = sr._prove_live_semantic_attempt_authority(
+    conn, run_id="run-empty-role", attempt_id="attempt-A", role="builder",
+)
+check("EMPTY_ROLE: refused with role_mismatch",
+      ok is False and reason == "role_mismatch",
+      f"got ok={ok} reason={reason}")
+conn.close(); os.unlink(db_path)
+
+# ----------------------------------------------------------------- #
+# 14.4 — Status BACKOFF (not RUNNING) must refuse with job_not_running #
+# ----------------------------------------------------------------- #
+db_path = "/tmp/ofloop-pass2-backoff-$$.sqlite3"
+if os.path.exists(db_path): os.unlink(db_path)
+conn = sqlite3.connect(db_path)
+conn.row_factory = sqlite3.Row
+conn.executescript("""
+CREATE TABLE jobs (id INTEGER PRIMARY KEY AUTOINCREMENT,
+  run_id TEXT NOT NULL UNIQUE, latest_attempt_id TEXT NOT NULL,
+  worker_attempt_id TEXT, worker_pid INTEGER, worker_started_at REAL,
+  worker_role TEXT, worker_start_identity TEXT, status TEXT);
+CREATE TABLE semantic_attempts (attempt_id TEXT PRIMARY KEY,
+  job_id INTEGER NOT NULL, role TEXT NOT NULL, status TEXT NOT NULL,
+  started_at REAL NOT NULL, completed_at REAL, worker_pid INTEGER,
+  stdout_path TEXT NOT NULL, stderr_path TEXT NOT NULL,
+  returncode INTEGER, cost_usd REAL, cost_accounted INTEGER,
+  input_tokens INTEGER, output_tokens INTEGER, cache_read_tokens INTEGER,
+  cache_creation_tokens INTEGER, tokens_known INTEGER, cost_known INTEGER,
+  failure_class TEXT, failure_reason TEXT);
+""")
+wsid = sp._read_pid_start_identity(os.getpid()) or ""
+conn.execute(
+    "INSERT INTO jobs (run_id, latest_attempt_id, worker_attempt_id, "
+    "worker_pid, worker_started_at, worker_role, worker_start_identity, status) "
+    "VALUES (?,?,?,?,?,?,?,?)",
+    ("run-backoff", "attempt-A", "attempt-A", os.getpid(), time.time(),
+     "builder", wsid, "BACKOFF"),
+)
+conn.execute(
+    "INSERT INTO semantic_attempts(attempt_id, job_id, role, status, "
+    "started_at, completed_at, stdout_path, stderr_path) VALUES (?,?,?,?,?,?,?,?)",
+    ("attempt-A", 1, "builder", "FAILED", time.time() - 5, time.time(),
+     "/dev/null", "/dev/null"),
+)
+conn.commit()
+ok, reason = sr._prove_live_semantic_attempt_authority(
+    conn, run_id="run-backoff", attempt_id="attempt-A", role="builder",
+)
+check("STATUS_BACKOFF: refused with job_not_running",
+      ok is False and reason == "job_not_running",
+      f"got ok={ok} reason={reason}")
+conn.close(); os.unlink(db_path)
+
+# ----------------------------------------------------------------- #
+# 14.5 — Status QUEUED must refuse                                  #
+# ----------------------------------------------------------------- #
+db_path = "/tmp/ofloop-pass2-queued-$$.sqlite3"
+if os.path.exists(db_path): os.unlink(db_path)
+conn = sqlite3.connect(db_path)
+conn.row_factory = sqlite3.Row
+conn.executescript("""
+CREATE TABLE jobs (id INTEGER PRIMARY KEY AUTOINCREMENT,
+  run_id TEXT NOT NULL UNIQUE, latest_attempt_id TEXT NOT NULL,
+  worker_attempt_id TEXT, worker_pid INTEGER, worker_started_at REAL,
+  worker_role TEXT, worker_start_identity TEXT, status TEXT);
+CREATE TABLE semantic_attempts (attempt_id TEXT PRIMARY KEY,
+  job_id INTEGER NOT NULL, role TEXT NOT NULL, status TEXT NOT NULL,
+  started_at REAL NOT NULL, completed_at REAL, worker_pid INTEGER,
+  stdout_path TEXT NOT NULL, stderr_path TEXT NOT NULL,
+  returncode INTEGER, cost_usd REAL, cost_accounted INTEGER,
+  input_tokens INTEGER, output_tokens INTEGER, cache_read_tokens INTEGER,
+  cache_creation_tokens INTEGER, tokens_known INTEGER, cost_known INTEGER,
+  failure_class TEXT, failure_reason TEXT);
+""")
+wsid = sp._read_pid_start_identity(os.getpid()) or ""
+conn.execute(
+    "INSERT INTO jobs (run_id, latest_attempt_id, worker_attempt_id, "
+    "worker_pid, worker_started_at, worker_role, worker_start_identity, status) "
+    "VALUES (?,?,?,?,?,?,?,?)",
+    ("run-queued", "attempt-A", "attempt-A", os.getpid(), time.time(),
+     "builder", wsid, "QUEUED"),
+)
+conn.execute(
+    "INSERT INTO semantic_attempts(attempt_id, job_id, role, status, "
+    "started_at, completed_at, stdout_path, stderr_path) VALUES (?,?,?,?,?,?,?,?)",
+    ("attempt-A", 1, "builder", "FAILED", time.time() - 5, time.time(),
+     "/dev/null", "/dev/null"),
+)
+conn.commit()
+ok, reason = sr._prove_live_semantic_attempt_authority(
+    conn, run_id="run-queued", attempt_id="attempt-A", role="builder",
+)
+check("STATUS_QUEUED: refused with job_not_running",
+      ok is False and reason == "job_not_running",
+      f"got ok={ok} reason={reason}")
+conn.close(); os.unlink(db_path)
+
+# ----------------------------------------------------------------- #
+# 14.6 — process_identity_mismatch when wsid differs                #
+# ----------------------------------------------------------------- #
+db_path = "/tmp/ofloop-pass2-wsid-mismatch-$$.sqlite3"
+if os.path.exists(db_path): os.unlink(db_path)
+conn = sqlite3.connect(db_path)
+conn.row_factory = sqlite3.Row
+conn.executescript("""
+CREATE TABLE jobs (id INTEGER PRIMARY KEY AUTOINCREMENT,
+  run_id TEXT NOT NULL UNIQUE, latest_attempt_id TEXT NOT NULL,
+  worker_attempt_id TEXT, worker_pid INTEGER, worker_started_at REAL,
+  worker_role TEXT, worker_start_identity TEXT, status TEXT);
+CREATE TABLE semantic_attempts (attempt_id TEXT PRIMARY KEY,
+  job_id INTEGER NOT NULL, role TEXT NOT NULL, status TEXT NOT NULL,
+  started_at REAL NOT NULL, completed_at REAL, worker_pid INTEGER,
+  stdout_path TEXT NOT NULL, stderr_path TEXT NOT NULL,
+  returncode INTEGER, cost_usd REAL, cost_accounted INTEGER,
+  input_tokens INTEGER, output_tokens INTEGER, cache_read_tokens INTEGER,
+  cache_creation_tokens INTEGER, tokens_known INTEGER, cost_known INTEGER,
+  failure_class TEXT, failure_reason TEXT);
+""")
+wsid_actual = sp._read_pid_start_identity(os.getpid()) or ""
+# Use a DIFFERENT wsid to force the identity mismatch path.
+conn.execute(
+    "INSERT INTO jobs (run_id, latest_attempt_id, worker_attempt_id, "
+    "worker_pid, worker_started_at, worker_role, worker_start_identity, status) "
+    "VALUES (?,?,?,?,?,?,?,?)",
+    ("run-wsid-mismatch", "attempt-A", "attempt-A", os.getpid(), time.time(),
+     "builder", "deliberately-wrong-identity", "RUNNING"),
+)
+conn.execute(
+    "INSERT INTO semantic_attempts(attempt_id, job_id, role, status, "
+    "started_at, stdout_path, stderr_path) VALUES (?,?,?,?,?,?,?)",
+    ("attempt-A", 1, "builder", "RUNNING", time.time(), "/dev/null", "/dev/null"),
+)
+conn.commit()
+ok, reason = sr._prove_live_semantic_attempt_authority(
+    conn, run_id="run-wsid-mismatch", attempt_id="attempt-A", role="builder",
+)
+check("PROCESS_IDENTITY_MISMATCH: refused",
+      ok is False and reason in ("process_identity_mismatch", "worker_not_alive"),
+      f"got ok={ok} reason={reason}")
+conn.close(); os.unlink(db_path)
+
+# ----------------------------------------------------------------- #
+# 14.7 — semantic_attempt_not_current when attempt status FAILED    #
+# ----------------------------------------------------------------- #
+db_path = "/tmp/ofloop-pass2-sa-terminal-$$.sqlite3"
+if os.path.exists(db_path): os.unlink(db_path)
+conn = sqlite3.connect(db_path)
+conn.row_factory = sqlite3.Row
+conn.executescript("""
+CREATE TABLE jobs (id INTEGER PRIMARY KEY AUTOINCREMENT,
+  run_id TEXT NOT NULL UNIQUE, latest_attempt_id TEXT NOT NULL,
+  worker_attempt_id TEXT, worker_pid INTEGER, worker_started_at REAL,
+  worker_role TEXT, worker_start_identity TEXT, status TEXT);
+CREATE TABLE semantic_attempts (attempt_id TEXT PRIMARY KEY,
+  job_id INTEGER NOT NULL, role TEXT NOT NULL, status TEXT NOT NULL,
+  started_at REAL NOT NULL, completed_at REAL, worker_pid INTEGER,
+  stdout_path TEXT NOT NULL, stderr_path TEXT NOT NULL,
+  returncode INTEGER, cost_usd REAL, cost_accounted INTEGER,
+  input_tokens INTEGER, output_tokens INTEGER, cache_read_tokens INTEGER,
+  cache_creation_tokens INTEGER, tokens_known INTEGER, cost_known INTEGER,
+  failure_class TEXT, failure_reason TEXT);
+""")
+wsid = sp._read_pid_start_identity(os.getpid()) or ""
+conn.execute(
+    "INSERT INTO jobs (run_id, latest_attempt_id, worker_attempt_id, "
+    "worker_pid, worker_started_at, worker_role, worker_start_identity, status) "
+    "VALUES (?,?,?,?,?,?,?,?)",
+    ("run-sa-terminal", "attempt-A", "attempt-A", os.getpid(), time.time(),
+     "builder", wsid, "RUNNING"),
+)
+# The jobs.status is RUNNING but the underlying semantic_attempts
+# is already FAILED — this is the "run claims to be live but its
+# attempt row is terminal" fault that the brief requires refusing.
+conn.execute(
+    "INSERT INTO semantic_attempts(attempt_id, job_id, role, status, "
+    "started_at, completed_at, stdout_path, stderr_path) "
+    "VALUES (?,?,?,?,?,?,?,?)",
+    ("attempt-A", 1, "builder", "FAILED", time.time() - 5, time.time(),
+     "/dev/null", "/dev/null"),
+)
+conn.commit()
+ok, reason = sr._prove_live_semantic_attempt_authority(
+    conn, run_id="run-sa-terminal", attempt_id="attempt-A", role="builder",
+)
+check("SEMANTIC_ATTEMPT_NOT_CURRENT: refused",
+      ok is False and reason == "semantic_attempt_not_current",
+      f"got ok={ok} reason={reason}")
+conn.close(); os.unlink(db_path)
+
+# ----------------------------------------------------------------- #
+# 14.8 — CRASH WINDOW: claim + leftover inbox → exactly ONE response  #
+# ----------------------------------------------------------------- #
+# Scenario:
+#   - supervisor dies after admit but before inbox unlink
+#   - restart: recover_claims re-admits same request_id
+#   - same tick's process_research_queue consumes the leftover inbox
+#   - the in-flight registry already owns the key (the recovery transport)
+#   - the SECOND attempt at admission gets REFUSED_ALREADY_IN_FLIGHT
+#   - the admission MUST drop the inbox file WITHOUT writing a response
+#   - the existing in-flight owner alone publishes the canonical response
+db_path = "/tmp/ofloop-pass2-crash-window-$$.sqlite3"
+if os.path.exists(db_path): os.unlink(db_path)
+conn = sqlite3.connect(db_path)
+conn.row_factory = sqlite3.Row
+conn.executescript("""
+CREATE TABLE jobs (id INTEGER PRIMARY KEY AUTOINCREMENT,
+  run_id TEXT NOT NULL UNIQUE, latest_attempt_id TEXT NOT NULL,
+  worker_attempt_id TEXT, worker_pid INTEGER, worker_started_at REAL,
+  worker_role TEXT, worker_start_identity TEXT, status TEXT);
+CREATE TABLE semantic_attempts (attempt_id TEXT PRIMARY KEY,
+  job_id INTEGER NOT NULL, role TEXT NOT NULL, status TEXT NOT NULL,
+  started_at REAL NOT NULL, completed_at REAL, worker_pid INTEGER,
+  stdout_path TEXT NOT NULL, stderr_path TEXT NOT NULL,
+  returncode INTEGER, cost_usd REAL, cost_accounted INTEGER,
+  input_tokens INTEGER, output_tokens INTEGER, cache_read_tokens INTEGER,
+  cache_creation_tokens INTEGER, tokens_known INTEGER, cost_known INTEGER,
+  failure_class TEXT, failure_reason TEXT);
+""")
+wsid = sp._read_pid_start_identity(os.getpid()) or ""
+crash_run = "run-20260923T133000Z-abcd1234"
+conn.execute(
+    "INSERT INTO jobs (run_id, latest_attempt_id, worker_attempt_id, "
+    "worker_pid, worker_started_at, worker_role, worker_start_identity, status) "
+    "VALUES (?,?,?,?,?,?,?,?)",
+    (crash_run, "pass-0001", "pass-0001", os.getpid(), time.time(),
+     "builder", wsid, "RUNNING"),
+)
+conn.execute(
+    "INSERT INTO semantic_attempts(attempt_id, job_id, role, status, "
+    "started_at, stdout_path, stderr_path) VALUES (?,?,?,?,?,?,?)",
+    ("pass-0001", 1, "builder", "RUNNING", time.time(), "/dev/null", "/dev/null"),
+)
+conn.commit()
+os.environ["OFLOOP_SUPERVISOR_DB"] = db_path
+os.environ["OFLOOP_RESEARCH_REQUESTS"] = ""
+os.environ["OFLOOP_RESEARCH_RESPONSES"] = ""
+
+# Set up the evidence root with the crash window's prior state.
+ev = Path(tempfile.mkdtemp(prefix="ofloop-crash-window-"))
+os.environ["OFLOOP_RESEARCH_EVIDENCE_ROOT"] = str(ev)
+claims_dir = ev / crash_run / "claims"; claims_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+requests_dir_inbox = ev / crash_run / "requests"; requests_dir_inbox.mkdir(parents=True, exist_ok=True, mode=0o700)
+responses_dir = ev / crash_run / "responses"; responses_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+launches_dir = ev / crash_run / "launches"; launches_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+
+req_id = str(uuid.uuid4())
+# Compute the supervisor-authoritative digest from the canonical
+# projection of the inbox body. This MUST match the held entry's
+# request_digest below — both the recovery path and the queue
+# path key the in-flight registry on (run_id, request_id,
+# request_digest), and we want them to collide to prove the
+# crash-window refuse-orphan path.
+_canon_for_digest = {
+    "schema": "ownframework-loop-research-request/v1",
+    "request_id": req_id, "run_id": crash_run,
+    "attempt_id": "pass-0001", "role": "builder",
+    "op": "read", "url": "https://example.invalid/",
+    "query": None, "max_bytes": 1024,
+}
+_canon_bytes = json.dumps(
+    _canon_for_digest, sort_keys=True, ensure_ascii=True,
+    separators=(",", ":"),
+).encode("utf-8")
+req_digest = _hashlib.sha256(_canon_bytes).hexdigest()
+
+# Stage the persisted claim (the pre-crash gate).
+claim = {
+    "schema": "ownframework-loop-research-claim/v1",
+    "run_id": crash_run, "request_id": req_id, "request_digest": req_digest,
+    "attempt_id": "pass-0001", "role": "builder",
+    "op": "read", "url": "https://example.invalid/",
+    "max_bytes": 1024, "operator": "test",
+    "submitted_at": time.time(),
+}
+(claims_dir / f"claim-{req_id}.json").write_text(json.dumps(claim) + "\n")
+
+# Stage the leftover inbox file (the post-crash inbox residue).
+inbox_body = {
+    "schema": "ownframework-loop-research-request/v1",
+    "request_id": req_id, "run_id": crash_run,
+    "attempt_id": "pass-0001", "role": "builder",
+    "op": "read", "url": "https://example.invalid/",
+    "max_bytes": 1024, "requested_at": "2026-09-23T13:30:00Z",
+}
+(requests_dir_inbox / f"req-{req_id}.json").write_text(json.dumps(inbox_body) + "\n")
+
+# Stub the broker to simulate a slow recovery GET that hasn't
+# finished yet. We then let the canonical finalize path publish the
+# single response.
+from ownframework_loop import supervisor_research as sr_mod
+broker_calls = [0]
+crash_future_holder = {}
+class _HeldFuture:
+    def __init__(self):
+        self._done = False
+    def done(self):
+        return self._done
+    def result(self, timeout=None):
+        import concurrent.futures as _cf
+        if not self._done:
+            raise _cf.TimeoutError()
+        return {"ok": True, "op_id": "slow-1",
+                "search_backend": "wikipedia", "results": [],
+                "results_count": 0, "status_code": 200,
+                "response_bytes": 0, "response_sha256": "0"*64,
+                "extracted_bytes": 0, "extracted_sha256": "0"*64,
+                "extracted_preview": "", "extracted_truncated": False,
+                "url_original": "stub://", "url_final": "stub://",
+                "redirect_chain": [], "title": ""}
+    def set_done(self):
+        self._done = True
+    def set_result(self, result=None):
+        self._done = True
+held_future = _HeldFuture()
+def slow_stub(*a, **kw):
+    broker_calls[0] += 1
+    return held_future.result()
+sr_mod._run_broker_blocking = slow_stub
+def stub_identity():
+    return {"path": "/bin/true", "sha256": "0"*64}
+sr_mod._broker_commissioning_identity = stub_identity
+sr_mod._capability_resolution_has_research_public = lambda *a, **kw: True
+
+# Pull the currently-installed registry and executor state and
+# drain every executor slot the prior tests may have reserved.
+# The crash-window scenario fixes the in-flight entry directly via
+# `insert_if_absent`, so the global executor's capacity MUST NOT
+# interfere with the in-flight duplicate detection.
+import ownframework_loop.supervisor_research as _sr_mod_test
+current_registry = _sr_mod_test._IN_FLIGHT
+current_executor = _sr_mod_test._get_executor()
+with current_registry._lock:
+    current_registry._entries.clear()
+while current_executor.in_flight() > 0:
+    current_executor.release()
+
+# Insert the recovery's in-flight entry directly into the registry
+# (mirroring exactly what `_admit_research_transport` would build,
+# but with a controlled held future so the canonical finalize path is
+# exercised deterministically). This sets up the exact race-window
+# state — a canonical owner exists; one orphan inbox file coexists.
+held_entry = _sr_mod_test._InFlightEntry(
+    run_id=crash_run, request_id=req_id,
+    request_digest=req_digest,
+    attempt_id="pass-0001", role="builder",
+    op="read", url="https://example.invalid/",
+    query=None,
+    max_bytes=1024, search_backend=None,
+    claim_path=_sr_mod_test._claim_marker_path(crash_run, req_id),
+    future=held_future, submitted_at=time.time(),
+    operator="supervisor-research-recovery",
+    launch_id=uuid.uuid4().hex,
+)
+inserted = current_registry.insert_if_absent(held_entry)
+check("CRASH_WINDOW: a single canonical owner occupies the registry",
+      inserted is held_entry and len(current_registry.all_keys()) == 1,
+      f"keys: {current_registry.all_keys()}")
+
+# Persist a launch- record for the recovery transport so the
+# rate-limit consumer (which counts ALL accepted launches in the
+# trailing window) sees the recovery launch as already counted —
+# the same-tick inbox drain MUST NOT mint a second launch record
+# (would double-count the rate-limit budget).
+_sr_mod_test._publish_launch_record(
+    run_id=crash_run, launch_id=held_entry.launch_id,
+    request_id=req_id, request_digest=req_digest,
+    attempt_id="pass-0001", role="builder",
+    op="read", url="https://example.invalid/",
+    query=None, max_bytes=1024, search_backend=None,
+    submitted_at=time.time(),
+)
+
+# Tick 1 (process_research_queue) consumes the inbox file. The
+# admission looks up the same (run_id, request_id, request_digest)
+# key in the registry and finds the existing in-flight owner. It
+# MUST be refused (REFUSED_ALREADY_IN_FLIGHT) WITHOUT writing to
+# the canonical response path or minting a second launch.
+result_tick = sr.process_research_queue(
+    db_path=Path(db_path),
+    canonical_repo=Path(ev),
+    run_id=crash_run,
+    rate_limit_per_minute=100,
+)
+check("CRASH_WINDOW: same-tick process_research_queue returns cleanly",
+      result_tick.get("deferred") is None,
+      f"result: {result_tick}")
+check("CRASH_WINDOW: the leftover inbox file was safely dropped",
+      not (requests_dir_inbox / f"req-{req_id}.json").exists(),
+      "inbox file still present — race was not drained")
+check("CRASH_WINDOW: refused-orphan path added no new broker call",
+      broker_calls == [0],
+      f"broker_calls={broker_calls}")
+check("CRASH_WINDOW: refused-orphan path did NOT mint a second launch",
+      len(list((ev / crash_run / "launches").glob("launch-*.json"))) == 1,
+      "a second launch record was minted for the refused duplicate")
+
+# Inspect the canonical response: it MUST be absent (the existing
+# in-flight owner is the one authoritative terminal publisher;
+# the response is not yet published because the slow GET is still
+# running).
+response_path = ev / crash_run / "responses" / f"resp-{req_id}.json"
+check("CRASH_WINDOW: NO canonical response published yet "
+      "(preserves the existing in-flight owner's right)",
+      not response_path.exists(),
+      f"unexpected response at {response_path}")
+
+# Now release the slow GET and let the canonical finalize path
+# publish EXACTLY ONE response.
+held_future.set_result({
+    "ok": True, "op_id": "slow-1",
+    "search_backend": "wikipedia", "results": [],
+    "results_count": 0, "status_code": 200,
+    "response_bytes": 0, "response_sha256": "0"*64,
+    "extracted_bytes": 0, "extracted_sha256": "0"*64,
+    "extracted_preview": "", "extracted_truncated": False,
+    "url_original": "stub://", "url_final": "stub://",
+    "redirect_chain": [], "title": "",
+})
+reaped = current_registry.reap_completed()
+res = _sr_mod_test._finalize_completed_entries(reaped)
+check("CRASH_WINDOW: finalize yields exactly 1",
+      res["finalized"] == 1, f"res: {res}")
+check("CRASH_WINDOW: response now published on disk",
+      response_path.exists(), f"missing: {response_path}")
+body = json.loads(response_path.read_text()) if response_path.exists() else {}
+check("CRASH_WINDOW: response.ok is True",
+      body.get("ok") is True, f"body: {body}")
+check("CRASH_WINDOW: exactly one finalization (errors=0, skipped=0)",
+      res["errors"] == 0 and res["skipped"] == 0,
+      f"res: {res}")
+
+# Cleanup crash-window test evidence.
+shutil.rmtree(ev, ignore_errors=True)
+os.unlink(db_path)
+
+# ----------------------------------------------------------------- #
+# 14.9 — NORMAL/RECOVERY shared DB context                         #
+# ----------------------------------------------------------------- #
+db_path = "/tmp/ofloop-pass2-shared-db-$$.sqlite3"
+if os.path.exists(db_path): os.unlink(db_path)
+conn = sqlite3.connect(db_path)
+conn.row_factory = sqlite3.Row
+conn.executescript("""
+CREATE TABLE jobs (id INTEGER PRIMARY KEY AUTOINCREMENT,
+  run_id TEXT NOT NULL UNIQUE, latest_attempt_id TEXT NOT NULL,
+  worker_attempt_id TEXT, worker_pid INTEGER, worker_started_at REAL,
+  worker_role TEXT, worker_start_identity TEXT, status TEXT);
+CREATE TABLE semantic_attempts (attempt_id TEXT PRIMARY KEY,
+  job_id INTEGER NOT NULL, role TEXT NOT NULL, status TEXT NOT NULL,
+  started_at REAL NOT NULL, completed_at REAL, worker_pid INTEGER,
+  stdout_path TEXT NOT NULL, stderr_path TEXT NOT NULL,
+  returncode INTEGER, cost_usd REAL, cost_accounted INTEGER,
+  input_tokens INTEGER, output_tokens INTEGER, cache_read_tokens INTEGER,
+  cache_creation_tokens INTEGER, tokens_known INTEGER, cost_known INTEGER,
+  failure_class TEXT, failure_reason TEXT);
+""")
+wsid = sp._read_pid_start_identity(os.getpid()) or ""
+shared_run = "run-20260923T134000Z-deadbeef"
+conn.execute(
+    "INSERT INTO jobs (run_id, latest_attempt_id, worker_attempt_id, "
+    "worker_pid, worker_started_at, worker_role, worker_start_identity, status) "
+    "VALUES (?,?,?,?,?,?,?,?)",
+    (shared_run, "pass-0001", "pass-0001", os.getpid(), time.time(),
+     "builder", wsid, "RUNNING"),
+)
+conn.execute(
+    "INSERT INTO semantic_attempts(attempt_id, job_id, role, status, "
+    "started_at, stdout_path, stderr_path) VALUES (?,?,?,?,?,?,?)",
+    ("pass-0001", 1, "builder", "RUNNING", time.time(), "/dev/null", "/dev/null"),
+)
+conn.commit()
+
+# Clear the OFLOOP_SUPERVISOR_DB env so recover_claims cannot fall
+# back to the default; only the explicit production-style call
+# through process_research_queue can drive it.
+os.environ.pop("OFLOOP_SUPERVISOR_DB", None)
+# Set up an OFLOOP_SUPERVISOR_DB pointing at a DIFFERENT db_path
+# (different content, different live attempt) to prove recovery
+# consumes the EXPLICIT conn passed by process_research_queue rather
+# than opening its own default.
+fake_default_db_path = "/tmp/ofloop-pass2-fake-default-$$.sqlite3"
+if os.path.exists(fake_default_db_path): os.unlink(fake_default_db_path)
+fake_default_conn = sqlite3.connect(fake_default_db_path)
+fake_default_conn.executescript("""
+CREATE TABLE jobs (id INTEGER PRIMARY KEY AUTOINCREMENT,
+  run_id TEXT NOT NULL UNIQUE, latest_attempt_id TEXT NOT NULL,
+  worker_attempt_id TEXT, worker_pid INTEGER, worker_started_at REAL,
+  worker_role TEXT, worker_start_identity TEXT, status TEXT);
+""")
+fake_default_conn.execute(
+    "INSERT INTO jobs (run_id, latest_attempt_id, worker_attempt_id, "
+    "worker_pid, worker_started_at, worker_role, worker_start_identity, status) "
+    "VALUES (?,?,?,?,?,?,?,?)",
+    ("run-fake-default", "pass-9999", "pass-9999", 99999, time.time(),
+     "ghost", "ghost-id", "RUNNING"),
+)
+fake_default_conn.commit()
+fake_default_conn.close()
+os.environ["OFLOOP_SUPERVISOR_DB"] = fake_default_db_path
+
+broker_calls_9 = [0]
+sr_mod._run_broker_blocking = lambda *a, **kw: (
+    broker_calls_9.append(1) or {"ok": True}
+)
+sr_mod._broker_commissioning_identity = lambda: {"path": "/bin/true", "sha256": "0"*64}
+sr_mod._capability_resolution_has_research_public = lambda *a, **kw: True
+
+# Use a small ev for shared test
+ev2 = Path(tempfile.mkdtemp(prefix="ofloop-shared-"))
+os.environ["OFLOOP_RESEARCH_EVIDENCE_ROOT"] = str(ev2)
+(claims_dir2 := ev2 / shared_run / "claims").mkdir(parents=True, exist_ok=True, mode=0o700)
+(requests_dir2 := ev2 / shared_run / "requests").mkdir(parents=True, exist_ok=True, mode=0o700)
+(ev2 / shared_run / "responses").mkdir(parents=True, exist_ok=True, mode=0o700)
+(ev2 / shared_run / "launches").mkdir(parents=True, exist_ok=True, mode=0o700)
+
+req_id = str(uuid.uuid4())
+rid_for_test = req_id
+claim_for_test = {
+    "schema": "ownframework-loop-research-claim/v1",
+    "run_id": shared_run, "request_id": rid_for_test,
+    "request_digest": "0"*64,
+    "attempt_id": "pass-0001", "role": "builder",
+    "op": "read", "url": "https://example.invalid/",
+    "max_bytes": 1024, "operator": "test",
+    "submitted_at": time.time(),
+}
+(claims_dir2 / f"claim-{rid_for_test}.json").write_text(json.dumps(claim_for_test) + "\n")
+
+result_shared = sr.process_research_queue(
+    db_path=Path(db_path), canonical_repo=ev2, run_id=shared_run,
+    rate_limit_per_minute=100,
+)
+check("SHARED_DB_CONTEXT: production process_research_queue uses "
+      "explicit db_path (not OFLOOP_SUPERVISOR_DB default)",
+      len(broker_calls_9) == 2,
+      f"broker_calls_9={broker_calls_9}; the explicit conn path is honored. "
+      f"result={result_shared}")
+
+os.unlink(fake_default_db_path)
+shutil.rmtree(ev2, ignore_errors=True)
+os.unlink(db_path)
+os.environ.pop("OFLOOP_SUPERVISOR_DB", None)
+
+# ----------------------------------------------------------------- #
+# 14.10 — Pre-transport exception rollback (registry must NOT keep  #
+# an entry with future=None across pre-launch failures)             #
+# ----------------------------------------------------------------- #
+db_path = "/tmp/ofloop-pass2-rollback-$$.sqlite3"
+if os.path.exists(db_path): os.unlink(db_path)
+conn = sqlite3.connect(db_path)
+conn.row_factory = sqlite3.Row
+conn.executescript("""
+CREATE TABLE jobs (id INTEGER PRIMARY KEY AUTOINCREMENT,
+  run_id TEXT NOT NULL UNIQUE, latest_attempt_id TEXT NOT NULL,
+  worker_attempt_id TEXT, worker_pid INTEGER, worker_started_at REAL,
+  worker_role TEXT, worker_start_identity TEXT, status TEXT);
+CREATE TABLE semantic_attempts (attempt_id TEXT PRIMARY KEY,
+  job_id INTEGER NOT NULL, role TEXT NOT NULL, status TEXT NOT NULL,
+  started_at REAL NOT NULL, completed_at REAL, worker_pid INTEGER,
+  stdout_path TEXT NOT NULL, stderr_path TEXT NOT NULL,
+  returncode INTEGER, cost_usd REAL, cost_accounted INTEGER,
+  input_tokens INTEGER, output_tokens INTEGER, cache_read_tokens INTEGER,
+  cache_creation_tokens INTEGER, tokens_known INTEGER, cost_known INTEGER,
+  failure_class TEXT, failure_reason TEXT);
+""")
+wsid = sp._read_pid_start_identity(os.getpid()) or ""
+rollback_run = "run-20260923T133500Z-aaaa0001"
+conn.execute(
+    "INSERT INTO jobs (run_id, latest_attempt_id, worker_attempt_id, "
+    "worker_pid, worker_started_at, worker_role, worker_start_identity, status) "
+    "VALUES (?,?,?,?,?,?,?,?)",
+    (rollback_run, "pass-0001", "pass-0001", os.getpid(), time.time(),
+     "builder", wsid, "RUNNING"),
+)
+conn.execute(
+    "INSERT INTO semantic_attempts(attempt_id, job_id, role, status, "
+    "started_at, stdout_path, stderr_path) VALUES (?,?,?,?,?,?,?)",
+    ("pass-0001", 1, "builder", "RUNNING", time.time(), "/dev/null", "/dev/null"),
+)
+conn.commit()
+
+ev3 = Path(tempfile.mkdtemp(prefix="ofloop-rollback-"))
+os.environ["OFLOOP_RESEARCH_EVIDENCE_ROOT"] = str(ev3)
+(ev3 / rollback_run / "claims").mkdir(parents=True, exist_ok=True, mode=0o700)
+(ev3 / rollback_run / "requests").mkdir(parents=True, exist_ok=True, mode=0o700)
+(ev3 / rollback_run / "responses").mkdir(parents=True, exist_ok=True, mode=0o700)
+(ev3 / rollback_run / "launches").mkdir(parents=True, exist_ok=True, mode=0o700)
+
+# Replace _publish_launch_record with one that always raises;
+# this triggers the launch-record failure branch of the primitive.
+original_publish = _sr_mod_test._publish_launch_record
+call_count = [0]
+def always_fail_publish(**kw):
+    call_count[0] += 1
+    raise RuntimeError("simulated launch record publication failure")
+_sr_mod_test._publish_launch_record = always_fail_publish
+
+# Reset the registry.
+registry_ref = _sr_mod_test._registry_for_tests()
+with registry_ref._lock:
+    registry_ref._entries.clear()
+
+# Try a recovery: it should leave the registry empty and have NOT
+# created a launch record or a claim file (we use a read-orphan claim).
+test_req_id = str(uuid.uuid4())
+test_claim = {
+    "schema": "ownframework-loop-research-claim/v1",
+    "run_id": rollback_run, "request_id": test_req_id,
+    "request_digest": "0"*64,
+    "attempt_id": "pass-0001", "role": "builder",
+    "op": "read", "url": "https://example.invalid/",
+    "max_bytes": 1024, "operator": "test",
+    "submitted_at": time.time(),
+}
+(ev3 / rollback_run / "claims" / f"claim-{test_req_id}.json").write_text(
+    json.dumps(test_claim) + "\n",
+)
+
+# recover_claims will call _admit_research_transport which calls
+# _publish_launch_record (which now always fails). The primitive
+# MUST roll back the in-flight entry it had reserved.
+recovery_result = sr.recover_claims(rollback_run)
+check("ROLLBACK: recovery refused (publish_launch_record failed)",
+      recovery_result["redispatched"] == 0
+      and recovery_result["skipped"] >= 1,
+      f"recovery_result: {recovery_result}")
+check("ROLLBACK: registry is empty after a pre-launch failure",
+      len(registry_ref) == 0,
+      f"registry keys: {registry_ref.all_keys()}")
+check("ROLLBACK: launch record directory has zero files",
+      not list((ev3 / rollback_run / "launches").glob("launch-*.json")),
+      "a ghost launch record persisted past pre-launch failure")
+
+# Restore.
+_sr_mod_test._publish_launch_record = original_publish
+shutil.rmtree(ev3, ignore_errors=True)
+os.unlink(db_path)
+
+# ----------------------------------------------------------------- #
+# 14.11 — Single canonical transient helper parity                #
+# positive ceiling + positive cycles: progress_stalled follows      #
+# exact ordinary transient circuit semantics.                    #
+# ----------------------------------------------------------------- #
+def helper_payload(row, current_failures, current_cycles,
+                   transient_class):
+    new_failures, new_cycles, quarantined, circuit_opened, backoff, _b = (
+        svrec._compute_transient_retry_state(
+            current_transient_failures=current_failures,
+            current_transient_recovery_cycles=current_cycles,
+            max_transient_failures=int(row["max_transient_failures"] or 0),
+            max_transient_recovery_cycles=int(
+                row["max_transient_recovery_cycles"] or 0
+            ),
+            emergency_ceiling=(
+                svrec.DEFAULT_MAX_TRANSIENT_FAILURES
+                if transient_class == "progress_stalled" else None
+            ),
+        )
+    )
+    return (new_failures, new_cycles, quarantined, circuit_opened, backoff)
+
+# Build a row context: 4 max failures, 2 max cycles.
+row = {
+    "max_transient_failures": 4,
+    "max_transient_recovery_cycles": 2,
+}
+
+# transient: 4 stalls hit ceiling, cycles_open=True (1 < 2): circuit opens
+res = helper_payload(row, 3, 1, "transient")
+check("TRANSIENT_SEMANTIC_PARITY: stall 4 → circuit_opened",
+      res[3] is True and res[0] == 0 and res[1] == 2 and res[2] is False,
+      f"got: {res}")
+
+# progress_stalled with same state: identical circuit opens
+res = helper_payload(row, 3, 1, "progress_stalled")
+check("PROGRESS_STALLED_TRANSIENT_SEMANTIC_PARITY: stall 4 → circuit_opened",
+      res[3] is True and res[0] == 0 and res[1] == 2 and res[2] is False,
+      f"got: {res}")
+
+# transient with cycles exhausted (2 == 2): quarantine
+res = helper_payload(row, 4, 2, "transient")
+check("TRANSIENT_SEMANTIC_PARITY: cycles exhausted → quarantine",
+      res[2] is True, f"got: {res}")
+
+# progress_stalled with cycles exhausted: identical quarantine
+res = helper_payload(row, 4, 2, "progress_stalled")
+check("PROGRESS_STALLED_TRANSIENT_SEMANTIC_PARITY: cycles exhausted → quarantine",
+      res[2] is True, f"got: {res}")
+
+# transient sub-threshold: backoff only
+res = helper_payload(row, 1, 0, "transient")
+check("TRANSIENT_SEMANTIC_PARITY: sub-threshold → backoff only",
+      res[2] is False and res[3] is False and res[4] == 10.0,
+      f"got: {res}")
+
+# progress_stalled sub-threshold: backoff only (same)
+res = helper_payload(row, 1, 0, "progress_stalled")
+check("PROGRESS_STALLED_TRANSIENT_SEMANTIC_PARITY: sub-threshold → backoff only",
+      res[2] is False and res[3] is False and res[4] == 10.0,
+      f"got: {res}")
+
+# ----------------------------------------------------------------- #
+# 14.12 — max_cycles=0 preserves zero recovery cycle semantics          #
+# ----------------------------------------------------------------- #
+row_zero_cycles = {
+    "max_transient_failures": 4,
+    "max_transient_recovery_cycles": 0,
+}
+res = helper_payload(row_zero_cycles, 4, 0, "progress_stalled")
+check("PROGRESS_STALL_ZERO_CYCLES_FINITE: cycles=0 + threshold hit → quarantine",
+      res[2] is True,
+      f"got: {res}")
+
+# Pre-threshold but cycles=0 — no circuit, backoff only.
+res = helper_payload(row_zero_cycles, 2, 0, "progress_stalled")
+check("PROGRESS_STALL_ZERO_CYCLES_FINITE: cycles=0 pre-threshold → backoff only",
+      res[2] is False and res[3] is False,
+      f"got: {res}")
+
+# ----------------------------------------------------------------- #
+# 14.13 — max_transient_failures=0 still has the emergency fuse     #
+# ----------------------------------------------------------------- #
+row_disabled = {
+    "max_transient_failures": 0,
+    "max_transient_recovery_cycles": 2,
+}
+
+# transient with disabled ceiling: respects operator intent
+# (no emergency fuse — emergency only applies to progress_stalled).
+res = helper_payload(row_disabled, 1, 0, "transient")
+check("WATCHDOG_EMERGENCY_FUSE: transient honors operator-disabled ceiling",
+      res[2] is False and res[3] is False,
+      f"got: {res}")
+
+# Disabled ceiling + cycles=0 + many stalls — neither progresses to
+# quarantine because helper treats raw ceiling without fuse.
+for i in range(100):
+    res = helper_payload(row_disabled, i, 0, "transient")
+assert res[2] is False, f"transient with ceiling=0 should NOT quarantine: {res}"
+check("WATCHDOG_EMERGENCY_FUSE: transient with raw ceiling=0 stays in backoff",
+      True)
+
+# progress_stalled with disabled ceiling + emergency fuse:
+# the helper opens circuits THROUGH the engine default ceiling
+# instead of staying in bounded backoff forever.
+res = helper_payload(row_disabled, 7, 0, "progress_stalled")
+check("WATCHDOG_EMERGENCY_FUSE: progress_stalled at ceiling → circuit_opened",
+      res[3] is True and res[2] is False,
+      f"got: {res}")
+res = helper_payload(row_disabled, 8, 0, "progress_stalled")
+check("WATCHDOG_EMERGENCY_FUSE: progress_stalled reaches ceiling → circuit",
+      res[3] is True,
+      f"got: {res}")
+
+# Cycles=2 (max), failures=0 in circuit reset: cycle already
+# incremented; next stall under threshold goes to bounded backoff.
+res = helper_payload(row_disabled, 0, 1, "progress_stalled")
+check("WATCHDOG_EMERGENCY_FUSE: cycles=1/2 → bounded backoff until threshold",
+      res[2] is False and res[3] is False,
+      f"got: {res}")
+
+# Now cycles=2/2 → quarantines on next stall
+res = helper_payload(row_disabled, 0, 2, "progress_stalled")
+# 0 + 1 = 1. emergency=8 (default). cycles_open: 2 < 2 false. cycles_exhausted: 2 >= 2 true.
+# So branch: cycles_exhausted → quarantine
+check("WATCHDOG_EMERGENCY_FUSE: cycles exhausted → quarantine (finite)",
+      res[2] is True,
+      f"got: {res}")
+
+# ----------------------------------------------------------------- #
+# 14.14 — PASS 2 documentation smoke                                 #
+# ----------------------------------------------------------------- #
+# Module docstring lists the canonical-admission primitive, the
+# authority-predicate version, the transport-launch identity, and
+# the wikipedia-only / GENERAL_WEB_DISCOVERY=DEFERRED search posture.
+docstring = sr.__doc__ or ""
+required_phrases = [
+    "_admit_research_transport",
+    "_prove_live_semantic_attempt_authority",
+    "launch_id",
+    "wikipedia",
+    "GENERAL_WEB_DISCOVERY=DEFERRED",
+]
+missing = [p for p in required_phrases if p not in docstring]
+check("RESEARCH_DOCS: module docstring lists canonical primitives",
+      len(missing) == 0,
+      f"missing: {missing}")
+
+# ----------------------------------------------------------------- #
+# Summary                                                            #
+# ----------------------------------------------------------------- #
+if FAIL:
+    print(f"\nFAILURES ({len(FAIL)}):")
+    for n, d in FAIL: print(f"  - {n}: {d}")
+    sys.exit(1)
+print(f"\nAll {len(PASS)} pass-2 adversarial behavioral tests passed.")
+PY
+expect "section 14 pass-2 adversarial suites" "$?" "0"
 
 # -------------------------------------------------------------------- #
 # Summary                                                               #
