@@ -15,6 +15,7 @@ import time
 from pathlib import Path
 
 from ownframework_loop import locking
+from ownframework_loop import process_runner
 from ownframework_loop import validation_executor as ve
 
 
@@ -57,6 +58,36 @@ time.sleep(30)
                 holder.wait()
 
 
+def prove_successful_leader_cannot_hide_live_descendant() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        sentinel = root / "leader-child-survived"
+        grandchild_code = (
+            "from pathlib import Path; import sys,time; "
+            "time.sleep(1); Path(sys.argv[1]).write_text('survived'); time.sleep(30)"
+        )
+        parent_code = r'''
+import subprocess, sys
+subprocess.Popen(
+    [sys.executable, "-c", sys.argv[1], sys.argv[2]],
+    stdin=subprocess.DEVNULL,
+    stdout=subprocess.DEVNULL,
+    stderr=subprocess.DEVNULL,
+    close_fds=True,
+)
+'''
+        result = process_runner.run_bounded_capture(
+            [sys.executable, "-c", parent_code, grandchild_code, str(sentinel)],
+            timeout_seconds=5,
+        )
+        assert result.returncode == process_runner.PROCESS_GROUP_LEAK_RC, result
+        assert process_runner.PROCESS_GROUP_LEAK_MARKER in (result.stderr or "")
+        time.sleep(1.3)
+        assert not sentinel.exists(), (
+            "direct child exited but an in-group descendant escaped bounded cleanup"
+        )
+
+
 def prove_validation_timeout_drains_descendants() -> None:
     with tempfile.TemporaryDirectory() as raw:
         root = Path(raw)
@@ -65,9 +96,6 @@ def prove_validation_timeout_drains_descendants() -> None:
         cwd.mkdir()
         cache.mkdir()
 
-        # Keep the unit focused on subprocess lifecycle rather than capability
-        # resolution. The command is deliberately non-uv, so project-env
-        # provisioning is not involved.
         ve.runtime_env.runtime_cache_dir = lambda *_args, **_kwargs: cache
         ve.runtime_env.commissioned_validation_env = (
             lambda *_args, **_kwargs: dict(os.environ)
@@ -108,10 +136,6 @@ def prove_validation_timeout_drains_descendants() -> None:
         assert result["timed_out"] is True, result
         assert result["exit_code"] == 124, result
         assert (cwd / "child-started").is_file(), "background descendant never started"
-
-        # If timeout killed only /bin/sh, the background Python child writes this
-        # sentinel after two seconds. Whole-group termination makes that
-        # impossible. Give it enough time to expose the old behavior.
         time.sleep(2.5)
         assert not (cwd / "child-survived").exists(), (
             "validation descendant survived the timeout boundary"
@@ -119,6 +143,7 @@ def prove_validation_timeout_drains_descendants() -> None:
 
 
 prove_nonblocking_shared_lock_normalizes_busy()
+prove_successful_leader_cannot_hide_live_descendant()
 prove_validation_timeout_drains_descendants()
 print("FINAL_HARDENING_PROCESS_AND_LOCK=PASS")
 PY
