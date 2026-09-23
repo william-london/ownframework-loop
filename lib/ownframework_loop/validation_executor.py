@@ -27,7 +27,6 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import signal
 import subprocess
 import time
 import uuid
@@ -35,6 +34,7 @@ from pathlib import Path
 from typing import Any
 
 from . import (
+    process_runner,
     runtime_env,
     secrets_v2,
     validation_environment,
@@ -49,58 +49,22 @@ MAX_EXCERPT_CHARS = 4096
 def _terminate_validation_group(
     process: subprocess.Popen[Any], grace_seconds: float = 3.0
 ) -> None:
-    """Terminate and reap one validation process group.
-
-    Required validations may invoke shells, test runners, compilers, or local
-    services that create descendants. Killing only the shell PID on timeout
-    would let those descendants outlive the deterministic validation envelope.
-    Every validation is therefore started in its own session and this helper
-    drains the full process group, escalating from TERM to KILL when needed.
-    """
-    if process.poll() is not None:
-        return
-    try:
-        os.killpg(process.pid, signal.SIGTERM)
-    except ProcessLookupError:
-        return
-    try:
-        process.wait(timeout=grace_seconds)
-        return
-    except subprocess.TimeoutExpired:
-        pass
-    try:
-        os.killpg(process.pid, signal.SIGKILL)
-    except ProcessLookupError:
-        pass
-    process.wait()
+    """Terminate/reap the whole validation group, including post-leader children."""
+    process_runner.terminate_process_group(process, grace_seconds=grace_seconds)
 
 
 def command_uses_uv_run(command: str) -> bool:
-    """Public surface for the uv-command classifier.
-
-    Lives in the executor module so callers that only need the
-    classifier (and do not need the heavier provisioning machinery)
-    do not have to import :mod:`validation_environment` directly.
-    See :func:`validation_environment.is_uv_command` for the
-    authoritative implementation.
-    """
+    """Public surface for the uv-command classifier."""
     return validation_environment.is_uv_command(command)
 
 
 def _resolution_names(resolution: dict[str, Any]) -> list[str]:
-    """Return the names of resolved capability items, in order."""
     return [str(item.get("name") or "") for item in (resolution.get("resolved") or [])]
 
 
 def _extract_bound_uv_from_resolution(
     resolution: dict[str, Any],
 ) -> validation_environment.BoundUvIdentity | None:
-    """Build a ``BoundUvIdentity`` from the frozen capability resolution.
-
-    Returns ``None`` only when ``package.uv`` is absent. An incomplete
-    ``package.uv`` item raises ``ValidationEnvironmentError`` so the caller can
-    classify the malformed frozen authority as an infra failure.
-    """
     for item in (resolution.get("resolved") or []):
         if str(item.get("name") or "") == "package.uv":
             return validation_environment.build_bound_uv_identity(
@@ -115,13 +79,6 @@ def _cached_environment_matches_bound_uv(
     status: dict[str, Any],
     bound_uv: validation_environment.BoundUvIdentity,
 ) -> bool:
-    """True only when a reusable env marker proves the full frozen uv binding.
-
-    A no-project marker legitimately has no ``uv_executable`` because no uv
-    subprocess was needed to provision it. It is reusable only when the marker
-    still proves every frozen bound-uv field. Real project environments must
-    additionally record the exact executable path used for provisioning.
-    """
     if not status.get("provisioned") or status.get("package_uv_unbound"):
         return False
     no_project = str(status.get("metadata_sha256") or "") == "no-pyproject"
@@ -206,25 +163,7 @@ def run_required_validation(
     role: str = "builder",
     infra_failure_path: Path | None = None,
 ) -> dict[str, Any]:
-    """Run one validation under the sealed capability binding.
-
-    Raw output is retained only in 0600 files below the supervisor-owned
-    runtime cache. Authoritative callers receive bounded redacted excerpts and
-    digests, enough to identify a failing nested recipe without exposing raw
-    command output.
-
-    When the validation command invokes ``uv run`` (or any uv subcommand
-    that needs the project environment), the deterministic validator
-    pre-provisions the candidate-bound project environment before
-    launching the subprocess. The environment lives outside the
-    candidate worktree, is bound to (candidate SHA + uv.lock +
-    pyproject.toml identity), and is wired into the subprocess via
-    ``UV_PROJECT_ENVIRONMENT`` / ``VIRTUAL_ENV`` so the command
-    inherits it without any worker involvement. A provisioning failure
-    is reported as ``infra_failure=True`` with a redacted excerpt so
-    finalizers can refuse the run without burning a semantic repair
-    round.
-    """
+    """Run one validation under the sealed capability binding."""
     command = str(validation.get("command") or "")
     name = str(validation.get("name") or "validation")
     kind = str(validation.get("kind") or "fast")
@@ -250,33 +189,19 @@ def run_required_validation(
     needs_uv = validation_environment.is_uv_command(command)
     if needs_uv:
         if not candidate_sha:
-            # This is a finalizer wiring bug, not a candidate defect.
-            # Treat as infra: terminal BLOCKED, no repair round.
             infra_failure = True
             infra_failure_reason = (
                 "uv-mediated validation command requires candidate_sha; "
                 "the finalizer did not pass it through"
             )
         else:
-            # INVARIANT: NO uv subprocess, NO package download, NO
-            # project-env creation may occur until the CURRENT
-            # capability resolution has been re-resolved against the
-            # frozen CAPABILITY_BINDING and exact-matched. We re-resolve
-            # BEFORE calling provision_project_environment and pull the
-            # package.uv item out so the provisioner is launched with
-            # the bound executable path + SHA — never a PATH-discovered
-            # uv binary.
             try:
-                resolution = (
-                    runtime_env.commissioned_validation_resolution(
-                        canonical_repo, run_id, packet
-                    )
+                resolution = runtime_env.commissioned_validation_resolution(
+                    canonical_repo, run_id, packet
                 )
             except Exception as exc:  # noqa: BLE001 — boundary
                 infra_failure = True
-                infra_failure_reason = (
-                    f"bound_uv_resolution_failed:{exc}"
-                )
+                infra_failure_reason = f"bound_uv_resolution_failed:{exc}"
             else:
                 resolution_names = _resolution_names(resolution)
                 try:
@@ -337,25 +262,13 @@ def run_required_validation(
                     if outcome_class == validation_environment.OUTCOME_PROVISIONED:
                         env_overrides = validation_environment.env_overrides(env_dir)
                     elif outcome_class == validation_environment.OUTCOME_CANDIDATE_INVALID:
-                        # The candidate's own metadata is unprovable. The
-                        # next builder pass can repair this; the run
-                        # transitions to CHANGES_REQUESTED with a normal
-                        # repair entitlement (NOT a terminal infra block).
                         candidate_invalid = True
                         candidate_invalid_reason = str(outcome.get("reason") or "")
                         candidate_invalid_excerpt = str(outcome.get("stderr_excerpt") or "")
                     else:
-                        # Genuine validator/host infrastructure failure.
-                        # Terminal BLOCKED without burning a repair round.
                         infra_failure = True
                         infra_failure_reason = str(outcome.get("reason") or "")
 
-    # Persist an infra-failure marker under the run's runtime cache so
-    # the build/review finalizer can distinguish infra_failure from
-    # validation_failed deterministically. Candidate-invalid markers
-    # are NOT recorded here: they go through the normal validation
-    # failure channel so the next builder pass receives a normal
-    # repair signal.
     if infra_failure and infra_failure_path is not None:
         _write_infra_failure_marker(infra_failure_path, {
             "name": name,
@@ -366,9 +279,6 @@ def run_required_validation(
             "recorded_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         })
 
-    # Infra failure: refuse to even launch the subprocess. The
-    # validator's owner (build/review finalizer) classifies this as a
-    # non-repairable condition; the candidate author cannot fix it.
     if infra_failure:
         return {
             "name": name,
@@ -397,16 +307,9 @@ def run_required_validation(
             "infra_failure_reason": infra_failure_reason,
             "candidate_invalid": False,
             "validation_env_id": env_id,
-            "validation_env_path": (
-                str(env_dir) if env_dir is not None else ""
-            ),
+            "validation_env_path": str(env_dir) if env_dir is not None else "",
         }
 
-    # Candidate-invalid: the candidate's metadata is unprovable. The
-    # subprocess is not launched (the env is unusable); the result
-    # row surfaces ``candidate_invalid=True`` so the build/review
-    # finalizer can route it to ``validation_failed`` /
-    # ``CHANGES_REQUESTED`` with a normal repair entitlement.
     if candidate_invalid:
         return {
             "name": name,
@@ -436,9 +339,7 @@ def run_required_validation(
             "candidate_invalid_reason": candidate_invalid_reason,
             "candidate_invalid_excerpt": candidate_invalid_excerpt,
             "validation_env_id": env_id,
-            "validation_env_path": (
-                str(env_dir) if env_dir is not None else ""
-            ),
+            "validation_env_path": str(env_dir) if env_dir is not None else "",
         }
 
     start = time.monotonic()
@@ -446,10 +347,6 @@ def run_required_validation(
     with stdout_path.open("wb") as stdout_fh, stderr_path.open("wb") as stderr_fh:
         os.chmod(stdout_path, 0o600)
         os.chmod(stderr_path, 0o600)
-        # Defense-in-depth: re-verify the bound uv identity one final
-        # time immediately before Popen. If anything changed on disk
-        # since provisioning (silent swap, byte mutation, symlink
-        # insertion), refuse to launch — turn this into infra_failure.
         if needs_uv and bound_uv is not None:
             try:
                 validation_environment.verify_bound_uv_identity(bound_uv)
@@ -461,9 +358,7 @@ def run_required_validation(
                         "command": command,
                         "reason": infra_failure_reason,
                         "validation_env_id": env_id,
-                        "validation_env_path": (
-                            str(env_dir) if env_dir is not None else ""
-                        ),
+                        "validation_env_path": str(env_dir) if env_dir is not None else "",
                         "recorded_at": time.strftime(
                             "%Y-%m-%dT%H:%M:%SZ", time.gmtime()
                         ),
@@ -495,17 +390,11 @@ def run_required_validation(
                     "infra_failure_reason": infra_failure_reason,
                     "candidate_invalid": False,
                     "validation_env_id": env_id,
-                    "validation_env_path": (
-                        str(env_dir) if env_dir is not None else ""
-                    ),
+                    "validation_env_path": str(env_dir) if env_dir is not None else "",
                 }
         env = runtime_env.commissioned_validation_env(
             canonical_repo, run_id, packet
         )
-        # Layer in the candidate-bound env binding AFTER the standard
-        # env has been computed so UV_PROJECT_ENVIRONMENT / VIRTUAL_ENV
-        # override any earlier value. The standard hermetic env does
-        # NOT set these, so layering here is purely additive.
         for key, value in env_overrides.items():
             env[key] = value
         process = subprocess.Popen(
@@ -525,6 +414,14 @@ def run_required_validation(
         except BaseException:
             _terminate_validation_group(process)
             raise
+        else:
+            if process_runner.process_group_exists(process.pid):
+                _terminate_validation_group(process)
+                returncode = process_runner.PROCESS_GROUP_LEAK_RC
+                stderr_fh.write(
+                    ("\n" + process_runner.PROCESS_GROUP_LEAK_MARKER + "\n").encode("utf-8")
+                )
+                stderr_fh.flush()
     duration = time.monotonic() - start
 
     stdout_prefix, stdout_size, stdout_sha = _file_snapshot(stdout_path)
@@ -571,19 +468,11 @@ def run_required_validation(
         "infra_failure": False,
         "candidate_invalid": False,
         "validation_env_id": env_id,
-        "validation_env_path": (
-            str(env_dir) if env_dir is not None else ""
-        ),
+        "validation_env_path": str(env_dir) if env_dir is not None else "",
     }
 
 
 def _write_infra_failure_marker(path: Path, payload: dict[str, Any]) -> None:
-    """Persist a redacted infra-failure marker under the run's runtime cache.
-
-    The marker is the canonical artifact the build/review finalizer
-    inspects to distinguish infra_failure from validation_failed. It is
-    private (0600), atomic, and never contains raw validation output.
-    """
     path = Path(path).expanduser().resolve(strict=False)
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     try:
