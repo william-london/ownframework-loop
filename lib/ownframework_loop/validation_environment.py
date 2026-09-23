@@ -173,8 +173,11 @@ UV_MEDIATED_SUBCOMMANDS: tuple[str, ...] = (
 _SHELL_PUNCTUATION = ";|&()<>"
 _ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=.*$", re.DOTALL)
 _SHELL_WRAPPERS = frozenset({"env", "command", "exec"})
-_SHELL_BOUNDARIES = frozenset({";", "|", "&", "&&", "||", "(", ")"})
+_SHELL_BOUNDARIES = frozenset({";", "|", "&", "&&", "||", "(", ")", "\n"})
 _SHELL_INTERPRETERS = frozenset({"sh", "bash", "dash", "zsh", "ksh"})
+_SHELL_COMMAND_PREFIXES = frozenset(
+    {"if", "then", "else", "elif", "while", "until", "do", "!"}
+)
 
 
 class ValidationCommandError(ValueError):
@@ -191,6 +194,10 @@ def _shell_words(command: str) -> list[tuple[str, int, int, bool]]:
     tokens: list[tuple[str, int, int, bool]] = []
     index = 0
     while index < len(command):
+        if command[index] == "\n":
+            tokens.append(("\n", index, index + 1, True))
+            index += 1
+            continue
         if command[index].isspace():
             index += 1
             continue
@@ -241,6 +248,8 @@ def _dynamic_shell_word(value: str) -> bool:
     command head therefore cannot be proven not to resolve to uv and must not
     be treated as an ordinary unmediated command.
     """
+    if value in {"[", "[["}:
+        return False
     return any(char in value for char in ("$", "`", "*", "?", "["))
 
 
@@ -275,6 +284,13 @@ def classify_uv_command(command: str, *, _depth: int = 0) -> str:
         return "ambiguous"
     if uv_mentions and ("$(" in command or "<(" in command or ">(" in command):
         return "ambiguous"
+    if uv_mentions and any(
+        not punctuation and value in _SHELL_COMMAND_PREFIXES | {"for", "select"}
+        for value, _start, _end, punctuation in tokens
+    ):
+        # The exact-word rewriter does not interpret compound shell grammar.
+        # Refuse rather than claim a frozen uv binding for only one branch.
+        return "ambiguous"
 
     segments: list[list[int]] = [[]]
     for index, (value, _start, _end, punctuation) in enumerate(tokens):
@@ -294,6 +310,13 @@ def classify_uv_command(command: str, *, _depth: int = 0) -> str:
             if _ASSIGNMENT_RE.match(value):
                 position += 1
                 continue
+            if value in _SHELL_COMMAND_PREFIXES:
+                position += 1
+                continue
+            if value in {"for", "select"}:
+                # Their first list is a variable/word header, not a command;
+                # the body begins after the following `do` token.
+                break
             if value in _SHELL_WRAPPERS:
                 wrapper = value
                 position += 1
