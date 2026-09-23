@@ -14,6 +14,7 @@ import tempfile
 import time
 from pathlib import Path
 
+from ownframework_loop import capabilities
 from ownframework_loop import locking
 from ownframework_loop import process_runner
 from ownframework_loop import validation_executor as ve
@@ -111,6 +112,34 @@ def prove_validation_detachment_is_refused() -> None:
         )
 
 
+def prove_capability_version_probe_requires_zero_exit() -> None:
+    with tempfile.TemporaryDirectory(dir="/tmp") as raw:
+        root = Path(raw)
+        executable = root / "fake-version-tool"
+        executable.write_text(
+            "#!/bin/sh\necho 'fake tool 99.0' >&2\nexit 7\n",
+            encoding="utf-8",
+        )
+        executable.chmod(0o700)
+        definition = capabilities.CapabilityDefinition(
+            "tool.fake-version", "tool", ()
+        )
+        try:
+            capabilities._resolve_executable(
+                definition,
+                {
+                    "executable": str(executable),
+                    "version_args": ["--version"],
+                },
+            )
+        except capabilities.CapabilityResolutionError as exc:
+            assert "rc=7" in str(exc), exc
+        else:
+            raise AssertionError(
+                "nonzero capability version probe was accepted as authoritative"
+            )
+
+
 def prove_validation_timeout_drains_descendants() -> None:
     with tempfile.TemporaryDirectory() as raw:
         root = Path(raw)
@@ -168,6 +197,7 @@ def prove_validation_timeout_drains_descendants() -> None:
 prove_nonblocking_shared_lock_normalizes_busy()
 prove_successful_leader_cannot_hide_live_descendant()
 prove_validation_detachment_is_refused()
+prove_capability_version_probe_requires_zero_exit()
 prove_validation_timeout_drains_descendants()
 print("FINAL_HARDENING_PROCESS_AND_LOCK=PASS")
 PY
