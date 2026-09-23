@@ -1,0 +1,126 @@
+name: Final integrity authority closure
+
+on:
+  push:
+    branches:
+      - hardening/github-authority-closure-2026-09-22
+    paths:
+      - .github/workflows/final-integrity-authority-closure.yml
+
+permissions:
+  contents: write
+
+jobs:
+  close:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: hardening/github-authority-closure-2026-09-22
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Patch authority-file trust boundaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${GITHUB_SHA}"
+          python3 - <<'PY'
+          from pathlib import Path
+
+          # STATE_TXN.json is write-ahead authority. Recovery must never follow
+          # a symlink or trust a loose/wrong-owner/non-regular journal.
+          p = Path('lib/ownframework_loop/state.py')
+          text = p.read_text(encoding='utf-8')
+          if 'import stat\n' not in text:
+              text = text.replace('import os\n', 'import os\nimport stat\n', 1)
+          old = '''    tp = state_txn_path(canonical_repo, run_id)\n    if not tp.exists():\n        return None\n    try:\n        with tp.open("r", encoding="utf-8") as f:\n            txn = json.load(f)\n'''
+          new = '''    tp = state_txn_path(canonical_repo, run_id)\n    if tp.is_symlink():\n        raise integrity.TamperingDetected(\n            "pending state transaction must not be a symlink"\n        )\n    if not tp.exists():\n        return None\n    try:\n        st = tp.stat()\n    except OSError as exc:\n        raise integrity.TamperingDetected(\n            f"pending state transaction metadata is unreadable: {exc}"\n        ) from exc\n    if not stat.S_ISREG(st.st_mode):\n        raise integrity.TamperingDetected(\n            "pending state transaction must be a regular file"\n        )\n    if hasattr(os, "getuid") and st.st_uid != os.getuid():\n        raise integrity.TamperingDetected(\n            "pending state transaction must be owned by supervisor user"\n        )\n    if stat.S_IMODE(st.st_mode) & 0o077:\n        raise integrity.TamperingDetected(\n            "pending state transaction must be private (0600)"\n        )\n    try:\n        with tp.open("r", encoding="utf-8") as f:\n            txn = json.load(f)\n'''
+          if old in text:
+              text = text.replace(old, new, 1)
+          elif 'pending state transaction must not be a symlink' not in text:
+              raise SystemExit('state recovery journal anchor missing')
+          text = text.replace(
+              '    if tp.exists():\n        raise integrity.TamperingDetected(\n            "pending state transaction exists after integrity recovery"\n        )\n',
+              '    if tp.exists() or tp.is_symlink():\n        raise integrity.TamperingDetected(\n            "pending state transaction exists after integrity recovery"\n        )\n',
+              1,
+          )
+          p.write_text(text, encoding='utf-8')
+
+          # Event/state/artifact verifiers must reject filesystem redirection.
+          p = Path('lib/ownframework_loop/integrity.py')
+          text = p.read_text(encoding='utf-8')
+          old = '''    if not path.exists():\n        return []\n    out: list[dict[str, Any]] = []\n'''
+          new = '''    if path.is_symlink():\n        raise TamperingDetected("event chain must not be a symlink")\n    if not path.exists():\n        return []\n    if not path.is_file():\n        raise TamperingDetected("event chain must be a regular file")\n    out: list[dict[str, Any]] = []\n'''
+          if old in text:
+              text = text.replace(old, new, 1)
+          elif 'event chain must not be a symlink' not in text:
+              raise SystemExit('event-chain authority anchor missing')
+
+          old = '''    if not events_log.exists():\n        if not state_path.exists():\n            return True, "no state or event chain yet"\n'''
+          new = '''    if state_path.is_symlink():\n        return False, "state must not be a symlink"\n    if events_log.is_symlink():\n        return False, "event chain must not be a symlink"\n    if not events_log.exists():\n        if not state_path.exists():\n            return True, "no state or event chain yet"\n'''
+          if old in text:
+              text = text.replace(old, new, 1)
+          elif 'return False, "state must not be a symlink"' not in text:
+              raise SystemExit('state symlink authority anchor missing')
+
+          marker = '''    if not events_log.exists():\n        if not artifact_path.exists():\n            return True, "no artifact or event chain yet"\n'''
+          replacement = '''    if artifact_path.is_symlink():\n        return False, f"{artifact_name} must not be a symlink"\n    if events_log.is_symlink():\n        return False, "event chain must not be a symlink"\n    if not events_log.exists():\n        if not artifact_path.exists():\n            return True, "no artifact or event chain yet"\n'''
+          if marker in text:
+              text = text.replace(marker, replacement, 1)
+          elif 'f"{artifact_name} must not be a symlink"' not in text:
+              raise SystemExit('artifact symlink authority anchor missing')
+          p.write_text(text, encoding='utf-8')
+
+          # Existing canonical transaction recovery suite: prove a symlinked
+          # journal is rejected before its JSON is considered authority.
+          p = Path('tests/integration/test_v084_state_transaction_recovery.sh')
+          text = p.read_text(encoding='utf-8')
+          anchor = '''assert state.load_verified(repo, run_id)["state"] == "AWAITING_APPROVAL"\n\n# A dead atomic writer may leave its append temp behind.'''
+          block = '''assert state.load_verified(repo, run_id)["state"] == "AWAITING_APPROVAL"\n\n# A forged/symlinked write-ahead journal is not recovery authority. The old\n# reader followed the link and would evaluate attacker-controlled JSON against\n# the live STATE/EVENTS bindings. Refuse the redirection before parsing.\nexternal_txn = root / "external-state-txn.json"\nexternal_txn.write_text("{}\\n", encoding="utf-8")\ntxn_link = state.state_txn_path(repo, run_id)\ntxn_link.symlink_to(external_txn)\ntry:\n    state.load_verified(repo, run_id)\nexcept integrity.TamperingDetected as exc:\n    assert "must not be a symlink" in str(exc), exc\nelse:\n    raise AssertionError("symlinked STATE_TXN.json was accepted as recovery authority")\nassert external_txn.read_text(encoding="utf-8") == "{}\\n"\ntxn_link.unlink()\n\n# A dead atomic writer may leave its append temp behind.'''
+          if anchor in text:
+              text = text.replace(anchor, block, 1)
+          elif 'symlinked STATE_TXN.json was accepted' not in text:
+              raise SystemExit('state transaction regression anchor missing')
+          p.write_text(text, encoding='utf-8')
+
+          # Extend the fail-closed evidence regression with redirection proofs.
+          p = Path('tests/integration/test_v061_evidence_fail_closed.sh')
+          text = p.read_text(encoding='utf-8')
+          anchor = '''assert ok and not failures, failures\nPY\n\n# Static guards pin the authoritative callers to strict evidence.\n'''
+          block = '''assert ok and not failures, failures\n\n# Symlinked authority is filesystem redirection, not evidence.\nreal_events = root / "real-events.log"\nreal_events.write_text("", encoding="utf-8")\nevents_link = root / "events-link.log"\nevents_link.symlink_to(real_events)\ntry:\n    integrity.read_event_chain(events_link)\nexcept integrity.TamperingDetected as exc:\n    assert "must not be a symlink" in str(exc), exc\nelse:\n    raise SystemExit("symlinked event chain was followed")\n\nreal_artifact = root / "real-artifact.json"\nreal_artifact.write_text("{}\\n", encoding="utf-8")\nartifact_link = root / "artifact-link.json"\nartifact_link.symlink_to(real_artifact)\nok, reason = integrity.verify_artifact_sha(\n    artifact_link, root / "missing-events.log", "BUILD_RECEIPT.json"\n)\nassert not ok and "must not be a symlink" in reason, reason\nPY\n\n# Static guards pin the authoritative callers to strict evidence.\n'''
+          if anchor in text:
+              text = text.replace(anchor, block, 1)
+          elif 'symlinked event chain was followed' not in text:
+              raise SystemExit('evidence redirection regression anchor missing')
+          p.write_text(text, encoding='utf-8')
+          PY
+
+          export PYTHONPATH="$PWD/lib${PYTHONPATH:+:$PYTHONPATH}"
+          python3 -m compileall -q lib/ownframework_loop
+          bash tests/integration/test_v061_evidence_fail_closed.sh
+          bash tests/integration/test_v084_state_transaction_recovery.sh
+          bash tests/integration/test_v084_authoritative_state_reads.sh
+          git diff --check
+
+      - name: Publish source closure and self-delete
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin hardening/github-authority-closure-2026-09-22
+          test "$(git rev-parse HEAD)" = "$(git rev-parse origin/hardening/github-authority-closure-2026-09-22)"
+          git rm .github/workflows/final-integrity-authority-closure.yml
+          git add lib/ownframework_loop/integrity.py \
+                  lib/ownframework_loop/state.py \
+                  tests/integration/test_v061_evidence_fail_closed.sh \
+                  tests/integration/test_v084_state_transaction_recovery.sh
+          git diff --cached --check
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'hardening: close state authority redirection gaps'
+          git push origin HEAD:hardening/github-authority-closure-2026-09-22
