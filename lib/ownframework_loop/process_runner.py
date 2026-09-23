@@ -8,7 +8,7 @@ import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import BinaryIO, Mapping, Sequence
+from typing import Any, BinaryIO, Mapping, Sequence
 
 
 PROCESS_GROUP_LEAK_RC = 125
@@ -18,7 +18,7 @@ PROCESS_GROUP_LEAK_MARKER = "OFLOOP_PROCESS_GROUP_LEAK=refused"
 class ProcessGroupLeakError(subprocess.SubprocessError):
     """A direct command exited while descendants remained alive."""
 
-    def __init__(self, argv: Sequence[str], stdout: str = "", stderr: str = "") -> None:
+    def __init__(self, argv: Sequence[str], stdout: Any = "", stderr: Any = "") -> None:
         super().__init__(PROCESS_GROUP_LEAK_MARKER)
         self.argv = list(argv)
         self.stdout = stdout
@@ -45,7 +45,7 @@ def process_group_exists(pgid: int) -> bool:
 
 
 def terminate_process_group(
-    proc: subprocess.Popen[str] | subprocess.Popen[bytes], grace_seconds: float = 3.0
+    proc: subprocess.Popen[Any], grace_seconds: float = 3.0
 ) -> None:
     """Terminate a whole child group even when its original leader exited.
 
@@ -87,24 +87,27 @@ def run_bounded_capture(
     timeout_seconds: float | None = None,
     env: Mapping[str, str] | None = None,
     stdin: int | None = subprocess.DEVNULL,
-) -> subprocess.CompletedProcess[str]:
-    """Run explicit argv with separate captured streams and bounded lifecycle.
+    text: bool = True,
+    capture_output: bool = True,
+    check: bool = False,
+) -> subprocess.CompletedProcess[Any]:
+    """Run explicit argv with subprocess.run-like semantics and bounded lifecycle.
 
     The child is always the leader of a fresh session/process group. Timeout
     drains descendants before the traditional ``TimeoutExpired`` contract is
     re-raised. Normal direct-child completion is accepted only after the whole
     process group is empty. A surviving descendant is terminated and raises
-    ``ProcessGroupLeakError``; lifecycle refusal is exceptional so callers can
-    never accidentally treat diagnostic output as successful authority.
+    ``ProcessGroupLeakError`` so lifecycle refusal cannot be mistaken for a
+    successful authority probe.
     """
     proc = subprocess.Popen(
         list(argv),
         cwd=str(cwd) if cwd is not None else None,
         env=dict(env) if env is not None else None,
         stdin=stdin,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
+        stdout=subprocess.PIPE if capture_output else None,
+        stderr=subprocess.PIPE if capture_output else None,
+        text=text,
         start_new_session=True,
     )
     try:
@@ -121,13 +124,43 @@ def run_bounded_capture(
 
     if process_group_exists(proc.pid):
         terminate_process_group(proc)
-        raise ProcessGroupLeakError(list(argv), stdout or "", stderr or "")
+        raise ProcessGroupLeakError(list(argv), stdout, stderr)
 
-    return subprocess.CompletedProcess(
+    result = subprocess.CompletedProcess(
         args=list(argv),
         returncode=int(proc.returncode),
         stdout=stdout,
         stderr=stderr,
+    )
+    if check and result.returncode != 0:
+        raise subprocess.CalledProcessError(
+            result.returncode,
+            result.args,
+            output=result.stdout,
+            stderr=result.stderr,
+        )
+    return result
+
+
+def run_bounded_capture_bytes(
+    argv: Sequence[str],
+    *,
+    cwd: Path | str | None = None,
+    timeout_seconds: float | None = None,
+    env: Mapping[str, str] | None = None,
+    stdin: int | None = subprocess.DEVNULL,
+    check: bool = False,
+) -> subprocess.CompletedProcess[bytes]:
+    """Bytes variant of :func:`run_bounded_capture` with identical proof."""
+    return run_bounded_capture(
+        argv,
+        cwd=cwd,
+        timeout_seconds=timeout_seconds,
+        env=env,
+        stdin=stdin,
+        text=False,
+        capture_output=True,
+        check=check,
     )
 
 
@@ -144,12 +177,10 @@ def run_bounded_to_files(
     """Run explicit argv with output streamed to caller-owned durable files.
 
     This is the file-output counterpart to :func:`run_bounded_capture` for
-    commands whose output may be large (package provisioning, compilers, test
-    runners). The process still owns a fresh session. Timeout drains the whole
-    process group and returns rc=124. A direct-child success with surviving
-    descendants is drained and returned as ``PROCESS_GROUP_LEAK_RC`` with the
-    canonical marker appended to stderr. No caller needs its own ``Popen``
-    lifecycle implementation.
+    commands whose output may be large. Timeout drains the whole process group
+    and returns rc=124. A direct-child success with surviving descendants is
+    drained and returned as ``PROCESS_GROUP_LEAK_RC`` with the canonical marker
+    appended to stderr. No caller needs its own ``Popen`` lifecycle code.
     """
     proc = subprocess.Popen(
         list(argv),
@@ -175,50 +206,6 @@ def run_bounded_to_files(
         stderr_fh.flush()
         return CommandResult(PROCESS_GROUP_LEAK_RC, "")
     return CommandResult(returncode, "")
-
-
-
-def run_bounded_capture_bytes(
-    argv: Sequence[str],
-    *,
-    cwd: Path | str | None = None,
-    timeout_seconds: float | None = None,
-    env: Mapping[str, str] | None = None,
-    stdin: int | None = subprocess.DEVNULL,
-) -> subprocess.CompletedProcess[bytes]:
-    """Bytes variant of run_bounded_capture with identical lifecycle proof."""
-    proc = subprocess.Popen(
-        list(argv),
-        cwd=str(cwd) if cwd is not None else None,
-        env=dict(env) if env is not None else None,
-        stdin=stdin,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=False,
-        start_new_session=True,
-    )
-    try:
-        stdout, stderr = proc.communicate(timeout=timeout_seconds)
-    except subprocess.TimeoutExpired as exc:
-        terminate_process_group(proc)  # type: ignore[arg-type]
-        stdout, stderr = proc.communicate()
-        raise subprocess.TimeoutExpired(
-            list(argv), timeout_seconds, output=stdout, stderr=stderr
-        ) from exc
-    except BaseException:
-        terminate_process_group(proc)  # type: ignore[arg-type]
-        raise
-    returncode = int(proc.returncode)
-    if process_group_exists(proc.pid):
-        terminate_process_group(proc)  # type: ignore[arg-type]
-        returncode = PROCESS_GROUP_LEAK_RC
-        stderr = (stderr or b'') + PROCESS_GROUP_LEAK_MARKER.encode('utf-8') + b'\n'
-    return subprocess.CompletedProcess(
-        args=list(argv),
-        returncode=returncode,
-        stdout=stdout,
-        stderr=stderr,
-    )
 
 
 def run_bounded(
@@ -259,11 +246,6 @@ def run_bounded(
 def process_group_drained(pgid: int) -> bool:
     """Return true when the caller has no leaked live direct descendants.
 
-    "Drained" of leaked children means: every direct child of the caller
-    whose state is not "Z" (zombie already reaped) has exited. The gate
-    uses group-bounded subprocess execution for every owned effect. Any
-    non-zombie direct child still alive at gate end is therefore a leak.
-
     FAIL-CLOSED: any probe failure returns False. "Unknown process state" is
     never collapsed to "drained".
     """
@@ -278,13 +260,13 @@ def process_group_drained(pgid: int) -> bool:
     except OSError:
         pass
     try:
-        result = subprocess.run(
+        result = run_bounded_capture(
             ["ps", "-axo", "pid=,ppid=,stat=,comm="],
-            capture_output=True, text=True, check=False, timeout=5,
+            timeout_seconds=5,
         )
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+    except (subprocess.SubprocessError, FileNotFoundError, OSError):
         return False
-    if result.returncode != 0 or not result.stdout.strip():
+    if result.returncode != 0 or not result.stdout or not result.stdout.strip():
         return False
     own_pid = os.getpid()
     live_children = 0
@@ -321,6 +303,7 @@ __all__ = [
     "process_group_exists",
     "run_bounded",
     "run_bounded_capture",
+    "run_bounded_capture_bytes",
     "run_bounded_to_files",
     "terminate_process_group",
 ]
