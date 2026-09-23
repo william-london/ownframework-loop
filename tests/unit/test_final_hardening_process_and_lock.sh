@@ -77,12 +77,16 @@ subprocess.Popen(
     close_fds=True,
 )
 '''
-        result = process_runner.run_bounded_capture(
-            [sys.executable, "-c", parent_code, grandchild_code, str(sentinel)],
-            timeout_seconds=5,
-        )
-        assert result.returncode == process_runner.PROCESS_GROUP_LEAK_RC, result
-        assert process_runner.PROCESS_GROUP_LEAK_MARKER in (result.stderr or "")
+        try:
+            process_runner.run_bounded_capture(
+                [sys.executable, "-c", parent_code, grandchild_code, str(sentinel)],
+                timeout_seconds=5,
+            )
+        except process_runner.ProcessGroupLeakError as exc:
+            assert exc.returncode == process_runner.PROCESS_GROUP_LEAK_RC
+            assert str(exc) == process_runner.PROCESS_GROUP_LEAK_MARKER
+        else:
+            raise AssertionError("live descendant was not refused exceptionally")
         time.sleep(1.3)
         assert not sentinel.exists(), (
             "direct child exited but an in-group descendant escaped bounded cleanup"
