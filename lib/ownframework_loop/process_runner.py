@@ -8,7 +8,7 @@ import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Mapping, Sequence
+from typing import BinaryIO, Mapping, Sequence
 
 
 PROCESS_GROUP_LEAK_RC = 125
@@ -45,7 +45,7 @@ def process_group_exists(pgid: int) -> bool:
 
 
 def terminate_process_group(
-    proc: subprocess.Popen[str], grace_seconds: float = 3.0
+    proc: subprocess.Popen[str] | subprocess.Popen[bytes], grace_seconds: float = 3.0
 ) -> None:
     """Terminate a whole child group even when its original leader exited.
 
@@ -129,6 +129,52 @@ def run_bounded_capture(
         stdout=stdout,
         stderr=stderr,
     )
+
+
+def run_bounded_to_files(
+    argv: Sequence[str],
+    *,
+    cwd: Path | str | None,
+    timeout_seconds: float,
+    stdout_fh: BinaryIO,
+    stderr_fh: BinaryIO,
+    env: Mapping[str, str] | None = None,
+    stdin: int | None = subprocess.DEVNULL,
+) -> CommandResult:
+    """Run explicit argv with output streamed to caller-owned durable files.
+
+    This is the file-output counterpart to :func:`run_bounded_capture` for
+    commands whose output may be large (package provisioning, compilers, test
+    runners). The process still owns a fresh session. Timeout drains the whole
+    process group and returns rc=124. A direct-child success with surviving
+    descendants is drained and returned as ``PROCESS_GROUP_LEAK_RC`` with the
+    canonical marker appended to stderr. No caller needs its own ``Popen``
+    lifecycle implementation.
+    """
+    proc = subprocess.Popen(
+        list(argv),
+        cwd=str(cwd) if cwd is not None else None,
+        env=dict(env) if env is not None else None,
+        stdin=stdin,
+        stdout=stdout_fh,
+        stderr=stderr_fh,
+        start_new_session=True,
+    )
+    try:
+        returncode = int(proc.wait(timeout=timeout_seconds))
+    except subprocess.TimeoutExpired:
+        terminate_process_group(proc)
+        return CommandResult(124, "", timed_out=True)
+    except BaseException:
+        terminate_process_group(proc)
+        raise
+
+    if process_group_exists(proc.pid):
+        terminate_process_group(proc)
+        stderr_fh.write(("\n" + PROCESS_GROUP_LEAK_MARKER + "\n").encode("utf-8"))
+        stderr_fh.flush()
+        return CommandResult(PROCESS_GROUP_LEAK_RC, "")
+    return CommandResult(returncode, "")
 
 
 def run_bounded(
@@ -231,5 +277,6 @@ __all__ = [
     "process_group_exists",
     "run_bounded",
     "run_bounded_capture",
+    "run_bounded_to_files",
     "terminate_process_group",
 ]
