@@ -15,6 +15,17 @@ PROCESS_GROUP_LEAK_RC = 125
 PROCESS_GROUP_LEAK_MARKER = "OFLOOP_PROCESS_GROUP_LEAK=refused"
 
 
+class ProcessGroupLeakError(subprocess.SubprocessError):
+    """A direct command exited while descendants remained alive."""
+
+    def __init__(self, argv: Sequence[str], stdout: str = "", stderr: str = "") -> None:
+        super().__init__(PROCESS_GROUP_LEAK_MARKER)
+        self.argv = list(argv)
+        self.stdout = stdout
+        self.stderr = stderr
+        self.returncode = PROCESS_GROUP_LEAK_RC
+
+
 @dataclass(frozen=True)
 class CommandResult:
     returncode: int
@@ -69,18 +80,6 @@ def terminate_process_group(
 _terminate_group = terminate_process_group
 
 
-def _refuse_live_group_after_success(
-    proc: subprocess.Popen[str], stdout: str, stderr: str
-) -> tuple[int, str, str]:
-    """Convert leader success with live descendants into a lifecycle failure."""
-    returncode = int(proc.returncode)
-    if not process_group_exists(proc.pid):
-        return returncode, stdout, stderr
-    terminate_process_group(proc)
-    suffix = PROCESS_GROUP_LEAK_MARKER + "\n"
-    return PROCESS_GROUP_LEAK_RC, stdout, (stderr or "") + suffix
-
-
 def run_bounded_capture(
     argv: Sequence[str],
     *,
@@ -94,8 +93,9 @@ def run_bounded_capture(
     The child is always the leader of a fresh session/process group. Timeout
     drains descendants before the traditional ``TimeoutExpired`` contract is
     re-raised. Normal direct-child completion is accepted only after the whole
-    process group is empty; a surviving descendant is terminated and reported
-    as ``PROCESS_GROUP_LEAK_RC`` rather than silently accepting partial exit.
+    process group is empty. A surviving descendant is terminated and raises
+    ``ProcessGroupLeakError``; lifecycle refusal is exceptional so callers can
+    never accidentally treat diagnostic output as successful authority.
     """
     proc = subprocess.Popen(
         list(argv),
@@ -118,12 +118,14 @@ def run_bounded_capture(
     except BaseException:
         terminate_process_group(proc)
         raise
-    returncode, stdout, stderr = _refuse_live_group_after_success(
-        proc, stdout, stderr
-    )
+
+    if process_group_exists(proc.pid):
+        terminate_process_group(proc)
+        raise ProcessGroupLeakError(list(argv), stdout or "", stderr or "")
+
     return subprocess.CompletedProcess(
         args=list(argv),
-        returncode=returncode,
+        returncode=int(proc.returncode),
         stdout=stdout,
         stderr=stderr,
     )
@@ -218,3 +220,16 @@ def process_group_drained(pgid: int) -> bool:
             continue
         live_children += 1
     return live_children == 0
+
+
+__all__ = [
+    "CommandResult",
+    "PROCESS_GROUP_LEAK_MARKER",
+    "PROCESS_GROUP_LEAK_RC",
+    "ProcessGroupLeakError",
+    "process_group_drained",
+    "process_group_exists",
+    "run_bounded",
+    "run_bounded_capture",
+    "terminate_process_group",
+]
