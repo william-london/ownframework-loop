@@ -1,50 +1,34 @@
 """Canonical macOS launchd service-lifecycle primitive.
 
-Seam 4 + Seam 6 of the residual-closure: every macOS lifecycle owner
-(normal replacement, pending-transaction recovery, activation-failure
-cleanup, uninstall) shares ONE small primitive for canonical-label
-authority.
-
-The primitive exposes three operations:
-
-- ``probe_canonical_label(label, domain)``: returns ``True`` when
-  ``launchctl print "$domain/$label"`` exits 0 (the label is loaded).
-
-- ``remove_canonical_label(label, domain, plist)``: tries the
-  appropriate launchctl removal forms (``bootout "$domain" "$plist"``
-  and ``bootout "$domain/$label"``) and returns.  It does NOT prove
-  absence — ``prove_canonical_label_absent`` is the load-bearing
-  authority.
-
-- ``prove_canonical_label_absent(label, domain)``: returns ``True``
-  when ``launchctl print "$domain/$label"`` exits nonzero (the
-  canonical label is genuinely unloaded under the canonical domain).
-  A successful bootout return code is necessary but not sufficient —
-  this is the postcondition every lifecycle owner must verify.
-
-The primitive does NOT depend on the loaded service's plist origin: a
-stale fixture from a different plist path is still under the canonical
-label and is removed the same way.  This closes the historical
-plist-origin assumption that allowed stale same-label registrations
-to persist across installs.
-
-This module is macOS-scoped.  Linux systemd code paths are not
-touched.
+Every macOS lifecycle owner (normal replacement, pending-transaction recovery,
+activation-failure cleanup, uninstall) shares this primitive for canonical-label
+authority. Absence is proven only from launchd's explicit missing-service
+response; arbitrary command failure is never collapsed to "service absent".
 """
 from __future__ import annotations
 
-import os
 import shutil
 import subprocess
 from typing import Sequence
 
 
+_LAUNCHCTL_TIMEOUT_SECONDS = 10.0
+_MISSING_SERVICE_MARKERS = (
+    "could not find service",
+    "service not found",
+)
+
+
+class LaunchctlProbeError(RuntimeError):
+    """launchctl could not prove loaded-or-absent state."""
+
+
 def _launchctl() -> str:
     """Return the path to launchctl, preferring the real binary on PATH.
 
-    Tests that want to exercise this primitive without touching the
-    real launchd domain prepend a shim directory to PATH; this
-    function resolves ``launchctl`` at call time so the shim wins.
+    Tests that want to exercise this primitive without touching the real
+    launchd domain prepend a shim directory to PATH; resolution happens at
+    call time so the shim wins.
     """
     found = shutil.which("launchctl")
     if found:
@@ -53,85 +37,81 @@ def _launchctl() -> str:
 
 
 def _run(args: Sequence[str]) -> tuple[int, str, str]:
-    """Run a launchctl invocation, capturing stdout/stderr and exit code.
+    """Run launchctl with a bounded foreground lifetime.
 
-    Returns ``(returncode, stdout, stderr)``.  Uses
-    ``subprocess.run`` with ``check=False`` so callers decide what
-    the postcondition means.  The caller never interprets
-    ``returncode != 0`` as a hard failure — the load-bearing
-    authority is the canonical ``probe_canonical_label`` exit code,
-    not the bootout return code.
+    Timeout/launch failure propagates. Callers must never manufacture an
+    absence proof from a transport failure.
     """
     proc = subprocess.run(
         list(args),
         check=False,
         capture_output=True,
         text=True,
+        timeout=_LAUNCHCTL_TIMEOUT_SECONDS,
     )
     return proc.returncode, proc.stdout, proc.stderr
 
 
-def probe_canonical_label(label: str, domain: str) -> bool:
-    """Return ``True`` when the canonical label is loaded under ``domain``.
+def _explicitly_absent(returncode: int, stdout: str, stderr: str) -> bool:
+    if returncode == 0:
+        return False
+    text = f"{stdout}\n{stderr}".lower()
+    return any(marker in text for marker in _MISSING_SERVICE_MARKERS)
 
-    Implementation: ``launchctl print "$domain/$label"`` exits 0 when
-    the label is loaded and nonzero when it is not (real launchd
-    returns "Could not find service" on stderr when the label is
-    absent).  The print body's textual content is irrelevant to the
-    authority surface; only the exit code matters.
+
+def _probe(label: str, domain: str) -> tuple[bool, bool]:
+    """Return ``(loaded, absent)`` or raise when launchd state is ambiguous."""
+    rc, out, err = _run([_launchctl(), "print", f"{domain}/{label}"])
+    if rc == 0:
+        return True, False
+    if _explicitly_absent(rc, out, err):
+        return False, True
+    detail = (err or out or "no diagnostic output").strip()[-1000:]
+    raise LaunchctlProbeError(
+        f"launchctl print could not prove state for {domain}/{label}: "
+        f"rc={rc}; {detail}"
+    )
+
+
+def probe_canonical_label(label: str, domain: str) -> bool:
+    """Return True when loaded, False only on explicit launchd absence.
+
+    Permission errors, malformed domains, timeouts and manager failures raise
+    rather than masquerading as an unloaded service.
     """
-    rc, _out, _err = _run([_launchctl(), "print", f"{domain}/{label}"])
-    return rc == 0
+    loaded, _absent = _probe(label, domain)
+    return loaded
 
 
 def remove_canonical_label(label: str, domain: str, plist: str | None = None) -> None:
-    """Try to unload the canonical label.  Does NOT prove absence.
-
-    Tries ``bootout "$domain" "$plist"`` first when ``plist`` is
-    provided (a plist-target bootout is well-defined when the loaded
-    service originated from that plist).  Then tries
-    ``bootout "$domain/$label"`` (label-target bootout).  Either
-    failure is non-fatal at this level: the load-bearing authority
-    is the canonical re-probe in ``prove_canonical_label_absent``,
-    which is what guarantees the label is genuinely gone before any
-    subsequent bootstrap.
-
-    The launchd manager may return rc=0 from a bootout that found no
-    job to unload (an already-absent label).  That is the reason the
-    postcondition lives in a separate function.
-    """
+    """Try to unload the canonical label. Does not itself prove absence."""
     if plist:
         _run([_launchctl(), "bootout", domain, plist])
     _run([_launchctl(), "bootout", f"{domain}/{label}"])
 
 
 def prove_canonical_label_absent(label: str, domain: str) -> bool:
-    """Return ``True`` only when ``launchctl print "$domain/$label"`` exits nonzero.
+    """Return True only from launchd's explicit missing-service response.
 
-    This is the load-bearing postcondition for every macOS lifecycle
-    owner: a successful bootout return code is necessary but never
-    sufficient.  Real launchd may return rc=0 from a bootout that
-    found no job to unload, and a residual-loaded label under a
-    different plist origin is the documented stale-fixture condition
-    this primitive exists to detect.
+    A generic non-zero return code is ambiguous and therefore raises
+    ``LaunchctlProbeError`` instead of becoming authority for absence.
     """
-    rc, _out, _err = _run([_launchctl(), "print", f"{domain}/{label}"])
-    return rc != 0
+    loaded, absent = _probe(label, domain)
+    if loaded:
+        return False
+    return absent
 
 
 def remove_and_prove_absent(label: str, domain: str, plist: str | None = None) -> bool:
-    """Convenience: remove the canonical label and prove absence.
-
-    Returns ``True`` only when the canonical label is genuinely
-    unloaded after the removal attempt.  Lifecycle owners that want
-    fail-closed behaviour should treat a ``False`` return as
-    REFUSED.
-
-    This is the single primitive that closes the historical
-    plist-origin assumption: regardless of which plist the stale
-    service came from, the canonical-label authority surface is
-    the same ``gui/$UID/com.ownframework.loop-supervisor`` label,
-    and the postcondition is the same proof of absence.
-    """
+    """Remove the canonical label and prove its absence fail-closed."""
     remove_canonical_label(label, domain, plist)
     return prove_canonical_label_absent(label, domain)
+
+
+__all__ = [
+    "LaunchctlProbeError",
+    "probe_canonical_label",
+    "remove_canonical_label",
+    "prove_canonical_label_absent",
+    "remove_and_prove_absent",
+]
