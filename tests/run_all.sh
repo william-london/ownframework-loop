@@ -7,9 +7,13 @@
 # here is a release blocker.
 #
 # v0.3.5 (A6-F12/A6-F13): tests are discovered from an explicit
-# allow-list (tests/canonical.txt) rather than by glob, and each test
-# is wrapped in `timeout 180 bash` so a hung test cannot block the
-# gate indefinitely.
+# allow-list (tests/canonical.txt) rather than by glob.
+#
+# Final hardening: every canonical test runs in its own process group through
+# Python's portable POSIX subprocess API. On timeout the entire group is
+# terminated and reaped, so a test cannot leave a background descendant alive
+# after the gate records it as timed out. The invocation is wrapped in an
+# explicit if/else so `set -e` never short-circuits aggregate failure reporting.
 
 set -euo pipefail
 
@@ -39,6 +43,50 @@ OF_LOOP_PLUGIN_VERSION="$(PYTHONDONTWRITEBYTECODE=1 python3 -B -c "import sys; s
 echo "OF_LOOP_PLUGIN_VERSION=$OF_LOOP_PLUGIN_VERSION"
 echo
 
+run_test_bounded() {
+  local test_path="$1"
+  python3 - "$test_path" <<'PY'
+import os
+import signal
+import subprocess
+import sys
+
+path = sys.argv[1]
+proc = subprocess.Popen(["bash", path], start_new_session=True)
+try:
+    rc = proc.wait(timeout=180)
+except subprocess.TimeoutExpired:
+    try:
+        os.killpg(proc.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    try:
+        proc.wait(timeout=3)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        proc.wait()
+    rc = 124
+except BaseException:
+    try:
+        os.killpg(proc.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    try:
+        proc.wait(timeout=3)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        proc.wait()
+    raise
+sys.exit(rc)
+PY
+}
+
 while IFS= read -r rel; do
   [[ -z "$rel" || "$rel" == \#* ]] && continue
   full="$ROOT/$rel"
@@ -46,35 +94,10 @@ while IFS= read -r rel; do
   TOTAL=$((TOTAL+1))
   name="$(basename "$full")"
   echo "--- $name ---"
-  # Portable 180s timeout: try `timeout`, then `gtimeout`, then a
-  # POSIX-only shell alarm fallback. The alarm fallback uses `kill -0`
-  # polling at 1s intervals so a hung test is always detected.
-  if command -v timeout >/dev/null 2>&1; then
-    timeout 180 bash "$full"
-    rc=$?
-  elif command -v gtimeout >/dev/null 2>&1; then
-    gtimeout 180 bash "$full"
-    rc=$?
-  else
-    bash "$full" &
-    pid=$!
-    elapsed=0
+  if run_test_bounded "$full"; then
     rc=0
-    while kill -0 "$pid" 2>/dev/null; do
-      if [[ "$elapsed" -ge 180 ]]; then
-        kill -TERM "$pid" 2>/dev/null
-        sleep 1
-        kill -KILL "$pid" 2>/dev/null
-        rc=124  # conventional timeout exit code
-        break
-      fi
-      sleep 1
-      elapsed=$((elapsed+1))
-    done
-    if [[ "$rc" == "0" ]]; then
-      wait "$pid"
-      rc=$?
-    fi
+  else
+    rc=$?
   fi
   if [[ $rc -eq 0 ]]; then
     PASSED=$((PASSED+1))
