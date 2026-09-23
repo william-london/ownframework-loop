@@ -309,16 +309,23 @@ def main() -> int:
     # file in the responses dir; the supervisor is the only writer
     # and must publish an authoritative response (or surface an
     # error path) on its own clock.
+    #
+    # Response binding (RESPECT THE EXACT SEMANTIC REQUEST):
+    # the response MUST come back bound to the exact (request_id,
+    # request_digest) the helper just submitted. A response under
+    # the same request_id but a different request_digest OR
+    # missing the digest field MUST fail closed — returning that
+    # response as success would silently misattribute a different
+    # semantic request's results to the caller's flow.
     deadline = time.monotonic() + float(args.timeout_seconds)
     poll_ms = max(50, int(args.poll_ms))
     response_path = responses_dir_p / f"resp-{args.request_id}.json"
+    submitted_digest = request["request_digest"]
     while time.monotonic() < deadline:
         if response_path.exists():
             try:
                 with response_path.open("r", encoding="utf-8") as fh:
-                    sys.stdout.write(fh.read())
-                    sys.stdout.flush()
-                return 0
+                    raw = fh.read()
             except OSError as exc:
                 err = {
                     "schema": RESPONSE_SCHEMA,
@@ -328,6 +335,63 @@ def main() -> int:
                 }
                 print(json.dumps(err, sort_keys=True), flush=True)
                 return 5
+            try:
+                envelope = json.loads(raw)
+            except (OSError, ValueError) as exc:
+                err = {
+                    "schema": RESPONSE_SCHEMA,
+                    "ok": False,
+                    "error_class": "ResponseBindingFailed",
+                    "error": (
+                        f"response at {response_path} is not valid JSON: {exc}"
+                    ),
+                    "request_id": args.request_id,
+                    "expected_request_digest": submitted_digest,
+                    "timestamp": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+                }
+                print(json.dumps(err, sort_keys=True), flush=True)
+                return 5
+            if not isinstance(envelope, dict):
+                envelope = {}
+            resp_schema = str(envelope.get("schema") or "")
+            resp_request_id = str(envelope.get("request_id") or "")
+            resp_request_digest = str(
+                envelope.get("request_digest") or ""
+            )
+            binding_failures: list[str] = []
+            if resp_schema != RESPONSE_SCHEMA:
+                binding_failures.append(
+                    f"schema mismatch: expected {RESPONSE_SCHEMA!r} "
+                    f"got {resp_schema!r}"
+                )
+            if resp_request_id != args.request_id:
+                binding_failures.append(
+                    f"request_id mismatch: expected {args.request_id!r} "
+                    f"got {resp_request_id!r}"
+                )
+            if resp_request_digest != submitted_digest:
+                binding_failures.append(
+                    f"request_digest mismatch: expected {submitted_digest!r} "
+                    f"got {resp_request_digest!r}"
+                )
+            if binding_failures:
+                err = {
+                    "schema": RESPONSE_SCHEMA,
+                    "ok": False,
+                    "error_class": "ResponseBindingFailed",
+                    "error": "; ".join(binding_failures),
+                    "request_id": args.request_id,
+                    "expected_request_digest": submitted_digest,
+                    "observed_request_digest": resp_request_digest,
+                    "timestamp": _dt.datetime.now(
+                        _dt.timezone.utc
+                    ).isoformat(),
+                }
+                print(json.dumps(err, sort_keys=True), flush=True)
+                return 5
+            sys.stdout.write(raw)
+            sys.stdout.flush()
+            return 0
         time.sleep(poll_ms / 1000.0)
 
     err = {

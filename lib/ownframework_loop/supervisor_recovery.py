@@ -429,12 +429,30 @@ def _compute_transient_retry_state(
     ``branch_label`` is one of ``"circuit_opened"`` /
     ``"quarantined"`` / ``"backoff"``.
     """
-    ceil = int(max_transient_failures or 0)
-    if ceil <= 0:
-        ceil = int(emergency_ceiling or DEFAULT_MAX_TRANSIENT_FAILURES)
+    # Resolve the effective ceiling. Three cases:
+    #   1. configured ceiling > 0 → use configured ceiling
+    #   2. configured ceiling <= 0 AND emergency_ceiling is
+    #      provided → use emergency_ceiling
+    #   3. configured ceiling <= 0 AND emergency_ceiling is None →
+    #      operator explicitly disabled the transient budget; do
+    #      NOT silently substitute a default — keep that
+    #      historical disabled semantics. This branch is exactly
+    #      what the ordinary ``transient`` path needs so its
+    #      zero-ceiling backoff remains bounded-as-operator-set,
+    #      NOT bounded-as-implicit-fallback.
+    ceil: int | None
+    configured = int(max_transient_failures or 0)
+    if configured > 0:
+        ceil = configured
+    elif emergency_ceiling is not None:
+        ceil = int(emergency_ceiling)
+    else:
+        ceil = None
     max_cycles = int(max_transient_recovery_cycles or 0)
     new_failures = int(current_transient_failures) + 1
-    threshold_hit = ceil > 0 and new_failures >= ceil
+    threshold_hit = (
+        ceil is not None and ceil > 0 and new_failures >= ceil
+    )
     cycles_open = (
         max_cycles > 0
         and int(current_transient_recovery_cycles) < max_cycles

@@ -1787,22 +1787,21 @@ def recover_claims(
                     continue
                 launch_id = _uuid.uuid4().hex
                 submitted_at = time.time()
-                # One rate-limit value resolved ONCE and passed
-                # into the canonical admission primitive. The
-                # default resolution chain is:
-                #   explicit caller value (this parameter) →
-                #   OFLOOP_RESEARCH_RATE_LIMIT_PER_MINUTE env →
-                #   DEFAULT_PER_ATTEMPT_RATE_LIMIT (30). Normal and
-                # recovery resolve via the SAME chain so neither
-                # path obtains a secret bypass lane.
-                effective_rate_limit = (
-                    int(rate_limit_per_minute)
-                    if rate_limit_per_minute is not None
-                    else int(os.environ.get(
+                # Production callers (``process_research_queue``)
+                # pass the SAME canonical rate-limit integer here
+                # so normal admission and recovery consume the
+                # exact same rate counter this tick. Standalone/
+                # test callers resolve the same chain (explicit →
+                # OFLOOP_RESEARCH_RATE_LIMIT_PER_MINUTE env →
+                # DEFAULT_PER_ATTEMPT_RATE_LIMIT) so the fallback
+                # remains consistent when conn is owned.
+                if rate_limit_per_minute is None:
+                    effective_rate_limit = int(os.environ.get(
                         "OFLOOP_RESEARCH_RATE_LIMIT_PER_MINUTE",
                         str(DEFAULT_PER_ATTEMPT_RATE_LIMIT),
                     ))
-                )
+                else:
+                    effective_rate_limit = int(rate_limit_per_minute)
                 status, entry, _accepted_after = _admit_research_transport(
                     conn=conn,
                     registry=_IN_FLIGHT,
@@ -1831,6 +1830,17 @@ def recover_claims(
             except Exception:
                 summary["skipped"] += 1
                 continue
+            finally:
+                # A connection supplied by the production caller
+                # MUST NOT be closed here — that caller owns its
+                # lifetime. A connection opened internally
+                # (conn_owned=True) MUST always be closed, even on
+                # the unconditional continue branches above.
+                if conn_owned and conn is not None:
+                    try:
+                        conn.close()
+                    except sqlite3.Error:
+                        pass
             if status is not _AdmissionStatus.ADMITTED:
                 # All refusal branches (already-in-flight,
                 # rate-limited, attempt-not-live, role-mismatch,
@@ -1850,8 +1860,6 @@ def recover_claims(
             entry.claim_path = claim_path
             summary["redispatched"] += 1
             continue
-            if conn_owned:
-                conn.close()
         # op=search (potentially metered) — do NOT auto-retry.
         response = {
             "schema": RESPONSE_SCHEMA,
@@ -2138,7 +2146,7 @@ def process_research_queue(
     db_path: Path,
     canonical_repo: Path,
     run_id: str,
-    rate_limit_per_minute: int = DEFAULT_PER_ATTEMPT_RATE_LIMIT,
+    rate_limit_per_minute: int | None = None,
 ) -> dict[str, Any]:
     """One supervisor tick for ``run_id``.
 
@@ -2193,6 +2201,22 @@ def process_research_queue(
                 "deferred": "db_unavailable"}
     conn.row_factory = sqlite3.Row
 
+    # 2b. Resolve the rate-limit operator authority ONCE — both
+    # the recovery path and the normal admission path MUST consume
+    # the SAME canonical integer for this tick. Resolution chain:
+    # explicit caller integer → OFLOOP_RESEARCH_RATE_LIMIT_PER_MINUTE
+    # env → DEFAULT_PER_ATTEMPT_RATE_LIMIT. The keyword default
+    # has been changed to ``None`` so the env can be consulted
+    # without being shadowed by an accidental 30.
+    effective_rate_limit = (
+        int(rate_limit_per_minute)
+        if rate_limit_per_minute is not None
+        else int(os.environ.get(
+            "OFLOOP_RESEARCH_RATE_LIMIT_PER_MINUTE",
+            str(DEFAULT_PER_ATTEMPT_RATE_LIMIT),
+        ))
+    )
+
     # 3. Broker identity — verify commission BEFORE admitting work.
     try:
         identity = _broker_commissioning_identity()
@@ -2225,7 +2249,7 @@ def process_research_queue(
     # production caller.
     recovered = recover_claims(
         run_id,
-        rate_limit_per_minute=rate_limit_per_minute,
+        rate_limit_per_minute=effective_rate_limit,
         conn=conn,
     )
 
@@ -2397,7 +2421,7 @@ def process_research_queue(
                 evidence_dir=evidence_dir,
                 operator="supervisor-research-bridge",
                 submitted_at=time.time(),
-                rate_limit_per_minute=rate_limit_per_minute,
+                rate_limit_per_minute=effective_rate_limit,
                 already_accepted=already_accepted,
                 claim_already_published=False,
             )
