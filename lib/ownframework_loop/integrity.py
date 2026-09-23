@@ -23,9 +23,10 @@ artifact hash. The event chain itself is sha256-chained: each event
 includes the hash of the chain tail. Verifying the chain is a linear
 scan over EVENTS.log.
 
-Direct edits to any of the above are detected (on the next CLI read) by
-re-hashing the file and comparing against the recorded hash. The CLI
-refuses to transition and emits ``OF_LOOP_STATE_INTEGRITY_FAILURE``.
+Direct edits OR deletion of any artifact whose digest has already been
+recorded are detected on the next verified read/transition. An artifact
+that has genuinely never been recorded may still be absent; optional
+artifacts therefore remain optional until first publication.
 """
 
 from __future__ import annotations
@@ -43,13 +44,6 @@ class TamperingDetected(RuntimeError):
     recorded SHA-256 in EVENTS.log."""
 
 
-# v0.10.0-dev f007: torn-write recovery subclass. A torn write (disk-full
-# mid-write, kernel panic mid-write, manual file truncation) leaves STATE.json
-# with content that does NOT match its recorded SHA, but the integrity
-# violation is not the same as adversarial tampering — the file is corrupt,
-# not malicious. Operators deserve a recovery path. StateTorn is the narrow
-# contract: the file is unreadable or its bytes don't match the recorded
-# SHA, but a pending journal may exist that can replay the lost state.
 class StateTorn(TamperingDetected):
     """STATE.json is torn / truncated; recoverable from pending journal.
 
@@ -59,7 +53,6 @@ class StateTorn(TamperingDetected):
     """
 
 
-# Authoritative artifact names that must match an event-chain hash.
 AUTHORITATIVE_ARTIFACTS: tuple[str, ...] = (
     "WORK_PACKET.md",
     "APPROVAL.json",
@@ -92,10 +85,6 @@ def read_event_chain(path: Path) -> list[dict[str, Any]]:
       - empty / whitespace-only line  -> skipped silently
       - non-empty parseable JSON line -> appended
       - non-empty malformed line      -> raises TamperingDetected
-
-    A non-empty malformed line is treated as an integrity failure. Silent
-    dropping would let an attacker truncate the verifier's view of history
-    without detection, breaking event-chain hash verification.
     """
     if not path.exists():
         return []
@@ -140,25 +129,13 @@ def get_event_chain_hash(events_log: Path) -> str | None:
 
 
 def compute_event_chain_hash(events_log: Path) -> str:
-    """Iteratively recompute the SHA-256 event chain hash.
-
-    chain_hash_n = SHA( chain_hash_(n-1) || event_n_minus_event_chain_sha256 )
-
-    Where chain_hash_(-1) is the empty string (the first event's hash is
-    SHA( "" || event_0_stripped )). The ``event_chain_sha256`` field is
-    excluded from the per-event input so the chain is non-self-referential
-    and can be filled in after computation.
-
-    The result equals the ``event_chain_sha256`` value of the LAST event
-    recorded in ``events_log`` for any chain written by the same writer.
-    """
-    import hashlib as _hashlib
+    """Iteratively recompute the SHA-256 event chain hash."""
     events = read_event_chain(events_log)
     chain = ""
     for ev in events:
         stripped = {k: v for k, v in ev.items() if k != "event_chain_sha256"}
         payload = canonical_json_dumps(stripped).encode("utf-8")
-        h = _hashlib.sha256()
+        h = hashlib.sha256()
         h.update(chain.encode("utf-8"))
         h.update(payload)
         chain = h.hexdigest()
@@ -166,46 +143,31 @@ def compute_event_chain_hash(events_log: Path) -> str:
 
 
 def canonical_json_dumps(obj: Any) -> str:
-    """Canonical JSON serialization for all hash-bearing artifacts.
-
-    Used by:
-      - state.append_event (EVENTS.log line bytes)
-      - integrity.compute_event_chain_hash (recomputation for verification)
-      - integrity.verify_state_sha (state SHA embedded in events)
-      - integrity.verify_artifact_sha (artifact SHA embedded in events)
-
-    Constraints:
-      - UTF-8 bytes
-      - sort_keys=True (deterministic key ordering)
-      - separators=(",", ":") (compact, no whitespace)
-      - ensure_ascii=False would emit non-ASCII as Unicode escapes; we
-        default to ensure_ascii=True so the byte stream is portable.
-    """
+    """Canonical JSON serialization for all hash-bearing artifacts."""
     return json.dumps(obj, sort_keys=True, separators=(",", ":"))
 
 
 def verify_state_sha(state_path: Path, events_log: Path) -> tuple[bool, str]:
-    """Verify STATE.json matches the last recorded SHA in EVENTS.log.
+    """Verify STATE.json against the most recent recorded state SHA.
 
-    Failure modes:
-      - STATE.json missing       -> (True, "no state to verify") — no artifact yet.
-      - EVENTS.log missing       -> (True, "no event chain yet") — first run.
-      - no prior SHA in chain    -> (True, "no prior sha recorded") — first event.
-      - STATE.json OSError       -> (False, "...unreadable...") — fail CLOSED.
-      - SHA mismatch             -> (False, "...mismatch...") — fail CLOSED.
-      - SHA match                -> (True, "ok") — pass.
-
-    An OSError reading STATE.json MUST be treated as an integrity failure
-    (cannot prove clean). It is NOT a benign "ok" — fail-open here would let
-    external tampering silently degrade tamper-detection to "did not run".
+    Absence is benign only before EVENTS has ever recorded a state digest.
+    Once a digest exists, deletion is an integrity failure exactly like byte
+    mutation: the authoritative state can no longer be proven.
     """
-    if not state_path.exists():
-        return True, "no state to verify"
     if not events_log.exists():
+        if not state_path.exists():
+            return True, "no state or event chain yet"
         return True, "no event chain yet"
+
     expected = last_recorded_state_sha(events_log)
     if expected is None:
+        if not state_path.exists():
+            return True, "no state or recorded sha yet"
         return True, "no prior sha recorded"
+
+    if not state_path.exists():
+        return False, f"state missing but recorded sha exists: recorded={expected[:12]}"
+
     try:
         actual = sha256_file(state_path)
     except OSError as exc:
@@ -232,21 +194,43 @@ def last_recorded_artifact_sha(events_log: Path, artifact_name: str) -> str | No
     return last_recorded_for(events_log, key)
 
 
-def verify_artifact_sha(artifact_path: Path, events_log: Path, artifact_name: str) -> tuple[bool, str]:
-    """Verify an artifact matches the SHA-256 recorded in EVENTS.log."""
-    if not artifact_path.exists():
-        return True, "no artifact to verify"
+def verify_artifact_sha(
+    artifact_path: Path,
+    events_log: Path,
+    artifact_name: str,
+) -> tuple[bool, str]:
+    """Verify an artifact against its most recent recorded SHA.
+
+    Optional artifacts remain optional until a digest is recorded. After first
+    publication, disappearance is tampering/unprovable authority and fails
+    closed rather than collapsing back to the pre-publication state.
+    """
     if not events_log.exists():
+        if not artifact_path.exists():
+            return True, "no artifact or event chain yet"
         return True, "no event chain yet"
+
     expected = last_recorded_artifact_sha(events_log, artifact_name)
     if expected is None:
+        if not artifact_path.exists():
+            return True, "artifact never recorded"
         return True, "no prior sha recorded"
+
+    if not artifact_path.exists():
+        return False, (
+            f"{artifact_name} missing but recorded sha exists: "
+            f"recorded={expected[:12]}"
+        )
+
     try:
         actual = sha256_file(artifact_path)
     except OSError as exc:
         return False, f"{artifact_name} unreadable: {exc}"
     if actual != expected:
-        return False, f"{artifact_name} sha mismatch: recorded={expected[:12]}, actual={actual[:12]}"
+        return False, (
+            f"{artifact_name} sha mismatch: "
+            f"recorded={expected[:12]}, actual={actual[:12]}"
+        )
     return True, "ok"
 
 
@@ -254,23 +238,20 @@ def verify_all_artifacts(
     artifacts: dict[str, Path],
     events_log: Path,
 ) -> tuple[bool, list[str]]:
-    """Verify every authoritative artifact in `artifacts` against the event chain.
+    """Verify every supplied authoritative artifact against the event chain.
 
-    `artifacts` maps artifact name -> path. Names must be members of
-    AUTHORITATIVE_ARTIFACTS. Missing paths are skipped (treated as
-    informational, not failures).
+    Missing paths are still checked because absence is meaningful after an
+    artifact digest has been recorded. An optional artifact with no historical
+    digest remains benign.
     """
     failures: list[str] = []
     for name in AUTHORITATIVE_ARTIFACTS:
         if name not in artifacts:
             continue
-        path = artifacts[name]
-        if not path.exists():
-            continue
-        ok, msg = verify_artifact_sha(path, events_log, name)
+        ok, msg = verify_artifact_sha(artifacts[name], events_log, name)
         if not ok:
             failures.append(f"{name}: {msg}")
-    # Cross-check the event chain tail.
+
     chain_hash_recorded = get_event_chain_hash(events_log)
     if chain_hash_recorded is not None:
         chain_hash_actual = compute_event_chain_hash(events_log)
@@ -304,4 +285,7 @@ def assert_artifacts_intact(
     """Convenience: verify the run's authoritative artifacts."""
     inventory = build_artifact_inventory(canonical_repo, run_id)
     from . import util
-    return verify_all_artifacts(inventory, util.run_dir(canonical_repo, run_id) / "EVENTS.log")
+    return verify_all_artifacts(
+        inventory,
+        util.run_dir(canonical_repo, run_id) / "EVENTS.log",
+    )
