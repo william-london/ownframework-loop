@@ -4,111 +4,44 @@ import ast
 from pathlib import Path
 
 
-def edit(path_s: str, fn) -> None:
-    path = Path(path_s)
-    src = path.read_text(encoding="utf-8")
-    out = fn(src)
-    if out == src:
-        raise SystemExit(f"{path_s}: expected transformation produced no change")
-    path.write_text(out, encoding="utf-8")
+def read(path: str) -> str:
+    return Path(path).read_text(encoding="utf-8")
 
 
-def once(src: str, old: str, new: str, label: str) -> str:
-    count = src.count(old)
-    if count != 1:
-        raise SystemExit(f"{label}: expected exactly 1 anchor, found {count}")
-    return src.replace(old, new, 1)
+def write(path: str, text: str) -> None:
+    Path(path).write_text(text, encoding="utf-8")
 
 
-def patch_process_runner(src: str) -> str:
-    src = once(src, "from typing import Mapping, Sequence\n",
-               "from typing import Any, Mapping, Sequence\n", "process_runner typing")
-    src = once(
-        src,
-        '    def __init__(self, argv: Sequence[str], stdout: str = "", stderr: str = "") -> None:\n',
-        '    def __init__(self, argv: Sequence[str], stdout: Any = "", stderr: Any = "") -> None:\n',
-        "ProcessGroupLeakError types",
-    )
-    old_sig = '''def run_bounded_capture(
-    argv: Sequence[str],
-    *,
-    cwd: Path | str | None = None,
-    timeout_seconds: float | None = None,
-    env: Mapping[str, str] | None = None,
-    stdin: int | None = subprocess.DEVNULL,
-) -> subprocess.CompletedProcess[str]:
-'''
-    new_sig = '''def run_bounded_capture(
-    argv: Sequence[str],
-    *,
-    cwd: Path | str | None = None,
-    timeout_seconds: float | None = None,
-    env: Mapping[str, str] | None = None,
-    stdin: int | None = subprocess.DEVNULL,
-    text: bool = True,
-    capture_output: bool = True,
-    check: bool = False,
-) -> subprocess.CompletedProcess[Any]:
-'''
-    src = once(src, old_sig, new_sig, "run_bounded_capture signature")
-    old_popen = '''        stdin=stdin,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        start_new_session=True,
-'''
-    new_popen = '''        stdin=stdin,
-        stdout=subprocess.PIPE if capture_output else None,
-        stderr=subprocess.PIPE if capture_output else None,
-        text=text,
-        start_new_session=True,
-'''
-    src = once(src, old_popen, new_popen, "run_bounded_capture Popen")
-    old_return = '''    return subprocess.CompletedProcess(
-        args=list(argv),
-        returncode=int(proc.returncode),
-        stdout=stdout,
-        stderr=stderr,
-    )
-'''
-    new_return = '''    result = subprocess.CompletedProcess(
-        args=list(argv),
-        returncode=int(proc.returncode),
-        stdout=stdout,
-        stderr=stderr,
-    )
-    if check and result.returncode != 0:
-        raise subprocess.CalledProcessError(
-            result.returncode,
-            result.args,
-            output=result.stdout,
-            stderr=result.stderr,
-        )
-    return result
-'''
-    src = once(src, old_return, new_return, "run_bounded_capture result")
-    old_ps = '''        result = subprocess.run(
-            ["ps", "-axo", "pid=,ppid=,stat=,comm="],
-            capture_output=True, text=True, check=False, timeout=5,
-        )
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
-'''
-    new_ps = '''        result = run_bounded_capture(
-            ["ps", "-axo", "pid=,ppid=,stat=,comm="],
-            timeout_seconds=5,
-        )
-    except (subprocess.SubprocessError, FileNotFoundError, OSError):
-'''
-    return once(src, old_ps, new_ps, "process_group_drained ps")
+def replace_once_if_present(path: str, old: str, new: str, label: str) -> None:
+    text = read(path)
+    count = text.count(old)
+    if count > 1:
+        raise SystemExit(f"{label}: ambiguous old contract count={count}")
+    if count == 1:
+        write(path, text.replace(old, new, 1))
 
 
-edit("lib/ownframework_loop/process_runner.py", patch_process_runner)
+def require(path: str, needle: str, label: str) -> None:
+    if needle not in read(path):
+        raise SystemExit(f"{label}: required postcondition missing")
 
 
-def patch_dispatch(src: str) -> str:
-    src = once(src, "    packet as packet_mod,\n    program as program_mod,\n",
-               "    packet as packet_mod,\n    process_runner,\n    program as program_mod,\n", "dispatch import")
-    old = '''        proc = subprocess.run(
+# The central runner was independently hardened while this closure was staged.
+# Preserve it and require the semantics callers now rely on.
+require("lib/ownframework_loop/process_runner.py", "def run_bounded_capture(", "bounded capture")
+require("lib/ownframework_loop/process_runner.py", "capture_output: bool = True", "capture compatibility")
+require("lib/ownframework_loop/process_runner.py", "check: bool = False", "check compatibility")
+require("lib/ownframework_loop/process_runner.py", "class ProcessGroupLeakError", "leak exception")
+
+# dispatch: internal finalizer transport is an owned subprocess tree.
+p = "lib/ownframework_loop/dispatch.py"
+text = read(p)
+if "    process_runner,\n" not in text:
+    anchor = "    packet as packet_mod,\n    program as program_mod,\n"
+    if text.count(anchor) != 1:
+        raise SystemExit("dispatch import anchor missing")
+    text = text.replace(anchor, "    packet as packet_mod,\n    process_runner,\n    program as program_mod,\n", 1)
+old = '''        proc = subprocess.run(
             [_ofloop_bin(), *args],
             capture_output=True,
             text=True,
@@ -116,23 +49,38 @@ def patch_dispatch(src: str) -> str:
             timeout=(int(timeout_seconds) if timeout_seconds and timeout_seconds > 0 else None),
         )
 '''
-    new = '''        proc = process_runner.run_bounded_capture(
+new = '''        proc = process_runner.run_bounded_capture(
             [_ofloop_bin(), *args],
             timeout_seconds=(
                 int(timeout_seconds) if timeout_seconds and timeout_seconds > 0 else None
             ),
         )
 '''
-    return once(src, old, new, "dispatch _run_cli")
+if old in text:
+    text = text.replace(old, new, 1)
+leak_block = '''    except process_runner.ProcessGroupLeakError as exc:
+        raise DispatchError(
+            f"ofloop {' '.join(args)} left descendant processes after command exit"
+        ) from exc
+'''
+if leak_block not in text:
+    anchor = '''    except subprocess.TimeoutExpired as exc:
+        raise DispatchError(
+            f"ofloop {' '.join(args)} exceeded finalization wall budget "
+            f"({int(timeout_seconds or 0)}s)"
+        ) from exc
+'''
+    if text.count(anchor) != 1:
+        raise SystemExit("dispatch timeout boundary anchor missing")
+    text = text.replace(anchor, anchor + leak_block, 1)
+write(p, text)
 
-
-edit("lib/ownframework_loop/dispatch.py", patch_dispatch)
-
-
-def patch_runtime_identity(src: str) -> str:
-    src = once(src, "from pathlib import Path\n\nIGNORED_DIR_NAMES",
-               "from pathlib import Path\n\nfrom . import process_runner\n\nIGNORED_DIR_NAMES", "runtime_identity import")
-    old = '''    return subprocess.run(
+# runtime identity: preserve binary output support while bounding git helpers.
+p = "lib/ownframework_loop/runtime_identity.py"
+text = read(p)
+if "from . import process_runner\n" not in text:
+    text = text.replace("from pathlib import Path\n", "from pathlib import Path\n\nfrom . import process_runner\n", 1)
+old = '''    return subprocess.run(
         ["git", "-C", str(root), *args],
         capture_output=True,
         text=text,
@@ -140,37 +88,38 @@ def patch_runtime_identity(src: str) -> str:
         timeout=10,
     )
 '''
-    new = '''    return process_runner.run_bounded_capture(
+new = '''    return process_runner.run_bounded_capture(
         ["git", "-C", str(root), *args],
         text=text,
         timeout_seconds=10,
     )
 '''
-    src = once(src, old, new, "runtime_identity git")
-    src = src.replace("(OSError, subprocess.TimeoutExpired)", "(OSError, subprocess.SubprocessError)")
-    if "subprocess.TimeoutExpired" in src:
-        raise SystemExit("runtime_identity: TimeoutExpired catch remained unexpectedly")
-    return src
+if old in text:
+    text = text.replace(old, new, 1)
+text = text.replace("(OSError, subprocess.TimeoutExpired)", "(OSError, subprocess.SubprocessError)")
+write(p, text)
 
+# Release-gate read-only git probes.
+p = "lib/ownframework_loop/release_gate_runtime.py"
+text = read(p)
+text = text.replace(
+    "from .process_runner import CommandResult, run_bounded\n",
+    "from .process_runner import CommandResult, run_bounded, run_bounded_capture\n",
+    1,
+)
+text = text.replace(
+    '    return subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True, check=False, timeout=10).stdout.strip()\n',
+    '    return run_bounded_capture(["git", "-C", str(root), *args], timeout_seconds=10).stdout.strip()\n',
+    1,
+)
+write(p, text)
 
-edit("lib/ownframework_loop/runtime_identity.py", patch_runtime_identity)
-
-
-def patch_release_gate(src: str) -> str:
-    src = once(src, "from .process_runner import CommandResult, run_bounded\n",
-               "from .process_runner import CommandResult, run_bounded, run_bounded_capture\n", "release gate import")
-    old = '    return subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True, check=False, timeout=10).stdout.strip()\n'
-    new = '    return run_bounded_capture(["git", "-C", str(root), *args], timeout_seconds=10).stdout.strip()\n'
-    return once(src, old, new, "release gate git")
-
-
-edit("lib/ownframework_loop/release_gate_runtime.py", patch_release_gate)
-
-
-def patch_macos_lifecycle(src: str) -> str:
-    src = once(src, "from typing import Sequence\n\n\n_LAUNCHCTL",
-               "from typing import Sequence\n\nfrom . import process_runner\n\n\n_LAUNCHCTL", "macos lifecycle import")
-    old = '''    proc = subprocess.run(
+# macOS service-manager command lifecycle.
+p = "lib/ownframework_loop/macos_service_lifecycle.py"
+text = read(p)
+if "from . import process_runner\n" not in text:
+    text = text.replace("from typing import Sequence\n", "from typing import Sequence\n\nfrom . import process_runner\n", 1)
+old = '''    proc = subprocess.run(
         list(args),
         check=False,
         capture_output=True,
@@ -178,67 +127,63 @@ def patch_macos_lifecycle(src: str) -> str:
         timeout=_LAUNCHCTL_TIMEOUT_SECONDS,
     )
 '''
-    new = '''    proc = process_runner.run_bounded_capture(
+new = '''    proc = process_runner.run_bounded_capture(
         list(args),
         timeout_seconds=_LAUNCHCTL_TIMEOUT_SECONDS,
     )
 '''
-    return once(src, old, new, "launchctl run")
+text = text.replace(old, new, 1)
+write(p, text)
 
-
-edit("lib/ownframework_loop/macos_service_lifecycle.py", patch_macos_lifecycle)
-
-
-def patch_readmodel(src: str) -> str:
-    src = once(src, "from . import state as state_mod\n",
-               "from . import process_runner\nfrom . import state as state_mod\n", "readmodel import")
-    old = '''        r = subprocess.run(
+# Read-model git observations.
+p = "lib/ownframework_loop/supervisor_readmodel.py"
+text = read(p)
+if "from . import process_runner\n" not in text:
+    text = text.replace("from . import state as state_mod\n", "from . import process_runner\nfrom . import state as state_mod\n", 1)
+old = '''        r = subprocess.run(
             ["git", "-C", str(repo), *args],
             capture_output=True,
             text=True,
             check=False,
             timeout=timeout,
         )
-    except (OSError, subprocess.TimeoutExpired) as exc:
 '''
-    new = '''        r = process_runner.run_bounded_capture(
+new = '''        r = process_runner.run_bounded_capture(
             ["git", "-C", str(repo), *args],
             timeout_seconds=timeout,
         )
-    except (OSError, subprocess.SubprocessError) as exc:
 '''
-    return once(src, old, new, "readmodel git")
+text = text.replace(old, new, 1)
+text = text.replace("    except (OSError, subprocess.TimeoutExpired) as exc:\n", "    except (OSError, subprocess.SubprocessError) as exc:\n")
+write(p, text)
 
-
-edit("lib/ownframework_loop/supervisor_readmodel.py", patch_readmodel)
-
-
-def patch_supervisor_process(src: str) -> str:
-    src = once(src, "import time\n\n_LOCAL_EXECUTION_LOCK",
-               "import time\n\nfrom . import process_runner\n\n_LOCAL_EXECUTION_LOCK", "supervisor_process import")
-    old = '''        r = subprocess.run(
+# PID/start-time observation on macOS.
+p = "lib/ownframework_loop/supervisor_process.py"
+text = read(p)
+if "from . import process_runner\n" not in text:
+    text = text.replace("import time\n", "import time\n\nfrom . import process_runner\n", 1)
+old = '''        r = subprocess.run(
             ["ps", "-o", "etime=", "-p", str(pid)],
             capture_output=True, text=True, check=False, timeout=2,
         )
 '''
-    new = '''        r = process_runner.run_bounded_capture(
+new = '''        r = process_runner.run_bounded_capture(
             ["ps", "-o", "etime=", "-p", str(pid)],
             timeout_seconds=2,
         )
 '''
-    return once(src, old, new, "supervisor_process ps")
+text = text.replace(old, new, 1)
+write(p, text)
 
-
-edit("lib/ownframework_loop/supervisor_process.py", patch_supervisor_process)
-
-
-def patch_research(src: str) -> str:
-    src = once(src, "from typing import Any, Callable\n\nREQUEST_SCHEMA",
-               "from typing import Any, Callable\n\nfrom . import process_runner\n\nREQUEST_SCHEMA", "research import")
-    src = src.replace("subprocess.run calls", "bounded broker process calls")
-    src = src.replace("via ``subprocess.run`` (NOT", "via the bounded supervisor process runner (NOT")
-    src = src.replace("dispatches the broker via subprocess.run —", "dispatches the broker via the bounded process runner —")
-    old = '''        proc = subprocess.run(
+# Governed research broker: timeout/lifecycle owns the entire broker group.
+p = "lib/ownframework_loop/supervisor_research.py"
+text = read(p)
+if "from . import process_runner\n" not in text:
+    text = text.replace("from typing import Any, Callable\n", "from typing import Any, Callable\n\nfrom . import process_runner\n", 1)
+text = text.replace("subprocess.run calls", "bounded broker process calls")
+text = text.replace("via ``subprocess.run`` (NOT", "via the bounded supervisor process runner (NOT")
+text = text.replace("dispatches the broker via subprocess.run —", "dispatches the broker via the bounded process runner —")
+old = '''        proc = subprocess.run(
             cmd,
             capture_output=True,
             text=True,
@@ -248,44 +193,40 @@ def patch_research(src: str) -> str:
                 "60",
             )),
         )
-    except subprocess.TimeoutExpired as exc:
 '''
-    new = '''        proc = process_runner.run_bounded_capture(
+new = '''        proc = process_runner.run_bounded_capture(
             cmd,
             timeout_seconds=float(os.environ.get(
                 "OFLOOP_RESEARCH_BROKER_TIMEOUT",
                 "60",
             )),
         )
-    except subprocess.TimeoutExpired as exc:
 '''
-    src = once(src, old, new, "research broker run")
-    anchor = '''    except Exception as exc:  # pragma: no cover
-        return {
-            "ok": False,
-            "error_class": "BrokerDispatchFailed",
-'''
-    replacement = '''    except process_runner.ProcessGroupLeakError as exc:
+text = text.replace(old, new, 1)
+leak = '''    except process_runner.ProcessGroupLeakError as exc:
         return {
             "ok": False,
             "error_class": "BrokerProcessLeak",
             "error": str(exc),
         }
-    except Exception as exc:  # pragma: no cover
+'''
+if leak not in text:
+    anchor = '''    except Exception as exc:  # pragma: no cover
         return {
             "ok": False,
             "error_class": "BrokerDispatchFailed",
 '''
-    return once(src, anchor, replacement, "research leak classification")
+    if text.count(anchor) != 1:
+        raise SystemExit("research generic exception anchor missing")
+    text = text.replace(anchor, leak + anchor, 1)
+write(p, text)
 
-
-edit("lib/ownframework_loop/supervisor_research.py", patch_research)
-
-
-def patch_execution_start(src: str) -> str:
-    src = once(src, "    packet as packet_mod,\n    state as state_mod,\n",
-               "    packet as packet_mod,\n    process_runner,\n    state as state_mod,\n", "execution_start import")
-    old = '''    p = subprocess.run(
+# Execution-start cleanliness probe cannot hang indefinitely.
+p = "lib/ownframework_loop/execution_start.py"
+text = read(p)
+if "    process_runner,\n" not in text:
+    text = text.replace("    packet as packet_mod,\n    state as state_mod,\n", "    packet as packet_mod,\n    process_runner,\n    state as state_mod,\n", 1)
+old = '''    p = subprocess.run(
         [
             "git",
             "-C",
@@ -299,7 +240,7 @@ def patch_execution_start(src: str) -> str:
         check=False,
     )
 '''
-    new = '''    p = process_runner.run_bounded_capture(
+new = '''    p = process_runner.run_bounded_capture(
         [
             "git",
             "-C",
@@ -311,77 +252,77 @@ def patch_execution_start(src: str) -> str:
         timeout_seconds=10,
     )
 '''
-    return once(src, old, new, "execution_start git status")
+text = text.replace(old, new, 1)
+write(p, text)
 
-
-edit("lib/ownframework_loop/execution_start.py", patch_execution_start)
-
-
-def patch_program(src: str) -> str:
-    src = once(src, "from typing import Any\n\nfrom .util",
-               "from typing import Any\n\nfrom . import process_runner\nfrom .util", "program import")
-    old = '''    diff = subprocess.run(
+# Program source accounting is bounded and preserves check=True semantics.
+p = "lib/ownframework_loop/program.py"
+text = read(p)
+if "from . import process_runner\n" not in text:
+    text = text.replace("from typing import Any\n", "from typing import Any\n\nfrom . import process_runner\n", 1)
+old = '''    diff = subprocess.run(
         ["git", "-C", str(canonical_repo), "diff", "--no-color", baseline_sha, candidate_sha, "--numstat"],
         capture_output=True,
         text=True,
         check=True,
     )
 '''
-    new = '''    diff = process_runner.run_bounded_capture(
+new = '''    diff = process_runner.run_bounded_capture(
         ["git", "-C", str(canonical_repo), "diff", "--no-color", baseline_sha, candidate_sha, "--numstat"],
         timeout_seconds=30,
         check=True,
     )
 '''
-    return once(src, old, new, "program source accounting")
+text = text.replace(old, new, 1)
+write(p, text)
 
-
-edit("lib/ownframework_loop/program.py", patch_program)
-
-
-def patch_cli(src: str) -> str:
-    src = once(src, "    branch_resolver, capabilities as capabilities_mod, commissioning as commissioning_mod, execution_start,\n",
-               "    branch_resolver, capabilities as capabilities_mod, commissioning as commissioning_mod, execution_start,\n    process_runner,\n", "cli import")
-    src = once(src, '    import subprocess\n    subprocess.run(["git", "init", "-b", "master", str(target)], check=True)\n',
-               '    process_runner.run_bounded_capture(\n        ["git", "init", "-b", "master", str(target)],\n        timeout_seconds=30, capture_output=False, check=True,\n    )\n', "cli git init")
-    src = once(src, '        subprocess.run(["git", "-C", str(target), "add", "README.md", ".gitignore"], check=True)\n',
-               '        process_runner.run_bounded_capture(\n            ["git", "-C", str(target), "add", "README.md", ".gitignore"],\n            timeout_seconds=30, capture_output=False, check=True,\n        )\n', "cli git add")
-    old = '''        subprocess.run(
+# New-repo bootstrap git effects are bounded and still check failures.
+p = "lib/ownframework_loop/cli.py"
+text = read(p)
+if "    process_runner,\n" not in text:
+    text = text.replace(
+        "    branch_resolver, capabilities as capabilities_mod, commissioning as commissioning_mod, execution_start,\n",
+        "    branch_resolver, capabilities as capabilities_mod, commissioning as commissioning_mod, execution_start,\n    process_runner,\n",
+        1,
+    )
+text = text.replace('    import subprocess\n    subprocess.run(["git", "init", "-b", "master", str(target)], check=True)\n',
+                    '    process_runner.run_bounded_capture(\n        ["git", "init", "-b", "master", str(target)],\n        timeout_seconds=30, capture_output=False, check=True,\n    )\n', 1)
+text = text.replace('        subprocess.run(["git", "-C", str(target), "add", "README.md", ".gitignore"], check=True)\n',
+                    '        process_runner.run_bounded_capture(\n            ["git", "-C", str(target), "add", "README.md", ".gitignore"],\n            timeout_seconds=30, capture_output=False, check=True,\n        )\n', 1)
+old = '''        subprocess.run(
             ["git", "-C", str(target), "commit", "-m", "loop-v1: minimal bootstrap baseline"],
             check=True, env=env,
         )
 '''
-    new = '''        process_runner.run_bounded_capture(
+new = '''        process_runner.run_bounded_capture(
             ["git", "-C", str(target), "commit", "-m", "loop-v1: minimal bootstrap baseline"],
             timeout_seconds=30, capture_output=False, check=True, env=env,
         )
 '''
-    return once(src, old, new, "cli git commit")
+text = text.replace(old, new, 1)
+write(p, text)
 
-
-edit("lib/ownframework_loop/cli.py", patch_cli)
-
-
-def patch_runner(src: str) -> str:
-    src = once(src, "from . import git_checks\n",
-               "from . import git_checks\nfrom . import process_runner\n", "supervisor_runner import")
-    old_version = '''        proc = subprocess.run(
+# Semantic provider: version probe + worker process group ownership.
+p = "lib/ownframework_loop/supervisor_runner.py"
+text = read(p)
+if "from . import process_runner\n" not in text:
+    text = text.replace("from . import git_checks\n", "from . import git_checks\nfrom . import process_runner\n", 1)
+old = '''        proc = subprocess.run(
             [executable, "--version"],
             capture_output=True,
             text=True,
             check=False,
             timeout=10,
         )
-    except (OSError, subprocess.TimeoutExpired):
 '''
-    new_version = '''        proc = process_runner.run_bounded_capture(
+new = '''        proc = process_runner.run_bounded_capture(
             [executable, "--version"],
             timeout_seconds=10,
         )
-    except (OSError, subprocess.SubprocessError):
 '''
-    src = once(src, old_version, new_version, "runner version probe")
-    old_term = '''def _terminate_group(proc: subprocess.Popen[str], grace_seconds: float = 3.0) -> None:
+text = text.replace(old, new, 1)
+text = text.replace("    except (OSError, subprocess.TimeoutExpired):\n        return None\n", "    except (OSError, subprocess.SubprocessError):\n        return None\n", 1)
+old_term = '''def _terminate_group(proc: subprocess.Popen[str], grace_seconds: float = 3.0) -> None:
     """Terminate and reap one semantic worker process group."""
     if proc.poll() is not None:
         return
@@ -400,14 +341,14 @@ def patch_runner(src: str) -> str:
         pass
     proc.wait()
 '''
-    new_term = '''def _terminate_group(proc: subprocess.Popen[str], grace_seconds: float = 3.0) -> None:
+new_term = '''def _terminate_group(proc: subprocess.Popen[str], grace_seconds: float = 3.0) -> None:
     """Terminate and reap one semantic worker process group."""
     process_runner.terminate_process_group(proc, grace_seconds=grace_seconds)
 '''
-    src = once(src, old_term, new_term, "runner terminate group")
-    src = once(src, "        timed_out = False\n        # Use communicate(input=prompt)",
-               "        timed_out = False\n        lifecycle_leak = False\n        # Use communicate(input=prompt)", "runner lifecycle flag")
-    old_timeout = '''        except subprocess.TimeoutExpired:
+text = text.replace(old_term, new_term, 1)
+if "        lifecycle_leak = False\n" not in text:
+    text = text.replace("        timed_out = False\n        # Use communicate(input=prompt)", "        timed_out = False\n        lifecycle_leak = False\n        # Use communicate(input=prompt)", 1)
+old_timeout = '''        except subprocess.TimeoutExpired:
             timed_out = True
             try:
                 os.killpg(proc.pid, signal.SIGTERM)
@@ -421,34 +362,26 @@ def patch_runner(src: str) -> str:
                 except ProcessLookupError:
                     pass
                 stdout_data, stderr_data = proc.communicate()
-        except BaseException:
-            _terminate_group(proc)
 '''
-    new_timeout = '''        except subprocess.TimeoutExpired:
+new_timeout = '''        except subprocess.TimeoutExpired:
             timed_out = True
             process_runner.terminate_process_group(proc)
             stdout_data, stderr_data = proc.communicate()
-        except BaseException:
-            _terminate_group(proc)
 '''
-    src = once(src, old_timeout, new_timeout, "runner timeout cleanup")
-    anchor = '''            raise
-
-        if durable_files is not None:
-'''
-    insert = '''            raise
-
-        if not timed_out and process_runner.process_group_exists(proc.pid):
+text = text.replace(old_timeout, new_timeout, 1)
+normal_drain = '''        if not timed_out and process_runner.process_group_exists(proc.pid):
             lifecycle_leak = True
             process_runner.terminate_process_group(proc)
 
-        if durable_files is not None:
 '''
-    src = once(src, anchor, insert, "runner normal drain proof")
-    before_timeout = '''        if timed_out:
-            if durable_files is not None and envelope_error:
+if normal_drain not in text:
+    anchor = '''        if durable_files is not None:
+            # Close our handles; the child holds its own dup until exit.
 '''
-    leak_then_timeout = '''        if lifecycle_leak:
+    if text.count(anchor) != 1:
+        raise SystemExit("runner durable-files anchor missing")
+    text = text.replace(anchor, normal_drain + anchor, 1)
+leak_result = '''        if lifecycle_leak:
             return RunnerResult(
                 ok=False,
                 returncode=process_runner.PROCESS_GROUP_LEAK_RC,
@@ -460,22 +393,30 @@ def patch_runner(src: str) -> str:
                 tokens_known=False,
             )
 
-        if timed_out:
-            if durable_files is not None and envelope_error:
 '''
-    return once(src, before_timeout, leak_then_timeout, "runner leak result")
+if leak_result not in text:
+    anchor = "        if timed_out:\n            if durable_files is not None and envelope_error:\n"
+    if text.count(anchor) != 1:
+        raise SystemExit("runner timeout-result anchor missing")
+    text = text.replace(anchor, leak_result + anchor, 1)
+write(p, text)
 
+# Documentation drift after rerouting broker execution.
+for p in ("lib/ownframework_loop/capabilities.py", "lib/ownframework_loop/supervisor.py"):
+    text = read(p)
+    text = text.replace("subprocess.run (NOT under Claude's Bash sandbox)", "the bounded supervisor process runner (NOT under Claude's Bash sandbox)")
+    text = text.replace("dispatches the broker via subprocess.run —", "dispatches the broker via the bounded process runner —")
+    write(p, text)
 
-edit("lib/ownframework_loop/supervisor_runner.py", patch_runner)
-
-
-def patch_test(src: str) -> str:
-    src = once(src, 'export PYTHONPATH="$ROOT/lib${PYTHONPATH:+:$PYTHONPATH}"\n',
-               'export PYTHONPATH="$ROOT/lib${PYTHONPATH:+:$PYTHONPATH}"\nexport OFLOOP_ROOT="$ROOT"\n', "test root export")
-    src = once(src, "import os\nimport shlex\n", "import ast\nimport os\nimport shlex\n", "test ast import")
-    marker = '''def prove_validation_timeout_drains_descendants() -> None:
-'''
-    fn = '''def prove_core_has_no_raw_subprocess_run() -> None:
+# Canonical static regression: core cannot re-introduce raw subprocess.run;
+# direct Popen ownership is restricted to audited lifecycle owners.
+p = "tests/unit/test_final_hardening_process_and_lock.sh"
+text = read(p)
+if 'export OFLOOP_ROOT="$ROOT"\n' not in text:
+    text = text.replace('export PYTHONPATH="$ROOT/lib${PYTHONPATH:+:$PYTHONPATH}"\n', 'export PYTHONPATH="$ROOT/lib${PYTHONPATH:+:$PYTHONPATH}"\nexport OFLOOP_ROOT="$ROOT"\n', 1)
+if "import ast\n" not in text:
+    text = text.replace("import os\n", "import ast\nimport os\n", 1)
+fn = '''def prove_core_has_no_raw_subprocess_run() -> None:
     root = Path(os.environ["OFLOOP_ROOT"])
     raw_runs: list[str] = []
     popen_calls: list[str] = []
@@ -501,15 +442,19 @@ def patch_test(src: str) -> str:
 
 
 '''
-    src = once(src, marker, fn + marker, "test raw subprocess regression")
-    src = once(src, "prove_capability_version_probe_requires_zero_exit()\nprove_validation_timeout_drains_descendants()\n",
-               "prove_capability_version_probe_requires_zero_exit()\nprove_core_has_no_raw_subprocess_run()\nprove_validation_timeout_drains_descendants()\n", "test invoke raw subprocess regression")
-    return src
+if "def prove_core_has_no_raw_subprocess_run()" not in text:
+    marker = "def prove_validation_timeout_drains_descendants() -> None:\n"
+    if text.count(marker) != 1:
+        raise SystemExit("test insertion anchor missing")
+    text = text.replace(marker, fn + marker, 1)
+if "prove_core_has_no_raw_subprocess_run()\n" not in text.split("print(\"FINAL_HARDENING_PROCESS_AND_LOCK=PASS\")", 1)[0].splitlines()[-5:]:
+    anchor = "prove_capability_version_probe_requires_zero_exit()\nprove_validation_timeout_drains_descendants()\n"
+    if anchor in text:
+        text = text.replace(anchor, "prove_capability_version_probe_requires_zero_exit()\nprove_core_has_no_raw_subprocess_run()\nprove_validation_timeout_drains_descendants()\n", 1)
+write(p, text)
 
-
-edit("tests/unit/test_final_hardening_process_and_lock.sh", patch_test)
-
-hits: list[str] = []
+# Mechanical final census.
+raw_runs: list[str] = []
 bad_popen: list[str] = []
 allowed = {"process_runner.py", "validation_environment.py", "validation_executor.py", "supervisor_runner.py"}
 for path in sorted(Path("lib/ownframework_loop").rglob("*.py")):
@@ -520,12 +465,12 @@ for path in sorted(Path("lib/ownframework_loop").rglob("*.py")):
         if not isinstance(node.func.value, ast.Name) or node.func.value.id != "subprocess":
             continue
         if node.func.attr == "run":
-            hits.append(f"{path}:{node.lineno}")
+            raw_runs.append(f"{path}:{node.lineno}")
         elif node.func.attr == "Popen" and path.name not in allowed:
             bad_popen.append(f"{path}:{node.lineno}")
-if hits:
-    raise SystemExit(f"raw subprocess.run remains: {hits}")
+if raw_runs:
+    raise SystemExit(f"raw subprocess.run remains: {raw_runs}")
 if bad_popen:
-    raise SystemExit(f"unaudited Popen owners remain: {bad_popen}")
+    raise SystemExit(f"unaudited subprocess.Popen owners remain: {bad_popen}")
 
 print("FINAL_CORE_SUBPROCESS_TRANSFORM=PASS")
