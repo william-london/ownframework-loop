@@ -46,7 +46,7 @@ do_fail() {
 pty_approve() {
   local repo="$1" rid="$2" token_str="$3"
   PYTHONDONTWRITEBYTECODE=1 python3 -B - "$repo" "$rid" "$token_str" "$OFLOOP_BIN" <<'PYEND'
-import json, os, pty, select, subprocess, sys, time
+import hashlib, json, os, pty, select, subprocess, sys, time
 
 canonical_repo, run_id, token, ofloop_bin = sys.argv[1:5]
 master_fd, slave_fd = pty.openpty()
@@ -98,6 +98,20 @@ if os.path.exists(ap_path):
         ap = json.loads(open(ap_path).read())
     except Exception:
         ap = None
+approval_event_sha256 = None
+events_path = os.path.join(canonical_repo, ".ownframework-loop", run_id, "EVENTS.log")
+if os.path.exists(events_path):
+    for raw in open(events_path, encoding="utf-8"):
+        try:
+            event = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        if event.get("event_type") == "packet_approved":
+            approval_event_sha256 = event.get("approval_sha256")
+approval_sha256 = (
+    hashlib.sha256(open(ap_path, "rb").read()).hexdigest()
+    if ap is not None else None
+)
 
 result = {
     "exit_code": proc.returncode,
@@ -107,6 +121,8 @@ result = {
     "run_id": ap.get("run_id") if ap else None,
     "canonical_repo": ap.get("canonical_repo") if ap else None,
     "approved_actor": ap.get("approved_actor") if ap else None,
+    "approval_sha256": approval_sha256,
+    "approval_event_sha256": approval_event_sha256,
 }
 json.dump(result, sys.stdout)
 PYEND
@@ -191,6 +207,12 @@ if [[ "$GOOD_METHOD" == "tty_confirmation" ]]; then
   do_pass "case6: approval_method=tty_confirmation"
 else
   do_fail "case6: approval_method=$GOOD_METHOD (expected tty_confirmation)"
+fi
+GOOD_APPROVAL_HASHES="$(echo "$GOOD_RESULT" | python3 -c "import json,sys; d=json.load(sys.stdin); print('MATCH' if d['approval_sha256'] == d['approval_event_sha256'] else 'MISMATCH')")"
+if [[ "$GOOD_APPROVAL_HASHES" == "MATCH" ]]; then
+  do_pass "case6: core-owned approval artifact hash is recorded in the event chain"
+else
+  do_fail "case6: approval event hash mismatch ($GOOD_APPROVAL_HASHES)"
 fi
 
 # === Case 7: bindings ===

@@ -13,6 +13,8 @@ from typing import Any, BinaryIO, Mapping, Sequence
 
 PROCESS_GROUP_LEAK_RC = 125
 PROCESS_GROUP_LEAK_MARKER = "OFLOOP_PROCESS_GROUP_LEAK=refused"
+_POST_KILL_DRAIN_SECONDS = 1.0
+_POST_KILL_POLL_SECONDS = 0.05
 
 
 class ProcessGroupLeakError(subprocess.SubprocessError):
@@ -54,17 +56,30 @@ def terminate_process_group(
     accepted as proof that the group is drained.
     """
     pgid = proc.pid
+    argv = getattr(proc, "args", None) or [f"pid={pgid}"]
     try:
         os.killpg(pgid, signal.SIGTERM)
     except ProcessLookupError:
-        if proc.poll() is None:
-            proc.wait()
-        return
+        pass
 
-    deadline = time.monotonic() + grace_seconds
-    while process_group_exists(pgid) and time.monotonic() < deadline:
+    deadline = time.monotonic() + max(0.0, float(grace_seconds))
+    while True:
         proc.poll()
-        time.sleep(0.05)
+        group_alive = process_group_exists(pgid)
+        if not group_alive and proc.poll() is not None:
+            # poll() reaps the direct child on Popen implementations; wait()
+            # here is consequently non-blocking but makes the ownership
+            # contract explicit for compatible Popen-like test doubles.
+            try:
+                proc.wait(timeout=0)
+            except subprocess.TimeoutExpired:
+                pass
+            if proc.poll() is not None:
+                return
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        time.sleep(min(_POST_KILL_POLL_SECONDS, remaining))
 
     if process_group_exists(pgid):
         try:
@@ -72,8 +87,39 @@ def terminate_process_group(
         except ProcessLookupError:
             pass
 
-    if proc.poll() is None:
-        proc.wait()
+    kill_deadline = time.monotonic() + _POST_KILL_DRAIN_SECONDS
+    while True:
+        proc.poll()
+        group_alive = process_group_exists(pgid)
+        if not group_alive:
+            try:
+                proc.wait(timeout=max(0.0, kill_deadline - time.monotonic()))
+            except subprocess.TimeoutExpired:
+                pass
+            if proc.poll() is not None:
+                return
+        remaining = kill_deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        time.sleep(min(_POST_KILL_POLL_SECONDS, remaining))
+
+    raise ProcessGroupLeakError(argv)
+
+
+def _communicate_after_termination(
+    proc: subprocess.Popen[Any], argv: Sequence[str], timeout_seconds: float = 1.0
+) -> tuple[Any, Any]:
+    """Drain pipes with a bound after the owned process group was killed."""
+    try:
+        return proc.communicate(timeout=timeout_seconds)
+    except subprocess.TimeoutExpired as exc:
+        for stream in (proc.stdin, proc.stdout, proc.stderr):
+            if stream is not None:
+                try:
+                    stream.close()
+                except OSError:
+                    pass
+        raise ProcessGroupLeakError(argv) from exc
 
 
 # Backward-compatible private name used by older imports/tests.
@@ -114,7 +160,7 @@ def run_bounded_capture(
         stdout, stderr = proc.communicate(timeout=timeout_seconds)
     except subprocess.TimeoutExpired as exc:
         terminate_process_group(proc)
-        stdout, stderr = proc.communicate()
+        stdout, stderr = _communicate_after_termination(proc, argv)
         raise subprocess.TimeoutExpired(
             list(argv), timeout_seconds, output=stdout, stderr=stderr
         ) from exc
@@ -230,7 +276,7 @@ def run_bounded(
         output, _ = proc.communicate(timeout=timeout_seconds)
     except subprocess.TimeoutExpired:
         terminate_process_group(proc)
-        output, _ = proc.communicate()
+        output, _ = _communicate_after_termination(proc, argv)
         return CommandResult(124, output, timed_out=True)
     except BaseException:
         terminate_process_group(proc)

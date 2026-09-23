@@ -429,13 +429,19 @@ def validate_validation_contract(meta: dict[str, Any]) -> list[str]:
 
     for validation in validations:
         command = str(validation.get("command") or "")
+        classification = validation_environment.classify_uv_command(command)
+        name = str(validation.get("name") or "validation")
+        if classification == "ambiguous":
+            errors.append(
+                f"required_validation {name!r} contains an unsupported or ambiguous "
+                "uv invocation; use a direct uv command or a supported env/command/exec wrapper"
+            )
         if (
-            validation_environment.is_uv_command(command)
+            classification != "none"
             and "package.uv" not in capabilities
         ):
-            name = str(validation.get("name") or "validation")
             errors.append(
-                f"required_validation {name!r} uses a uv subcommand but packet "
+                f"required_validation {name!r} uses or may use uv but packet "
                 "capabilities do not declare package.uv"
             )
 

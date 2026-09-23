@@ -80,6 +80,20 @@ PACKAGE_NETWORK_OVERRIDE_KEYS = frozenset({
     "PNPM_REGISTRY",
     "CARGO_REGISTRIES_CRATES_IO_PROTOCOL",
     "CARGO_REGISTRIES_CRATES_IO_INDEX",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "NO_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "all_proxy",
+    "no_proxy",
+    "UV_HTTP_PROXY",
+    "UV_HTTPS_PROXY",
+    "UV_NO_PROXY",
+    "uv_http_proxy",
+    "uv_https_proxy",
+    "uv_no_proxy",
 })
 
 

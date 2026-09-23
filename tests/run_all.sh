@@ -70,7 +70,7 @@ sys.exit(rc)
 PY
 }
 
-while IFS= read -r rel; do
+while IFS= read -r rel || [[ -n "$rel" ]]; do
   [[ -z "$rel" || "$rel" == \#* ]] && continue
   full="$ROOT/$rel"
   [[ -e "$full" ]] || { echo "MISSING: $rel" >&2; FAILED_TESTS+=("$rel"); FAILED=$((FAILED+1)); TOTAL=$((TOTAL+1)); continue; }

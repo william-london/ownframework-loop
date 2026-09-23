@@ -83,10 +83,11 @@ if [[ "${1:-}" == "--version" ]]; then
     echo "uv 99.0-test"
     exit 0
 fi
-printf '1\n' > "${0}.child-started"
+marker_base="${OFLOOP_TEST_MARKER_BASE:-${0}}"
+printf '1\n' > "${marker_base}.child-started"
 (
-    sleep 1
-    printf '1\n' > "${0}.child-survived"
+    sleep 3
+    printf '1\n' > "${marker_base}.child-survived"
 ) &
 wait
 EOF
@@ -125,12 +126,13 @@ expect "missing frozen uv → reason starts with bound_uv_required" \
 section "B. bound uv provisioning timeout"
 rm -f "${FAKE_UV}.child-started" "${FAKE_UV}.child-survived"
 PYTHONPATH="${LIB_DIR}" python3 -B - "${REAL_REPO}" "${CANDIDATE_SHA}" "${FAKE_UV}" > "${TMP}/B.json" <<'PY'
-import json, sys, time
+import json, os, sys, time
 from pathlib import Path
 from ownframework_loop import validation_environment as ve
 
 canonical_repo = Path(sys.argv[1])
 fake_uv = Path(sys.argv[3]).resolve()
+os.environ["OFLOOP_TEST_MARKER_BASE"] = str(fake_uv)
 bound_uv = ve.build_bound_uv_identity({
     "executable": str(fake_uv),
     "version": "uv 99.0-test",
@@ -147,7 +149,7 @@ out = ve.provision_project_environment(
     candidate_sha=sys.argv[2],
     candidate_worktree=canonical_repo,
     bound_uv=bound_uv,
-    timeout_seconds=0.05,
+    timeout_seconds=1,
 )
 print(json.dumps({
     "outcome": out.get("outcome"),
@@ -167,7 +169,7 @@ expect "bound timeout → timed_out=True" "$B_TIMED_OUT" "True"
 expect "bound timeout → package.uv remains bound" "$B_UNBOUND" "False"
 expect "bound timeout → descendant actually started" \
     "$([ -f "${FAKE_UV}.child-started" ] && echo yes || echo no)" "yes"
-sleep 1.3
+sleep 3.3
 expect "bound timeout → descendant process group drained" \
     "$([ -f "${FAKE_UV}.child-survived" ] && echo yes || echo no)" "no"
 

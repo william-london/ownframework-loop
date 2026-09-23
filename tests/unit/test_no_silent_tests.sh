@@ -55,4 +55,42 @@ if [[ -n "$undeclared" ]]; then
   exit 1
 fi
 
+# The gate must process a final manifest entry even without a trailing
+# newline. Execute the exact reader condition extracted from the real runner;
+# this behavioral fixture does not recursively invoke the release hierarchy.
+python3 - "$TESTS_DIR/run_all.sh" <<'PYTEST'
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+
+runner = Path(sys.argv[1])
+condition = next(
+    (line.strip() for line in runner.read_text(encoding="utf-8").splitlines()
+     if line.startswith("while IFS= read -r rel ||")),
+    None,
+)
+expected = 'while IFS= read -r rel || [[ -n "$rel" ]]; do'
+assert condition == expected, (condition, expected)
+with tempfile.TemporaryDirectory(prefix="ofloop-canonical-eof-") as tmp:
+    manifest = Path(tmp) / "canonical.txt"
+    manifest.write_bytes(b"tests/final-entry.sh")
+    harness = "\n".join((
+        "set -eu",
+        "count=0",
+        condition,
+        "  count=$((count + 1))",
+        '  printf "ENTRY=%s\\n" "$rel"',
+        'done < "$1"',
+        'printf "COUNT=%s\\n" "$count"',
+    ))
+    result = subprocess.run(
+        ["bash", "-c", harness, "ofloop-eof-reader", str(manifest)],
+        check=False, capture_output=True, text=True, timeout=3,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "ENTRY=tests/final-entry.sh\nCOUNT=1\n", result.stdout
+print("CANONICAL_UNTERMINATED_FINAL_ENTRY=PASS")
+PYTEST
+
 echo "NO_SILENT_TESTS=PASS canonical=$(grep -cE '^tests/' "$CANONICAL") non_canonical=$(grep -cE '^tests/' "$NONCANONICAL") on_disk=$(printf '%s\n' "$on_disk" | wc -l | tr -d ' ')"

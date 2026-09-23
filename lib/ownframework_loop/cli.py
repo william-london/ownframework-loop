@@ -508,8 +508,8 @@ def cmd_spec_approve(args: argparse.Namespace) -> None:
         )
         _emit_error(str(e), exit_code=4, classification="OF_LOOP_APPROVAL_REFUSED")
 
-    # Record the approval event (artifact hash included).
-    approval_sha = approval.approval_artifact_sha256(approval_doc)
+    # Record the approval event. append_event() snapshots authoritative
+    # artifact hashes itself; callers must not supply reserved hash fields.
     cur_state = state_mod.load(repo, args.run_id).get("state")
     state_mod.append_event(
         repo, args.run_id,
@@ -519,11 +519,9 @@ def cmd_spec_approve(args: argparse.Namespace) -> None:
         actor=actor,
         reason=f"packet_sha256={approval_doc['packet_sha256']}",
         extras={
-            "approval_sha256": approval_sha,
             "approval_method": approval_doc["approval_method"],
             "baseline_sha": approval_doc["baseline_sha"],
             "baseline_branch": approval_doc["baseline_branch"],
-            "confirmation_token": approval_doc["confirmation_token"],
         },
     )
 

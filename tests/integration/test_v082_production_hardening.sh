@@ -345,23 +345,26 @@ for path in (service_env, prov, plist, state_root/"supervisor.stdout.log", state
 PY
 
 NCSHIMS="$TMP/nc-shims"; mkdir -p "$NCSHIMS"
-cat > "$NCSHIMS/uname" <<'SH'
-#!/bin/sh
-echo Darwin
-SH
-cat > "$NCSHIMS/launchctl" <<'SH'
-#!/bin/bash
-exit 0
-SH
-chmod +x "$NCSHIMS/uname" "$NCSHIMS/launchctl"
+. "$HERE/../launchctl_fixture.sh"
+write_launchctl_fixture "$NCSHIMS"
 MINIMAL_PATH="/usr/bin:/bin"
 NCHOME="$TMP/nc-home"; NCXDG="$TMP/nc-xdg"
 rm -rf "$NCHOME" "$NCXDG"
 mkdir -p "$NCHOME/Library/LaunchAgents" "$NCXDG/ownframework-loop"
 NCPLIST="$NCHOME/Library/LaunchAgents/com.ownframework.loop-supervisor.plist"
 NCSERVICE_ENV="$NCXDG/ownframework-loop/service-env.json"
-HOME="$NCHOME" XDG_STATE_HOME="$NCXDG" PATH="$MINIMAL_PATH:$NCSHIMS" \
+NCSTUB_STATE="$TMP/nc-stub-state"; mkdir -p "$NCSTUB_STATE"
+HOME="$NCHOME" XDG_STATE_HOME="$NCXDG" PATH="$NCSHIMS:$MINIMAL_PATH" \
+  PYTHON_BIN="${PYTHON_BIN:-$(command -v python3)}" \
   OFLOOP_BIN="$ROOT_DIR/bin/ofloop" \
+  OFLOOP_TEST_STUB_STATE_DIR="$NCSTUB_STATE" \
+  OFLOOP_TEST_STUB_PLIST="$NCPLIST" \
+  OFLOOP_TEST_STUB_RECEIPT_PATH="$NCXDG/ownframework-loop/supervisor-activation.json" \
+  OFLOOP_TEST_STUB_SUPERVISOR_DB="$NCXDG/ownframework-loop/supervisor.sqlite3" \
+  OFLOOP_TEST_STUB_LEDGER_MARKER="$NCXDG/ownframework-loop/ledger-incarnation.json" \
+  OFLOOP_TEST_STUB_INSTALL_ROOT="$ROOT_DIR" \
+  OFLOOP_TEST_STUB_LIB_ROOT="$ROOT_DIR" \
+  OFLOOP_TEST_STUB_LAUNCHER_NOOP=1 \
   ANTHROPIC_AUTH_TOKEN="sk-leaked" \
   bash "$ROOT_DIR/scripts/supervisor/install-macos.sh" > /tmp/v082-t8b.out 2>&1 \
   || fail "T8b idle-only macOS supervisor install failed"

@@ -60,17 +60,19 @@ from __future__ import annotations
 
 import hashlib
 import json
+import errno
 import os
 import re
 import shutil
+import shlex
 import stat
-import subprocess
 import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import process_runner, runtime_env, util
+from . import runtime_env, util, validation_network
 
 
 SCHEMA = "ownframework-loop-validation-environment/v1"
@@ -133,27 +135,7 @@ def verify_bound_uv_identity(bound: BoundUvIdentity) -> None:
     """Re-prove the bound uv identity immediately before any subprocess."""
     if not bound.executable:
         raise ValidationEnvironmentError("bound package.uv executable path is empty")
-    p = Path(bound.executable)
-    if not p.exists():
-        raise ValidationEnvironmentError(
-            f"bound package.uv executable disappeared: {bound.executable}"
-        )
-    if p.is_symlink():
-        raise ValidationEnvironmentError(
-            f"bound package.uv executable is now a symlink: {bound.executable}"
-        )
-    if not p.is_file() or not os.access(bound.executable, os.X_OK):
-        raise ValidationEnvironmentError(
-            "bound package.uv executable is no longer a regular runnable file: "
-            f"{bound.executable}"
-        )
-    actual = _sha256_file(Path(bound.executable)) or ""
-    if not actual or actual != bound.executable_sha256:
-        raise ValidationEnvironmentError(
-            "CAPABILITY_DRIFT: bound package.uv SHA mismatch — "
-            f"expected {bound.executable_sha256}, observed {actual or '<none>'}; "
-            "refusing uv execution"
-        )
+    _read_bound_executable(bound)
 
 
 OUTCOME_PROVISIONED = "provisioned"
@@ -187,17 +169,390 @@ class ProvisionOutcome:
 UV_MEDIATED_SUBCOMMANDS: tuple[str, ...] = (
     "run", "sync", "exec", "test", "python", "lock",
 )
-_UV_COMMAND_RE = re.compile(
-    r"\buv\s+(?:"
-    + "|".join(re.escape(subcommand) for subcommand in UV_MEDIATED_SUBCOMMANDS)
-    + r")\b"
-)
+
+_SHELL_PUNCTUATION = ";|&()<>"
+_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=.*$", re.DOTALL)
+_SHELL_WRAPPERS = frozenset({"env", "command", "exec"})
+_SHELL_BOUNDARIES = frozenset({";", "|", "&", "&&", "||", "(", ")"})
+
+
+class ValidationCommandError(ValueError):
+    """A validation command cannot be classified without ambiguity."""
+
+
+def _shell_words(command: str) -> list[tuple[str, int, int, bool]]:
+    """Tokenize command words/punctuation while retaining replacement spans.
+
+    This intentionally handles shell quoting and common command separators,
+    not shell evaluation. Constructs which can manufacture commands are
+    rejected by the uv classifier when they mention uv authority.
+    """
+    tokens: list[tuple[str, int, int, bool]] = []
+    index = 0
+    while index < len(command):
+        if command[index].isspace():
+            index += 1
+            continue
+        start = index
+        if command[index] in _SHELL_PUNCTUATION:
+            char = command[index]
+            index += 1
+            while index < len(command) and command[index] == char:
+                index += 1
+            tokens.append((command[start:index], start, index, True))
+            continue
+        quote: str | None = None
+        while index < len(command):
+            char = command[index]
+            if quote is None:
+                if char.isspace() or char in _SHELL_PUNCTUATION:
+                    break
+                if char in "'\"":
+                    quote = char
+                elif char == "\\" and index + 1 < len(command):
+                    index += 1
+            elif quote == "'":
+                if char == "'":
+                    quote = None
+            else:
+                if char == quote:
+                    quote = None
+                elif char == "\\" and index + 1 < len(command):
+                    index += 1
+            index += 1
+        raw = command[start:index]
+        if quote is not None:
+            raise ValidationCommandError("unclosed quote in validation command")
+        try:
+            decoded = shlex.split(raw, posix=True)
+        except ValueError as exc:
+            raise ValidationCommandError("invalid shell quoting") from exc
+        if len(decoded) != 1:
+            raise ValidationCommandError("ambiguous shell word")
+        tokens.append((decoded[0], start, index, False))
+    return tokens
+
+
+def classify_uv_command(command: str) -> str:
+    """Return ``none``, ``uv``, or ``ambiguous`` for shell command authority.
+
+    Any direct uv/uvx executable is package-capability mediated. Wrappers
+    ``env``, ``command`` and ``exec`` plus leading environment assignments are
+    recognized. A uv token in an unsupported shell position, command
+    substitution, backtick expression, or ``env -S`` form is ambiguous and
+    must be refused at packet admission rather than escaping the binding.
+    """
+    if not command or not command.strip():
+        return "none"
+    try:
+        tokens = _shell_words(command)
+    except ValidationCommandError:
+        if re.search(r"(?<![A-Za-z0-9_])(?:uvx?|[^\s/'\"]*/uv)(?![A-Za-z0-9_])", command):
+            return "ambiguous"
+        return "none"
+
+    uv_mentions = [
+        index for index, (value, _start, _end, punctuation) in enumerate(tokens)
+        if not punctuation and (
+            Path(value).name in {"uv", "uvx"}
+            or re.search(r"(?<![A-Za-z0-9_])uvx?(?![A-Za-z0-9_])", value)
+        )
+    ]
+    if not uv_mentions:
+        return "none"
+    if "`" in command:
+        return "ambiguous"
+    if "$(" in command or "<(" in command or ">(" in command:
+        return "ambiguous"
+
+    segments: list[list[int]] = [[]]
+    for index, (value, _start, _end, punctuation) in enumerate(tokens):
+        if punctuation and value in _SHELL_BOUNDARIES:
+            segments.append([])
+        else:
+            segments[-1].append(index)
+
+    direct = False
+    command_token_indexes: set[int] = set()
+    for segment in segments:
+        if not segment:
+            continue
+        position = 0
+        while position < len(segment):
+            value = tokens[segment[position]][0]
+            if _ASSIGNMENT_RE.match(value):
+                position += 1
+                continue
+            if value in _SHELL_WRAPPERS:
+                wrapper = value
+                position += 1
+                if wrapper == "env":
+                    while position < len(segment):
+                        option = tokens[segment[position]][0]
+                        if option == "--":
+                            position += 1
+                            break
+                        if option == "-S" or option.startswith("--split-string"):
+                            return "ambiguous"
+                        if option in {"-i", "--ignore-environment"}:
+                            position += 1
+                            continue
+                        if option in {"-u", "--unset"}:
+                            position += 2
+                            continue
+                        if option.startswith("-"):
+                            return "ambiguous"
+                        if _ASSIGNMENT_RE.match(option):
+                            position += 1
+                            continue
+                        break
+                    continue
+                if wrapper == "command" and position < len(segment):
+                    option = tokens[segment[position]][0]
+                    if option.startswith("-"):
+                        if option not in {"-p", "--"}:
+                            return "ambiguous"
+                        position += 1
+                        if option == "--":
+                            continue
+                    continue
+                continue
+            if value in {">", ">>", "<", "<<", "<<<"}:
+                position += 2
+                continue
+            if value in {"2>", "2>>", "&>", "&>>"}:
+                position += 2
+                continue
+            command_token_indexes.add(segment[position])
+            if Path(value).name == "uv":
+                direct = True
+            elif Path(value).name == "uvx":
+                return "ambiguous"
+            break
+
+    for index in uv_mentions:
+        value = tokens[index][0]
+        if index not in command_token_indexes:
+            return "ambiguous"
+        if Path(value).name != "uv":
+            return "ambiguous"
+    return "uv" if direct else "ambiguous"
 
 
 def is_uv_command(command: str) -> bool:
-    if not command:
-        return False
-    return bool(_UV_COMMAND_RE.search(command))
+    """Compatibility predicate for unambiguous direct uv invocations."""
+    return classify_uv_command(command) == "uv"
+
+
+def bound_uv_snapshot_dir(
+    canonical_repo: Path, run_id: str, bound: BoundUvIdentity,
+) -> Path:
+    if not re.fullmatch(r"[0-9a-f]{64}", bound.executable_sha256):
+        raise ValidationEnvironmentError(
+            "bound package.uv SHA-256 must be canonical lowercase hexadecimal"
+        )
+    return (
+        runtime_env.runtime_cache_dir(canonical_repo, run_id, "validation")
+        / "tool-bindings" / bound.executable_sha256
+    )
+
+
+def _read_bound_executable(bound: BoundUvIdentity) -> tuple[bytes, int]:
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(bound.executable, flags)
+    except FileNotFoundError as exc:
+        raise ValidationEnvironmentError(
+            f"bound package.uv executable disappeared: {bound.executable}"
+        ) from exc
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            raise ValidationEnvironmentError(
+                f"bound package.uv executable is now a symlink: {bound.executable}"
+            ) from exc
+        raise ValidationEnvironmentError(
+            f"bound package.uv executable cannot be opened safely: {exc}"
+        ) from exc
+    try:
+        info = os.fstat(fd)
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or not (info.st_mode & 0o111)
+            or info.st_size > 128 * 1024 * 1024
+        ):
+            raise ValidationEnvironmentError(
+                "bound package.uv executable is not a bounded regular executable file"
+            )
+        digest = hashlib.sha256()
+        chunks: list[bytes] = []
+        while True:
+            block = os.read(fd, 1024 * 1024)
+            if not block:
+                break
+            digest.update(block)
+            chunks.append(block)
+        if digest.hexdigest() != bound.executable_sha256:
+            raise ValidationEnvironmentError(
+                "CAPABILITY_DRIFT: bound package.uv SHA mismatch"
+            )
+        return b"".join(chunks), info.st_mode & 0o777
+    finally:
+        os.close(fd)
+
+
+def snapshot_bound_uv(
+    canonical_repo: Path, run_id: str, bound: BoundUvIdentity,
+) -> tuple[Path, Path]:
+    """Atomically freeze verified uv bytes outside the candidate worktree."""
+    payload, mode = _read_bound_executable(bound)
+    directory = bound_uv_snapshot_dir(canonical_repo, run_id, bound)
+    for parent in (directory.parent, directory):
+        parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        info = parent.lstat()
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+            raise ValidationEnvironmentError(
+                "package.uv snapshot directory is not a real directory"
+            )
+        if hasattr(os, "getuid") and info.st_uid != os.getuid():
+            raise ValidationEnvironmentError(
+                "package.uv snapshot directory has unexpected ownership"
+            )
+        os.chmod(parent, 0o700)
+    executable = directory / "uv"
+    try:
+        info = executable.lstat()
+    except FileNotFoundError:
+        info = None
+    if info is not None:
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+            raise ValidationEnvironmentError(
+                "bound package.uv snapshot path is not a regular file"
+            )
+        try:
+            existing_bound = BoundUvIdentity(
+                executable=str(executable), version=bound.version,
+                executable_sha256=bound.executable_sha256,
+                cache_path=bound.cache_path, cache_scope=bound.cache_scope,
+                network_domains=bound.network_domains,
+            )
+            _read_bound_executable(existing_bound)
+        except ValidationEnvironmentError:
+            raise ValidationEnvironmentError(
+                "CAPABILITY_DRIFT: existing package.uv snapshot contradicts frozen bytes"
+            ) from None
+        return executable, directory
+
+    temporary = directory / f".uv.{os.getpid()}.{uuid.uuid4().hex}.tmp"
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(temporary, flags, 0o600)
+    try:
+        view = memoryview(payload)
+        while view:
+            written = os.write(fd, view)
+            view = view[written:]
+        os.fchmod(fd, (mode & 0o111) | 0o400)
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    try:
+        os.link(temporary, executable)
+    except FileExistsError:
+        if _sha256_file(executable) != bound.executable_sha256:
+            raise ValidationEnvironmentError(
+                "CAPABILITY_DRIFT: concurrent package.uv snapshot collision"
+            )
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+    directory_fd = os.open(directory, os.O_RDONLY)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+    try:
+        _read_bound_executable(BoundUvIdentity(
+            executable=str(executable), version=bound.version,
+            executable_sha256=bound.executable_sha256,
+            cache_path=bound.cache_path, cache_scope=bound.cache_scope,
+            network_domains=bound.network_domains,
+        ))
+    except ValidationEnvironmentError as exc:
+        raise ValidationEnvironmentError(
+            "package.uv snapshot digest verification failed"
+        ) from exc
+    return executable, directory
+
+
+def rewrite_bound_uv_tokens(
+    command: str, *, expected_executable: str, snapshot_executable: Path,
+    cwd: Path,
+) -> str:
+    """Rewrite only direct absolute/relative uv executable words to snapshot."""
+    tokens = _shell_words(command)
+    edits: list[tuple[int, int]] = []
+    segments: list[list[int]] = [[]]
+    for index, (value, _start, _end, punctuation) in enumerate(tokens):
+        if punctuation and value in _SHELL_BOUNDARIES:
+            segments.append([])
+        else:
+            segments[-1].append(index)
+    for segment in segments:
+        position = 0
+        while position < len(segment):
+            value = tokens[segment[position]][0]
+            if _ASSIGNMENT_RE.match(value):
+                position += 1
+                continue
+            if value in _SHELL_WRAPPERS:
+                position += 1
+                if value == "env":
+                    while position < len(segment):
+                        option = tokens[segment[position]][0]
+                        if option == "--":
+                            position += 1
+                            break
+                        if option in {"-i", "--ignore-environment"} or _ASSIGNMENT_RE.match(option):
+                            position += 1
+                        elif option in {"-u", "--unset"}:
+                            position += 2
+                        elif option == "-S" or option.startswith("--split-string"):
+                            raise ValidationCommandError("env -S uv form is unsupported")
+                        elif option.startswith("-"):
+                            raise ValidationCommandError("ambiguous env uv wrapper")
+                        else:
+                            break
+                    continue
+                if value == "command" and position < len(segment):
+                    if tokens[segment[position]][0] in {"-p", "--"}:
+                        position += 1
+                continue
+            if value in {">", ">>", "<", "<<", "<<<", "2>", "2>>", "&>", "&>>"}:
+                position += 2
+                continue
+            if Path(value).name == "uv":
+                if value != "uv":
+                    actual = Path(value)
+                    if not actual.is_absolute():
+                        actual = cwd / actual
+                    try:
+                        resolved = str(actual.resolve(strict=True))
+                    except OSError as exc:
+                        raise ValidationCommandError(
+                            "absolute uv executable cannot be resolved"
+                        ) from exc
+                    if resolved != str(Path(expected_executable).resolve(strict=True)):
+                        raise ValidationCommandError(
+                            "absolute uv executable differs from frozen package.uv"
+                        )
+                _value, start, end, _punctuation = tokens[segment[position]]
+                edits.append((start, end))
+            break
+    replacement = shlex.quote(str(snapshot_executable))
+    for start, end in reversed(edits):
+        command = command[:start] + replacement + command[end:]
+    return command
 
 
 _INFRA_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
@@ -367,19 +722,6 @@ def _real_project_environment_matches_bound_uv(
         and sorted(str(value) for value in (status.get("bound_uv_network_domains") or []))
         == sorted(bound_uv.network_domains)
     )
-
-
-def _uv_version(uv_executable: str) -> str:
-    try:
-        proc = process_runner.run_bounded_capture(
-            [uv_executable, "--version"], timeout_seconds=5,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return ""
-    if proc.returncode != 0:
-        return ""
-    text = (proc.stdout or proc.stderr or "").strip()
-    return text.splitlines()[0][:512] if text else ""
 
 
 def _uuid_name() -> str:
@@ -560,13 +902,19 @@ def provision_project_environment(
     except OSError as exc:
         return _infra(f"runtime_cache_create_failed:{exc.strerror or exc}")
 
+    try:
+        uv_snapshot, uv_snapshot_dir = snapshot_bound_uv(
+            canonical_repo, run_id, bound_uv
+        )
+    except (OSError, ValidationEnvironmentError) as exc:
+        return _infra(f"bound_uv_snapshot_failed:{exc}")
     uv_executable = bound_uv.executable
-    uv_version = _uv_version(uv_executable)
+    uv_version = bound_uv.version
     sync_env = runtime_env.hermetic_subprocess_env(canonical_repo, run_id, "validation")
     sync_env["UV_PROJECT_ENVIRONMENT"] = str(env_dir)
     sync_env["VIRTUAL_ENV"] = str(env_dir)
     cmd = [
-        uv_executable, "sync",
+        str(uv_snapshot), "sync",
         "--project", str(candidate_worktree),
         "--python-preference", "only-system",
         "--locked",
@@ -584,18 +932,27 @@ def provision_project_environment(
                 os.chmod(stderr_path, 0o600)
             except OSError:
                 pass
-            result = process_runner.run_bounded_to_files(
+            result = validation_network.run_isolated_to_files(
                 cmd,
                 cwd=candidate_worktree,
                 timeout_seconds=timeout_seconds,
                 env=sync_env,
                 stdout_fh=stdout_fh,
                 stderr_fh=stderr_fh,
+                protected_paths=(uv_snapshot_dir,),
+                package_network_domains=bound_uv.network_domains,
             )
             returncode = result.returncode
             timed_out = result.timed_out
-    except OSError as exc:
-        return _infra(f"subprocess_spawn_failed:{exc.strerror or exc}")
+    except (OSError, validation_network.ValidationNetworkError) as exc:
+        for output_path in (stdout_path, stderr_path):
+            try:
+                output_path.unlink()
+            except OSError:
+                pass
+        return _infra(
+            f"subprocess_spawn_failed:{getattr(exc, 'strerror', None) or exc}"
+        )
     duration = time.monotonic() - start
     stdout_bytes = stdout_path.read_bytes() if stdout_path.exists() else b""
     stderr_bytes = stderr_path.read_bytes() if stderr_path.exists() else b""
@@ -678,6 +1035,7 @@ def env_overrides(env_dir: Path) -> dict[str, str]:
 __all__ = [
     "ALL_OUTCOMES",
     "BoundUvIdentity",
+    "ValidationCommandError",
     "DEFAULT_PROVISION_TIMEOUT_SECONDS",
     "OUTCOME_CANDIDATE_INVALID",
     "OUTCOME_INFRA_FAILURE",
@@ -687,7 +1045,9 @@ __all__ = [
     "UV_MEDIATED_SUBCOMMANDS",
     "ValidationEnvironmentError",
     "build_bound_uv_identity",
+    "bound_uv_snapshot_dir",
     "candidate_bound_environment_id",
+    "classify_uv_command",
     "classify_sync_failure",
     "command_uses_uv_run",
     "env_overrides",
@@ -695,5 +1055,7 @@ __all__ = [
     "project_environment_dir",
     "project_environment_status",
     "provision_project_environment",
+    "rewrite_bound_uv_tokens",
+    "snapshot_bound_uv",
     "verify_bound_uv_identity",
 ]

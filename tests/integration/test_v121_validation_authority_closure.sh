@@ -8,21 +8,203 @@ export PYTHONPATH="${REPO_ROOT}/lib${PYTHONPATH:+:${PYTHONPATH}}"
 
 python3 -B <<'PYTEST'
 import hashlib
-import inspect
 import json
+import os
 import tempfile
+import threading
+import urllib.request
+import socket
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from ownframework_loop import packet
+from ownframework_loop import process_runner
 from ownframework_loop import validation_environment as ve
 from ownframework_loop import validation_executor as vx
+from ownframework_loop import validation_network as vn
 
-# Catalogue drives detection; every declared subcommand is recognized.
-source = inspect.getsource(ve)
-assert '"|".join(re.escape(subcommand) for subcommand in UV_MEDIATED_SUBCOMMANDS)' in source
+# Structured command classification covers supported direct forms and fails
+# closed for ambiguous wrappers rather than relying on a textual regex.
 for subcommand in ve.UV_MEDIATED_SUBCOMMANDS:
     assert ve.is_uv_command(f"uv {subcommand}"), subcommand
+for command in (
+    "uv --offline --quiet run pytest",
+    "/opt/homebrew/bin/uv --directory src sync",
+    "UV_RUN=1 env PIP_NO_INDEX=1 uv run pytest",
+    "command -p uv test",
+):
+    assert ve.classify_uv_command(command) == "uv", command
+for command in (
+    "uvx tool run",
+    "python -c 'import uv; print(1)'",
+    "env -S 'uv run pytest'",
+    "echo 'uv run'",
+):
+    assert ve.classify_uv_command(command) == "ambiguous", command
+assert ve.classify_uv_command("pytest -q") == "none"
 assert not hasattr(ve, "_resolve_uv_executable")
+
+ambiguous_packet = {
+    "allowed_paths": ["src/", "tests/"],
+    "capabilities": ["package.uv"],
+    "required_validation": [
+        {"name": "ambiguous-uv", "command": "env -S 'uv run pytest'"},
+    ],
+}
+ambiguous_errors = packet.validate_validation_contract(ambiguous_packet)
+assert any("ambiguous-uv" in err and "ambiguous" in err for err in ambiguous_errors), ambiguous_errors
+
+# OS-level validator isolation preserves loopback test servers, denies public
+# sockets, and strips an ambient proxy that could otherwise tunnel around it.
+class _LoopbackHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"local-ok")
+    def log_message(self, *_args):
+        pass
+
+server = ThreadingHTTPServer(("127.0.0.1", 0), _LoopbackHandler)
+server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+server_thread.start()
+try:
+    with tempfile.TemporaryDirectory(prefix="ofloop-net-boundary-") as td:
+        root = Path(td)
+        stdout_path, stderr_path = root / "out", root / "err"
+        script = (
+            "import socket,urllib.request; "
+            f"assert urllib.request.urlopen('http://127.0.0.1:{server.server_port}/', timeout=2).read()==b'local-ok'; "
+            "print('LOCAL_OK'); "
+            "s=socket.socket(); s.settimeout(1); "
+            "exec(\"try:\\n s.connect(('1.1.1.1',443)); raise SystemExit('PUBLIC_EGRESS_ALLOWED')"
+            "\\nexcept OSError as e:\\n print('PUBLIC_BLOCKED',e.errno)\")"
+        )
+        ambient = dict(os.environ)
+        ambient.update({"HTTPS_PROXY": "http://127.0.0.1:9", "https_proxy": "http://127.0.0.1:9"})
+        with stdout_path.open("wb") as out, stderr_path.open("wb") as err:
+            result = vn.run_isolated_to_files(
+                [os.sys.executable, "-c", script], cwd=root,
+                timeout_seconds=8, stdout_fh=out, stderr_fh=err,
+                env=ambient,
+            )
+        assert result.returncode == 0, stderr_path.read_text(errors="replace")
+        output = stdout_path.read_text(errors="replace")
+        assert "LOCAL_OK" in output and "PUBLIC_BLOCKED" in output, output
+finally:
+    server.shutdown()
+    server.server_close()
+    server_thread.join(timeout=2)
+
+try:
+    vn._allowed_upstream("attacker.example", 443, frozenset({"pypi.org"}))
+except PermissionError:
+    pass
+else:
+    raise AssertionError("package proxy accepted an unauthorized host")
+
+# The real child-facing package proxy also refuses a non-allowlisted CONNECT
+# without relying on external DNS or a live public service.
+with tempfile.TemporaryDirectory(prefix="ofloop-package-proxy-") as td:
+    root = Path(td)
+    out_path, err_path = root / "out", root / "err"
+    script = (
+        "import urllib.request\n"
+        "try:\n urllib.request.urlopen('https://attacker.example/',timeout=3)"
+        "\nexcept Exception:\n print('PACKAGE_DESTINATION_REFUSED')"
+        "\nelse:\n raise SystemExit('PACKAGE_DESTINATION_ALLOWED')"
+    )
+    with out_path.open("wb") as out, err_path.open("wb") as err:
+        proxy_result = vn.run_isolated_to_files(
+            [os.sys.executable, "-c", script], cwd=root,
+            timeout_seconds=6, stdout_fh=out, stderr_fh=err,
+            env=dict(os.environ), package_network_domains=("pypi.org",),
+        )
+    assert proxy_result.returncode == 0, err_path.read_text(errors="replace")
+    assert "PACKAGE_DESTINATION_REFUSED" in out_path.read_text(errors="replace")
+
+# A frozen host is accepted only after public-address revalidation. Stub the
+# socket edge so this proof stays deterministic and does not download data.
+real_getaddrinfo, real_socket = socket.getaddrinfo, socket.socket
+connected = []
+class _FakeUpstream:
+    def settimeout(self, _timeout):
+        pass
+    def connect(self, address):
+        connected.append(address)
+    def close(self):
+        pass
+try:
+    socket.getaddrinfo = lambda *_a, **_k: [
+        (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443))
+    ]
+    socket.socket = lambda *_a, **_k: _FakeUpstream()
+    allowed = vn._allowed_upstream("pypi.org", 443, frozenset({"pypi.org"}))
+    allowed.close()
+    assert connected == [("93.184.216.34", 443)], connected
+    connected.clear()
+    socket.getaddrinfo = lambda *_a, **_k: [
+        (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", 443))
+    ]
+    try:
+        vn._allowed_upstream("pypi.org", 443, frozenset({"pypi.org"}))
+    except OSError:
+        pass
+    else:
+        raise AssertionError("package proxy accepted a private DNS answer")
+    assert not connected, connected
+finally:
+    socket.getaddrinfo, socket.socket = real_getaddrinfo, real_socket
+
+# A verified uv capability is copied atomically into a private immutable
+# snapshot. Direct absolute invocations normalize to that exact snapshot.
+with tempfile.TemporaryDirectory(prefix="ofloop-uv-snapshot-") as td:
+    root = Path(td)
+    previous_xdg = os.environ.get("XDG_STATE_HOME")
+    os.environ["XDG_STATE_HOME"] = str(root / "state")
+    repo = root / "repo"
+    repo.mkdir()
+    tool_dir = root / "tool"
+    tool_dir.mkdir()
+    source_uv = tool_dir / "uv"
+    source_uv.write_text("#!/bin/sh\nprintf frozen-uv\n", encoding="utf-8")
+    source_uv.chmod(0o700)
+    digest = hashlib.sha256(source_uv.read_bytes()).hexdigest()
+    bound = ve.BoundUvIdentity(
+        executable=str(source_uv), version="uv-fixture",
+        executable_sha256=digest, cache_path=str(root / "cache"),
+        cache_scope="repository_durable", network_domains=("pypi.org",),
+    )
+    snapshot, snapshot_dir = ve.snapshot_bound_uv(repo, "run-uv-snapshot", bound)
+    assert snapshot.read_bytes() == source_uv.read_bytes()
+    assert snapshot.stat().st_mode & 0o777 == 0o500
+    assert snapshot_dir.stat().st_mode & 0o777 == 0o700
+    normalized = ve.rewrite_bound_uv_tokens(
+        f"{source_uv} --offline run", expected_executable=str(source_uv),
+        snapshot_executable=snapshot, cwd=root,
+    )
+    assert normalized == f"{snapshot} --offline run", normalized
+    actual = process_runner.run_bounded_capture([str(snapshot)], timeout_seconds=2)
+    assert actual.returncode == 0 and actual.stdout == "frozen-uv", actual
+    source_uv.write_text("#!/bin/sh\nprintf replaced\n", encoding="utf-8")
+    try:
+        ve.verify_bound_uv_identity(bound)
+    except ve.ValidationEnvironmentError as exc:
+        assert "CAPABILITY_DRIFT" in str(exc), exc
+    else:
+        raise AssertionError("changed bound uv source was accepted")
+
+    with (root / "guard.out").open("wb") as out, (root / "guard.err").open("wb") as err:
+        guarded = vn.run_isolated_to_files(
+            ["/bin/sh", "-c", f"printf poison > {snapshot}"],
+            cwd=root, timeout_seconds=4, stdout_fh=out, stderr_fh=err,
+            env={"PATH": "/usr/bin:/bin"}, protected_paths=(snapshot_dir,),
+        )
+    assert guarded.returncode != 0, guarded
+    assert hashlib.sha256(snapshot.read_bytes()).hexdigest() == digest
+    if previous_xdg is None:
+        os.environ.pop("XDG_STATE_HOME", None)
+    else:
+        os.environ["XDG_STATE_HOME"] = previous_xdg
 
 # package.uv admission is independent of source layout, including checkpoints.
 flat = {

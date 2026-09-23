@@ -27,7 +27,6 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import subprocess
 import time
 import uuid
 from pathlib import Path
@@ -38,19 +37,13 @@ from . import (
     runtime_env,
     secrets_v2,
     validation_environment,
+    validation_network,
     validation_policy,
 )
 
 
 MAX_CAPTURE_BYTES = 64 * 1024
 MAX_EXCERPT_CHARS = 4096
-
-
-def _terminate_validation_group(
-    process: subprocess.Popen[Any], grace_seconds: float = 3.0
-) -> None:
-    """Terminate/reap the whole validation group, including post-leader children."""
-    process_runner.terminate_process_group(process, grace_seconds=grace_seconds)
 
 
 def command_uses_uv_run(command: str) -> bool:
@@ -186,8 +179,14 @@ def run_required_validation(
     env_id = ""
     env_dir = None
     bound_uv: validation_environment.BoundUvIdentity | None = None
-    needs_uv = validation_environment.is_uv_command(command)
-    if needs_uv:
+    uv_snapshot: Path | None = None
+    uv_snapshot_dir: Path | None = None
+    classification = validation_environment.classify_uv_command(command)
+    needs_uv = classification == "uv"
+    if classification == "ambiguous":
+        infra_failure = True
+        infra_failure_reason = "unsupported_or_ambiguous_uv_command"
+    if needs_uv and not infra_failure:
         if not candidate_sha:
             infra_failure = True
             infra_failure_reason = (
@@ -226,23 +225,36 @@ def run_required_validation(
                                 "requires frozen package.uv authority"
                             )
                     else:
-                        env_id = validation_environment.candidate_bound_environment_id(
-                            str(candidate_sha), cwd
-                        )
-                        env_dir = validation_environment.project_environment_dir(
-                            canonical_repo, run_id, role, env_id
-                        )
-                        existing = validation_environment.project_environment_status(env_dir)
-                        if existing.get("provisioned") and not _cached_environment_matches_bound_uv(
-                            existing, bound_uv
-                        ):
-                            infra_failure = True
-                            infra_failure_reason = (
-                                "bound_uv_cached_environment_mismatch: existing project "
-                                "environment was not provisioned under the full frozen "
-                                "package.uv binding"
+                        try:
+                            uv_snapshot, uv_snapshot_dir = (
+                                validation_environment.snapshot_bound_uv(
+                                    canonical_repo, run_id, bound_uv
+                                )
                             )
-            if not infra_failure:
+                        except (
+                            OSError,
+                            validation_environment.ValidationEnvironmentError,
+                        ) as exc:
+                            infra_failure = True
+                            infra_failure_reason = f"bound_uv_snapshot_failed:{exc}"
+                        if not infra_failure:
+                            env_id = validation_environment.candidate_bound_environment_id(
+                                str(candidate_sha), cwd
+                            )
+                            env_dir = validation_environment.project_environment_dir(
+                                canonical_repo, run_id, role, env_id
+                            )
+                            existing = validation_environment.project_environment_status(env_dir)
+                            if existing.get("provisioned") and not _cached_environment_matches_bound_uv(
+                                existing, bound_uv
+                            ):
+                                infra_failure = True
+                                infra_failure_reason = (
+                                    "bound_uv_cached_environment_mismatch: existing project "
+                                    "environment was not provisioned under the full frozen "
+                                    "package.uv binding"
+                                )
+            if needs_uv and not infra_failure:
                 try:
                     outcome = validation_environment.provision_project_environment(
                         canonical_repo=canonical_repo,
@@ -344,12 +356,27 @@ def run_required_validation(
 
     start = time.monotonic()
     timed_out = False
+    network_failure_reason = ""
     with stdout_path.open("wb") as stdout_fh, stderr_path.open("wb") as stderr_fh:
         os.chmod(stdout_path, 0o600)
         os.chmod(stderr_path, 0o600)
         if needs_uv and bound_uv is not None:
             try:
                 validation_environment.verify_bound_uv_identity(bound_uv)
+                if uv_snapshot is None or uv_snapshot_dir is None:
+                    raise validation_environment.ValidationEnvironmentError(
+                        "bound package.uv snapshot is missing before launch"
+                    )
+                validation_environment._read_bound_executable(
+                    validation_environment.BoundUvIdentity(
+                        executable=str(uv_snapshot),
+                        version=bound_uv.version,
+                        executable_sha256=bound_uv.executable_sha256,
+                        cache_path=bound_uv.cache_path,
+                        cache_scope=bound_uv.cache_scope,
+                        network_domains=bound_uv.network_domains,
+                    )
+                )
             except validation_environment.ValidationEnvironmentError as exc:
                 infra_failure_reason = f"bound_uv_drift_pre_launch:{exc}"
                 if infra_failure_path is not None:
@@ -397,31 +424,51 @@ def run_required_validation(
         )
         for key, value in env_overrides.items():
             env[key] = value
-        process = subprocess.Popen(
-            ["/bin/sh", "-c", command],
-            cwd=str(cwd),
-            stdout=stdout_fh,
-            stderr=stderr_fh,
-            env=env,
-            start_new_session=True,
-        )
         try:
-            returncode = process.wait(timeout=timeout_seconds)
-        except subprocess.TimeoutExpired:
-            timed_out = True
-            _terminate_validation_group(process)
-            returncode = 124
-        except BaseException:
-            _terminate_validation_group(process)
-            raise
-        else:
-            if process_runner.process_group_exists(process.pid):
-                _terminate_validation_group(process)
-                returncode = process_runner.PROCESS_GROUP_LEAK_RC
-                stderr_fh.write(
-                    ("\n" + process_runner.PROCESS_GROUP_LEAK_MARKER + "\n").encode("utf-8")
+            effective_command = command
+            protected_paths: tuple[Path, ...] = ()
+            if needs_uv and bound_uv is not None:
+                if uv_snapshot is None or uv_snapshot_dir is None:
+                    raise validation_environment.ValidationEnvironmentError(
+                        "bound package.uv snapshot is missing before validation"
+                    )
+                env["PATH"] = str(uv_snapshot_dir) + os.pathsep + env.get("PATH", "")
+                effective_command = validation_environment.rewrite_bound_uv_tokens(
+                    command,
+                    expected_executable=bound_uv.executable,
+                    snapshot_executable=uv_snapshot,
+                    cwd=cwd,
                 )
-                stderr_fh.flush()
+                protected_paths = (uv_snapshot_dir,)
+            result = validation_network.run_isolated_to_files(
+                ["/bin/sh", "-c", effective_command],
+                cwd=cwd,
+                timeout_seconds=timeout_seconds,
+                stdout_fh=stdout_fh,
+                stderr_fh=stderr_fh,
+                env=env,
+                protected_paths=protected_paths,
+            )
+            returncode = result.returncode
+            timed_out = result.timed_out
+        except (
+            OSError,
+            validation_network.ValidationNetworkError,
+            validation_environment.ValidationCommandError,
+            validation_environment.ValidationEnvironmentError,
+            process_runner.ProcessGroupLeakError,
+        ) as exc:
+            network_failure_reason = f"validation_isolation_or_binding_failed:{exc}"
+            returncode = -1
+            if infra_failure_path is not None:
+                _write_infra_failure_marker(infra_failure_path, {
+                    "name": name,
+                    "command": command,
+                    "reason": network_failure_reason,
+                    "validation_env_id": env_id,
+                    "validation_env_path": str(env_dir) if env_dir is not None else "",
+                    "recorded_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                })
     duration = time.monotonic() - start
 
     stdout_prefix, stdout_size, stdout_sha = _file_snapshot(stdout_path)
@@ -448,10 +495,10 @@ def run_required_validation(
         "name": name,
         "command": command,
         "kind": kind,
-        "exit_code": int(returncode),
+        "exit_code": None if network_failure_reason else int(returncode),
         "duration_seconds": float(duration),
         "expected_exit_code": expected_exit,
-        "passed": passed,
+        "passed": passed and not network_failure_reason,
         "timed_out": timed_out,
         "marker_match": marker_match,
         "stdout_truncated": stdout_size > MAX_CAPTURE_BYTES,
@@ -465,7 +512,8 @@ def run_required_validation(
         "stderr_sha256": stderr_sha,
         "diagnostic_stdout_path": str(stdout_path),
         "diagnostic_stderr_path": str(stderr_path),
-        "infra_failure": False,
+        "infra_failure": bool(network_failure_reason),
+        "infra_failure_reason": network_failure_reason,
         "candidate_invalid": False,
         "validation_env_id": env_id,
         "validation_env_path": str(env_dir) if env_dir is not None else "",
