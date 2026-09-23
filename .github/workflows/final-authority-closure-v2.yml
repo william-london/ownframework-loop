@@ -47,7 +47,16 @@ jobs:
           python3 .github/final_authority_closure_v2.py
           export PYTHONPATH="$PWD/lib${PYTHONPATH:+:$PYTHONPATH}"
           python3 -m compileall -q lib/ownframework_loop bin/ofloop
-          bash -x tests/unit/test_trust_approval.sh
+          probe="$(mktemp -d)"
+          git -C "$probe" init -b master >/dev/null
+          git -C "$probe" config user.email test@local
+          git -C "$probe" config user.name test
+          echo seed > "$probe/README.md"
+          git -C "$probe" add README.md
+          git -C "$probe" commit -m init >/dev/null
+          bin/ofloop spec new "$probe" state-creation-probe
+          rm -rf "$probe"
+          bash tests/unit/test_trust_approval.sh
           bash tests/unit/test_approval_pty_e2e.sh
           bash tests/integration/test_v061_runner_cost_proof.sh
           bash tests/integration/test_v10d_pre1_adversarial_fixes.sh
