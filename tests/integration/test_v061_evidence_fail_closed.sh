@@ -60,18 +60,27 @@ except integrity.TamperingDetected as exc:
 else:
     raise SystemExit("deleted event-bound STATE.json did not fail closed")
 
-# The generic artifact verifier preserves optional-before-publication behavior,
-# but a missing artifact becomes an integrity failure once its digest exists in
-# EVENTS. Use a synthetic chain with no event_chain_sha256 field so this unit is
-# focused strictly on artifact-presence semantics.
-artifact = root / "BUILD_RECEIPT.json"
+# Artifact binding is owned by the event writer, not by individual finalizers.
+# Publish a receipt into a real run, append an ordinary event, and prove the
+# canonical build_receipt_sha256 field appears automatically. Deletion after
+# that publication must fail closed, while never-published optional artifacts
+# remain benign.
+repo2 = root / "artifact-delete-repo"
+repo2.mkdir()
+run2 = "run-artifact-delete"
+state.run_dir(repo2, run2).mkdir(parents=True)
+state.save(repo2, run2, state.initial_state(run2))
+artifact = state.run_dir(repo2, run2) / "BUILD_RECEIPT.json"
 artifact.write_text('{"ok":true}\n', encoding="utf-8")
-events = root / "artifact-events.log"
-digest = integrity.sha256_file(artifact)
-events.write_text(
-    json.dumps({"BUILD_RECEIPT.json_sha256": digest}) + "\n",
-    encoding="utf-8",
+state.append_event(
+    repo2, run2, event_type="artifact_published", old_state=None,
+    new_state=None, actor="test",
 )
+events = state.events_path(repo2, run2)
+digest = integrity.sha256_file(artifact)
+assert integrity.last_recorded_artifact_sha(
+    events, "BUILD_RECEIPT.json"
+) == digest
 ok, failures = integrity.verify_all_artifacts(
     {"BUILD_RECEIPT.json": artifact}, events
 )
@@ -82,7 +91,7 @@ ok, failures = integrity.verify_all_artifacts(
 )
 assert not ok and any("missing but recorded sha exists" in row for row in failures), failures
 
-never_published = root / "REVIEW_VERDICT.json"
+never_published = state.run_dir(repo2, run2) / "REVIEW_VERDICT.json"
 ok, failures = integrity.verify_all_artifacts(
     {"REVIEW_VERDICT.json": never_published}, events
 )

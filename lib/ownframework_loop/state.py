@@ -81,7 +81,7 @@ STATE_TXN_SCHEMA = "ownframework-loop-state-txn/v1"
 _EVENT_AUTHORITATIVE_FIELDS = frozenset({
     "ts", "run_id", "event_type", "old_state", "new_state", "actor",
     "commit_sha", "reason", "state_sha256", "event_chain_sha256",
-})
+} | set(integrity.ARTIFACT_EVENT_KEYS.values()))
 _EVENT_CALLER_RESERVED_FIELDS = _EVENT_AUTHORITATIVE_FIELDS | {"state_txn_id"}
 
 
@@ -793,6 +793,10 @@ def _append_event_locked(
         "state_sha256": state_sha_now,
         "event_chain_sha256": "0" * 64,
     }
+    # Core-owned publication binding: every event snapshots every currently
+    # present authoritative artifact. Callers cannot spoof these keys because
+    # they are part of _EVENT_AUTHORITATIVE_FIELDS above.
+    record.update(integrity.artifact_event_hashes(run_dir(canonical_repo, run_id)))
     if extras:
         record.update(extras)
     line = _json_dumps(record)
