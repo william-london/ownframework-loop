@@ -34,7 +34,7 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-from .util import sha256_text, utc_now_iso
+from .util import run_subprocess, sha256_text, utc_now_iso
 from .integrity import canonical_json_dumps
 from .state import is_program_state, load as state_load, append_event, save as state_save
 
@@ -1800,10 +1800,9 @@ def source_tree_accounting(
     baseline_sha: str,
     candidate_sha: str,
 ) -> dict[str, int]:
-    diff = subprocess.run(
+    diff = run_subprocess(
         ["git", "-C", str(canonical_repo), "diff", "--no-color", baseline_sha, candidate_sha, "--numstat"],
-        capture_output=True,
-        text=True,
+        timeout=30,
         check=True,
     )
     files = 0

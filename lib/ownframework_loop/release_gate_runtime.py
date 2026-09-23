@@ -40,7 +40,12 @@ def _canonical_root() -> Path:
 
 
 def _git(root: Path, *args: str) -> str:
-    return subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True, check=False, timeout=10).stdout.strip()
+    result = run_bounded(
+        ["git", "-C", str(root), *args],
+        cwd=root,
+        timeout_seconds=10,
+    )
+    return result.stdout.strip() if result.returncode == 0 else ""
 
 
 def _preflight(root: Path, *, check_resource_pressure: bool = True) -> tuple[bool, str, dict[str, str]]:

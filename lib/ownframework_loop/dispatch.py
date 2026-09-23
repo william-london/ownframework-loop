@@ -25,6 +25,7 @@ from . import (
     git_checks as git_checks_mod,
     packet as packet_mod,
     program as program_mod,
+    process_runner,
     reconcile as reconcile_mod,
     state as state_mod,
     util,
@@ -655,12 +656,9 @@ def _run_cli(
     timeout_seconds: int | None = None,
 ) -> dict[str, Any]:
     try:
-        proc = subprocess.run(
+        proc = process_runner.run_bounded_capture(
             [_ofloop_bin(), *args],
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=(int(timeout_seconds) if timeout_seconds and timeout_seconds > 0 else None),
+            timeout_seconds=(int(timeout_seconds) if timeout_seconds and timeout_seconds > 0 else None),
         )
     except subprocess.TimeoutExpired as exc:
         raise DispatchError(

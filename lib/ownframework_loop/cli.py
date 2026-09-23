@@ -1410,8 +1410,7 @@ def cmd_new_repo(args: argparse.Namespace) -> None:
     if target.exists() and any(target.iterdir()):
         _emit_error(f"target not empty: {target}", exit_code=2)
     target.mkdir(parents=True, exist_ok=True)
-    import subprocess
-    subprocess.run(["git", "init", "-b", "master", str(target)], check=True)
+    util.run_subprocess(["git", "init", "-b", "master", str(target)], timeout=30, check=True)
     rc = git_checks.remote_count(target)
     if rc > 0:
         _emit_error(f"newly created repo has remotes (should be zero)", exit_code=2)
@@ -1436,13 +1435,13 @@ def cmd_new_repo(args: argparse.Namespace) -> None:
         )
         gitignore = target / ".gitignore"
         gitignore.write_text(".ownframework-loop/\n.worktrees/ownframework-loop/\n", encoding="utf-8")
-        subprocess.run(["git", "-C", str(target), "add", "README.md", ".gitignore"], check=True)
+        util.run_subprocess(["git", "-C", str(target), "add", "README.md", ".gitignore"], timeout=30, check=True)
         # Use the discovered identity; do NOT pass --local config writes.
         env = {**os.environ, "GIT_AUTHOR_NAME": name, "GIT_AUTHOR_EMAIL": email,
                "GIT_COMMITTER_NAME": name, "GIT_COMMITTER_EMAIL": email}
-        subprocess.run(
+        util.run_subprocess(
             ["git", "-C", str(target), "commit", "-m", "loop-v1: minimal bootstrap baseline"],
-            check=True, env=env,
+            timeout=30, check=True, env=env,
         )
     _emit({
         "ok": True,

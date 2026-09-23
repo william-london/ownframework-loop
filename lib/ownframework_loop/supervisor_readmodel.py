@@ -30,6 +30,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from . import process_runner
 from . import state as state_mod
 from . import packet as packet_mod
 from . import supervisor_db as _db_mod
@@ -270,12 +271,9 @@ def fleet_status(*, db_path: Path | None = None) -> dict[str, Any]:
 def _run_git_readonly(repo: Path, args: list[str], *, timeout: int = 10) -> dict[str, Any]:
     """Run one bounded read-only Git observation for operator visibility."""
     try:
-        r = subprocess.run(
+        r = process_runner.run_bounded_capture(
             ["git", "-C", str(repo), *args],
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=timeout,
+            timeout_seconds=timeout,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         return {

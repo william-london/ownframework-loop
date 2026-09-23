@@ -15,6 +15,7 @@ import time
 from pathlib import Path
 
 from ownframework_loop import capabilities
+from ownframework_loop import guards
 from ownframework_loop import locking
 from ownframework_loop import process_runner
 from ownframework_loop import validation_executor as ve
@@ -140,6 +141,19 @@ def prove_capability_version_probe_requires_zero_exit() -> None:
             )
 
 
+
+def prove_semantic_detach_primitives_are_forbidden() -> None:
+    commands = (
+        "setsid sleep 30",
+        "systemd-run --user sleep 30",
+        "launchctl kickstart gui/501/com.example.test",
+        "at now",
+    )
+    for command in commands:
+        result = guards.classify_bash_command(command)
+        assert result["severity"] == "forbidden", (command, result)
+
+
 def prove_validation_timeout_drains_descendants() -> None:
     with tempfile.TemporaryDirectory() as raw:
         root = Path(raw)
@@ -196,6 +210,7 @@ def prove_validation_timeout_drains_descendants() -> None:
 
 prove_nonblocking_shared_lock_normalizes_busy()
 prove_successful_leader_cannot_hide_live_descendant()
+prove_semantic_detach_primitives_are_forbidden()
 prove_validation_detachment_is_refused()
 prove_capability_version_probe_requires_zero_exit()
 prove_validation_timeout_drains_descendants()

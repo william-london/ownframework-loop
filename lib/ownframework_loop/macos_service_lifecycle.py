@@ -11,6 +11,8 @@ import shutil
 import subprocess
 from typing import Sequence
 
+from . import process_runner
+
 
 _LAUNCHCTL_TIMEOUT_SECONDS = 10.0
 _MISSING_SERVICE_MARKERS = (
@@ -42,12 +44,9 @@ def _run(args: Sequence[str]) -> tuple[int, str, str]:
     Timeout/launch failure propagates. Callers must never manufacture an
     absence proof from a transport failure.
     """
-    proc = subprocess.run(
+    proc = process_runner.run_bounded_capture(
         list(args),
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=_LAUNCHCTL_TIMEOUT_SECONDS,
+        timeout_seconds=_LAUNCHCTL_TIMEOUT_SECONDS,
     )
     return proc.returncode, proc.stdout, proc.stderr
 

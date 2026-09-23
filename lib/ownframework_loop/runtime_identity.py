@@ -13,6 +13,8 @@ import stat
 import subprocess
 from pathlib import Path
 
+from . import process_runner
+
 IGNORED_DIR_NAMES = {".git", "logs", ".ownframework-loop", "__pycache__"}
 IGNORED_FILE_NAMES = {
     ".payload.manifest", ".payload.manifest.tmp", ".ownframework-loop-managed", ".install.provenance",
@@ -88,12 +90,13 @@ def payload_tree_digest(root: Path) -> str:
 
 
 def _git(root: Path, *args: str, text: bool = True) -> subprocess.CompletedProcess:
-    return subprocess.run(
-        ["git", "-C", str(root), *args],
-        capture_output=True,
-        text=text,
-        check=False,
-        timeout=10,
+    argv = ["git", "-C", str(root), *args]
+    if text:
+        return process_runner.run_bounded_capture(
+            argv, timeout_seconds=10,
+        )
+    return process_runner.run_bounded_capture_bytes(
+        argv, timeout_seconds=10,
     )
 
 

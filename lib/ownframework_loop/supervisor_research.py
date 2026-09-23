@@ -111,6 +111,8 @@ import uuid as _uuid
 from pathlib import Path
 from typing import Any, Callable
 
+from . import process_runner
+
 REQUEST_SCHEMA = "ownframework-loop-research-request/v1"
 RESPONSE_SCHEMA = "ownframework-loop-research-response/v1"
 
@@ -687,12 +689,9 @@ def _run_broker_blocking(
     if op == "search" and search_backend:
         cmd += ["--search-backend", search_backend]
     try:
-        proc = subprocess.run(
+        proc = process_runner.run_bounded_capture(
             cmd,
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=float(os.environ.get(
+            timeout_seconds=float(os.environ.get(
                 "OFLOOP_RESEARCH_BROKER_TIMEOUT",
                 "60",
             )),

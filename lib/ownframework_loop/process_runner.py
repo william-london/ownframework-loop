@@ -177,6 +177,50 @@ def run_bounded_to_files(
     return CommandResult(returncode, "")
 
 
+
+def run_bounded_capture_bytes(
+    argv: Sequence[str],
+    *,
+    cwd: Path | str | None = None,
+    timeout_seconds: float | None = None,
+    env: Mapping[str, str] | None = None,
+    stdin: int | None = subprocess.DEVNULL,
+) -> subprocess.CompletedProcess[bytes]:
+    """Bytes variant of run_bounded_capture with identical lifecycle proof."""
+    proc = subprocess.Popen(
+        list(argv),
+        cwd=str(cwd) if cwd is not None else None,
+        env=dict(env) if env is not None else None,
+        stdin=stdin,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=False,
+        start_new_session=True,
+    )
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout_seconds)
+    except subprocess.TimeoutExpired as exc:
+        terminate_process_group(proc)  # type: ignore[arg-type]
+        stdout, stderr = proc.communicate()
+        raise subprocess.TimeoutExpired(
+            list(argv), timeout_seconds, output=stdout, stderr=stderr
+        ) from exc
+    except BaseException:
+        terminate_process_group(proc)  # type: ignore[arg-type]
+        raise
+    returncode = int(proc.returncode)
+    if process_group_exists(proc.pid):
+        terminate_process_group(proc)  # type: ignore[arg-type]
+        returncode = PROCESS_GROUP_LEAK_RC
+        stderr = (stderr or b'') + PROCESS_GROUP_LEAK_MARKER.encode('utf-8') + b'\n'
+    return subprocess.CompletedProcess(
+        args=list(argv),
+        returncode=returncode,
+        stdout=stdout,
+        stderr=stderr,
+    )
+
+
 def run_bounded(
     argv: Sequence[str],
     *,
