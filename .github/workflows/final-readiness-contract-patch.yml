@@ -52,7 +52,7 @@ jobs:
               'lib/ownframework_loop/runtime_identity.py',
               '(OSError, subprocess.TimeoutExpired)',
               '(OSError, subprocess.SubprocessError)',
-              expected_old_max=2,
+              expected_old_max=3,
           )
 
           # Read-model observation is explicitly best-effort and returns an
