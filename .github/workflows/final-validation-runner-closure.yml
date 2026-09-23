@@ -49,11 +49,9 @@ jobs:
           from pathlib import Path
           p = Path('.github/final_authority_closure.py')
           s = p.read_text(encoding='utf-8')
-          old = r'                    ("\n" + process_runner.PROCESS_GROUP_LEAK_MARKER + "\n").encode("utf-8")'
-          new = r'                    ("\\n" + process_runner.PROCESS_GROUP_LEAK_MARKER + "\\n").encode("utf-8")'
-          if old not in s:
-              raise SystemExit('closure-script validation escape anchor missing')
-          p.write_text(s.replace(old, new, 1), encoding='utf-8')
+          for name in ('old', 'new', 'block', 'fn', 'new_fn', 'insertion'):
+              s = s.replace(f"{name} = '''", f"{name} = r'''")
+          p.write_text(s, encoding='utf-8')
           PY
           python3 -m py_compile .github/final_authority_closure.py
           python3 .github/final_authority_closure.py
