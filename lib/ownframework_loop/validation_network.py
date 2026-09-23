@@ -432,6 +432,38 @@ sys.exit(result)
     ]
 
 
+def _probe_linux_namespace(
+    *, protected_paths: Sequence[Path],
+    package_broker_socket: str | None = None,
+) -> None:
+    """Prove Linux isolation can be established before running validation.
+
+    ``unshare`` can exist and still be denied by the host's user-namespace
+    policy.  Letting its non-zero exit look like the candidate command's exit
+    would turn an unavailable safety primitive into a product-validation
+    failure.  Run the same namespace/bootstrap helper with a harmless command
+    first so that host refusal is reported as infrastructure failure.
+    """
+    probe = _linux_namespace_prefix(
+        ["/bin/true"],
+        protected_paths=protected_paths,
+        package_broker_socket=package_broker_socket,
+    )
+    try:
+        result = process_runner.run_bounded_capture(
+            probe, timeout_seconds=8.0
+        )
+    except OSError as exc:
+        raise ValidationNetworkError(
+            "Linux validation namespace preflight could not be completed"
+        ) from exc
+    if result.timed_out or result.returncode != 0:
+        detail = "timed out" if result.timed_out else f"exit={result.returncode}"
+        raise ValidationNetworkError(
+            f"Linux validation namespace is unavailable ({detail})"
+        )
+
+
 def _isolated_argv(
     command: Sequence[str], *, proxy_port: int | None,
     protected_paths: Sequence[Path],
@@ -507,6 +539,8 @@ def run_isolated_to_files(
     domains = tuple(sorted({_domain(item) for item in package_network_domains}))
     if not domains:
         argv = isolated_argv(command, protected_paths=protected_paths)
+        if sys.platform.startswith("linux"):
+            _probe_linux_namespace(protected_paths=protected_paths)
         return process_runner.run_bounded_to_files(
             argv, cwd=cwd, timeout_seconds=timeout_seconds,
             stdout_fh=stdout_fh, stderr_fh=stderr_fh,
@@ -525,6 +559,10 @@ def run_isolated_to_files(
             )
     if sys.platform.startswith("linux"):
         with _PackageBroker(domains) as broker:
+            _probe_linux_namespace(
+                protected_paths=protected_paths,
+                package_broker_socket=broker.socket_path,
+            )
             sandboxed = _linux_namespace_prefix(
                 command,
                 protected_paths=protected_paths,

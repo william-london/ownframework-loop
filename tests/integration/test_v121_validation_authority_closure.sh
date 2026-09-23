@@ -10,10 +10,12 @@ python3 -B <<'PYTEST'
 import hashlib
 import json
 import os
+import sys
 import tempfile
 import threading
 import urllib.request
 import socket
+from types import SimpleNamespace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -613,6 +615,71 @@ with tempfile.TemporaryDirectory(prefix="ofloop-v121-late-drift-") as td:
     assert marker_doc["validation_env_path"] == result["validation_env_path"], marker_doc
     assert (marker.stat().st_mode & 0o777) == 0o600, oct(marker.stat().st_mode)
     assert not launched.exists(), "validation subprocess launched after late uv drift"
+
+# A host that cannot create the required Linux namespace is an infrastructure
+# failure, not a failed candidate command.  The preflight must refuse before
+# the validation process is launched.
+with tempfile.TemporaryDirectory(prefix="ofloop-v121-namespace-refusal-") as td:
+    root = Path(td)
+    repo = root / "repo"
+    candidate = root / "candidate"
+    repo.mkdir()
+    candidate.mkdir()
+    marker = root / "namespace-infra.json"
+    previous_xdg = os.environ.get("XDG_STATE_HOME")
+    previous_network_sys = vn.sys
+    previous_namespace_prefix = vn._linux_namespace_prefix
+    previous_capture = process_runner.run_bounded_capture
+    previous_bounded = process_runner.run_bounded_to_files
+    previous_env = vx.runtime_env.commissioned_validation_env
+    launches = []
+
+    def denied_namespace(*_args, **_kwargs):
+        return SimpleNamespace(returncode=1, timed_out=False, stderr="uid_map denied")
+
+    def unexpected_validation_launch(*_args, **_kwargs):
+        launches.append(True)
+        raise AssertionError("candidate validation launched without isolation")
+
+    os.environ["XDG_STATE_HOME"] = str(root / "state")
+    vn.sys = SimpleNamespace(platform="linux", executable=sys.executable)
+    vn._linux_namespace_prefix = lambda *_a, **_k: ["namespace-probe"]
+    process_runner.run_bounded_capture = denied_namespace
+    process_runner.run_bounded_to_files = unexpected_validation_launch
+    vx.runtime_env.commissioned_validation_env = lambda *_a, **_k: {
+        "PATH": "/usr/bin:/bin",
+    }
+    try:
+        result = vx.run_required_validation(
+            cwd=candidate,
+            validation={
+                "name": "linux-namespace-refusal",
+                "command": "printf SHOULD_NOT_RUN",
+                "kind": "fast",
+                "expected_exit_code": 0,
+            },
+            timeout_seconds=5,
+            canonical_repo=repo,
+            run_id="run-v121-namespace-refusal",
+            packet={},
+            infra_failure_path=marker,
+        )
+    finally:
+        vx.runtime_env.commissioned_validation_env = previous_env
+        process_runner.run_bounded_to_files = previous_bounded
+        process_runner.run_bounded_capture = previous_capture
+        vn._linux_namespace_prefix = previous_namespace_prefix
+        vn.sys = previous_network_sys
+        if previous_xdg is None:
+            os.environ.pop("XDG_STATE_HOME", None)
+        else:
+            os.environ["XDG_STATE_HOME"] = previous_xdg
+    assert result["infra_failure"] is True, result
+    assert result["passed"] is False, result
+    assert result["exit_code"] is None, result
+    assert "Linux validation namespace is unavailable" in result["infra_failure_reason"], result
+    assert marker.is_file(), marker
+    assert not launches
 
 print("VALIDATION_AUTHORITY_CLOSURE=PASS")
 PYTEST
