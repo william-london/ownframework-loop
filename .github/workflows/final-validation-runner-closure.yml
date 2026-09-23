@@ -1,0 +1,86 @@
+name: Final validation runner ownership closure
+
+on:
+  push:
+    branches:
+      - hardening/github-authority-closure-2026-09-22
+    paths:
+      - .github/workflows/final-validation-runner-closure.yml
+
+permissions:
+  contents: write
+
+jobs:
+  close:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: hardening/github-authority-closure-2026-09-22
+          fetch-depth: 0
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Collapse validation lifecycle ownership
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${GITHUB_SHA}"
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path('lib/ownframework_loop/validation_executor.py')
+          text = p.read_text(encoding='utf-8')
+
+          helper = '''def _terminate_validation_group(\n    process: subprocess.Popen[Any], grace_seconds: float = 3.0\n) -> None:\n    \"\"\"Terminate/reap the whole validation group, including post-leader children.\"\"\"\n    process_runner.terminate_process_group(process, grace_seconds=grace_seconds)\n\n\n'''
+          if helper in text:
+              text = text.replace(helper, '', 1)
+
+          old = '''        process = subprocess.Popen(\n            [\"/bin/sh\", \"-c\", command],\n            cwd=str(cwd),\n            stdout=stdout_fh,\n            stderr=stderr_fh,\n            env=env,\n            start_new_session=True,\n        )\n        try:\n            returncode = process.wait(timeout=timeout_seconds)\n        except subprocess.TimeoutExpired:\n            timed_out = True\n            _terminate_validation_group(process)\n            returncode = 124\n        except BaseException:\n            _terminate_validation_group(process)\n            raise\n        else:\n            if process_runner.process_group_exists(process.pid):\n                _terminate_validation_group(process)\n                returncode = process_runner.PROCESS_GROUP_LEAK_RC\n                stderr_fh.write(\n                    (\"\\n\" + process_runner.PROCESS_GROUP_LEAK_MARKER + \"\\n\").encode(\"utf-8\")\n                )\n                stderr_fh.flush()\n'''
+          new = '''        outcome = process_runner.run_bounded_to_files(\n            [\"/bin/sh\", \"-c\", command],\n            cwd=cwd,\n            timeout_seconds=float(timeout_seconds),\n            stdout_fh=stdout_fh,\n            stderr_fh=stderr_fh,\n            env=env,\n        )\n        returncode = int(outcome.returncode)\n        timed_out = bool(outcome.timed_out)\n'''
+          if old in text:
+              text = text.replace(old, new, 1)
+          elif 'outcome = process_runner.run_bounded_to_files(' not in text:
+              raise SystemExit('validation executor lifecycle anchor missing')
+
+          if 'subprocess.' not in text:
+              text = text.replace('import subprocess\n', '', 1)
+          else:
+              raise SystemExit('validation_executor still owns raw subprocess lifecycle')
+          p.write_text(text, encoding='utf-8')
+
+          p = Path('tests/unit/test_final_hardening_process_and_lock.sh')
+          text = p.read_text(encoding='utf-8')
+          old = '''    allowed_popen = {\n        \"process_runner.py\",\n        \"validation_environment.py\",\n        \"validation_executor.py\",\n        \"supervisor_runner.py\",\n    }\n'''
+          new = '''    allowed_popen = {\n        \"process_runner.py\",\n        \"supervisor_runner.py\",\n    }\n'''
+          if old in text:
+              text = text.replace(old, new, 1)
+          elif new not in text:
+              raise SystemExit('raw Popen ownership allow-list anchor missing')
+          p.write_text(text, encoding='utf-8')
+          PY
+
+          export PYTHONPATH="$PWD/lib${PYTHONPATH:+:$PYTHONPATH}"
+          python3 -m compileall -q lib/ownframework_loop bin/ofloop
+          bash tests/unit/test_final_hardening_process_and_lock.sh
+          bash tests/integration/test_v121_validation_authority_closure.sh
+          bash tests/integration/test_final_source_closure.sh
+          ./validate.sh
+          git diff --check
+
+      - name: Publish closure and self-delete
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin hardening/github-authority-closure-2026-09-22
+          test "$(git rev-parse HEAD)" = "$(git rev-parse origin/hardening/github-authority-closure-2026-09-22)"
+          git rm .github/workflows/final-validation-runner-closure.yml
+          git add lib/ownframework_loop/validation_executor.py \
+                  tests/unit/test_final_hardening_process_and_lock.sh
+          git diff --cached --check
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'hardening: centralize validation process lifecycle'
+          git push origin HEAD:hardening/github-authority-closure-2026-09-22
