@@ -154,8 +154,8 @@ assert rc != 0, f"QUARANTINED UNBOUND must refuse install, got rc={rc} out={out}
 assert "runtime_generation_dependency" in out, out
 
 # Now exercise retirement semantics against the supervisor directly.
-def fresh_db() -> Path:
-    db = tmp / "retire-tests.sqlite3"
+def fresh_db(name: str = "default") -> Path:
+    db = tmp / f"retire-tests-{name}.sqlite3"
     if db.exists():
         db.unlink()
     with supervisor._connect(db):
@@ -260,6 +260,127 @@ assert row["status"] == "RETIRED"
 assert row["runtime_generation"] == "ofloop-0.6.2@git-OLD", row["runtime_generation"]
 assert row["total_cost_usd"] == before["total_cost_usd"], row["total_cost_usd"]
 assert row["latest_attempt_id"] == before["latest_attempt_id"], row["latest_attempt_id"]
+
+# A gated reservation with no published worker identity is proven
+# pre-provider by the runner's persist-before-release handshake. Retirement
+# terminalizes that exact pristine shape as known-zero and preserves the row.
+db_safe = fresh_db("gated")
+repo_safe = make_repo("retire-gated-reservation", run_id="run-retire-gated")
+enqueue_quarantined(repo_safe, "run-retire-gated", db_safe, generation="ofloop-old")
+safe_ids = ["gated-safe-1", "gated-safe-2"]
+with supervisor._connect(db_safe) as conn:
+    safe_job_id = conn.execute(
+        "SELECT id FROM jobs WHERE repo=? AND run_id=?",
+        (str(repo_safe.resolve()), "run-retire-gated"),
+    ).fetchone()["id"]
+    for attempt_id_safe in safe_ids:
+        conn.execute(
+            """INSERT INTO semantic_attempts
+                (attempt_id, job_id, role, status, started_at, stdout_path,
+                 stderr_path, launch_gate_version)
+               VALUES (?, ?, 'builder', 'RESERVED', 1.0, ?, ?, 1)""",
+            (attempt_id_safe, safe_job_id, "/tmp/out", "/tmp/err"),
+        )
+    conn.execute(
+        "UPDATE jobs SET latest_attempt_id=? WHERE id=?",
+        (safe_ids[-1], safe_job_id),
+    )
+    conn.commit()
+with supervisor._connect_readonly(db_safe) as conn:
+    safe_job_before = conn.execute(
+        "SELECT runtime_generation,total_cost_usd,total_input_tokens,total_output_tokens,"
+        "total_cache_read_tokens,total_cache_creation_tokens,latest_attempt_id "
+        "FROM jobs WHERE id=?",
+        (safe_job_id,),
+    ).fetchone()
+safe_retire = supervisor.retire(
+    canonical_repo=repo_safe, run_id="run-retire-gated", db_path=db_safe,
+)
+assert safe_retire.get("retired") is True, safe_retire
+assert set(safe_retire.get("pre_provider_attempts_terminalized", [])) == set(safe_ids), safe_retire
+with supervisor._connect_readonly(db_safe) as conn:
+    safe_job_after = conn.execute(
+        "SELECT status,runtime_generation,total_cost_usd,total_input_tokens,total_output_tokens,"
+        "total_cache_read_tokens,total_cache_creation_tokens,latest_attempt_id "
+        "FROM jobs WHERE id=?",
+        (safe_job_id,),
+    ).fetchone()
+    safe_rows = conn.execute(
+        "SELECT attempt_id,status,completed_at,cost_accounted,cost_known,"
+        "input_tokens,output_tokens,cache_read_tokens,cache_creation_tokens,"
+        "tokens_known,failure_class,failure_reason FROM semantic_attempts "
+        "WHERE job_id=? ORDER BY attempt_id",
+        (safe_job_id,),
+    ).fetchall()
+assert len(safe_rows) == 2, safe_rows
+assert safe_job_after["status"] == "RETIRED", dict(safe_job_after)
+for field in (
+    "runtime_generation", "total_cost_usd", "total_input_tokens", "total_output_tokens",
+    "total_cache_read_tokens", "total_cache_creation_tokens", "latest_attempt_id",
+):
+    assert safe_job_after[field] == safe_job_before[field], (field, dict(safe_job_before), dict(safe_job_after))
+for safe_row in safe_rows:
+    assert safe_row["status"] == "FAILED" and safe_row["completed_at"] is not None, dict(safe_row)
+    assert safe_row["cost_accounted"] == 1 and safe_row["cost_known"] == 1, dict(safe_row)
+    assert all(safe_row[name] == 0 for name in (
+        "input_tokens", "output_tokens", "cache_read_tokens", "cache_creation_tokens"
+    )), dict(safe_row)
+    assert safe_row["tokens_known"] == 1, dict(safe_row)
+    assert safe_row["failure_class"] == "supervisor", dict(safe_row)
+    assert safe_row["failure_reason"] == "worker_ownership_not_published", dict(safe_row)
+
+# A mixed group is all-or-nothing: a safe gated row must not be terminalized
+# if a legacy ungated reservation or a published worker PID makes the job
+# ambiguous.
+db_mixed = fresh_db("mixed")
+repo_mixed = make_repo("retire-mixed-reservations", run_id="run-retire-mixed")
+enqueue_quarantined(repo_mixed, "run-retire-mixed", db_mixed, generation="ofloop-old")
+mixed_ids = ["mixed-safe", "mixed-legacy", "mixed-pid"]
+with supervisor._connect(db_mixed) as conn:
+    mixed_job_id = conn.execute(
+        "SELECT id FROM jobs WHERE repo=? AND run_id=?",
+        (str(repo_mixed.resolve()), "run-retire-mixed"),
+    ).fetchone()["id"]
+    conn.execute(
+        """INSERT INTO semantic_attempts
+            (attempt_id, job_id, role, status, started_at, stdout_path,
+             stderr_path, launch_gate_version)
+           VALUES (?, ?, 'builder', 'RESERVED', 1.0, ?, ?, 1)""",
+        (mixed_ids[0], mixed_job_id, "/tmp/out", "/tmp/err"),
+    )
+    conn.execute(
+        """INSERT INTO semantic_attempts
+            (attempt_id, job_id, role, status, started_at, stdout_path,
+             stderr_path, launch_gate_version)
+           VALUES (?, ?, 'builder', 'RESERVED', 2.0, ?, ?, 0)""",
+        (mixed_ids[1], mixed_job_id, "/tmp/out", "/tmp/err"),
+    )
+    conn.execute(
+        """INSERT INTO semantic_attempts
+            (attempt_id, job_id, role, status, started_at, worker_pid,
+             stdout_path, stderr_path, launch_gate_version)
+           VALUES (?, ?, 'builder', 'RESERVED', 3.0, ?, ?, ?, 1)""",
+        (mixed_ids[2], mixed_job_id, os.getpid(), "/tmp/out", "/tmp/err"),
+    )
+    conn.commit()
+mixed_retire = supervisor.retire(
+    canonical_repo=repo_mixed, run_id="run-retire-mixed", db_path=db_mixed,
+)
+assert mixed_retire.get("retired") is False, mixed_retire
+assert mixed_retire.get("reason") == "retire_refuses_unresolved_semantic_attempt", mixed_retire
+with supervisor._connect_readonly(db_mixed) as conn:
+    mixed_status = conn.execute(
+        "SELECT status FROM jobs WHERE id=?", (mixed_job_id,),
+    ).fetchone()["status"]
+    attempt_statuses = {
+        row["attempt_id"]: row["status"]
+        for row in conn.execute(
+            "SELECT attempt_id,status FROM semantic_attempts WHERE job_id=?",
+            (mixed_job_id,),
+        )
+    }
+assert mixed_status == "QUARANTINED", mixed_status
+assert attempt_statuses == {attempt_id: "RESERVED" for attempt_id in mixed_ids}, attempt_statuses
 
 # 13) Repository / run artifacts untouched by retirement.
 state_after = (repo / ".ownframework-loop" / "run-retire-ok" / "STATE.json").read_text()

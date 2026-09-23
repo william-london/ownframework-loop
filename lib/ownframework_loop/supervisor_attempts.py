@@ -423,6 +423,82 @@ PRE_PROVIDER_FAILURE_REASONS = frozenset({
 })
 
 
+def _is_proven_unpublished_gated_reservation(attempt: sqlite3.Row) -> bool:
+    """Whether the durable row proves a gated provider was never released.
+
+    A gate-v1 runner cannot exec its provider until the supervisor has
+    committed worker ownership.  Retirement/recovery may therefore record a
+    known-zero terminal attempt only while the reservation still has the
+    pristine pre-publication shape.  Contradictory accounting, ownership,
+    completion, or acceptance fields make the row ambiguous and fail closed.
+    """
+    try:
+        return (
+            str(attempt["status"] or "") == "RESERVED"
+            and attempt["worker_pid"] is None
+            and attempt["worker_pgid"] is None
+            and attempt["deadline_at"] is None
+            and attempt["worker_start_identity"] is None
+            and int(attempt["launch_gate_version"] or 0) >= 1
+            and attempt["completed_at"] is None
+            and attempt["returncode"] is None
+            and float(attempt["cost_usd"] or 0.0) == 0.0
+            and int(attempt["cost_accounted"] or 0) == 0
+            and int(attempt["semantic_accepted"] or 0) == 0
+            and int(attempt["input_tokens"] or 0) == 0
+            and int(attempt["output_tokens"] or 0) == 0
+            and int(attempt["cache_read_tokens"] or 0) == 0
+            and int(attempt["cache_creation_tokens"] or 0) == 0
+            and int(attempt["tokens_known"] or 0) == 0
+            and not str(attempt["failure_class"] or "")
+            and not str(attempt["failure_reason"] or "")
+            and not str(attempt["effective_model"] or "")
+            and not str(attempt["model_usage_json"] or "")
+        )
+    except (IndexError, KeyError, TypeError, ValueError, OverflowError):
+        return False
+
+
+def _terminalize_proven_unpublished_gated_reservation(
+    conn: sqlite3.Connection,
+    *,
+    job_id: int,
+    attempt: sqlite3.Row,
+    now: float | None = None,
+) -> bool:
+    """Account one exact pre-provider reservation as known-zero FAILED.
+
+    The caller owns the SQLite transaction.  The UPDATE repeats the safety
+    predicates as a compare-and-set so a stale observation can never
+    overwrite published worker ownership or accounting.
+    """
+    if not _is_proven_unpublished_gated_reservation(attempt):
+        return False
+    timestamp = time.time() if now is None else float(now)
+    cur = conn.execute(
+        """UPDATE semantic_attempts SET
+             status='FAILED', completed_at=?, returncode=NULL,
+             cost_usd=0, cost_accounted=1, cost_known=1,
+             input_tokens=0, output_tokens=0, cache_read_tokens=0,
+             cache_creation_tokens=0, tokens_known=1,
+             failure_class='supervisor',
+             failure_reason='worker_ownership_not_published'
+           WHERE attempt_id=? AND job_id=? AND status='RESERVED'
+             AND worker_pid IS NULL AND worker_pgid IS NULL
+             AND deadline_at IS NULL AND worker_start_identity IS NULL
+             AND launch_gate_version>=1 AND completed_at IS NULL
+             AND returncode IS NULL AND cost_usd=0
+             AND cost_accounted=0 AND semantic_accepted=0
+             AND input_tokens=0 AND output_tokens=0
+             AND cache_read_tokens=0 AND cache_creation_tokens=0
+             AND tokens_known=0 AND failure_class IS NULL
+             AND failure_reason IS NULL AND effective_model=''
+             AND model_usage_json=''""",
+        (timestamp, str(attempt["attempt_id"]), int(job_id)),
+    )
+    return cur.rowcount == 1
+
+
 
 
 def _reserve_semantic_attempt(
@@ -840,4 +916,3 @@ def _mark_attempt_launch_failed(
             f"{attempt_id}: {detail[-500:]}"
         )
     conn.commit()
-

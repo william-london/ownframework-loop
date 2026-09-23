@@ -84,6 +84,12 @@ def _recover_stale_running(conn: sqlite3.Connection) -> int:
     _extract_effective_model_from_durable_stdout = _accounting_mod.extract_effective_model_from_durable_stdout
     _extract_model_usage_json_from_durable_stdout = _accounting_mod.extract_model_usage_json_from_durable_stdout
     _account_attempt_cost = _attempts_mod._account_attempt_cost
+    _is_proven_unpublished_gated_reservation = (
+        _attempts_mod._is_proven_unpublished_gated_reservation
+    )
+    _terminalize_proven_unpublished_gated_reservation = (
+        _attempts_mod._terminalize_proven_unpublished_gated_reservation
+    )
 
     recovered = 0
     rows = conn.execute(
@@ -215,22 +221,12 @@ def _recover_stale_running(conn: sqlite3.Connection) -> int:
                 conn.commit()
                 continue
 
-            if (
-                str(attempt["status"] or "") == "RESERVED"
-                and not attempt["worker_pid"]
-                and int(attempt["launch_gate_version"] or 0) >= 1
-            ):
-                conn.execute(
-                    """UPDATE semantic_attempts SET
-                         status='FAILED', completed_at=?, returncode=NULL,
-                         cost_usd=0, cost_accounted=1, cost_known=1,
-                         input_tokens=0, output_tokens=0, cache_read_tokens=0,
-                         cache_creation_tokens=0, tokens_known=1,
-                         failure_class='supervisor',
-                         failure_reason='worker_ownership_not_published'
-                       WHERE attempt_id=? AND job_id=? AND status='RESERVED'""",
-                    (time.time(), attempt_id, job_id),
-                )
+            if _is_proven_unpublished_gated_reservation(attempt):
+                if not _terminalize_proven_unpublished_gated_reservation(
+                    conn, job_id=job_id, attempt=attempt
+                ):
+                    conn.rollback()
+                    continue
                 recovery_reason = (
                     "recovered unpublished gated semantic reservation; "
                     "provider was never released"
