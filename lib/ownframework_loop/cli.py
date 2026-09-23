@@ -1977,7 +1977,15 @@ def _build_parser() -> argparse.ArgumentParser:
         _emit(out, exit_code=0 if out.get("ok") else 2)
 
     def cmd_supervisor_retire(args: argparse.Namespace) -> None:
-        repo = _repo_path(args.repo)
+        # Historical disposable repositories may already have been removed.
+        # Retirement changes only the exact supervisor enrollment identified
+        # by this canonical path + run_id; it does not read or recreate repo
+        # contents. Keep existing directory validation when the path exists,
+        # while allowing a missing path to reach the ledger's exact-match,
+        # QUARANTINED-only retirement guard.
+        repo = Path(args.repo).expanduser().resolve(strict=False)
+        if repo.exists() and not repo.is_dir():
+            _emit_error(f"repository path is not a directory: {args.repo}", exit_code=2)
         out = supervisor_mod.retire(
             canonical_repo=repo,
             run_id=args.run_id,

@@ -104,9 +104,23 @@ _LOCAL_CONNECTION_DEPTH_SUPERVISOR = _process_mod._LOCAL_CONNECTION_DEPTH_SUPERV
 _SUPERVISOR_LIFECYCLE_LOCK_NAME = "SUPERVISOR_LIFECYCLE.lock"
 
 
-def _supervisor_lifecycle_lock_path(canonical_repo: Path, run_id: str) -> Path:
+def _supervisor_lifecycle_lock_path(
+    canonical_repo: Path,
+    run_id: str,
+    db_path: Path | None = None,
+) -> Path:
     state_mod.validate_run_id(run_id)
-    return state_mod.run_dir(canonical_repo, run_id) / _SUPERVISOR_LIFECYCLE_LOCK_NAME
+    repo = Path(canonical_repo).expanduser().resolve(strict=False)
+    if repo.exists():
+        return state_mod.run_dir(repo, run_id) / _SUPERVISOR_LIFECYCLE_LOCK_NAME
+    # A ledger-only retirement of a deleted disposable repo must not recreate
+    # .ownframework-loop/run-id just to obtain its lifecycle lock. Keep the
+    # same per-logical-run serialization in a private lock beside the ledger.
+    db = Path(db_path).expanduser() if db_path is not None else default_db_path()
+    lock_identity = hashlib.sha256(
+        (str(repo) + "\0" + run_id).encode("utf-8")
+    ).hexdigest()
+    return db.parent / f".lifecycle-{lock_identity}.lock"
 
 
 def _serialize_run_lifecycle(func):
@@ -124,7 +138,9 @@ def _serialize_run_lifecycle(func):
         if canonical_repo is None or run_id is None:
             raise TypeError("lifecycle operation requires canonical_repo and run_id")
         with flock_exclusive(
-            _supervisor_lifecycle_lock_path(Path(canonical_repo), str(run_id)),
+            _supervisor_lifecycle_lock_path(
+                Path(canonical_repo), str(run_id), kwargs.get("db_path")
+            ),
             blocking=True,
             timeout_seconds=30,
         ):

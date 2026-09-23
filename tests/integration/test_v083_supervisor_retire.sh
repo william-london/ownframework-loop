@@ -17,6 +17,7 @@
 #  13. Repository/run artifacts are untouched by retirement.
 #  14. Second ordinary same-generation installer refresh also proceeds
 #      without OFLOOP_ALLOW_RUNTIME_GENERATION_MIGRATION.
+#  15. A deleted disposable repository's exact enrollment remains retireable.
 set -euo pipefail
 TESTS_DIR="$(cd "$(dirname "$0")" && pwd)"
 . "$TESTS_DIR/../_helpers.sh"
@@ -260,6 +261,54 @@ assert row["status"] == "RETIRED"
 assert row["runtime_generation"] == "ofloop-0.6.2@git-OLD", row["runtime_generation"]
 assert row["total_cost_usd"] == before["total_cost_usd"], row["total_cost_usd"]
 assert row["latest_attempt_id"] == before["latest_attempt_id"], row["latest_attempt_id"]
+
+# A stale disposable repository may already be gone. Retire is ledger-only, so
+# the supported CLI may resolve the exact missing path + run_id against the
+# supervisor DB without recreating repository contents.
+db_missing = fresh_db("missing-repo")
+repo_missing = make_repo("retire-missing-repo", run_id="run-retire-missing-repo")
+enqueue_quarantined(
+    repo_missing, "run-retire-missing-repo", db_missing, generation="ofloop-old"
+)
+shutil.rmtree(repo_missing)
+assert not repo_missing.exists()
+wrong_path = tmp / "repo-retire-wrong-missing-path"
+wrong_path_proc = subprocess.run(
+    [
+        str(src / "bin" / "ofloop"), "supervisor", "retire",
+        "--db", str(db_missing), str(wrong_path), "run-retire-missing-repo",
+    ],
+    cwd=src, capture_output=True, text=True, env=os.environ.copy(), timeout=30,
+)
+assert wrong_path_proc.returncode == 2, (
+    wrong_path_proc.returncode, wrong_path_proc.stdout, wrong_path_proc.stderr
+)
+with supervisor._connect_readonly(db_missing) as conn:
+    before_exact_retire = conn.execute(
+        "SELECT status FROM jobs WHERE run_id=?", ("run-retire-missing-repo",),
+    ).fetchone()
+assert before_exact_retire["status"] == "QUARANTINED", dict(before_exact_retire)
+missing_retire_proc = subprocess.run(
+    [
+        str(src / "bin" / "ofloop"), "supervisor", "retire",
+        "--db", str(db_missing), str(repo_missing), "run-retire-missing-repo",
+    ],
+    cwd=src, capture_output=True, text=True, env=os.environ.copy(), timeout=30,
+)
+assert missing_retire_proc.returncode == 0, (
+    missing_retire_proc.returncode, missing_retire_proc.stdout, missing_retire_proc.stderr
+)
+missing_retire_result = json.loads(missing_retire_proc.stdout)
+assert missing_retire_result.get("retired") is True, missing_retire_result
+assert missing_retire_result.get("status") == "RETIRED", missing_retire_result
+assert not repo_missing.exists(), "retirement must not recreate repository contents"
+with supervisor._connect_readonly(db_missing) as conn:
+    missing_row = conn.execute(
+        "SELECT status,runtime_generation FROM jobs WHERE run_id=?",
+        ("run-retire-missing-repo",),
+    ).fetchone()
+assert missing_row["status"] == "RETIRED", dict(missing_row)
+assert missing_row["runtime_generation"] == "ofloop-old", dict(missing_row)
 
 # A gated reservation with no published worker identity is proven
 # pre-provider by the runner's persist-before-release handshake. Retirement
