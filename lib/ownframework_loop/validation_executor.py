@@ -27,6 +27,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import signal
 import subprocess
 import time
 import uuid
@@ -43,6 +44,35 @@ from . import (
 
 MAX_CAPTURE_BYTES = 64 * 1024
 MAX_EXCERPT_CHARS = 4096
+
+
+def _terminate_validation_group(
+    process: subprocess.Popen[Any], grace_seconds: float = 3.0
+) -> None:
+    """Terminate and reap one validation process group.
+
+    Required validations may invoke shells, test runners, compilers, or local
+    services that create descendants. Killing only the shell PID on timeout
+    would let those descendants outlive the deterministic validation envelope.
+    Every validation is therefore started in its own session and this helper
+    drains the full process group, escalating from TERM to KILL when needed.
+    """
+    if process.poll() is not None:
+        return
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    try:
+        process.wait(timeout=grace_seconds)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    process.wait()
 
 
 def command_uses_uv_run(command: str) -> bool:
@@ -484,14 +514,17 @@ def run_required_validation(
             stdout=stdout_fh,
             stderr=stderr_fh,
             env=env,
+            start_new_session=True,
         )
         try:
             returncode = process.wait(timeout=timeout_seconds)
         except subprocess.TimeoutExpired:
             timed_out = True
-            process.kill()
-            process.wait()
+            _terminate_validation_group(process)
             returncode = 124
+        except BaseException:
+            _terminate_validation_group(process)
+            raise
     duration = time.monotonic() - start
 
     stdout_prefix, stdout_size, stdout_sha = _file_snapshot(stdout_path)
