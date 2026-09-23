@@ -10,7 +10,7 @@
 #
 # Categories exercised:
 #   A) frozen package.uv authority missing
-#   B) bound uv provisioning timeout
+#   B) bound uv provisioning timeout + descendant drain
 #   C) runtime-cache write refused after bound identity verification
 set -euo pipefail
 
@@ -73,7 +73,9 @@ git -C "${REAL_REPO}" commit -qm "baseline: real uv project"
 CANDIDATE_SHA="$(git -C "${REAL_REPO}" rev-parse HEAD)"
 
 # A test-only executable with deterministic behavior: version inspection is
-# immediate, while the sync operation sleeps long enough to hit a tiny bound.
+# immediate. The sync operation launches a descendant that would leave a
+# sentinel after one second if only the wrapper PID were killed. Whole-group
+# timeout cleanup must prevent that sentinel from ever appearing.
 FAKE_UV="${TMP}/fake-uv"
 cat > "${FAKE_UV}" <<'EOF'
 #!/usr/bin/env bash
@@ -81,8 +83,12 @@ if [[ "${1:-}" == "--version" ]]; then
     echo "uv 99.0-test"
     exit 0
 fi
-sleep 2
-exit 0
+printf '1\n' > "${0}.child-started"
+(
+    sleep 1
+    printf '1\n' > "${0}.child-survived"
+) &
+wait
 EOF
 chmod 0755 "${FAKE_UV}"
 
@@ -117,6 +123,7 @@ expect "missing frozen uv → reason starts with bound_uv_required" \
 # B. Provisioning timeout with a valid frozen executable identity       #
 # -------------------------------------------------------------------- #
 section "B. bound uv provisioning timeout"
+rm -f "${FAKE_UV}.child-started" "${FAKE_UV}.child-survived"
 PYTHONPATH="${LIB_DIR}" python3 -B - "${REAL_REPO}" "${CANDIDATE_SHA}" "${FAKE_UV}" > "${TMP}/B.json" <<'PY'
 import json, sys, time
 from pathlib import Path
@@ -158,6 +165,11 @@ expect "bound timeout → OUTCOME_INFRA_FAILURE" "$B_OUTCOME" "infra_failure"
 expect "bound timeout → reason provisioning_timeout" "$B_REASON" "provisioning_timeout"
 expect "bound timeout → timed_out=True" "$B_TIMED_OUT" "True"
 expect "bound timeout → package.uv remains bound" "$B_UNBOUND" "False"
+expect "bound timeout → descendant actually started" \
+    "$([ -f "${FAKE_UV}.child-started" ] && echo yes || echo no)" "yes"
+sleep 1.3
+expect "bound timeout → descendant process group drained" \
+    "$([ -f "${FAKE_UV}.child-survived" ] && echo yes || echo no)" "no"
 
 # Independently pin the pure classifier contract too.
 PYTHONPATH="${LIB_DIR}" python3 -B - > "${TMP}/B_class.json" <<'PY'
