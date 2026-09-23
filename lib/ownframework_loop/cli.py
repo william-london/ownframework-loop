@@ -40,6 +40,7 @@ from . import (
     scheduling, state as state_mod, transitions, util, verdicts, worktrees,
     integrity, limits as limits_mod, approval, build_finalize, review_finalize,
     branch_resolver, capabilities as capabilities_mod, commissioning as commissioning_mod, execution_start,
+    process_runner,
     dispatch as dispatch_mod, runner_profiles as runner_profiles_mod, runtime_env, supervisor as supervisor_mod,
     supervisor_readmodel as supervisor_readmodel_mod,
     supervisor_holds as supervisor_holds_mod,

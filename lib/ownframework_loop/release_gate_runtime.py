@@ -22,7 +22,7 @@ from pathlib import Path
 
 from . import plugin_data, runtime_identity
 from .gate_lock import GateAlreadyRunning, GateLock
-from .process_runner import CommandResult, run_bounded
+from .process_runner import CommandResult, run_bounded, run_bounded_capture
 from .util import utc_now_compact, utc_now_iso
 
 MAX_GATE = 1800

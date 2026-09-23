@@ -2622,7 +2622,7 @@ def serve(
             # consumes queued research requests for active runs,
             # validates against the run's frozen capability binding
             # and the live jobs table, dispatches the broker via
-            # subprocess.run (NOT under Claude's Bash sandbox), and
+            # the bounded supervisor process runner (NOT under Claude's Bash sandbox), and
             # publishes responses back into the worker's per-attempt
             # scratch research dir. Defensive try/except so a tick
             # failure cannot bring down the scheduler.

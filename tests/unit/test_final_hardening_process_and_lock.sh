@@ -2,10 +2,12 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 export PYTHONPATH="$ROOT/lib${PYTHONPATH:+:$PYTHONPATH}"
+export OFLOOP_ROOT="$ROOT"
 
 python3 - <<'PY'
 from __future__ import annotations
 
+import ast
 import os
 import shlex
 import subprocess
@@ -154,6 +156,31 @@ def prove_semantic_detach_primitives_are_forbidden() -> None:
         assert result["severity"] == "forbidden", (command, result)
 
 
+def prove_core_has_no_raw_subprocess_run() -> None:
+    root = Path(os.environ["OFLOOP_ROOT"])
+    raw_runs: list[str] = []
+    popen_calls: list[str] = []
+    allowed_popen = {
+        "process_runner.py",
+        "validation_environment.py",
+        "validation_executor.py",
+        "supervisor_runner.py",
+    }
+    for path in sorted((root / "lib" / "ownframework_loop").rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+                continue
+            if not isinstance(node.func.value, ast.Name) or node.func.value.id != "subprocess":
+                continue
+            if node.func.attr == "run":
+                raw_runs.append(f"{path.relative_to(root)}:{node.lineno}")
+            elif node.func.attr == "Popen" and path.name not in allowed_popen:
+                popen_calls.append(f"{path.relative_to(root)}:{node.lineno}")
+    assert not raw_runs, f"raw subprocess.run bypasses remain: {raw_runs}"
+    assert not popen_calls, f"unaudited subprocess.Popen owners remain: {popen_calls}"
+
+
 def prove_validation_timeout_drains_descendants() -> None:
     with tempfile.TemporaryDirectory() as raw:
         root = Path(raw)
@@ -213,6 +240,7 @@ prove_successful_leader_cannot_hide_live_descendant()
 prove_semantic_detach_primitives_are_forbidden()
 prove_validation_detachment_is_refused()
 prove_capability_version_probe_requires_zero_exit()
+prove_core_has_no_raw_subprocess_run()
 prove_validation_timeout_drains_descendants()
 print("FINAL_HARDENING_PROCESS_AND_LOCK=PASS")
 PY

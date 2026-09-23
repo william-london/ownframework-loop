@@ -682,6 +682,10 @@ class ClaudeCodeRunner:
             lifecycle_leak = True
             _terminate_group(proc)
 
+        if not timed_out and process_runner.process_group_exists(proc.pid):
+            lifecycle_leak = True
+            process_runner.terminate_process_group(proc)
+
         if durable_files is not None:
             # Close our handles; the child holds its own dup until exit.
             try:
@@ -714,6 +718,18 @@ class ClaudeCodeRunner:
         if lifecycle_leak:
             if durable_files is not None and envelope_error:
                 stderr_data = (stderr_data or "") + "\n" + envelope_error
+            return RunnerResult(
+                ok=False,
+                returncode=process_runner.PROCESS_GROUP_LEAK_RC,
+                cost_usd=0.0,
+                stdout=(stdout_data or "")[-RUNNER_DIAGNOSTIC_MAX_CHARS:],
+                stderr=((stderr_data or "") + "\n" + process_runner.PROCESS_GROUP_LEAK_MARKER)[-RUNNER_DIAGNOSTIC_MAX_CHARS:],
+                pid=int(proc.pid),
+                cost_known=False,
+                tokens_known=False,
+            )
+
+        if lifecycle_leak:
             return RunnerResult(
                 ok=False,
                 returncode=process_runner.PROCESS_GROUP_LEAK_RC,

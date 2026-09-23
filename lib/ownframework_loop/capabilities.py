@@ -687,7 +687,7 @@ def resolve_capabilities(
             # blocks for a RESPONSE. The supervisor's serve() loop
             # consumes the inbox, validates the request against the
             # run's frozen capability binding and the live jobs table,
-            # and dispatches the broker via subprocess.run — the broker
+            # and dispatches the broker via the bounded process runner — the broker
             # runs OUTSIDE Claude's Bash sandbox with full DNS/TCP
             # egress under the operator's authority.
             #
