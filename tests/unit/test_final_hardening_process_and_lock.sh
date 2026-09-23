@@ -17,6 +17,7 @@ from pathlib import Path
 from ownframework_loop import locking
 from ownframework_loop import process_runner
 from ownframework_loop import validation_executor as ve
+from ownframework_loop import validation_policy
 
 
 def prove_nonblocking_shared_lock_normalizes_busy() -> None:
@@ -88,6 +89,24 @@ subprocess.Popen(
         )
 
 
+def prove_validation_detachment_is_refused() -> None:
+    for command in (
+        "setsid python3 -c 'print(1)'",
+        "nohup python3 -c 'print(1)'",
+        "daemonize /tmp/example python3 -c 'print(1)'",
+        "printf ok; disown",
+        "systemd-run --user python3 -c 'print(1)'",
+        "launchctl submit -l example -- /bin/true",
+    ):
+        decision = validation_policy.classify_required_validation(
+            command, run_id="run-20260923T000000Z-deadbeef"
+        )
+        assert decision["allowed"] is False, (command, decision)
+        assert decision["external_decision"] == "BLOCK:OF_LOOP_VALIDATION_DETACH", (
+            command, decision
+        )
+
+
 def prove_validation_timeout_drains_descendants() -> None:
     with tempfile.TemporaryDirectory() as raw:
         root = Path(raw)
@@ -144,6 +163,7 @@ def prove_validation_timeout_drains_descendants() -> None:
 
 prove_nonblocking_shared_lock_normalizes_busy()
 prove_successful_leader_cannot_hide_live_descendant()
+prove_validation_detachment_is_refused()
 prove_validation_timeout_drains_descendants()
 print("FINAL_HARDENING_PROCESS_AND_LOCK=PASS")
 PY
