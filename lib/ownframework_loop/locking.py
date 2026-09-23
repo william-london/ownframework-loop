@@ -58,7 +58,12 @@ def flock_exclusive(
 
 @contextmanager
 def flock_shared(path: Path, *, blocking: bool = True, timeout_seconds: float = 30.0) -> Iterator[None]:
-    """Acquire a shared (read) flock."""
+    """Acquire a shared (read) flock.
+
+    Raises LockBusyError when a non-blocking shared lock cannot be acquired,
+    matching the exclusive-lock contract and keeping callers independent of
+    platform-specific fcntl exceptions.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(str(path), os.O_CREAT | os.O_RDWR, 0o600)
     try:
@@ -75,7 +80,10 @@ def flock_shared(path: Path, *, blocking: bool = True, timeout_seconds: float = 
                         )
                     time.sleep(0.05)
         else:
-            fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+            except BlockingIOError as e:
+                raise LockBusyError(f"shared lock {path} busy") from e
         yield
     finally:
         try:
