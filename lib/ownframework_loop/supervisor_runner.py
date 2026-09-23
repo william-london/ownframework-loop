@@ -69,7 +69,7 @@ def _claude_cli_version(executable: str) -> tuple[int, int, int] | None:
             [executable, "--version"],
             timeout_seconds=10,
         )
-    except (OSError, subprocess.TimeoutExpired):
+    except (OSError, subprocess.SubprocessError):
         return None
     if proc.returncode != 0:
         return None
