@@ -18,23 +18,47 @@ class CommandResult:
     timed_out: bool = False
 
 
+def _process_group_exists(pgid: int) -> bool:
+    """Return whether a POSIX process group still has any members."""
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
 def _terminate_group(proc: subprocess.Popen[str], grace_seconds: float = 3.0) -> None:
-    if proc.poll() is not None:
-        return
+    """Terminate a whole child group even when its original leader exited.
+
+    ``Popen.poll()`` only tells us about the direct child.  A shell/wrapper may
+    exit while descendants remain in the process group, so leader exit is never
+    accepted as proof that the group is drained.
+    """
+    pgid = proc.pid
     try:
-        os.killpg(proc.pid, signal.SIGTERM)
+        os.killpg(pgid, signal.SIGTERM)
     except ProcessLookupError:
+        if proc.poll() is None:
+            proc.wait()
         return
-    try:
-        proc.wait(timeout=grace_seconds)
-        return
-    except subprocess.TimeoutExpired:
-        pass
-    try:
-        os.killpg(proc.pid, signal.SIGKILL)
-    except ProcessLookupError:
-        pass
-    proc.wait()
+
+    deadline = time.monotonic() + grace_seconds
+    while _process_group_exists(pgid) and time.monotonic() < deadline:
+        # Reap the direct child when possible, but group existence—not leader
+        # status—is the cleanup authority.
+        proc.poll()
+        time.sleep(0.05)
+
+    if _process_group_exists(pgid):
+        try:
+            os.killpg(pgid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+
+    if proc.poll() is None:
+        proc.wait()
 
 
 def run_bounded_capture(
@@ -47,11 +71,11 @@ def run_bounded_capture(
 ) -> subprocess.CompletedProcess[str]:
     """Run explicit argv with separate captured streams and bounded lifecycle.
 
-    The child is always the leader of a fresh session/process group.  A timeout
+    The child is always the leader of a fresh session/process group. A timeout
     therefore drains descendants before the traditional ``TimeoutExpired``
-    contract is re-raised.  Callers that historically used ``subprocess.run``
+    contract is re-raised. Callers that historically used ``subprocess.run``
     can adopt this helper without changing success/failure semantics while
-    gaining the stronger guarantee that a timed-out effect is actually gone.
+    gaining the stronger guarantee that a timed-out in-group effect is gone.
     """
     proc = subprocess.Popen(
         list(argv),
@@ -138,7 +162,7 @@ def process_group_drained(pgid: int) -> bool:
     and recovery paths must prove the tree is empty rather than assume
     it.
     """
-    _ = pgid  # accepted for API symmetry; the drain semantics is by-ppid
+    _ = pgid
     try:
         while True:
             waited_pid, _ = os.waitpid(-1, os.WNOHANG)
