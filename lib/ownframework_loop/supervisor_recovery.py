@@ -438,18 +438,46 @@ def _apply_failure_policy(
         streak = 1
         backoff = 0.0
     elif failure_class == "progress_stalled":
-        # Post-v1 closure: the watchdog owns detect+terminate+classify
-        # for progress_stalled and incremented the dedicated
-        # ``progress_stall_count`` counter. The canonical failure-policy
-        # owner does NOT also increment transient_failures or
-        # infra_failures — that would be a double-charge. The stall is
-        # its own budget unit; quarantine for repeated stalls is
-        # governed by the stall count, not by infra/transient streaks.
-        # We still derive the operational backoff so a stalled attempt
-        # does not hot-loop.
-        quarantined = False
-        streak = 1
-        backoff = min(300.0, float(5 * (2 ** max(0, streak - 1))))
+        # Post-v1 closure: the watchdog owns detect + terminate +
+        # classify for progress_stalled and incremented the dedicated
+        # ``progress_stall_count`` diagnostic counter exactly once.
+        # The canonical failure-policy owner CONSUMES the existing
+        # ``transient_failures`` retry budget exactly once per
+        # watchdog-terminated attempt, applying the same transient
+        # circuit-and-cycles semantics so repeated stalls are
+        # bounded by ``max_transient_failures`` ×
+        # ``max_transient_recovery_cycles`` rather than retrying
+        # forever. Without this, an inert provider that occupies
+        # the budget without producing progress would never
+        # terminate.
+        transient_failures += 1
+        ceiling = int(row["max_transient_failures"] or 0)
+        max_cycles = int(row["max_transient_recovery_cycles"] or 0)
+        cycles_exhausted = max_cycles > 0 and transient_recovery_cycles >= max_cycles
+        threshold_hit = ceiling > 0 and transient_failures >= ceiling
+        if threshold_hit and not cycles_exhausted:
+            # Bound the streak via the existing transient recovery
+            # circuit. Operational backoff cools the worker; the
+            # circuit-open counter is the only place this row's
+            # streak is reset, and the cycle budget itself caps the
+            # number of times the same stall pattern can be
+            # recovered.
+            transient_recovery_cycles += 1
+            transient_failures = 0
+            quarantined = False
+            backoff = 600.0
+        else:
+            # Either the streak threshold was hit AND the cycles
+            # are exhausted, or cycles are exhausted on a sub-cycle
+            # stall. Either way the aggregate finite budget
+            # (``max_transient_failures`` × ``max_transient_recovery_cycles``)
+            # is spent and the run goes terminal — the only way to
+            # avoid an unbounded stall loop.
+            quarantined = threshold_hit or cycles_exhausted
+            streak = transient_failures
+            backoff = 0.0 if quarantined else min(
+                300.0, float(5 * (2 ** max(0, streak - 1)))
+            )
     else:
         infra_failures += 1
         ceiling = int(row["max_infra_failures"] or 0)
@@ -480,8 +508,9 @@ def _apply_failure_policy(
         "transient_failures": transient_failures,
         "transient_recovery_cycles": transient_recovery_cycles,
         "max_transient_recovery_cycles": int(row["max_transient_recovery_cycles"] or 0),
+        "quarantined": bool(quarantined),
         "circuit_opened": bool(
-            failure_class == "transient"
+            (failure_class in ("transient", "progress_stalled"))
             and not quarantined
             and backoff == 600.0
             and transient_failures == 0
