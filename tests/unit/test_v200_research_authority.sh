@@ -1785,6 +1785,578 @@ PY
 expect "section 12 third-mid-run behavioral tests" "$?" "0"
 
 # -------------------------------------------------------------------- #
+# Section 13: research-recovery + transport-admission + watchdog-retry  #
+#              bounded closure adversarial tests                       #
+# -------------------------------------------------------------------- #
+# These tests prove the four clustered defects:
+#   A) recovery must reprove live attempt authority
+#   A) recovery may not redispatch an already-in-flight key
+#   B) request identity is distinct from transport-launch identity
+#   B) recovery must pass through the same rate-limit primitive
+# Each test uses a stub broker that counts invocations and a fresh
+# in-memory DB so the live-attempt authority proof is real.
+section "13. research-recovery + transport-admission + watchdog-retry bounded closure"
+REPO_ROOT_ABS="${REPO_ROOT}" SUPERVISOR_DB_PATH="/tmp/ofloop-recov-13-supervisor-$$.sqlite3" python3 - <<'PY'
+import os, sys, json, sqlite3, uuid, time, shutil, tempfile, threading, concurrent.futures
+from pathlib import Path
+
+sys.path.insert(0, os.environ['REPO_ROOT_ABS'] + "/lib")
+from ownframework_loop import supervisor_research as sr
+
+# Stable per-process evidence root.
+_EV = Path(tempfile.mkdtemp(prefix="ofloop-recovery-bridge-"))
+os.environ["OFLOOP_RESEARCH_EVIDENCE_ROOT"] = str(_EV)
+os.environ.pop("OFLOOP_SUPERVISOR_DB", None)
+
+PASS, FAIL = [], []
+def check(name, cond, detail=""):
+    if cond:
+        PASS.append(name); print(f"PASS {name}")
+    else:
+        FAIL.append((name, detail)); print(f"FAIL {name} {detail}")
+
+import ownframework_loop.supervisor_research as sr_mod
+
+def fresh_db(run_id, latest_attempt, status, role):
+    db_path = _EV / "supervisor.sqlite3"
+    if db_path.exists():
+        db_path.unlink()
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        "CREATE TABLE jobs ("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL, "
+        "latest_attempt_id TEXT NOT NULL, worker_pid INTEGER, "
+        "worker_started_at REAL, worker_role TEXT, status TEXT)"
+    )
+    # attempt_id_only column is referenced from the watchdog's
+    # progress-watchdog tick; recover_claims itself does not need
+    # attempt_id_only, but tests that exercise the failure policy
+    # downstream do.
+    pid = os.getpid() if status == "RUNNING" else None
+    started = time.time() if pid else None
+    conn.execute(
+        "INSERT INTO jobs (run_id, latest_attempt_id, worker_pid, "
+        "worker_started_at, worker_role, status) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (run_id, latest_attempt, pid, started, role, status),
+    )
+    conn.commit()
+    conn.close()
+    os.environ["OFLOOP_SUPERVISOR_DB"] = str(db_path)
+    return db_path
+
+def write_claim(run_id, request_id, op, attempt_id="pass-0001",
+                role="builder", request_digest=None, **extra):
+    cd = _EV / run_id / "claims"
+    cd.mkdir(parents=True, exist_ok=True, mode=0o700)
+    rd = _EV / run_id / "requests"
+    rd.mkdir(parents=True, exist_ok=True, mode=0o700)
+    body = {
+        "schema": "ownframework-loop-research-claim/v1",
+        "run_id": run_id,
+        "request_id": request_id,
+        "request_digest": request_digest or ("0"*64),
+        "attempt_id": attempt_id,
+        "role": role,
+        "op": op,
+        "operator": "test",
+        "submitted_at": time.time(),
+    }
+    body.update(extra)
+    (cd / f"claim-{request_id}.json").write_text(json.dumps(body) + "\n")
+    return cd / f"claim-{request_id}.json"
+
+def reset_registry():
+    reg = sr_mod._registry_for_tests()
+    # Allow deregistering finalized / non-finalized entries alike.
+    with reg._lock:
+        reg._entries.clear()
+        return len(reg._entries)
+
+# ----------------------------------------------------------------- #
+# A) STALE_ATTEMPT_RECOVERY — claim attempt_id differs from DB       #
+#    latest_attempt_id. Recovery MUST refuse (zero broker transport). #
+# ----------------------------------------------------------------- #
+broker_calls_A1 = [0]
+sr_mod._run_broker_blocking = lambda *a, **kw: (broker_calls_A1.append(1) or {"ok": True})
+sr_mod._broker_commissioning_identity = lambda: {"path": "/bin/true", "sha256": "0"*64}
+run_id_A1 = "run-20260923T130000Z-aaaa0001"
+fresh_db(run_id_A1, latest_attempt="pass-0002", status="RUNNING", role="builder")
+reset_registry()
+try:
+    rid = str(uuid.uuid4())
+    write_claim(run_id_A1, rid, "read", attempt_id="pass-0001")
+    summary = sr.recover_claims(run_id_A1)
+    check("STALE_ATTEMPT_RECOVERY: recovery skipped (run advanced)",
+          summary["redispatched"] == 0 and summary["skipped"] >= 1,
+          f"summary: {summary}")
+    check("STALE_ATTEMPT_RECOVERY: zero broker transport",
+          broker_calls_A1 == [0], f"broker_calls: {broker_calls_A1}")
+finally:
+    shutil.rmtree(_EV / run_id_A1, ignore_errors=True)
+
+# ----------------------------------------------------------------- #
+# A) ROLE_MISMATCH_RECOVERY — claim role differs from DB worker_role #
+# ----------------------------------------------------------------- #
+broker_calls_A2 = [0]
+sr_mod._run_broker_blocking = lambda *a, **kw: (broker_calls_A2.append(1) or {"ok": True})
+run_id_A2 = "run-20260923T130100Z-bbbb0002"
+fresh_db(run_id_A2, latest_attempt="pass-0001", status="RUNNING", role="reviewer")
+reset_registry()
+try:
+    rid = str(uuid.uuid4())
+    write_claim(run_id_A2, rid, "asset-read", attempt_id="pass-0001", role="builder")
+    summary = sr.recover_claims(run_id_A2)
+    check("ROLE_MISMATCH_RECOVERY: recovery skipped",
+          summary["redispatched"] == 0 and summary["skipped"] >= 1,
+          f"summary: {summary}")
+    check("ROLE_MISMATCH_RECOVERY: zero broker transport",
+          broker_calls_A2 == [0], f"broker_calls: {broker_calls_A2}")
+finally:
+    shutil.rmtree(_EV / run_id_A2, ignore_errors=True)
+
+# ----------------------------------------------------------------- #
+# A) NON_LIVE_JOB_RECOVERY — DB shows status='DONE' (terminal)        #
+# ----------------------------------------------------------------- #
+broker_calls_A3 = [0]
+sr_mod._run_broker_blocking = lambda *a, **kw: (broker_calls_A3.append(1) or {"ok": True})
+run_id_A3 = "run-20260923T130200Z-cccc0003"
+fresh_db(run_id_A3, latest_attempt="pass-0001", status="DONE", role=None)
+reset_registry()
+try:
+    rid = str(uuid.uuid4())
+    write_claim(run_id_A3, rid, "read", attempt_id="pass-0001", role="builder")
+    summary = sr.recover_claims(run_id_A3)
+    check("NON_LIVE_JOB_RECOVERY: recovery skipped (terminal run)",
+          summary["redispatched"] == 0 and summary["skipped"] >= 1,
+          f"summary: {summary}")
+    check("NON_LIVE_JOB_RECOVERY: zero broker transport",
+          broker_calls_A3 == [0], f"broker_calls: {broker_calls_A3}")
+finally:
+    shutil.rmtree(_EV / run_id_A3, ignore_errors=True)
+
+# ----------------------------------------------------------------- #
+# A) SLOW_RECOVERED_GET_ACROSS_MULTIPLE_TICKS — same orphan claim,    #
+#    broker takes >1 tick to complete. Tick 1 admits once; ticks 2..N #
+#    must detect exact in-flight ownership and emit ZERO new transports#
+# ----------------------------------------------------------------- #
+# The slow broker increments calls on entry, then blocks on a gate
+# until released. Tick 1 dispatches the broker; the worker enters,
+# increments calls to 1, blocks on the gate. Across ticks 2 and 3
+# the entry's future remains incomplete in the executor pool, so
+# the in-flight registry must continue to detect ownership and refuse
+# additional redispatches. Tick count is observed AFTER giving the
+# worker sufficient time to enter the broker body.
+slow_calls = [0]
+slow_gate = threading.Event()
+def slow_broker(*a, **kw):
+    slow_calls[0] += 1
+    slow_gate.wait(timeout=10.0)
+    return {"ok": True, "op_id": f"slow-{slow_calls[0]}",
+            "search_backend": "wikipedia", "results": [],
+            "results_count": 0, "status_code": 200,
+            "response_bytes": 0, "response_sha256": "0"*64,
+            "extracted_bytes": 0, "extracted_sha256": "0"*64,
+            "extracted_preview": "", "extracted_truncated": False,
+            "url_original": "stub://", "url_final": "stub://",
+            "redirect_chain": [], "title": ""}
+sr_mod._run_broker_blocking = slow_broker
+
+run_id_slow = "run-20260923T130300Z-dddd0004"
+fresh_db(run_id_slow, latest_attempt="pass-0001", status="RUNNING", role="builder")
+reset_registry()
+try:
+    rid = str(uuid.uuid4())
+    write_claim(run_id_slow, rid, "read", attempt_id="pass-0001", role="builder")
+
+    # Tick 1: recovery scan admits once.
+    s1 = sr.recover_claims(run_id_slow)
+    # Wait for the worker pool to enter the broker body. With
+    # max_workers=2 the executor usually schedules new tasks
+    # immediately; 0.5s is generous.
+    time.sleep(0.5)
+    launches_t1 = list((_EV / run_id_slow / "launches").glob("launch-*.json"))
+    check("SLOW_RECOVERED_GET tick1: 1 launch record published",
+          len(launches_t1) == 1, f"launches={launches_t1}")
+    keys_t1 = sr_mod._registry_for_tests().all_keys()
+    check("SLOW_RECOVERED_GET tick1: registry owns 1 entry",
+          len(keys_t1) == 1, f"keys={keys_t1}")
+    check("SLOW_RECOVERED_GET tick1: broker entered (calls=1)",
+          slow_calls[0] == 1,
+          f"slow_calls={slow_calls[0]}")
+    calls_after_t1 = slow_calls[0]
+
+    # Tick 2: recovery scan re-encounters the same claim. The
+    # primitive's insert_if_absent MUST refuse because the in-flight
+    # registry still holds an entry for that key.
+    s2 = sr.recover_claims(run_id_slow)
+    time.sleep(0.2)
+    check("SLOW_RECOVERED_GET tick2: zero new broker transport",
+          slow_calls[0] == calls_after_t1,
+          f"slow_calls={slow_calls[0]} expected={calls_after_t1}")
+    check("SLOW_RECOVERED_GET tick2: registry still 1 entry",
+          len(sr_mod._registry_for_tests().all_keys()) == 1,
+          f"keys={sr_mod._registry_for_tests().all_keys()}")
+    check("SLOW_RECOVERED_GET tick2: zero new launch records",
+          len(list((_EV / run_id_slow / "launches").glob("launch-*.json"))) == 1,
+          f"launches={list((_EV / run_id_slow / 'launches').glob('launch-*.json'))}")
+
+    # Tick 3: same.
+    s3 = sr.recover_claims(run_id_slow)
+    time.sleep(0.2)
+    check("SLOW_RECOVERED_GET tick3: zero new broker transport",
+          slow_calls[0] == calls_after_t1,
+          f"slow_calls={slow_calls[0]}")
+    check("SLOW_RECOVERED_GET tick3: registry still 1 entry",
+          len(sr_mod._registry_for_tests().all_keys()) == 1,
+          f"keys={sr_mod._registry_for_tests().all_keys()}")
+    check("SLOW_RECOVERED_GET tick3: zero new launch records",
+          len(list((_EV / run_id_slow / "launches").glob("launch-*.json"))) == 1,
+          f"launches={list((_EV / run_id_slow / 'launches').glob('launch-*.json'))}")
+
+    # Release the gate; futures complete; canonical finalize runs.
+    slow_gate.set()
+    time.sleep(0.5)
+    reaped = sr_mod._registry_for_tests().reap_completed()
+    res = sr_mod._finalize_completed_entries(reaped)
+    check("SLOW_RECOVERED_GET: exactly 1 finalize",
+          res["finalized"] == 1, f"res: {res}")
+    claim_path = _EV / run_id_slow / "claims" / f"claim-{rid}.json"
+    check("SLOW_RECOVERED_GET: claim marker removed after completion",
+          not claim_path.exists(), f"present: {claim_path}")
+    resp_path = sr.canonical_response_path(run_id_slow, rid)
+    check("SLOW_RECOVERED_GET: response published on disk",
+          resp_path.exists(),
+          f"missing: {resp_path}")
+finally:
+    shutil.rmtree(_EV / run_id_slow, ignore_errors=True)
+
+# ----------------------------------------------------------------- #
+# A) EXACT_INFLIGHT_DUPLICATE_INSERT — registry.insert_if_absent must #
+#    refuse to overwrite an existing entry; the existing entry wins.  #
+# ----------------------------------------------------------------- #
+reg = sr_mod._registry_for_tests()
+reset_registry()
+try:
+    e1 = sr_mod._InFlightEntry(
+        run_id="run-20260923T130400Z-aaaa1111",
+        request_id="11111111-2222-4333-8444-555555555555",
+        request_digest="a"*64,
+        attempt_id="pass-0001",
+        role="builder", op="search", url=None,
+        query="x", max_bytes=10, search_backend="wikipedia",
+        claim_path=Path("/dev/null"),
+        future=None, submitted_at=time.time(),
+        operator="test1",
+    )
+    reg.insert_if_absent(e1)
+    inserted, = reg.all_keys(),  # capture existing
+    future_holder = []
+    def stub_future():
+        f = concurrent.futures.Future()
+        future_holder.append(f)
+        return f
+    e2 = sr_mod._InFlightEntry(
+        run_id="run-20260923T130400Z-aaaa1111",
+        request_id="11111111-2222-4333-8444-555555555555",
+        request_digest="a"*64,  # same triple → same key
+        attempt_id="pass-0001",
+        role="builder", op="search", url=None,
+        query="x", max_bytes=999,  # distinguishable mutation
+        search_backend="wikipedia",
+        claim_path=Path("/dev/null"),
+        future=stub_future(),
+        submitted_at=time.time(),
+        operator="test2",
+    )
+    result = reg.insert_if_absent(e2)
+    check("EXACT_INFLIGHT_DUPLICATE_INSERT: existing entry is preserved",
+          result is e1, "result is not e1")
+    check("EXACT_INFLIGHT_DUPLICATE_INSERT: insert did NOT mutate e1",
+          e1.max_bytes == 10, f"e1.max_bytes={e1.max_bytes}")
+    check("EXACT_INFLIGHT_DUPLICATE_INSERT: registry size == 1",
+          len(reg) == 1, f"len={len(reg)}")
+finally:
+    reset_registry()
+
+# ----------------------------------------------------------------- #
+# A) RECOVERED_COMPLETION — exactly one response, one claim          #
+#    finalization, no orphan future/slot leakage.                    #
+# ----------------------------------------------------------------- #
+def stub_broker_quick(*a, **kw):
+    return {"ok": True, "op_id": "qb-1",
+            "search_backend": "wikipedia", "results": [],
+            "results_count": 0, "status_code": 200,
+            "response_bytes": 0, "response_sha256": "0"*64,
+            "extracted_bytes": 0, "extracted_sha256": "0"*64,
+            "extracted_preview": "", "extracted_truncated": False,
+            "url_original": "stub://", "url_final": "stub://",
+            "redirect_chain": [], "title": ""}
+
+sr_mod._run_broker_blocking = stub_broker_quick
+run_id_rec = "run-20260923T130500Z-eeee0005"
+fresh_db(run_id_rec, latest_attempt="pass-0001", status="RUNNING", role="builder")
+reset_registry()
+try:
+    rid = str(uuid.uuid4())
+    write_claim(run_id_rec, rid, "read", attempt_id="pass-0001", role="builder")
+    s = sr.recover_claims(run_id_rec)
+    check("RECOVERED_COMPLETION: 1 redispatch",
+          s["redispatched"] == 1,
+          f"summary: {s}")
+    # Drain via the canonical finalize path.
+    reg = sr_mod._registry_for_tests()
+    reg_size_before = len(reg)
+    reaped = reg.reap_completed()
+    res = sr_mod._finalize_completed_entries(reaped)
+    check("RECOVERED_COMPLETION: exactly 1 finalized",
+          res["finalized"] == 1,
+          f"res: {res}")
+    reg_size_after = len(reg)
+    check("RECOVERED_COMPLETION: no orphan in-flight slot",
+          reg_size_after == 0,
+          f"reg sizes: before={reg_size_before} after={reg_size_after}")
+    # Claim must be removed by finalize.
+    cp = _EV / run_id_rec / "claims" / f"claim-{rid}.json"
+    check("RECOVERED_COMPLETION: claim removed",
+          not cp.exists(), f"present: {cp}")
+    # Response on disk.
+    rp = sr.canonical_response_path(run_id_rec, rid)
+    check("RECOVERED_COMPLETION: response on disk",
+          rp.exists(), f"missing: {rp}")
+finally:
+    shutil.rmtree(_EV / run_id_rec, ignore_errors=True)
+
+# ----------------------------------------------------------------- #
+# B) NORMAL_AND_RECOVERY_SHARE_RATE_LIMIT — Limit=N. Submit N via the #
+#    normal inbox path. Then stage an orphan claim for recovery.      #
+#    The recovery MUST refuse (rate already exhausted).                #
+# ----------------------------------------------------------------- #
+LIMIT_B1 = 3
+saved_id = sr_mod._broker_commissioning_identity
+sr_mod._broker_commissioning_identity = lambda: {"path": "/bin/true", "sha256": "0"*64}
+sr_mod._capability_resolution_has_research_public = lambda *a, **kw: True
+
+run_id_b1 = "run-20260923T130600Z-ffff0006"
+db_path_b1 = fresh_db(run_id_b1, latest_attempt="pass-0001",
+                     status="RUNNING", role="builder")
+reset_registry()
+try:
+    requests_dir = _EV / run_id_b1 / "requests"
+    requests_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    # Drive N normal admissions.
+    for _ in range(LIMIT_B1):
+        rid = str(uuid.uuid4())
+        body = {
+            "schema": "ownframework-loop-research-request/v1",
+            "request_id": rid, "run_id": run_id_b1,
+            "attempt_id": "pass-0001", "role": "builder",
+            "op": "search", "query": "q",
+            "max_bytes": 1024,
+            "requested_at": "2026-09-23T13:06:00Z",
+        }
+        (requests_dir / f"req-{rid}.json").write_text(json.dumps(body) + "\n")
+    sr.process_research_queue(
+        db_path=db_path_b1, canonical_repo=_EV, run_id=run_id_b1,
+        rate_limit_per_minute=LIMIT_B1,
+    )
+    # Stage an orphan claim for recovery that wants a 4th transport.
+    orphan_rid = str(uuid.uuid4())
+    write_claim(run_id_b1, orphan_rid, "read", attempt_id="pass-0001", role="builder")
+    summary = sr.recover_claims(run_id_b1, rate_limit_per_minute=LIMIT_B1)
+    check("NORMAL_AND_RECOVERY_SHARE_RATE_LIMIT: recovery refused at limit",
+          summary["redispatched"] == 0 and summary["skipped"] >= 1,
+          f"summary: {summary}")
+    # The accepted-launch counter should still be LIMIT_B1.
+    accepted = sr._accepted_count_last_60s(run_id_b1)
+    check("NORMAL_AND_RECOVERY_SHARE_RATE_LIMIT: counter unchanged on refused recovery",
+          accepted == LIMIT_B1, f"accepted={accepted}")
+finally:
+    sr_mod._capability_resolution_has_research_public = lambda *a, **kw: True
+    shutil.rmtree(_EV / run_id_b1, ignore_errors=True)
+
+# ----------------------------------------------------------------- #
+# B) RECOVERY_AT_RATE_LIMIT — pre-saturate accepted count, then      #
+#    probe recovery; recovery MUST emit zero new transports.          #
+# ----------------------------------------------------------------- #
+run_id_b2 = "run-20260923T130700Z-aaaa0007"
+db_path_b2 = fresh_db(run_id_b2, latest_attempt="pass-0001",
+                     status="RUNNING", role="builder")
+reset_registry()
+try:
+    # Pre-create LIMIT_B1+1 launch record files (synthetic).
+    launches_dir = _EV / run_id_b2 / "launches"
+    launches_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    LIMIT_B2 = 2
+    for i in range(LIMIT_B2):
+        rid_dummy = uuid.uuid4().hex
+        (launches_dir / f"launch-{rid_dummy}.json").write_text(
+            json.dumps({"schema": "ownframework-loop-research-launch/v1",
+                        "launch_id": rid_dummy, "request_id": "x",
+                        "submitted_at": time.time()}) + "\n"
+        )
+    accepted = sr._accepted_count_last_60s(run_id_b2)
+    check("RECOVERY_AT_RATE_LIMIT: pre-seeded accepted count",
+          accepted == LIMIT_B2, f"accepted={accepted}")
+    # Stage orphan claim.
+    rid_orphan = str(uuid.uuid4())
+    write_claim(run_id_b2, rid_orphan, "read", attempt_id="pass-0001", role="builder")
+    summary = sr.recover_claims(run_id_b2, rate_limit_per_minute=LIMIT_B2)
+    check("RECOVERY_AT_RATE_LIMIT: zero new transport",
+          summary["redispatched"] == 0, f"summary: {summary}")
+finally:
+    shutil.rmtree(_EV / run_id_b2, ignore_errors=True)
+
+# ----------------------------------------------------------------- #
+# B) LEGITIMATE_SECOND_PHYSICAL_TRANSPORT — First transport completes#
+#    and is finalized and removed from in-flight registry. Then a new #
+#    legitimate admission (different request_id) succeeds with a      #
+#    distinct launch_id and a fresh rate-limit event.                 #
+# ----------------------------------------------------------------- #
+def stub_b1(*a, **kw):
+    return {"ok": True, "op_id": "legit-1",
+            "search_backend": "wikipedia", "results": [],
+            "results_count": 0, "status_code": 200,
+            "response_bytes": 0, "response_sha256": "0"*64,
+            "extracted_bytes": 0, "extracted_sha256": "0"*64,
+            "extracted_preview": "", "extracted_truncated": False,
+            "url_original": "stub://", "url_final": "stub://",
+            "redirect_chain": [], "title": ""}
+sr_mod._run_broker_blocking = stub_b1
+run_id_b3 = "run-20260923T130800Z-bbbb0008"
+db_path_b3 = fresh_db(run_id_b3, latest_attempt="pass-0001",
+                     status="RUNNING", role="builder")
+reset_registry()
+try:
+    requests_dir_b3 = _EV / run_id_b3 / "requests"
+    requests_dir_b3.mkdir(parents=True, exist_ok=True, mode=0o700)
+    # First transport.
+    rid1 = str(uuid.uuid4())
+    body1 = {
+        "schema": "ownframework-loop-research-request/v1",
+        "request_id": rid1, "run_id": run_id_b3,
+        "attempt_id": "pass-0001", "role": "builder",
+        "op": "search", "query": "q1",
+        "max_bytes": 1024,
+        "requested_at": "2026-09-23T13:08:00Z",
+    }
+    (requests_dir_b3 / f"req-{rid1}.json").write_text(json.dumps(body1) + "\n")
+    sr.process_research_queue(
+        db_path=db_path_b3, canonical_repo=_EV, run_id=run_id_b3,
+        rate_limit_per_minute=100,
+    )
+    # Drain the first transport's future.
+    reg = sr_mod._registry_for_tests()
+    reaped = reg.reap_completed()
+    sr_mod._finalize_completed_entries(reaped)
+    # Second transport.
+    rid2 = str(uuid.uuid4())
+    body2 = dict(body1)
+    body2["request_id"] = rid2
+    body2["query"] = "q2"
+    (requests_dir_b3 / f"req-{rid2}.json").write_text(json.dumps(body2) + "\n")
+    sr.process_research_queue(
+        db_path=db_path_b3, canonical_repo=_EV, run_id=run_id_b3,
+        rate_limit_per_minute=100,
+    )
+    # Inspect the launches/ directory.
+    launches_dir = _EV / run_id_b3 / "launches"
+    files = sorted(launches_dir.glob("launch-*.json"))
+    check("LEGITIMATE_SECOND_PHYSICAL_TRANSPORT: 2 launch files",
+          len(files) == 2, f"files={files}")
+    if len(files) == 2:
+        b1h = files[0].name.removeprefix("launch-").removesuffix(".json")
+        b2h = files[1].name.removeprefix("launch-").removesuffix(".json")
+        check("LEGITIMATE_SECOND_PHYSICAL_TRANSPORT: distinct launch ids",
+              b1h != b2h, f"ids={b1h} {b2h}")
+finally:
+    shutil.rmtree(_EV / run_id_b3, ignore_errors=True)
+
+# ----------------------------------------------------------------- #
+# B) SEMANTIC_REPLAY_AFTER_ACCEPTED_RESPONSE — normal admission N=1,  #
+#    completes, response + claim removed. Next tick: worker reposts   #
+#    same (request_id, request_digest). NO new transport (replay      #
+#    reuses the authoritative response).                              #
+# ----------------------------------------------------------------- #
+run_id_b4 = "run-20260923T130900Z-cccc0009"
+db_path_b4 = fresh_db(run_id_b4, latest_attempt="pass-0001",
+                     status="RUNNING", role="builder")
+reset_registry()
+try:
+    requests_dir_b4 = _EV / run_id_b4 / "requests"
+    requests_dir_b4.mkdir(parents=True, exist_ok=True, mode=0o700)
+    rid = str(uuid.uuid4())
+    body = {
+        "schema": "ownframework-loop-research-request/v1",
+        "request_id": rid, "run_id": run_id_b4,
+        "attempt_id": "pass-0001", "role": "builder",
+        "op": "search", "query": "r",
+        "max_bytes": 1024,
+        "requested_at": "2026-09-23T13:09:00Z",
+    }
+    (requests_dir_b4 / f"req-{rid}.json").write_text(json.dumps(body) + "\n")
+    # Tick 1: admit.
+    sr.process_research_queue(
+        db_path=db_path_b4, canonical_repo=_EV, run_id=run_id_b4,
+        rate_limit_per_minute=100,
+    )
+    # Drain.
+    sr_mod._finalize_completed_entries(sr_mod._registry_for_tests().reap_completed())
+    count_after_tick1 = len(list((_EV / run_id_b4 / "launches").glob("launch-*.json")))
+    # Tick 2: worker reposts same (request_id, request_digest).
+    body2 = dict(body)
+    body2["query"] = "different-but-same-replay-id"
+    (requests_dir_b4 / f"req-{rid}.json").write_text(json.dumps(body2) + "\n")
+    sr.process_research_queue(
+        db_path=db_path_b4, canonical_repo=_EV, run_id=run_id_b4,
+        rate_limit_per_minute=100,
+    )
+    count_after_tick2 = len(list((_EV / run_id_b4 / "launches").glob("launch-*.json")))
+    check("SEMANTIC_REPLAY_AFTER_ACCEPTED_RESPONSE: zero new transport",
+          count_after_tick1 == count_after_tick2,
+          f"tick1={count_after_tick1} tick2={count_after_tick2}")
+finally:
+    shutil.rmtree(_EV / run_id_b4, ignore_errors=True)
+
+# ----------------------------------------------------------------- #
+# SEARCH_ORPHAN_POLICY — recovery MUST NOT auto-retry op=search (the  #
+# deliberately-deferred posture: search is potentially metered).     #
+# ----------------------------------------------------------------- #
+sr_mod._run_broker_blocking = lambda *a, **kw: {"ok": True}
+run_id_s = "run-20260923T131000Z-dddd0010"
+fresh_db(run_id_s, latest_attempt="pass-0001", status="RUNNING", role="builder")
+reset_registry()
+try:
+    rid = str(uuid.uuid4())
+    write_claim(run_id_s, rid, "search", attempt_id="pass-0001", role="builder",
+                query="ambiguous")
+    summary = sr.recover_claims(run_id_s)
+    check("SEARCH_ORPHAN_POLICY: no auto-retry for op=search",
+          summary["redispatched"] == 0 and summary["republished_unknown"] >= 1,
+          f"summary: {summary}")
+    resp_path = sr.canonical_response_path(run_id_s, rid)
+    if resp_path.exists():
+        body = json.loads(resp_path.read_text())
+        check("SEARCH_ORPHAN_POLICY: response is RecoveryOutcomeUnknown",
+              body.get("error_class") == "RecoveryOutcomeUnknown",
+              f"body: {body}")
+finally:
+    shutil.rmtree(_EV / run_id_s, ignore_errors=True)
+
+# ----------------------------------------------------------------- #
+# Cleanup                                                             #
+# ----------------------------------------------------------------- #
+shutil.rmtree(_EV, ignore_errors=True)
+if FAIL:
+    print(f"\nFAILURES ({len(FAIL)}):")
+    for n, d in FAIL: print(f"  - {n}: {d}")
+    sys.exit(1)
+print(f"\nAll {len(PASS)} recovery-closure behavioral tests passed.")
+PY
+expect "section 13 research-recovery bounded closure" "$?" "0"
+
+# -------------------------------------------------------------------- #
 # Summary                                                               #
 # -------------------------------------------------------------------- #
 printf '\n=== Summary ===\n'
