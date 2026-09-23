@@ -89,6 +89,10 @@ for spec_path in spec_contracts:
         "do not narrow ordinary repository write authority merely",
         "including packaging, tests, configuration, documentation, and build metadata when relevant",
         "artificial path minimization that prevents legitimate engineering is itself a packet defect.",
+        "For a normal PROGRAM using a high-effort profile, use at least 3600 seconds by",
+        "Do not use a short wall-clock ceiling as a proxy for controlling spend",
+        "leaving cost and tokens honestly unknown",
+        "Cost controls are a separate authority and remain off unless explicitly requested",
     )
     missing = [fragment for fragment in required if " ".join(fragment.split()) not in normalized_text]
     assert not missing, (

@@ -39,9 +39,16 @@ for command in (
     "python -c 'import uv; print(1)'",
     "env -S 'uv run pytest'",
     "echo 'uv run'",
+    '"${UV_BIN}" run pytest',
+    'eval "$VALIDATION_COMMAND"',
+    "sh -c '\"$UV_BIN\" run pytest'",
+    "sh -c 'uv run pytest'",
+    "bash -lc '\"$UV_BIN\" run pytest'",
 ):
     assert ve.classify_uv_command(command) == "ambiguous", command
 assert ve.classify_uv_command("pytest -q") == "none"
+assert ve.classify_uv_command("sh -c 'pytest -q'") == "none"
+assert ve.classify_uv_command("bash -lc 'python -m unittest'") == "none"
 assert not hasattr(ve, "_resolve_uv_executable")
 
 ambiguous_packet = {
@@ -53,6 +60,18 @@ ambiguous_packet = {
 }
 ambiguous_errors = packet.validate_validation_contract(ambiguous_packet)
 assert any("ambiguous-uv" in err and "ambiguous" in err for err in ambiguous_errors), ambiguous_errors
+for name, command in (
+    ("dynamic-command-head", '"${UV_BIN}" run pytest'),
+    ("dynamic-eval", 'eval "$VALIDATION_COMMAND"'),
+    ("nested-dynamic-shell", "sh -c '\"$UV_BIN\" run pytest'"),
+    ("nested-login-shell", "bash -lc '\"$UV_BIN\" run pytest'"),
+):
+    errors = packet.validate_validation_contract({
+        "allowed_paths": ["src/", "tests/"],
+        "capabilities": ["toolchain.python"],
+        "required_validation": [{"name": name, "command": command}],
+    })
+    assert any(name in error and "ambiguous" in error for error in errors), (name, errors)
 
 # OS-level validator isolation permits a candidate-owned loopback service
 # within the isolated network namespace, denies public sockets, and strips an

@@ -200,7 +200,17 @@ Before a v3 PROGRAM is considered ready:
   defect.
 - choose `max_pass_runtime_seconds` for the complexity of one semantic pass
   (up to 28800 per pass; the undeclared fallback fuse is 3600, so any pass
-  that legitimately needs longer than one hour must declare its budget);
+  that legitimately needs longer than one hour must declare its budget). For
+  a normal PROGRAM using a high-effort profile, use at least 3600 seconds by
+  default so a substantive review can finish; choose a larger value when the
+  whole-checkpoint or whole-product review warrants it. Use a smaller ceiling
+  only when the operator explicitly requests a shorter hard wall or same-profile
+  empirical evidence shows the smaller value is sufficient. Do not use a short
+  wall-clock ceiling as a proxy for controlling spend: a productive provider
+  call can reach that ceiling without returning its usage envelope, leaving
+  cost and tokens honestly unknown and the run unable to accept the artifact.
+  Cost controls are a separate authority and remain off unless explicitly
+  requested;
 - declare `risk_budget.max_runtime_seconds` as the whole-run wall-clock
   envelope when the PROGRAM may legitimately run long (up to 2419200).
   `supervisor enqueue` consumes it as the operational wall ceiling; without

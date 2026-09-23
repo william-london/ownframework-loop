@@ -174,6 +174,7 @@ _SHELL_PUNCTUATION = ";|&()<>"
 _ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=.*$", re.DOTALL)
 _SHELL_WRAPPERS = frozenset({"env", "command", "exec"})
 _SHELL_BOUNDARIES = frozenset({";", "|", "&", "&&", "||", "(", ")"})
+_SHELL_INTERPRETERS = frozenset({"sh", "bash", "dash", "zsh", "ksh"})
 
 
 class ValidationCommandError(ValueError):
@@ -233,7 +234,17 @@ def _shell_words(command: str) -> list[tuple[str, int, int, bool]]:
     return tokens
 
 
-def classify_uv_command(command: str) -> str:
+def _dynamic_shell_word(value: str) -> bool:
+    """Whether a command word can change after shell expansion.
+
+    The tokenizer intentionally does not evaluate shell code.  A dynamic
+    command head therefore cannot be proven not to resolve to uv and must not
+    be treated as an ordinary unmediated command.
+    """
+    return any(char in value for char in ("$", "`", "*", "?", "["))
+
+
+def classify_uv_command(command: str, *, _depth: int = 0) -> str:
     """Return ``none``, ``uv``, or ``ambiguous`` for shell command authority.
 
     Any direct uv/uvx executable is package-capability mediated. Wrappers
@@ -242,6 +253,8 @@ def classify_uv_command(command: str) -> str:
     substitution, backtick expression, or ``env -S`` form is ambiguous and
     must be refused at packet admission rather than escaping the binding.
     """
+    if _depth > 16:
+        return "ambiguous"
     if not command or not command.strip():
         return "none"
     try:
@@ -258,11 +271,9 @@ def classify_uv_command(command: str) -> str:
             or re.search(r"(?<![A-Za-z0-9_])uvx?(?![A-Za-z0-9_])", value)
         )
     ]
-    if not uv_mentions:
-        return "none"
-    if "`" in command:
+    if uv_mentions and "`" in command:
         return "ambiguous"
-    if "$(" in command or "<(" in command or ">(" in command:
+    if uv_mentions and ("$(" in command or "<(" in command or ">(" in command):
         return "ambiguous"
 
     segments: list[list[int]] = [[]]
@@ -323,6 +334,32 @@ def classify_uv_command(command: str) -> str:
             if value in {"2>", "2>>", "&>", "&>>"}:
                 position += 2
                 continue
+            # `eval` re-parses data as shell source.  Its eventual executable
+            # cannot be bound from the packet's literal command and is refused
+            # even when the word `uv` is supplied only by an environment value.
+            if Path(value).name == "eval":
+                return "ambiguous"
+            if _dynamic_shell_word(value):
+                return "ambiguous"
+            # A nested shell -c is a second command grammar.  Recurse only to
+            # distinguish a literal ordinary command from an uv/dynamic form;
+            # nested uv itself is refused because the exact-word rewriter below
+            # cannot safely rewrite through another shell's quoting layer.
+            if Path(value).name in _SHELL_INTERPRETERS:
+                for option_index in range(position + 1, len(segment) - 1):
+                    option = tokens[segment[option_index]][0]
+                    if option == "--command" or (
+                        option.startswith("-")
+                        and not option.startswith("--")
+                        and "c" in option[1:]
+                    ):
+                        nested = tokens[segment[option_index + 1]][0]
+                        nested_classification = classify_uv_command(
+                            nested, _depth=_depth + 1
+                        )
+                        if nested_classification != "none":
+                            return "ambiguous"
+                        break
             command_token_indexes.add(segment[position])
             if Path(value).name == "uv":
                 direct = True
@@ -336,7 +373,9 @@ def classify_uv_command(command: str) -> str:
             return "ambiguous"
         if Path(value).name != "uv":
             return "ambiguous"
-    return "uv" if direct else "ambiguous"
+    if direct:
+        return "uv"
+    return "ambiguous" if uv_mentions else "none"
 
 
 def is_uv_command(command: str) -> bool:
