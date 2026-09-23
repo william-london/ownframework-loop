@@ -8,6 +8,8 @@ import stat
 import subprocess
 from typing import Any
 
+from . import process_runner
+
 EVIDENCE_SCHEMA = "ownframework-loop-privileged-commissioning/v1"
 CANARY_RESULT_SCHEMA = "ownframework-loop-privileged-canary/v1"
 CANARY_VERSION = 1
@@ -181,9 +183,8 @@ def _provider_identity(name: str, entry: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(args, list) or not all(isinstance(x, str) for x in args):
             raise CommissioningError("container.docker.version_args must be an array of strings")
         try:
-            proc = subprocess.run(
-                [executable, *args], capture_output=True, text=True,
-                check=False, timeout=5,
+            proc = process_runner.run_bounded_capture(
+                [executable, *args], timeout_seconds=5,
             )
         except (OSError, subprocess.SubprocessError) as exc:
             raise CommissioningError(f"Docker broker version proof failed: {exc}") from exc
@@ -218,9 +219,8 @@ def _provider_identity(name: str, entry: dict[str, Any]) -> dict[str, Any]:
                 "research.public.version_args must be an array of strings"
             )
         try:
-            proc = subprocess.run(
-                [executable, *args], capture_output=True, text=True,
-                check=False, timeout=5,
+            proc = process_runner.run_bounded_capture(
+                [executable, *args], timeout_seconds=5,
             )
         except (OSError, subprocess.SubprocessError) as exc:
             raise CommissioningError(
@@ -287,17 +287,13 @@ def commission_capability(
     )
     provider = _provider_identity(name, entry)
     fingerprint = cap.semantic_runtime_fingerprint()
-    # Canary launch failures and timeouts must fail closed THROUGH the
-    # commissioning error contract — never as raw subprocess exceptions and
-    # never with partial evidence (evidence is only written after the full
-    # contract match below).
     try:
-        proc = subprocess.run(
+        proc = process_runner.run_bounded_capture(
             [
                 canary_path, "--ofloop-capability-canary", name, fingerprint,
                 _CANARY_KINDS[name], cap.CAPABILITY_CONTRACT_REVISION,
             ],
-            capture_output=True, text=True, check=False, timeout=timeout_seconds,
+            timeout_seconds=timeout_seconds,
         )
     except subprocess.TimeoutExpired as exc:
         raise CommissioningError(
