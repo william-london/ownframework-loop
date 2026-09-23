@@ -3395,12 +3395,21 @@ check("WATCHDOG_EMERGENCY_FUSE: cycles=1/2 → bounded backoff until threshold",
       res[2] is False and res[3] is False,
       f"got: {res}")
 
-# Now cycles=2/2 → quarantines on next stall
+# Cycles exhausted (2/2) BUT current streak has NOT yet reached
+# the effective threshold — per the canonical algorithm
+# cycles_exhausted alone does NOT force terminalization; the
+# bounded backoff continues until the streak hits threshold.
 res = helper_payload(row_disabled, 0, 2, "progress_stalled")
-# 0 + 1 = 1. emergency=8 (default). cycles_open: 2 < 2 false. cycles_exhausted: 2 >= 2 true.
-# So branch: cycles_exhausted → quarantine
-check("WATCHDOG_EMERGENCY_FUSE: cycles exhausted → quarantine (finite)",
-      res[2] is True,
+check("WATCHDOG_EMERGENCY_FUSE: cycles=2/2 pre-threshold → bounded backoff",
+      res[2] is False and res[3] is False,
+      f"got: {res}")
+
+# Advancing the streak up to the emergency ceiling under
+# cycles_exhausted MUST terminate via the SAME algorithm —
+# reached-threshold AND no cycles remaining ⇒ quarantine.
+res = helper_payload(row_disabled, 7, 2, "progress_stalled")
+check("WATCHDOG_EMERGENCY_FUSE: cycles=2/2 + threshold hit → quarantine",
+      res[2] is True and res[3] is False,
       f"got: {res}")
 
 # ----------------------------------------------------------------- #

@@ -450,27 +450,29 @@ def _compute_transient_retry_state(
         ceil = None
     max_cycles = int(max_transient_recovery_cycles or 0)
     new_failures = int(current_transient_failures) + 1
-    threshold_hit = (
-        ceil is not None and ceil > 0 and new_failures >= ceil
-    )
     cycles_open = (
         max_cycles > 0
         and int(current_transient_recovery_cycles) < max_cycles
     )
-    cycles_exhausted = (
-        max_cycles > 0
-        and int(current_transient_recovery_cycles) >= max_cycles
-    )
-    if threshold_hit and cycles_open and max_cycles > 0:
-        return (
-            0,
-            int(current_transient_recovery_cycles) + 1,
-            False,
-            True,
-            600.0,
-            "circuit_opened",
-        )
-    if threshold_hit or cycles_exhausted:
+    # Single algorithm shared by ordinary ``transient`` and
+    # ``progress_stalled``. Streak under threshold is bounded
+    # backoff regardless of cycle count. Streak at threshold
+    # with cycles remaining opens a circuit (streak reset, +1
+    # cycle, 600s backoff). Streak at threshold with no cycles
+    # remaining quarantines. Cycles-exhausted alone NEVER forces
+    # a terminal decision before the streak reaches the
+    # effective threshold — historical ordinary-transient
+    # semantics depend on this.
+    if ceil is not None and ceil > 0 and new_failures >= ceil:
+        if cycles_open:
+            return (
+                0,
+                int(current_transient_recovery_cycles) + 1,
+                False,
+                True,
+                600.0,
+                "circuit_opened",
+            )
         return (
             new_failures,
             int(current_transient_recovery_cycles),

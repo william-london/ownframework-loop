@@ -831,19 +831,36 @@ row = conn.execute(
 ).fetchone()
 assert int(row[0]) == 2, f"second circuit: {row[0]}"
 
-# 9th stall is past the cycle budget: MUST bring the row to
-# QUARANTINED. infinite progress-stalled retry is impossible.
+# 9th stall is past the cycle budget AND the streak JUST
+# RESET to 0 from the second circuit_opened. Per the canonical
+# algorithm shared by ordinary transient and progress_stalled,
+# cycles_exhausted alone does NOT force terminalization;
+# bounded backoff continues until the streak reaches the
+# configured ceiling. Thus the 9th stall is bounded backoff.
 final = _apply_failure_policy(
     conn, job_id=1, failure_class="progress_stalled",
     failure_reason="r", detail="d",
 )
-assert final["status"] == "QUARANTINED", final
-assert final["quarantined"] is True, final
+assert final["status"] == "BACKOFF", final
+assert final["quarantined"] is False, final
 assert final["transient_failures"] == 1, final
+
+# Drive 3 more stalls (10th, 11th, 12th total). On the 12th the
+# streak reaches the configured ceiling AND cycles_open is False,
+# so the SINGLE canonical branch deterministically reaches
+# QUARANTINED. infinite progress-stalled retry is impossible.
+last = final
+for _ in range(3):
+    last = _apply_failure_policy(
+        conn, job_id=1, failure_class="progress_stalled",
+        failure_reason="r", detail="d",
+    )
+assert last["status"] == "QUARANTINED", last
+assert last["quarantined"] is True, last
 row = conn.execute(
     "SELECT status, last_failure_class FROM jobs WHERE id=1"
 ).fetchone()
-assert row[0] == "QUARANTINED", f"row state after max_cycles: {row[0]}"
+assert row[0] == "QUARANTINED", f"row state after max_cycles + threshold: {row[0]}"
 assert row[1] == "progress_stalled"
 
 print("PASS progress_stall consumes transient retry budget + finite exhaustion")

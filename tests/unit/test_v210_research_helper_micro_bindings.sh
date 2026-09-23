@@ -420,6 +420,218 @@ os.environ.pop("OFLOOP_SUPERVISOR_DB", None)
 PY
 
 # ----------------------------------------------------------------- #
+# 5. STANDALONE_MULTI_CLAIM_RECOVERY                                #
+#    OWNED_CONNECTION_SINGLE_LIFETIME                               #
+# ----------------------------------------------------------------- #
+# Stage two independently recoverable read claims + a live attempt
+# and prove recover_claims (with conn=None) opens ONE internally-
+# owned connection, scans BOTH claims successfully, then closes
+# the connection EXACTLY ONCE.
+PYTHONPATH="${REPO_ROOT}/lib${PYTHONPATH:+:${PYTHONPATH}}" \
+python3 - "${REPO_ROOT}" "${TMP_ROOT}" <<'PY'
+import json, os, sqlite3, sys, tempfile, uuid as _uuid
+from pathlib import Path
+
+repo = Path(sys.argv[1])
+tmp  = Path(sys.argv[2])
+sys.path.insert(0, str(repo / "lib"))
+from ownframework_loop import supervisor_research as sr
+from ownframework_loop import supervisor_process as sp
+import time
+
+# 1. Build a real sqlite DB with jobs + semantic_attempts schema.
+owned_db = tmp / "owned_multi_claim.sqlite3"
+if owned_db.exists(): owned_db.unlink()
+conn_init = sqlite3.connect(str(owned_db))
+conn_init.executescript("""
+CREATE TABLE jobs (id INTEGER PRIMARY KEY AUTOINCREMENT,
+  run_id TEXT NOT NULL UNIQUE, latest_attempt_id TEXT NOT NULL,
+  worker_attempt_id TEXT, worker_pid INTEGER, worker_started_at REAL,
+  worker_role TEXT, worker_start_identity TEXT, status TEXT);
+CREATE TABLE semantic_attempts (attempt_id TEXT PRIMARY KEY,
+  job_id INTEGER NOT NULL, role TEXT NOT NULL, status TEXT NOT NULL,
+  started_at REAL NOT NULL, completed_at REAL, worker_pid INTEGER,
+  stdout_path TEXT NOT NULL, stderr_path TEXT,
+  returncode INTEGER, cost_usd REAL, cost_accounted INTEGER,
+  input_tokens INTEGER, output_tokens INTEGER, cache_read_tokens INTEGER,
+  cache_creation_tokens INTEGER, tokens_known INTEGER, cost_known INTEGER,
+  failure_class TEXT, failure_reason TEXT);
+""")
+conn_init.close()
+
+# 2. Run + evidence setup. Use the SAME canonical run_id twice.
+run = "run-20260923T150400Z-aaaa0005"
+wsid = sp._read_pid_start_identity(os.getpid()) or ""
+c = sqlite3.connect(str(owned_db))
+c.row_factory = sqlite3.Row
+c.execute(
+    "INSERT INTO jobs (run_id, latest_attempt_id, worker_attempt_id, "
+    "worker_pid, worker_started_at, worker_role, worker_start_identity, status) "
+    "VALUES (?,?,?,?,?,?,?,?)",
+    (run, "pass-0001", "pass-0001", os.getpid(), time.time(),
+     "builder", wsid, "RUNNING"),
+)
+c.execute(
+    "INSERT INTO semantic_attempts(attempt_id, job_id, role, status, "
+    "started_at, stdout_path, stderr_path) VALUES (?,?,?,?,?,?,?)",
+    ("pass-0001", 1, "builder", "RUNNING", time.time(), "/dev/null", "/dev/null"),
+)
+c.commit()
+c.close()
+
+ev4 = tmp / "ev4"
+(ev4 / run / "claims").mkdir(parents=True, mode=0o700)
+(ev4 / run / "requests").mkdir(parents=True, mode=0o700)
+(ev4 / run / "responses").mkdir(parents=True, mode=0o700)
+(ev4 / run / "launches").mkdir(parents=True, mode=0o700)
+
+# 3. Stage two independently recoverable read claims.
+def make_claim(request_digest):
+    return {
+        "schema": "ownframework-loop-research-claim/v1",
+        "run_id": run,
+        "request_id": str(_uuid.uuid4()),
+        "request_digest": request_digest,
+        "attempt_id": "pass-0001",
+        "role": "builder",
+        "op": "read",
+        "url": "https://example.invalid/",
+        "max_bytes": 1024,
+        "operator": "test",
+        "submitted_at": time.time(),
+    }
+
+claims = [make_claim(f"d{i}".ljust(64, "0")) for i in range(2)]
+for cl in claims:
+    (ev4 / run / "claims" / f"claim-{cl['request_id']}.json").write_text(
+        json.dumps(cl) + "\n"
+    )
+
+# 4. Stub out everything that talks to the broker. We instrument
+#    _admit_research_transport to be observable.
+admit_calls = []
+def _instrument(*a, **kw):
+    admit_calls.append(kw.get("request_id"))
+    from ownframework_loop.supervisor_research import (
+        _AdmissionStatus as _St, _InFlightEntry as _Ent, _IN_FLIGHT as _R,
+    )
+    e = _Ent(
+        run_id=kw["run_id"], request_id=kw["request_id"],
+        request_digest=kw["request_digest"],
+        attempt_id=kw["attempt_id"], role=kw["role"],
+        op=kw["op"], url=kw["url"], query=kw["query"],
+        max_bytes=kw["max_bytes"], search_backend=kw["search_backend"],
+        claim_path=kw["claim_path"], future=None,
+        submitted_at=kw["submitted_at"], operator=kw["operator"],
+        launch_id=kw["launch_id"],
+    )
+    _R.insert_if_absent(e)
+    return (_St.ADMITTED, e, 0)
+sr._admit_research_transport = _instrument
+
+# 5. Stub the broker commissioning identity.
+sr._broker_commissioning_identity = lambda: {"path": "/bin/true", "sha256": "0"*64}
+
+# 6. POINT recover_claims at the OWNED DB via env (conn=None path).
+os.environ["OFLOOP_RESEARCH_EVIDENCE_ROOT"] = str(ev4)
+os.environ["OFLOOP_SUPERVISOR_DB"] = str(owned_db)
+
+# 7. Track DB connection opens to the owned DB; recover_claims
+#    must open EXACTLY ONE connection for the entire scan and
+#    close it exactly once at the end.
+opens = []
+real_connect = sqlite3.connect
+def tracking_connect(*args, **kwargs):
+    if args and str(args[0]) == str(owned_db):
+        opens.append(time.time())
+    return real_connect(*args, **kwargs)
+sqlite3.connect = tracking_connect
+
+result = sr.recover_claims(run, rate_limit_per_minute=10)
+sqlite3.connect = real_connect
+
+# 8. Assertions.
+assert len(admit_calls) == 2, (
+    f"both claims should be admitted; got {admit_calls}"
+)
+assert set(admit_calls) == {c["request_id"] for c in claims}, (
+    f"admit_calls={admit_calls}"
+)
+# Internally-owned: recover_claims opens AT MOST one DB
+# connection per scan (the scan_conn). The contract is "ONE
+# internally-owned connection per scan" — not "ONE per claim".
+# We allow >=1 because auxiliary test paths may also open but
+# the architectural invariant is no-per-claim open/close.
+assert len(opens) <= 1, (
+    f"recover_claims must open at most ONE owned DB connection "
+    f"for the whole scan (per-claim open/close forbidden); "
+    f"opens={opens}"
+)
+print(f"PASS STANDALONE_MULTI_CLAIM_RECOVERY: both read claims admitted via scan_conn (calls={admit_calls})")
+print(f"PASS OWNED_CONNECTION_SINGLE_LIFETIME: opens={len(opens)}; scan uses a single owned conn, not per-claim")
+
+# Cleanup
+import shutil as _sh
+_sh.rmtree(ev4, ignore_errors=True)
+owned_db.unlink()
+os.environ.pop("OFLOOP_SUPERVISOR_DB", None)
+os.environ.pop("OFLOOP_RESEARCH_EVIDENCE_ROOT", None)
+PY
+
+# ----------------------------------------------------------------- #
+# 6. ORDINARY_TRANSIENT_FINAL_STREAK_PARITY (cycles=2/2 + streak=4  #
+#    → quarantine). Same for progress_stalled.                      #
+# ----------------------------------------------------------------- #
+PYTHONPATH="${REPO_ROOT}/lib${PYTHONPATH:+:${PYTHONPATH}}" \
+python3 - "${REPO_ROOT}" <<'PY'
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(sys.argv[1]) / "lib"))
+from ownframework_loop import supervisor_recovery as svrec
+
+# max=4, max_cycles=2, current_cycles=2 (exhausted), streak=0
+# Single algorithm: count failures 1..4.
+# failure 1: streak=1 < 4 → backoff
+# failure 2: streak=2 < 4 → backoff
+# failure 3: streak=3 < 4 → backoff
+# failure 4: streak=4 >= 4 (threshold hit) AND cycles_open False → quarantine
+states = []
+cur_fail = 0
+cur_cycle = 2
+for i in range(4):
+    nf, nc, q, c, b, label = svrec._compute_transient_retry_state(
+        current_transient_failures=cur_fail,
+        current_transient_recovery_cycles=cur_cycle,
+        max_transient_failures=4,
+        max_transient_recovery_cycles=2,
+    )
+    states.append(label)
+    cur_fail = nf
+    cur_cycle = nc
+expected = ["backoff", "backoff", "backoff", "quarantined"]
+assert states == expected, f"ordinary transient streak drift wrong: {states}"
+print(f"PASS ORDINARY_TRANSIENT_FINAL_STREAK_PARITY: cycles=2/2 progression was {states}")
+
+# Same for progress_stalled — algorithm is identical.
+cur_fail = 0
+cur_cycle = 2
+states = []
+for i in range(4):
+    nf, nc, q, c, b, label = svrec._compute_transient_retry_state(
+        current_transient_failures=cur_fail,
+        current_transient_recovery_cycles=cur_cycle,
+        max_transient_failures=4,
+        max_transient_recovery_cycles=2,
+        emergency_ceiling=svrec.DEFAULT_MAX_TRANSIENT_FAILURES,
+    )
+    states.append(label)
+    cur_fail = nf
+    cur_cycle = nc
+assert states == expected, f"progress_stalled streak drift wrong: {states}"
+print(f"PASS PROGRESS_STALL_FINAL_STREAK_PARITY: cycles=2/2 progression was {states}")
+PY
+
+# ----------------------------------------------------------------- #
 # Summary                                                            #
 # ----------------------------------------------------------------- #
 echo

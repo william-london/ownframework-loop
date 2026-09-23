@@ -1667,6 +1667,14 @@ def recover_claims(
 
     This function is called once per tick on the serviced run;
     idempotent. Returns a count summary.
+
+    Connection ownership:
+      A caller-supplied ``conn`` (the production path) is treated
+      as caller-owned — ``recover_claims`` MUST NOT close it.
+      A ``None`` argument triggers an internally-owned connection
+      that ``recover_claims`` opens ONCE up front and closes ONCE
+      at the end of the scan, so every claim in the scan shares
+      a single coherent DB lifetime.
     """
     _assert_canonical_run_id(run_id)
     claims = _claims_dir(run_id)
@@ -1674,6 +1682,61 @@ def recover_claims(
     summary = {"scanned": 0, "republished_retry": 0,
                "republished_unknown": 0, "reconstructed": 0,
                "redispatched": 0, "skipped": 0}
+    # Resolve the scan-wide DB connection ONCE.
+    scan_conn: sqlite3.Connection | None = None
+    caller_owned_conn = True
+    if conn is None:
+        try:
+            db_path = Path(
+                os.environ.get(
+                    "OFLOOP_SUPERVISOR_DB",
+                    f"{Path.home()}/.local/state/ownframework-loop/supervisor.sqlite3",
+                )
+            ).expanduser()
+            scan_conn = sqlite3.connect(str(db_path))
+            scan_conn.row_factory = sqlite3.Row
+            caller_owned_conn = False
+        except sqlite3.Error:
+            summary["scanned"] = 0
+            return summary
+    else:
+        scan_conn = conn
+    try:
+        return _recover_claims_scan(
+            run_id=run_id,
+            claims=claims,
+            receipts=receipts,
+            scan_conn=scan_conn,
+            rate_limit_per_minute=rate_limit_per_minute,
+            summary=summary,
+        )
+    finally:
+        if not caller_owned_conn and scan_conn is not None:
+            try:
+                scan_conn.close()
+            except sqlite3.Error:
+                pass
+
+
+def _recover_claims_scan(
+    *,
+    run_id: str,
+    claims: Path,
+    receipts: Path,
+    scan_conn: sqlite3.Connection,
+    rate_limit_per_minute: int | None,
+    summary: dict[str, int],
+) -> dict[str, int]:
+    """Iterate ``claim-*.json`` markers and recover them.
+
+    All claims in this scan share the SAME ``scan_conn`` — either
+    a caller-supplied DB connection the production caller owns
+    (``recover_claims`` will NOT close it) OR a single
+    internally-owned connection that ``recover_claims`` opened
+    ONCE up front and will close ONCE after the scan returns.
+    There is NO per-claim connection open/close cycle and NO
+    short-circuit that closes the connection mid-scan.
+    """
     if not claims.is_dir():
         return summary
     for claim_path in claims.glob("claim-*.json"):
@@ -1748,31 +1811,14 @@ def recover_claims(
             except _BrokerUnavailable:
                 summary["skipped"] += 1
                 continue
-            # Resolve the exact DB authority context. Production
-            # callers (``process_research_queue``) pass the SAME
-            # connection so normal admission and recovery observe
-            # the same row snapshot. Tests / legacy wrappers pass
-            # ``conn=None`` and get an independent connection from
-            # ``OFLOOP_SUPERVISOR_DB`` so the function remains
-            # exercisable in isolation.
-            conn_owned = False
-            if conn is None:
-                try:
-                    db_path = Path(
-                        os.environ.get(
-                            "OFLOOP_SUPERVISOR_DB",
-                            f"{Path.home()}/.local/state/ownframework-loop/supervisor.sqlite3",
-                        )
-                    ).expanduser()
-                    conn = sqlite3.connect(str(db_path))
-                    conn.row_factory = sqlite3.Row
-                    conn_owned = True
-                except sqlite3.Error:
-                    summary["skipped"] += 1
-                    continue
+            # The single scan-wide ``scan_conn`` is authoritative
+            # for every claim in this scan. No per-claim connection
+            # is opened here; ``recover_claims`` owns the
+            # internally-opened connection lifetime OUTSIDE this
+            # loop.
             try:
                 ok, _reason = _prove_live_semantic_attempt_authority(
-                    conn,
+                    scan_conn,
                     run_id=run_id,
                     attempt_id=attempt_id,
                     role=role,
@@ -1803,7 +1849,7 @@ def recover_claims(
                 else:
                     effective_rate_limit = int(rate_limit_per_minute)
                 status, entry, _accepted_after = _admit_research_transport(
-                    conn=conn,
+                    conn=scan_conn,
                     registry=_IN_FLIGHT,
                     executor=_get_executor(),
                     run_id=run_id,
@@ -1830,17 +1876,6 @@ def recover_claims(
             except Exception:
                 summary["skipped"] += 1
                 continue
-            finally:
-                # A connection supplied by the production caller
-                # MUST NOT be closed here — that caller owns its
-                # lifetime. A connection opened internally
-                # (conn_owned=True) MUST always be closed, even on
-                # the unconditional continue branches above.
-                if conn_owned and conn is not None:
-                    try:
-                        conn.close()
-                    except sqlite3.Error:
-                        pass
             if status is not _AdmissionStatus.ADMITTED:
                 # All refusal branches (already-in-flight,
                 # rate-limited, attempt-not-live, role-mismatch,
