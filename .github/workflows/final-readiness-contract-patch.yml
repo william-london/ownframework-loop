@@ -14,17 +14,22 @@ jobs:
   patch:
     if: github.actor != 'github-actions[bot]'
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
           ref: hardening/github-authority-closure-2026-09-22
 
-      - name: Normalize bounded-runner refusal contracts
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Apply final bounded-refusal and regression closure
         shell: bash
         run: |
           set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${GITHUB_SHA}"
           python3 - <<'PY'
           from pathlib import Path
 
@@ -35,35 +40,29 @@ jobs:
               if count > expected_old_max:
                   raise SystemExit(f'{path_s}: unexpected old-contract multiplicity={count}')
               if count:
-                  text = text.replace(old, new)
-                  path.write_text(text, encoding='utf-8')
+                  path.write_text(text.replace(old, new), encoding='utf-8')
 
-          # Version probe contract: lifecycle refusal means version unproven,
-          # not an uncaught boundary exception.
+          # Version/read-only/runtime probes must normalize every bounded-runner
+          # lifecycle refusal into their documented fail-closed contracts.
           replace_if_present(
               'lib/ownframework_loop/supervisor_runner.py',
               '    except (OSError, subprocess.TimeoutExpired):\n        return None\n',
               '    except (OSError, subprocess.SubprocessError):\n        return None\n',
           )
-
-          # Runtime-identity probes already fail closed; normalize all bounded
-          # subprocess failures into their documented empty/RuntimeIdentityError paths.
           replace_if_present(
               'lib/ownframework_loop/runtime_identity.py',
               '(OSError, subprocess.TimeoutExpired)',
               '(OSError, subprocess.SubprocessError)',
               expected_old_max=3,
           )
-
-          # Read-model observation is explicitly best-effort and returns an
-          # error envelope; lifecycle refusal belongs in that envelope.
           replace_if_present(
               'lib/ownframework_loop/supervisor_readmodel.py',
               '    except (OSError, subprocess.TimeoutExpired) as exc:\n',
               '    except (OSError, subprocess.SubprocessError) as exc:\n',
           )
 
-          # Dispatch owns a typed DispatchError boundary for finalizer transport.
+          # Dispatch has a typed finalizer-transport boundary; descendant leak
+          # refusal must not escape as an implementation-specific exception.
           path = Path('lib/ownframework_loop/dispatch.py')
           text = path.read_text(encoding='utf-8')
           leak_block = '''    except process_runner.ProcessGroupLeakError as exc:\n        raise DispatchError(\n            f"ofloop {' '.join(args)} left descendant processes after command exit"\n        ) from exc\n'''
@@ -71,8 +70,20 @@ jobs:
               anchor = '''    except subprocess.TimeoutExpired as exc:\n        raise DispatchError(\n            f"ofloop {' '.join(args)} exceeded finalization wall budget "\n            f"({int(timeout_seconds or 0)}s)"\n        ) from exc\n'''
               if text.count(anchor) != 1:
                   raise SystemExit('dispatch timeout boundary anchor missing or ambiguous')
-              text = text.replace(anchor, anchor + leak_block, 1)
-              path.write_text(text, encoding='utf-8')
+              path.write_text(text.replace(anchor, anchor + leak_block, 1), encoding='utf-8')
+
+          # The scheduling-identity owner moved into supervisor_identity. Keep
+          # the fail-closed regression attached to the real Git-probe boundary
+          # instead of monkeypatching the obsolete supervisor.subprocess.run.
+          path = Path('tests/integration/test_v090_bounded_concurrency.sh')
+          text = path.read_text(encoding='utf-8')
+          old = '''orig_run = supervisor.subprocess.run\ndef _fail_git_probe(*args, **kwargs):\n    raise OSError("synthetic git identity probe failure")\nsupervisor.subprocess.run = _fail_git_probe\ntry:\n    identity_key, identity_proven = supervisor._repository_scheduling_identity(identity_repo)\nfinally:\n    supervisor.subprocess.run = orig_run\n'''
+          new = '''orig_run = supervisor_identity.git_checks.run_subprocess\ndef _fail_git_probe(*args, **kwargs):\n    raise OSError("synthetic git identity probe failure")\nsupervisor_identity.git_checks.run_subprocess = _fail_git_probe\ntry:\n    identity_key, identity_proven = supervisor._repository_scheduling_identity(identity_repo)\nfinally:\n    supervisor_identity.git_checks.run_subprocess = orig_run\n'''
+          count = text.count(old)
+          if count > 1:
+              raise SystemExit(f'v090 stale identity fixture multiplicity={count}')
+          if count:
+              path.write_text(text.replace(old, new, 1), encoding='utf-8')
           PY
 
           python3 -m compileall -q lib/ownframework_loop
@@ -99,18 +110,23 @@ jobs:
               process_runner.run_bounded_capture = original
           print('FINAL_BOUNDED_REFUSAL_CONTRACTS=PASS')
           PY
+
+          bash tests/unit/test_final_hardening_process_and_lock.sh
+          bash tests/integration/test_gate_fault_injection.sh
+          bash tests/integration/test_v082_production_hardening.sh
+          bash tests/integration/test_v090_bounded_concurrency.sh
           git diff --check
 
-      - name: Commit refusal-contract closure
+      - name: Commit final source closure
         shell: bash
         run: |
           set -euo pipefail
-          if [[ -z "$(git status --porcelain -- lib/ownframework_loop)" ]]; then
-            echo 'All refusal contracts already closed by an earlier concurrent run.'
+          if [[ -z "$(git status --porcelain -- lib/ownframework_loop tests/integration/test_v090_bounded_concurrency.sh)" ]]; then
+            echo 'All final source contracts already closed by an earlier concurrent run.'
             exit 0
           fi
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add lib/ownframework_loop
-          git commit -m 'hardening: normalize bounded lifecycle refusal contracts'
+          git add lib/ownframework_loop tests/integration/test_v090_bounded_concurrency.sh
+          git commit -m 'hardening: close final bounded refusal contracts'
           git push origin HEAD:hardening/github-authority-closure-2026-09-22
