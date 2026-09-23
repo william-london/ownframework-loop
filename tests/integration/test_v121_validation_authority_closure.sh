@@ -47,12 +47,44 @@ for command in (
     'if true; then "$UV_BIN" run pytest; fi',
     'for item in one; do "$UV_BIN" run pytest; done',
     'echo harmless\n"$UV_BIN" run pytest',
+    'time "$UV_BIN" run pytest',
+    'timeout 30 "$UV_BIN" run pytest',
+    'nohup "$UV_BIN" run pytest',
+    'nice -n 5 "$UV_BIN" run pytest',
+    'stdbuf -oL "$UV_BIN" run pytest',
+    'setsid --wait "$UV_BIN" run pytest',
+    'xargs -n1 "$UV_BIN" run pytest',
+    'foo() { "$UV_BIN" run pytest; }',
+    'function foo { "$UV_BIN" run pytest; }',
+    'time -f "$FORMAT" "$UV_BIN" run pytest',
+    'timeout --unknown "$LIMIT" "$UV_BIN" run pytest',
+    'timeout 30 command -- "$UV_BIN" run pytest',
+    'timeout 30 env MODE=test "$UV_BIN" run pytest',
+    'time exec -a validation "$UV_BIN" run pytest',
+    "timeout 30 sh -c '\"$UV_BIN\" run pytest'",
 ):
     assert ve.classify_uv_command(command) == "ambiguous", command
 assert ve.classify_uv_command("pytest -q") == "none"
 assert ve.classify_uv_command("sh -c 'pytest -q'") == "none"
 assert ve.classify_uv_command("bash -lc 'python -m unittest'") == "none"
 assert ve.classify_uv_command('if [ -n "$CI" ]; then pytest -q; fi') == "none"
+for command in (
+    "time pytest -q",
+    "timeout 30 pytest -q",
+    "nohup pytest -q",
+    "nice -n 5 pytest -q",
+    "stdbuf -oL pytest -q",
+    "setsid --wait pytest -q",
+    "xargs -n1 echo",
+    "foo() { echo harmless; }",
+    "function foo { echo harmless; }",
+    'xargs echo "$UV_BIN"',
+    "timeout 30 command -- pytest -q",
+    "timeout 30 env MODE=test pytest -q",
+    "time exec -a validation pytest -q",
+    "timeout 30 sh -c 'pytest -q'",
+):
+    assert ve.classify_uv_command(command) == "none", command
 assert not hasattr(ve, "_resolve_uv_executable")
 
 ambiguous_packet = {
@@ -71,6 +103,17 @@ for name, command in (
     ("nested-login-shell", "bash -lc '\"$UV_BIN\" run pytest'"),
     ("conditional-dynamic-shell", 'if true; then "$UV_BIN" run pytest; fi'),
     ("loop-dynamic-shell", 'for item in one; do "$UV_BIN" run pytest; done'),
+    ("time-dynamic-command", 'time "$UV_BIN" run pytest'),
+    ("timeout-dynamic-command", 'timeout 30 "$UV_BIN" run pytest'),
+    ("xargs-dynamic-command", 'xargs -n1 "$UV_BIN" run pytest'),
+    (
+        "nested-wrapper-dynamic-command",
+        'timeout 30 command -- "$UV_BIN" run pytest',
+    ),
+    (
+        "wrapped-shell-dynamic-command",
+        "timeout 30 sh -c '\"$UV_BIN\" run pytest'",
+    ),
 ):
     errors = packet.validate_validation_contract({
         "allowed_paths": ["src/", "tests/"],

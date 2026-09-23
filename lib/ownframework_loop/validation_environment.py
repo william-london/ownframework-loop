@@ -170,13 +170,16 @@ UV_MEDIATED_SUBCOMMANDS: tuple[str, ...] = (
     "run", "sync", "exec", "test", "python", "lock",
 )
 
-_SHELL_PUNCTUATION = ";|&()<>"
+_SHELL_PUNCTUATION = ";|&()<>{}"
 _ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=.*$", re.DOTALL)
 _SHELL_WRAPPERS = frozenset({"env", "command", "exec"})
-_SHELL_BOUNDARIES = frozenset({";", "|", "&", "&&", "||", "(", ")", "\n"})
+_SHELL_BOUNDARIES = frozenset({";", "|", "&", "&&", "||", "(", ")", "{", "}", "\n"})
 _SHELL_INTERPRETERS = frozenset({"sh", "bash", "dash", "zsh", "ksh"})
 _SHELL_COMMAND_PREFIXES = frozenset(
     {"if", "then", "else", "elif", "while", "until", "do", "!"}
+)
+_SHELL_UNBOUND_EXEC_WRAPPERS = frozenset(
+    {"time", "timeout", "nohup", "nice", "stdbuf", "setsid", "xargs"}
 )
 
 
@@ -253,6 +256,144 @@ def _dynamic_shell_word(value: str) -> bool:
     return any(char in value for char in ("$", "`", "*", "?", "["))
 
 
+def _wrapped_executable_position(
+    tokens: list[tuple[str, int, int, bool]],
+    segment: list[int],
+    position: int,
+    wrapper: str,
+) -> int | None:
+    """Return a known wrapper's target position; None means unparsed options."""
+    cursor = position + 1
+    values = [tokens[index][0] for index in segment]
+
+    if wrapper == "env":
+        while cursor < len(segment):
+            option = values[cursor]
+            if option == "--":
+                cursor += 1
+                break
+            if option == "-S" or option.startswith("--split-string"):
+                return None
+            if option in {"-i", "--ignore-environment"}:
+                cursor += 1
+                continue
+            if option in {"-u", "--unset"}:
+                cursor += 2
+                continue
+            if option.startswith("-"):
+                return None
+            if _ASSIGNMENT_RE.match(option):
+                cursor += 1
+                continue
+            break
+    elif wrapper == "command":
+        if cursor < len(segment) and values[cursor] == "-p":
+            cursor += 1
+        elif cursor < len(segment) and values[cursor] == "--":
+            cursor += 1
+        elif cursor < len(segment) and values[cursor].startswith("-"):
+            return None
+    elif wrapper == "exec":
+        while cursor < len(segment) and values[cursor].startswith("-"):
+            option = values[cursor]
+            if option == "--":
+                cursor += 1
+                break
+            if option in {"-c", "-l"}:
+                cursor += 1
+            elif option in {"-a", "--argv0"}:
+                cursor += 2
+            elif option.startswith("--argv0="):
+                cursor += 1
+            else:
+                return None
+    elif wrapper == "time":
+        while cursor < len(segment) and values[cursor].startswith("-"):
+            option = values[cursor]
+            if option == "--":
+                cursor += 1
+                break
+            if option == "-p":
+                cursor += 1
+            elif option in {"-f", "--format", "-o", "--output"}:
+                cursor += 2
+            elif option.startswith(("-f", "--format=", "-o", "--output=")):
+                cursor += 1
+            else:
+                return None
+    elif wrapper == "timeout":
+        while cursor < len(segment):
+            option = values[cursor]
+            if option == "--":
+                cursor += 1
+                break
+            if option in {"--foreground", "--preserve-status", "--verbose"}:
+                cursor += 1
+            elif option in {"-k", "--kill-after", "-s", "--signal"}:
+                cursor += 2
+            elif option.startswith(("--kill-after=", "--signal=")):
+                cursor += 1
+            elif option.startswith("-"):
+                return None
+            else:
+                break
+        cursor += 1  # timeout duration precedes its command
+    elif wrapper == "nice":
+        if cursor < len(segment) and values[cursor] == "--":
+            cursor += 1
+        elif cursor < len(segment) and values[cursor] in {"-n", "--adjustment"}:
+            cursor += 2
+        elif cursor < len(segment) and values[cursor].startswith("--adjustment="):
+            cursor += 1
+        elif cursor < len(segment) and re.fullmatch(r"-n-?\d+", values[cursor]):
+            cursor += 1
+        elif cursor < len(segment) and values[cursor].startswith("-"):
+            return None
+    elif wrapper == "stdbuf":
+        while cursor < len(segment) and values[cursor].startswith("-"):
+            option = values[cursor]
+            if option in {"-i", "-o", "-e"}:
+                cursor += 2
+            elif len(option) > 2 and option[:2] in {"-i", "-o", "-e"}:
+                cursor += 1
+            else:
+                return None
+    elif wrapper == "setsid":
+        while cursor < len(segment) and values[cursor] in {"--wait", "--ctty", "--fork"}:
+            cursor += 1
+        if cursor < len(segment) and values[cursor] == "--":
+            cursor += 1
+        elif cursor < len(segment) and values[cursor].startswith("-"):
+            return None
+    elif wrapper == "xargs":
+        # Parse common POSIX/GNU options only. Unknown option forms fail closed
+        # if the caller sees a dynamic token later in the segment.
+        takes_argument = {"-a", "-d", "-E", "-I", "-L", "-n", "-P", "-s"}
+        flags = {"-0", "-p", "-r", "-t", "-x"}
+        while cursor < len(segment) and values[cursor].startswith("-"):
+            option = values[cursor]
+            if option == "--":
+                cursor += 1
+                break
+            if option in takes_argument:
+                cursor += 2
+            elif option in flags:
+                cursor += 1
+            elif option.startswith("--") and "=" in option:
+                cursor += 1
+            elif len(option) > 2 and option[:2] in takes_argument:
+                cursor += 1
+            elif option.startswith("-") and all(char in "0prtx" for char in option[1:]):
+                cursor += 1
+            else:
+                return None
+        return cursor if cursor < len(segment) else None
+    elif wrapper == "nohup":
+        pass
+
+    return cursor if cursor < len(segment) else None
+
+
 def classify_uv_command(command: str, *, _depth: int = 0) -> str:
     """Return ``none``, ``uv``, or ``ambiguous`` for shell command authority.
 
@@ -313,6 +454,10 @@ def classify_uv_command(command: str, *, _depth: int = 0) -> str:
             if value in _SHELL_COMMAND_PREFIXES:
                 position += 1
                 continue
+            if value == "function":
+                # `function name { ...; }` is syntax, not the command body.
+                position += 2
+                continue
             if value in {"for", "select"}:
                 # Their first list is a variable/word header, not a command;
                 # the body begins after the following `do` token.
@@ -357,6 +502,49 @@ def classify_uv_command(command: str, *, _depth: int = 0) -> str:
             if value in {"2>", "2>>", "&>", "&>>"}:
                 position += 2
                 continue
+            wrapper_name = Path(value).name
+            if wrapper_name in _SHELL_UNBOUND_EXEC_WRAPPERS:
+                wrapped_position = position
+                wrapped_name = wrapper_name
+                for _ in range(16):
+                    target = _wrapped_executable_position(
+                        tokens, segment, wrapped_position, wrapped_name
+                    )
+                    if target is None:
+                        if any(
+                            _dynamic_shell_word(tokens[index][0])
+                            for index in segment[wrapped_position + 1 :]
+                        ):
+                            return "ambiguous"
+                        break
+                    target_value = tokens[target][0]
+                    if _dynamic_shell_word(target_value):
+                        return "ambiguous"
+                    target_name = Path(target_value).name
+                    if target_name in _SHELL_WRAPPERS | _SHELL_UNBOUND_EXEC_WRAPPERS:
+                        wrapped_position = target
+                        wrapped_name = target_name
+                        continue
+                    if target_name in _SHELL_INTERPRETERS:
+                        for option_index in range(target + 1, len(segment) - 1):
+                            option = tokens[segment[option_index]][0]
+                            if option == "--command" or (
+                                option.startswith("-")
+                                and not option.startswith("--")
+                                and "c" in option[1:]
+                            ):
+                                nested = tokens[segment[option_index + 1]][0]
+                                if classify_uv_command(
+                                    nested, _depth=_depth + 1
+                                ) != "none":
+                                    return "ambiguous"
+                                break
+                    break
+                else:
+                    return "ambiguous"
+                # These wrappers are not rewritten by the bound-uv rewriter.
+                # Literal uv use is refused by the uv_mentions check below.
+                break
             # `eval` re-parses data as shell source.  Its eventual executable
             # cannot be bound from the packet's literal command and is refused
             # even when the word `uv` is supplied only by an environment value.
