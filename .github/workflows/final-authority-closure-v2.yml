@@ -45,6 +45,17 @@ jobs:
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "${GITHUB_SHA}"
           python3 .github/final_authority_closure_v2.py
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('lib/ownframework_loop/integrity.py')
+          text = p.read_text(encoding='utf-8')
+          if 'from .util import read_json\n' not in text:
+              anchor = 'from typing import Any\n'
+              if text.count(anchor) != 1:
+                  raise SystemExit('integrity read_json import anchor missing')
+              text = text.replace(anchor, anchor + '\nfrom .util import read_json\n', 1)
+              p.write_text(text, encoding='utf-8')
+          PY
           export PYTHONPATH="$PWD/lib${PYTHONPATH:+:$PYTHONPATH}"
           python3 -m compileall -q lib/ownframework_loop bin/ofloop
           probe="$(mktemp -d)"
