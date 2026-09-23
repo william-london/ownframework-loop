@@ -32,6 +32,8 @@ import subprocess
 import uuid
 from typing import Any
 
+from . import process_runner
+
 SCHEMA = "ownframework-loop-capability-resolution/v1"
 HOST_MANIFEST_SCHEMA = "ownframework-loop-host-capabilities/v1"
 CAPABILITY_CONTRACT_REVISION = "host-capability-contract/v2"
@@ -171,12 +173,11 @@ def semantic_runtime_fingerprint() -> str:
             except OSError:
                 claude_sha256 = ""
             try:
-                proc = subprocess.run(
-                    [claude_path, "--version"], capture_output=True, text=True,
-                    check=False, timeout=5,
+                proc = process_runner.run_bounded_capture(
+                    [claude_path, "--version"], timeout_seconds=5,
                 )
                 lines = (proc.stdout or proc.stderr or "").strip().splitlines()
-                if lines:
+                if proc.returncode == 0 and lines:
                     claude_version = lines[0][:512]
             except (OSError, subprocess.SubprocessError):
                 pass
@@ -498,9 +499,8 @@ def _resolve_executable(
                 f"{definition.name}.version_args must be an array of strings"
             )
         try:
-            proc = subprocess.run(
-                [executable, *args], capture_output=True, text=True,
-                check=False, timeout=5,
+            proc = process_runner.run_bounded_capture(
+                [executable, *args], timeout_seconds=5,
                 # Some package-manager shims (notably Corepack/pnpm) resolve
                 # their effective version from the nearest package manifest.
                 # Capability authority must be derived from the canonical
@@ -512,6 +512,11 @@ def _resolve_executable(
             raise CapabilityResolutionError(
                 f"could not prove version for {definition.name!r}: {exc}"
             ) from exc
+        if proc.returncode != 0:
+            raise CapabilityResolutionError(
+                f"could not prove version for {definition.name!r}: "
+                f"rc={proc.returncode}"
+            )
         text = (proc.stdout or proc.stderr or "").strip().splitlines()
         if not text:
             raise CapabilityResolutionError(
@@ -1019,9 +1024,9 @@ def _playwright_resolvable() -> tuple[bool, str]:
     if exe:
         return True, str(Path(exe).expanduser().resolve(strict=False))
     try:
-        proc = subprocess.run(
+        proc = process_runner.run_bounded_capture(
             [sys.executable, "-m", "playwright", "--version"],
-            capture_output=True, text=True, check=False, timeout=10,
+            timeout_seconds=10,
         )
         if proc.returncode == 0:
             return True, f"{sys.executable} -m playwright"
