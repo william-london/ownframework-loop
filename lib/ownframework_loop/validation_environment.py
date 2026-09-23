@@ -389,7 +389,10 @@ def _wrapped_executable_position(
                 return None
         return cursor if cursor < len(segment) else None
     elif wrapper == "nohup":
-        pass
+        if cursor < len(segment) and values[cursor] == "--":
+            cursor += 1
+        elif cursor < len(segment) and values[cursor].startswith("-"):
+            return None
 
     return cursor if cursor < len(segment) else None
 
