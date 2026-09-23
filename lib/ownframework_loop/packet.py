@@ -413,39 +413,52 @@ def _has_explicit_python_source_binding(command: str) -> bool:
 
 
 def validate_validation_contract(meta: dict[str, Any]) -> list[str]:
-    """Reject obvious validation commands whose source-layout assumptions conflict.
+    """Reject validation declarations that exceed their packet authority.
 
-    This is intentionally structural rather than a shell or language analyzer.
-    When a packet declares a ``src/`` source layout, a dotted Python import
-    authored as a plain root-working-directory command is not self-consistent:
-    the deterministic validator does not install the future package or inject
-    ``src/`` into ``sys.path``. The packet must bind that fact explicitly with
-    a repo-relative ``PYTHONPATH=src`` contract, a ``uv run`` project
-    environment, an equivalent ``sys.path`` insertion, or a ``cd src`` command.
+    uv capability admission is layout-independent: every top-level or
+    checkpoint-local uv-mediated validation requires ``package.uv`` whether
+    the repository uses ``src/``, a flat layout, ``app/``, or a monorepo.
+    Source-layout Python import checks are applied separately when ``src/``
+    is actually declared.
     """
+    errors: list[str] = []
+    validations = _declared_required_validations(meta)
+    capabilities = {
+        str(value) for value in (meta.get("capabilities") or [])
+    }
+
+    for validation in validations:
+        command = str(validation.get("command") or "")
+        classification = validation_environment.classify_uv_command(command)
+        name = str(validation.get("name") or "validation")
+        if classification == "ambiguous":
+            errors.append(
+                f"required_validation {name!r} contains an unsupported or ambiguous "
+                "uv invocation; use a direct uv command or a supported env/command/exec wrapper"
+            )
+        if (
+            classification != "none"
+            and "package.uv" not in capabilities
+        ):
+            errors.append(
+                f"required_validation {name!r} uses or may use uv but packet "
+                "capabilities do not declare package.uv"
+            )
+
     allowed = {
         _normalize_scope_prefix(p)
         for p in (meta.get("allowed_paths") or [])
         if isinstance(p, str)
     }
     if not any(p == "src" or p.startswith("src/") for p in allowed):
-        return []
+        return errors
 
-    errors: list[str] = []
-    capabilities = {
-        str(value) for value in (meta.get("capabilities") or [])
-    }
-    for validation in _declared_required_validations(meta):
+    for validation in validations:
         command = str(validation.get("command") or "")
         if (
             validation_environment.is_uv_command(command)
             and "package.uv" not in capabilities
         ):
-            name = str(validation.get("name") or "validation")
-            errors.append(
-                f"required_validation {name!r} uses a uv subcommand but packet "
-                "capabilities do not declare package.uv"
-            )
             continue
         if not _PYTHON_VALIDATION_RE.search(command):
             continue

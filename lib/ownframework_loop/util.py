@@ -14,6 +14,8 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from . import process_runner
+
 
 def utc_now_iso() -> str:
     """Return current UTC timestamp in ISO 8601 with 'Z' suffix."""
@@ -79,7 +81,7 @@ def reviewer_worktree(canonical_repo: Path, run_id: str) -> Path:
     return worktrees_dir(canonical_repo) / run_id / "reviewer"
 
 
-def canonical_repo_root(path: Path) -> Path:
+def canonical_repo_root(path: Path | str) -> Path:
     """Resolve canonical absolute repo path. Raises if not absolute."""
     p = Path(path).expanduser().resolve(strict=False)
     if not p.is_absolute():
@@ -199,15 +201,12 @@ def run_subprocess(
     timeout: float | None = None,
     check: bool = False,
     env: dict[str, str] | None = None,
-) -> subprocess.CompletedProcess:
-    """Run a subprocess with explicit args, no shell."""
-    result = subprocess.run(
+) -> subprocess.CompletedProcess[str]:
+    """Run explicit argv with captured output and tree-bounded timeout cleanup."""
+    result = process_runner.run_bounded_capture(
         cmd,
-        cwd=str(cwd) if cwd else None,
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-        check=False,
+        cwd=cwd,
+        timeout_seconds=timeout,
         env=env,
     )
     if check and result.returncode != 0:
@@ -250,35 +249,21 @@ def stderr(msg: str) -> None:
     sys.stderr.flush()
 
 
-# Work-class-aware budget recommendations. These are starting ranges, not
-# hard caps; the packet's exact risk_budget overrides them. Operator confirms via TTY.
-# the packet's budget, so any reasonable mission-appropriate funding is
-# acceptable. The blanket V1 400-line / 12-file cap is removed.
 WORK_CLASS_BUDGET_RECOMMENDATIONS: dict[str, dict[str, int]] = {
-    # Small: bug / doc / test / CI repair
     "BUG":            {"max_files_changed": 25, "max_diff_lines": 1000, "max_repair_rounds": 4},
     "DOCUMENTATION":  {"max_files_changed": 20, "max_diff_lines": 800,  "max_repair_rounds": 3},
     "TESTING":        {"max_files_changed": 25, "max_diff_lines": 1000, "max_repair_rounds": 4},
     "CI_REPAIR":      {"max_files_changed": 12, "max_diff_lines": 600,  "max_repair_rounds": 3},
-    # Medium: feature / debug / hardening
     "FEATURE":        {"max_files_changed": 60, "max_diff_lines": 3000, "max_repair_rounds": 5},
     "DEBUG":          {"max_files_changed": 40, "max_diff_lines": 2000, "max_repair_rounds": 4},
     "HARDENING":      {"max_files_changed": 50, "max_diff_lines": 2500, "max_repair_rounds": 5},
-    # Large bounded: refactor / tracked contract / new repo
     "REFACTOR":       {"max_files_changed": 150, "max_diff_lines": 8000, "max_repair_rounds": 6},
     "TRACKED_CONTRACT": {"max_files_changed": 80, "max_diff_lines": 4000, "max_repair_rounds": 5},
     "NEW_REPOSITORY": {"max_files_changed": 100, "max_diff_lines": 5000, "max_repair_rounds": 5},
-    # Research / runtime
     "RESEARCH_SPIKE": {"max_files_changed": 30, "max_diff_lines": 1500, "max_repair_rounds": 3},
     "RUNTIME_CANDIDATE": {"max_files_changed": 60, "max_diff_lines": 3000, "max_repair_rounds": 5},
 }
 
-# Generous runaway ceiling — past this requires packet-level elevation.
-#
-# v0.6.3: PROGRAM packets may span many checkpoints. Per-checkpoint caps remain
-# 32, but the packet-wide cumulative pass envelope may be larger so a long
-# PROGRAM can actually realize its checkpoint-local repair budgets. Source-size
-# ceilings remain deliberately lower and are validated before execution.
 ABSOLUTE_BUDGET_CEILING: dict[str, int] = {
     "max_files_changed": 500,
     "max_diff_lines": 30000,

@@ -9,7 +9,7 @@ trap 'rm -rf "$TMP"' EXIT
 python3 - "$TMP" <<'PY'
 import json, signal, subprocess, sys
 from pathlib import Path
-from ownframework_loop import supervisor, supervisor_runner
+from ownframework_loop import process_runner, supervisor, supervisor_runner
 root=Path(sys.argv[1])
 p=root/"cost.json"
 p.write_text(json.dumps({"total_cost_usd":1.25}))
@@ -42,10 +42,12 @@ class FakeProc:
     returncode = None
     def __init__(self):
         self.wait_calls = 0
+        self.wait_timeouts = []
     def poll(self):
         return self.returncode
     def wait(self, timeout=None):
         self.wait_calls += 1
+        self.wait_timeouts.append(timeout)
         if self.wait_calls == 1:
             raise subprocess.TimeoutExpired(cmd="fake-semantic-worker", timeout=timeout)
         self.returncode = -signal.SIGKILL
@@ -54,13 +56,22 @@ class FakeProc:
 fake = FakeProc()
 signals = []
 orig_killpg = supervisor_runner.os.killpg
+orig_group_exists = process_runner.process_group_exists
 try:
-    supervisor_runner.os.killpg = lambda pid, sig: signals.append((pid, sig))
+    def fake_killpg(pid, sig):
+        signals.append((pid, sig))
+        if sig == signal.SIGKILL:
+            fake.returncode = -signal.SIGKILL
+
+    supervisor_runner.os.killpg = fake_killpg
+    process_runner.process_group_exists = lambda _pgid: fake.returncode is None
     supervisor_runner._terminate_group(fake, grace_seconds=0.01)
 finally:
     supervisor_runner.os.killpg = orig_killpg
+    process_runner.process_group_exists = orig_group_exists
 assert signals == [(fake.pid, signal.SIGTERM), (fake.pid, signal.SIGKILL)], signals
-assert fake.wait_calls == 2, fake.wait_calls
+assert fake.wait_calls >= 1, fake.wait_calls
+assert all(timeout is not None for timeout in getattr(fake, "wait_timeouts", []))
 PY
 
 # A valid Claude result may exceed diagnostic retention. The runner must parse

@@ -49,6 +49,17 @@ overrides = {
     "PNPM_REGISTRY": "https://pnpm-attacker.example.com",
     "CARGO_REGISTRIES_CRATES_IO_PROTOCOL": "sparse",
     "CARGO_REGISTRIES_CRATES_IO_INDEX": "https://cargo-attacker.example.com",
+    "HTTP_PROXY": "http://attacker-proxy.example.com:8080",
+    "HTTPS_PROXY": "http://attacker-proxy.example.com:8080",
+    "ALL_PROXY": "socks5://attacker-proxy.example.com:1080",
+    "NO_PROXY": "*",
+    "http_proxy": "http://attacker-proxy.example.com:8080",
+    "https_proxy": "http://attacker-proxy.example.com:8080",
+    "all_proxy": "socks5://attacker-proxy.example.com:1080",
+    "no_proxy": "*",
+    "UV_HTTP_PROXY": "http://attacker-proxy.example.com:8080",
+    "UV_HTTPS_PROXY": "http://attacker-proxy.example.com:8080",
+    "UV_NO_PROXY": "*",
 }
 base = dict(os.environ)
 base.update(overrides)

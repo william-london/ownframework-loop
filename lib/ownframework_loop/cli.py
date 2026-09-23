@@ -40,6 +40,7 @@ from . import (
     scheduling, state as state_mod, transitions, util, verdicts, worktrees,
     integrity, limits as limits_mod, approval, build_finalize, review_finalize,
     branch_resolver, capabilities as capabilities_mod, commissioning as commissioning_mod, execution_start,
+    process_runner,
     dispatch as dispatch_mod, runner_profiles as runner_profiles_mod, runtime_env, supervisor as supervisor_mod,
     supervisor_readmodel as supervisor_readmodel_mod,
     supervisor_holds as supervisor_holds_mod,
@@ -507,8 +508,8 @@ def cmd_spec_approve(args: argparse.Namespace) -> None:
         )
         _emit_error(str(e), exit_code=4, classification="OF_LOOP_APPROVAL_REFUSED")
 
-    # Record the approval event (artifact hash included).
-    approval_sha = approval.approval_artifact_sha256(approval_doc)
+    # Record the approval event. append_event() snapshots authoritative
+    # artifact hashes itself; callers must not supply reserved hash fields.
     cur_state = state_mod.load(repo, args.run_id).get("state")
     state_mod.append_event(
         repo, args.run_id,
@@ -518,11 +519,9 @@ def cmd_spec_approve(args: argparse.Namespace) -> None:
         actor=actor,
         reason=f"packet_sha256={approval_doc['packet_sha256']}",
         extras={
-            "approval_sha256": approval_sha,
             "approval_method": approval_doc["approval_method"],
             "baseline_sha": approval_doc["baseline_sha"],
             "baseline_branch": approval_doc["baseline_branch"],
-            "confirmation_token": approval_doc["confirmation_token"],
         },
     )
 
@@ -1410,8 +1409,7 @@ def cmd_new_repo(args: argparse.Namespace) -> None:
     if target.exists() and any(target.iterdir()):
         _emit_error(f"target not empty: {target}", exit_code=2)
     target.mkdir(parents=True, exist_ok=True)
-    import subprocess
-    subprocess.run(["git", "init", "-b", "master", str(target)], check=True)
+    util.run_subprocess(["git", "init", "-b", "master", str(target)], timeout=30, check=True)
     rc = git_checks.remote_count(target)
     if rc > 0:
         _emit_error(f"newly created repo has remotes (should be zero)", exit_code=2)
@@ -1436,13 +1434,13 @@ def cmd_new_repo(args: argparse.Namespace) -> None:
         )
         gitignore = target / ".gitignore"
         gitignore.write_text(".ownframework-loop/\n.worktrees/ownframework-loop/\n", encoding="utf-8")
-        subprocess.run(["git", "-C", str(target), "add", "README.md", ".gitignore"], check=True)
+        util.run_subprocess(["git", "-C", str(target), "add", "README.md", ".gitignore"], timeout=30, check=True)
         # Use the discovered identity; do NOT pass --local config writes.
         env = {**os.environ, "GIT_AUTHOR_NAME": name, "GIT_AUTHOR_EMAIL": email,
                "GIT_COMMITTER_NAME": name, "GIT_COMMITTER_EMAIL": email}
-        subprocess.run(
+        util.run_subprocess(
             ["git", "-C", str(target), "commit", "-m", "loop-v1: minimal bootstrap baseline"],
-            check=True, env=env,
+            timeout=30, check=True, env=env,
         )
     _emit({
         "ok": True,
@@ -1979,7 +1977,15 @@ def _build_parser() -> argparse.ArgumentParser:
         _emit(out, exit_code=0 if out.get("ok") else 2)
 
     def cmd_supervisor_retire(args: argparse.Namespace) -> None:
-        repo = _repo_path(args.repo)
+        # Historical disposable repositories may already have been removed.
+        # Retirement changes only the exact supervisor enrollment identified
+        # by this canonical path + run_id; it does not read or recreate repo
+        # contents. Keep existing directory validation when the path exists,
+        # while allowing a missing path to reach the ledger's exact-match,
+        # QUARANTINED-only retirement guard.
+        repo = Path(args.repo).expanduser().resolve(strict=False)
+        if repo.exists() and not repo.is_dir():
+            _emit_error(f"repository path is not a directory: {args.repo}", exit_code=2)
         out = supervisor_mod.retire(
             canonical_repo=repo,
             run_id=args.run_id,

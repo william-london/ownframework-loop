@@ -21,6 +21,7 @@ from . import (
     branch_resolver,
     git_checks,
     packet as packet_mod,
+    process_runner,
     state as state_mod,
     util,
 )
@@ -55,7 +56,7 @@ def _current_baseline(canonical_repo, expected_branch):
 def _is_tracked_or_staged_dirty(canonical_repo):
     if not git_checks.is_git_repo(canonical_repo):
         return False
-    p = subprocess.run(
+    p = util.run_subprocess(
         [
             "git",
             "-C",
@@ -64,9 +65,7 @@ def _is_tracked_or_staged_dirty(canonical_repo):
             "--porcelain",
             "--untracked-files=no",
         ],
-        capture_output=True,
-        text=True,
-        check=False,
+        timeout=10,
     )
     if p.returncode != 0:
         raise RuntimeError(

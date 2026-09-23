@@ -24,6 +24,7 @@ from . import capabilities as capabilities_mod
 from . import capability_binding as capability_binding_mod
 from . import dispatch as dispatch_mod
 from . import git_checks
+from . import process_runner
 from . import runner_profiles as runner_profiles_mod
 from . import runtime_env
 from . import supervisor_accounting as _accounting_mod
@@ -64,14 +65,11 @@ class WorkerLaunchError(RuntimeError):
 def _claude_cli_version(executable: str) -> tuple[int, int, int] | None:
     """Return Claude Code semantic version, or None when it cannot be proven."""
     try:
-        proc = subprocess.run(
+        proc = process_runner.run_bounded_capture(
             [executable, "--version"],
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=10,
+            timeout_seconds=10,
         )
-    except (OSError, subprocess.TimeoutExpired):
+    except (OSError, subprocess.SubprocessError):
         return None
     if proc.returncode != 0:
         return None
@@ -254,23 +252,8 @@ def _semantic_worker_settings(
     }
 
 def _terminate_group(proc: subprocess.Popen[str], grace_seconds: float = 3.0) -> None:
-    """Terminate and reap one semantic worker process group."""
-    if proc.poll() is not None:
-        return
-    try:
-        os.killpg(proc.pid, signal.SIGTERM)
-    except ProcessLookupError:
-        return
-    try:
-        proc.wait(timeout=grace_seconds)
-        return
-    except subprocess.TimeoutExpired:
-        pass
-    try:
-        os.killpg(proc.pid, signal.SIGKILL)
-    except ProcessLookupError:
-        pass
-    proc.wait()
+    """Terminate the entire semantic-worker group even after leader exit."""
+    process_runner.terminate_process_group(proc, grace_seconds=grace_seconds)
 
 class ClaudeCodeRunner:
     """One fresh non-interactive Claude Code process per semantic pass."""
@@ -685,24 +668,23 @@ class ClaudeCodeRunner:
             )
         except subprocess.TimeoutExpired:
             timed_out = True
-            try:
-                os.killpg(proc.pid, signal.SIGTERM)
-            except ProcessLookupError:
-                pass
-            try:
-                stdout_data, stderr_data = proc.communicate(timeout=10)
-            except subprocess.TimeoutExpired:
-                try:
-                    os.killpg(proc.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-                stdout_data, stderr_data = proc.communicate()
+            _terminate_group(proc)
+            stdout_data, stderr_data = proc.communicate()
         except BaseException:
             _terminate_group(proc)
             if durable_files is not None:
                 stdout_fh.close()  # type: ignore[union-attr]
                 stderr_fh.close()  # type: ignore[union-attr]
             raise
+
+        lifecycle_leak = False
+        if not timed_out and process_runner.process_group_exists(proc.pid):
+            lifecycle_leak = True
+            _terminate_group(proc)
+
+        if not timed_out and process_runner.process_group_exists(proc.pid):
+            lifecycle_leak = True
+            process_runner.terminate_process_group(proc)
 
         if durable_files is not None:
             # Close our handles; the child holds its own dup until exit.
@@ -732,6 +714,32 @@ class ClaudeCodeRunner:
                 stderr_data = _runner_io_mod._read_durable_diagnostic_tail(err_path)
             except Exception:
                 stderr_data = ""
+
+        if lifecycle_leak:
+            if durable_files is not None and envelope_error:
+                stderr_data = (stderr_data or "") + "\n" + envelope_error
+            return RunnerResult(
+                ok=False,
+                returncode=process_runner.PROCESS_GROUP_LEAK_RC,
+                cost_usd=0.0,
+                stdout=(stdout_data or "")[-RUNNER_DIAGNOSTIC_MAX_CHARS:],
+                stderr=((stderr_data or "") + "\n" + process_runner.PROCESS_GROUP_LEAK_MARKER)[-RUNNER_DIAGNOSTIC_MAX_CHARS:],
+                pid=int(proc.pid),
+                cost_known=False,
+                tokens_known=False,
+            )
+
+        if lifecycle_leak:
+            return RunnerResult(
+                ok=False,
+                returncode=process_runner.PROCESS_GROUP_LEAK_RC,
+                cost_usd=0.0,
+                stdout=(stdout_data or "")[-RUNNER_DIAGNOSTIC_MAX_CHARS:],
+                stderr=((stderr_data or "") + "\n" + process_runner.PROCESS_GROUP_LEAK_MARKER)[-RUNNER_DIAGNOSTIC_MAX_CHARS:],
+                pid=int(proc.pid),
+                cost_known=False,
+                tokens_known=False,
+            )
 
         if timed_out:
             if durable_files is not None and envelope_error:

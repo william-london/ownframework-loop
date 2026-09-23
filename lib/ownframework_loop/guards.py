@@ -70,6 +70,11 @@ FORBIDDEN_PATTERNS: list[tuple[re.Pattern[str], str, str]] = [
     # intentionally allowed. REGISTRY PUBLISHING is an external effect and
     # stays prohibited.
     (re.compile(r"\bsystemctl\s+(start|stop|restart|reload)\b"), "systemctl is prohibited", "subcommand"),
+    (re.compile(r"(?:^|[;&|\n])\s*(?:\S*/)?setsid(?:\s|$)"), "setsid process detachment is prohibited", "executable_identity"),
+    (re.compile(r"(?:^|[;&|\n])\s*(?:\S*/)?daemonize(?:\s|$)"), "daemonize process detachment is prohibited", "executable_identity"),
+    (re.compile(r"(?:^|[;&|\n])\s*(?:\S*/)?systemd-run(?:\s|$)"), "systemd-run service detachment is prohibited", "executable_identity"),
+    (re.compile(r"\blaunchctl\s+(?:bootstrap|kickstart|start|submit)\b"), "launchctl service start is prohibited", "subcommand"),
+    (re.compile(r"(?:^|[;&|\n])\s*(?:\S*/)?(?:at|batch|crontab)(?:\s|$)"), "scheduled detached execution is prohibited", "executable_identity"),
     # Registry / publish effects (no push, no publish, no deploy).
     (re.compile(r"\bdocker\s+push\b"), "docker push (registry publish) is prohibited", "subcommand"),
     (re.compile(r"\bdocker\s+compose\s+push\b"), "docker compose push (registry publish) is prohibited", "subcommand"),

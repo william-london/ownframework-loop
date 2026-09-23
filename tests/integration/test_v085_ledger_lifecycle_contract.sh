@@ -129,8 +129,11 @@ if [[ "$(uname -s)" == "Darwin" ]]; then
   cat > "$ABSENT_MANAGER/launchctl" <<'SH'
 #!/bin/sh
 if [ "${1:-}" = print ]; then
-  case "${2:-}" in
-    gui/*/com.ownframework.loop-supervisor) exit 1 ;;
+    case "${2:-}" in
+    gui/*/com.ownframework.loop-supervisor)
+      echo "Could not find service" >&2
+      exit 1
+      ;;
     gui/*) exit 0 ;;
   esac
 fi

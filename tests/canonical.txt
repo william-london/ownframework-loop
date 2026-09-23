@@ -11,6 +11,7 @@ tests/unit/test_v046_hardening.sh
 tests/unit/test_v050_hardening.sh
 tests/unit/test_lifecycle.sh
 tests/unit/test_no_silent_tests.sh
+tests/unit/test_final_hardening_process_and_lock.sh
 tests/unit/test_v120_validation_environment.sh
 tests/unit/test_v200_research_authority.sh
 
@@ -145,3 +146,4 @@ tests/integration/test_v120_stale_lock_repair.sh
 tests/integration/test_v120_genuine_infra_failure.sh
 tests/integration/test_v120_tool_swap_regression.sh
 tests/integration/test_v120_network_authority.sh
+tests/integration/test_v121_validation_authority_closure.sh

@@ -41,21 +41,42 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python }}
+      - name: Enable validator namespaces on the disposable Linux runner
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          restriction=/proc/sys/kernel/apparmor_restrict_unprivileged_userns
+          if [[ -r "$restriction" ]] && [[ "$(cat "$restriction")" == "1" ]]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          unshare --user --map-root-user --mount --net /bin/true
       - name: Environment
         run: |
           python3 --version
           git --version
       - name: Install uv for candidate-bound project env tests
-        # Install uv at a non-HOME location so the capability resolver
-        # does NOT refuse uv on HOME-fall-through grounds. HOME-bound
-        # executables require explicit host commissioning in CI runs
-        # that have no host manifest entry.
+        # The resolver intentionally refuses uncommissioned executables under
+        # HOME. setup-python lives outside HOME on Linux but under
+        # /Users/runner on GitHub-hosted macOS, so a normal pip install is not
+        # cross-platform proof. Install/locate uv, copy the exact executable to
+        # an ephemeral non-HOME path, and make that copy authoritative for all
+        # later validation steps.
+        shell: bash
         run: |
+          set -euo pipefail
           if ! command -v uv >/dev/null 2>&1; then
             python3 -m pip install --break-system-packages uv || \
               python3 -m pip install uv
           fi
-          which uv
+          uv_source="$(command -v uv)"
+          test -n "$uv_source"
+          rm -rf /tmp/ofloop-ci-bin
+          install -d -m 0755 /tmp/ofloop-ci-bin
+          install -m 0755 "$uv_source" /tmp/ofloop-ci-bin/uv
+          echo "/tmp/ofloop-ci-bin" >> "$GITHUB_PATH"
+          export PATH="/tmp/ofloop-ci-bin:$PATH"
+          test "$(command -v uv)" = "/tmp/ofloop-ci-bin/uv"
           uv --version
       - name: Fetch canonical PR base
         if: github.event_name == 'pull_request'
@@ -94,13 +115,32 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python }}
-      - name: Install uv for candidate-bound project env tests
+      - name: Enable validator namespaces on the disposable Linux runner
+        if: runner.os == 'Linux'
+        shell: bash
         run: |
+          set -euo pipefail
+          restriction=/proc/sys/kernel/apparmor_restrict_unprivileged_userns
+          if [[ -r "$restriction" ]] && [[ "$(cat "$restriction")" == "1" ]]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          unshare --user --map-root-user --mount --net /bin/true
+      - name: Install uv for candidate-bound project env tests
+        shell: bash
+        run: |
+          set -euo pipefail
           if ! command -v uv >/dev/null 2>&1; then
             python3 -m pip install --break-system-packages uv || \
               python3 -m pip install uv
           fi
-          which uv
+          uv_source="$(command -v uv)"
+          test -n "$uv_source"
+          rm -rf /tmp/ofloop-ci-bin
+          install -d -m 0755 /tmp/ofloop-ci-bin
+          install -m 0755 "$uv_source" /tmp/ofloop-ci-bin/uv
+          echo "/tmp/ofloop-ci-bin" >> "$GITHUB_PATH"
+          export PATH="/tmp/ofloop-ci-bin:$PATH"
+          test "$(command -v uv)" = "/tmp/ofloop-ci-bin/uv"
           uv --version
       - name: Release gate
         env:

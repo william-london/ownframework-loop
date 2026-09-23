@@ -56,9 +56,17 @@ macOS uses launchd. Linux uses systemd-user.
 The current Claude runner needs Claude Code 2.1.248+, `bubblewrap`, and
 `socat`.
 
-If bubblewrap exists but cannot run, inspect Linux unprivileged user-namespace
-policy. Ubuntu 24.04+ may require the AppArmor profile documented by Claude
-Code for `bwrap`.
+Deterministic validation also requires the commissioned user to create a
+private user, mount, and network namespace. If `unshare --user --map-root-user
+--mount --net /bin/true` is refused, validation is reported as infrastructure
+unavailable and candidate validation commands do not run. Inspect the host's
+unprivileged user-namespace policy. Ubuntu 24.04+ may require a narrowly scoped
+AppArmor profile allowing the commissioned namespace helper; do not disable
+the restriction system-wide merely to force validation to run.
+
+If bubblewrap exists but cannot run, inspect the separate Linux unprivileged
+user-namespace policy. Ubuntu 24.04+ may require the AppArmor profile documented
+by Claude Code for `bwrap`.
 
 Do not bypass the sandbox to make unattended execution start.
 

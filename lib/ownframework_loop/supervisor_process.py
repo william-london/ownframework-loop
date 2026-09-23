@@ -14,6 +14,8 @@ import sys
 import threading
 import time
 
+from . import process_runner
+
 _LOCAL_EXECUTION_LOCK = threading.Lock()
 _LOCAL_EXECUTION_JOBS: dict[int, set[int]] = {}
 _LOCAL_CONNECTION_DEPTH_SUPERVISOR: dict[int, int] = {}
@@ -212,9 +214,9 @@ def _read_pid_start_time(pid: int) -> float | None:
                 return None
             return boot + ticks / float(clk_tck)
         # macOS fallback
-        r = subprocess.run(
+        r = process_runner.run_bounded_capture(
             ["ps", "-o", "etime=", "-p", str(pid)],
-            capture_output=True, text=True, check=False, timeout=2,
+            timeout_seconds=2,
         )
         if r.returncode != 0 or not r.stdout.strip():
             return None

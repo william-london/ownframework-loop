@@ -77,18 +77,24 @@ spec_contracts = (
 )
 for spec_path in spec_contracts:
     text = spec_path.read_text(encoding="utf-8")
+    normalized_text = " ".join(text.split())
     required = (
         "Before a v3 PROGRAM is considered ready:",
         "top-level `required_validation` is a global gate",
         "MUST be satisfiable from the first checkpoint onward",
         "belongs in that checkpoint's",
-        "never place a known\n  later-only gate in the top-level list",
+        "never place a known later-only gate in the top-level list",
         "src/` package layout must not use a plain",
-        "deterministic packet preflight must\n  reject an obvious contradiction",
+        "deterministic packet preflight must reject an obvious contradiction",
         "do not narrow ordinary repository write authority merely",
-        "artificial\n  path minimization that prevents legitimate engineering",
+        "including packaging, tests, configuration, documentation, and build metadata when relevant",
+        "artificial path minimization that prevents legitimate engineering is itself a packet defect.",
+        "For a normal PROGRAM using a high-effort profile, use at least 3600 seconds by",
+        "Do not use a short wall-clock ceiling as a proxy for controlling spend",
+        "leaving cost and tokens honestly unknown",
+        "Cost controls are a separate authority and remain off unless explicitly requested",
     )
-    missing = [fragment for fragment in required if fragment not in text]
+    missing = [fragment for fragment in required if " ".join(fragment.split()) not in normalized_text]
     assert not missing, (
         f"{spec_path}: PROGRAM validation-scope contract drift: missing={missing}"
     )

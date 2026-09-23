@@ -45,8 +45,21 @@ assert errs, f'shape validator accepted operator_marker: {errs}'
 print('OK')
 " >/dev/null 2>&1 && pass "fault 2: validate_approval_shape refuses operator_marker" || fail "fault 2: operator_marker accepted"
 
-# === Fault 3: gate has timeout wrapper ===
-grep -q "timeout 180" "$ROOT/tests/run_all.sh" && pass "fault 3: gate wraps each test in timeout" || fail "fault 3: no timeout wrapper"
+# === Fault 3: gate has bounded whole-process-group timeout ownership ===
+python3 -B - "$ROOT/tests/run_all.sh" <<'PY' >/dev/null 2>&1 && pass "fault 3: gate bounds and drains each canonical test process group" || fail "fault 3: bounded test lifecycle missing"
+from pathlib import Path
+import sys
+text = Path(sys.argv[1]).read_text(encoding="utf-8")
+required = (
+    "start_new_session=True",
+    "proc.wait(timeout=180)",
+    "process_runner.terminate_process_group(proc)",
+    "process_runner.process_group_exists(proc.pid)",
+    "process_runner.PROCESS_GROUP_LEAK_RC",
+)
+missing = [needle for needle in required if needle not in text]
+assert not missing, missing
+PY
 
 # === Fault 4: canonical.txt allow-list present ===
 [[ -f "$ROOT/tests/canonical.txt" ]] && pass "fault 4: canonical.txt allow-list in place" || fail "fault 4: canonical.txt missing"

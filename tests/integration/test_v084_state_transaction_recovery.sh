@@ -31,6 +31,22 @@ rd.mkdir(parents=True)
 state.save(repo, run_id, state.initial_state(run_id))
 assert state.load_verified(repo, run_id)["state"] == "AWAITING_APPROVAL"
 
+# A forged/symlinked write-ahead journal is not recovery authority. The old
+# reader followed the link and would evaluate attacker-controlled JSON against
+# the live STATE/EVENTS bindings. Refuse the redirection before parsing.
+external_txn = root / "external-state-txn.json"
+external_txn.write_text("{}\n", encoding="utf-8")
+txn_link = state.state_txn_path(repo, run_id)
+txn_link.symlink_to(external_txn)
+try:
+    state.load_verified(repo, run_id)
+except integrity.TamperingDetected as exc:
+    assert "must not be a symlink" in str(exc), exc
+else:
+    raise AssertionError("symlinked STATE_TXN.json was accepted as recovery authority")
+assert external_txn.read_text(encoding="utf-8") == "{}\n"
+txn_link.unlink()
+
 # A dead atomic writer may leave its append temp behind. It is not authority
 # and verified recovery removes it under the same run flock without touching
 # the valid state/event pair.

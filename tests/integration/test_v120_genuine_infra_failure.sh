@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
-# OwnFramework Loop — GENUINE infrastructure failure classification.
+# OwnFramework Loop — genuine infrastructure failure classification.
 #
 # Distinguishes validator/host-side infrastructure failures from
-# candidate-repairable defects. Each scenario produces:
+# candidate-repairable defects. Each genuine infra scenario must produce:
 #   VALIDATION_INFRA_FAILURE=yes
 #   CHANGES_REQUESTED=no
 #   REPAIR_ROUND_BURNED=no
 #   RESULT=BLOCKED
 #
-# Three categories exercised:
-#   A) uv executable missing
-#   B) provisioning timeout (network stall simulation via tiny budget)
-#   C) runtime-cache write refused (env_dir under read-only parent)
+# Categories exercised:
+#   A) frozen package.uv authority missing
+#   B) bound uv provisioning timeout + descendant drain
+#   C) runtime-cache write refused after bound identity verification
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -23,7 +23,6 @@ export PYTHONPATH="${LIB_DIR}${PYTHONPATH:+:${PYTHONPATH}}"
 export OFLOOP_LIB="${LIB_DIR}"
 export OFLOOP_ROOT="${REPO_ROOT}"
 
-# Helper: extract a top-level field from a JSON file.
 jq_field() {
     python3 -c "import json, sys; d=json.load(open(sys.argv[1])); print(d[sys.argv[2]])" "$1" "$2"
 }
@@ -43,7 +42,6 @@ expect() {
 TMP="$(mktemp -d -t ofloop-genuine-infra.XXXXXX)"
 trap 'if [[ "${failures:-0}" -eq 0 ]]; then rm -rf "${TMP}"; else echo "DEBUG_TMP=${TMP}" >&2; fi' EXIT INT TERM HUP
 
-# Build a small uv project fixture.
 REAL_REPO="${TMP}/proj"
 git init -q -b master "${REAL_REPO}"
 git -C "${REAL_REPO}" config user.email "test@local"
@@ -74,237 +72,210 @@ git -C "${REAL_REPO}" add -A
 git -C "${REAL_REPO}" commit -qm "baseline: real uv project"
 CANDIDATE_SHA="$(git -C "${REAL_REPO}" rev-parse HEAD)"
 
-# -------------------------------------------------------------------- #
-# Section A: uv executable missing on PATH                              #
-# -------------------------------------------------------------------- #
-section "A. uv executable missing on PATH"
+# A test-only executable with deterministic behavior: version inspection is
+# immediate. The sync operation launches a descendant that would leave a
+# sentinel after one second if only the wrapper PID were killed. Whole-group
+# timeout cleanup must prevent that sentinel from ever appearing.
+FAKE_UV="${TMP}/fake-uv"
+cat > "${FAKE_UV}" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "--version" ]]; then
+    echo "uv 99.0-test"
+    exit 0
+fi
+marker_base="${OFLOOP_TEST_MARKER_BASE:-${0}}"
+printf '1\n' > "${marker_base}.child-started"
+(
+    sleep 3
+    printf '1\n' > "${marker_base}.child-survived"
+) &
+wait
+EOF
+chmod 0755 "${FAKE_UV}"
 
+# -------------------------------------------------------------------- #
+# A. Missing frozen package.uv authority                                #
+# -------------------------------------------------------------------- #
+section "A. frozen package.uv authority missing"
 PYTHONPATH="${LIB_DIR}" python3 -B - "${REAL_REPO}" "${CANDIDATE_SHA}" > "${TMP}/A.json" <<'PY'
-"""Drive provision with PATH pointing to a directory that has no uv."""
-import json, os, sys
+import json, sys
 from pathlib import Path
 from ownframework_loop import validation_environment as ve
 
 canonical_repo = Path(sys.argv[1])
-candidate_sha = sys.argv[2]
-
-saved_path = os.environ.get("PATH")
-os.environ["PATH"] = "/tmp/no-such-dir-for-uv-genuine-infra"
-try:
-    out = ve.provision_project_environment(
-        canonical_repo=canonical_repo, run_id="run-2026-genuine-A",
-        role="builder", candidate_sha=candidate_sha,
-        candidate_worktree=canonical_repo, timeout_seconds=30,
-    )
-finally:
-    if saved_path is not None:
-        os.environ["PATH"] = saved_path
-print(json.dumps({
-    "outcome": out.get("outcome"),
-    "reason": out.get("reason"),
-}))
+out = ve.provision_project_environment(
+    canonical_repo=canonical_repo,
+    run_id="run-2026-genuine-A",
+    role="builder",
+    candidate_sha=sys.argv[2],
+    candidate_worktree=canonical_repo,
+    bound_uv=None,
+    timeout_seconds=30,
+)
+print(json.dumps({"outcome": out.get("outcome"), "reason": out.get("reason")}))
 PY
 A_OUTCOME="$(jq_field "${TMP}/A.json" outcome)"
 A_REASON="$(jq_field "${TMP}/A.json" reason)"
-expect "missing uv → OUTCOME_INFRA_FAILURE" "$A_OUTCOME" "infra_failure"
-expect "missing uv → reason starts with uv_executable_unavailable" \
-    "$([ "${A_REASON#uv_executable_unavailable}" != "$A_REASON" ] && echo yes || echo no)" "yes"
+expect "missing frozen uv → OUTCOME_INFRA_FAILURE" "$A_OUTCOME" "infra_failure"
+expect "missing frozen uv → reason starts with bound_uv_required" \
+    "$([ "${A_REASON#bound_uv_required}" != "$A_REASON" ] && echo yes || echo no)" "yes"
 
 # -------------------------------------------------------------------- #
-# Section B: provisioning timeout                                       #
+# B. Provisioning timeout with a valid frozen executable identity       #
 # -------------------------------------------------------------------- #
-section "B. provisioning timeout (tiny budget against a real uv project)"
-
-# We simulate timeout by stubbing the subprocess via monkey-patch.
-# The actual subprocess.run respects the timeout, but a real-world
-# timeout scenario would block on a hostile network. Use a tiny
-# timeout against a real project and confirm the classification
-# signal lands on infra_failure / provisioning_timeout.
-PYTHONPATH="${LIB_DIR}" python3 -B - "${REAL_REPO}" "${CANDIDATE_SHA}" > "${TMP}/B.json" <<'PY'
-"""Drive provision with a 1-millisecond timeout; uv sync against the
-real registry will reliably exceed this."""
-import json, sys, time
+section "B. bound uv provisioning timeout"
+rm -f "${FAKE_UV}.child-started" "${FAKE_UV}.child-survived"
+PYTHONPATH="${LIB_DIR}" python3 -B - "${REAL_REPO}" "${CANDIDATE_SHA}" "${FAKE_UV}" > "${TMP}/B.json" <<'PY'
+import json, os, sys, time
 from pathlib import Path
 from ownframework_loop import validation_environment as ve
 
 canonical_repo = Path(sys.argv[1])
-candidate_sha = sys.argv[2]
+fake_uv = Path(sys.argv[3]).resolve()
+os.environ["OFLOOP_TEST_MARKER_BASE"] = str(fake_uv)
+bound_uv = ve.build_bound_uv_identity({
+    "executable": str(fake_uv),
+    "version": "uv 99.0-test",
+    "executable_sha256": ve._sha256_file(fake_uv),
+    "network_domains": [],
+    "cache_path": "",
+    "cache_scope": "test",
+})
 start = time.monotonic()
 out = ve.provision_project_environment(
-    canonical_repo=canonical_repo, run_id="run-2026-genuine-B",
-    role="builder", candidate_sha=candidate_sha,
-    candidate_worktree=canonical_repo, timeout_seconds=0.001,
+    canonical_repo=canonical_repo,
+    run_id="run-2026-genuine-B",
+    role="builder",
+    candidate_sha=sys.argv[2],
+    candidate_worktree=canonical_repo,
+    bound_uv=bound_uv,
+    timeout_seconds=1,
 )
-elapsed = time.monotonic() - start
 print(json.dumps({
     "outcome": out.get("outcome"),
     "reason": out.get("reason"),
     "timed_out": out.get("timed_out"),
-    "elapsed": round(elapsed, 3),
+    "package_uv_unbound": out.get("package_uv_unbound"),
+    "elapsed": round(time.monotonic() - start, 3),
 }))
 PY
 B_OUTCOME="$(jq_field "${TMP}/B.json" outcome)"
 B_REASON="$(jq_field "${TMP}/B.json" reason)"
 B_TIMED_OUT="$(jq_field "${TMP}/B.json" timed_out)"
-expect "1ms timeout → OUTCOME_INFRA_FAILURE" "$B_OUTCOME" "infra_failure"
+B_UNBOUND="$(jq_field "${TMP}/B.json" package_uv_unbound)"
+expect "bound timeout → OUTCOME_INFRA_FAILURE" "$B_OUTCOME" "infra_failure"
+expect "bound timeout → reason provisioning_timeout" "$B_REASON" "provisioning_timeout"
+expect "bound timeout → timed_out=True" "$B_TIMED_OUT" "True"
+expect "bound timeout → package.uv remains bound" "$B_UNBOUND" "False"
+expect "bound timeout → descendant actually started" \
+    "$([ -f "${FAKE_UV}.child-started" ] && echo yes || echo no)" "yes"
+sleep 3.3
+expect "bound timeout → descendant process group drained" \
+    "$([ -f "${FAKE_UV}.child-survived" ] && echo yes || echo no)" "no"
 
-# On a hot disk-cache, uv sync could still complete within 0.001s in
-# rare cases; accept any infra label as long as the outcome class is
-# infra_failure. The classifier test below proves the timeout signal
-# is mapped to provisioning_timeout independently.
-if [[ "$B_TIMED_OUT" == "True" ]]; then
-    expect "1ms timeout → reason is provisioning_timeout" \
-        "$B_REASON" "provisioning_timeout"
-else
-    expect "1ms timeout → reason is an infra label (NOT candidate_invalid)" \
-        "$([ "${B_REASON#candidate_invalid}" = "$B_REASON" ] && echo yes || echo no)" "yes"
-fi
-
-# Independently verify the classifier assigns INFRA to a synthetic
-# subprocess-timeout signal — without depending on network timing.
+# Independently pin the pure classifier contract too.
 PYTHONPATH="${LIB_DIR}" python3 -B - > "${TMP}/B_class.json" <<'PY'
-"""Exhaustively check the classifier assigns INFRA to the
-provisioning_timeout signal — independent of whether uv actually
-times out in the previous run."""
 import json
-from ownframework_loop.validation_environment import (
-    classify_sync_failure, OUTCOME_INFRA_FAILURE,
-)
+from ownframework_loop.validation_environment import classify_sync_failure
 outcome, reason = classify_sync_failure(
-    returncode=124, timed_out=True,
-    stderr_bytes=b"", stdout_bytes=b"",
+    returncode=124,
+    timed_out=True,
+    stderr_bytes=b"",
+    stdout_bytes=b"",
 )
 print(json.dumps({"outcome": outcome, "reason": reason}))
 PY
-B_CLASS_OUTCOME="$(jq_field "${TMP}/B_class.json" outcome)"
-B_CLASS_REASON="$(jq_field "${TMP}/B_class.json" reason)"
-expect "classifier assigns INFRA to timed_out=True" "$B_CLASS_OUTCOME" "infra_failure"
-expect "classifier labels timed_out as provisioning_timeout" "$B_CLASS_REASON" "provisioning_timeout"
+expect "classifier assigns INFRA to timed_out=True" \
+    "$(jq_field "${TMP}/B_class.json" outcome)" "infra_failure"
+expect "classifier labels timed_out as provisioning_timeout" \
+    "$(jq_field "${TMP}/B_class.json" reason)" "provisioning_timeout"
 
 # -------------------------------------------------------------------- #
-# Section C: runtime-cache write refusal                                #
+# C. Runtime-cache write refusal after identity verification             #
 # -------------------------------------------------------------------- #
-section "C. runtime-cache write refusal (env_dir parent not writable)"
-
-# Drive provision with a read-only parent of env_dir.
-PYTHONPATH="${LIB_DIR}" python3 -B - "${REAL_REPO}" "${CANDIDATE_SHA}" > "${TMP}/C.json" <<'PY'
-"""Drive provision against a project_env parent that is read-only.
-
-We force the issue by injecting a custom OFLOOP_RUNTIME_CACHE_ROOT
-that points to a directory whose permission makes env_dir creation
-impossible. The validator must report infra_failure with a
-runtime_cache_create_failed or env_dir_clear_failed reason.
-"""
-import json, os, sys, tempfile
+section "C. runtime-cache write refusal after bound identity verification"
+PYTHONPATH="${LIB_DIR}" python3 -B - "${REAL_REPO}" "${CANDIDATE_SHA}" "${FAKE_UV}" "${TMP}" > "${TMP}/C.json" <<'PY'
+import json, os, sys
 from pathlib import Path
 from ownframework_loop import validation_environment as ve
 
-# Create a directory we cannot write into.
-parent = Path(tempfile.mkdtemp(prefix="ofloop-ro-"))
-os.chmod(parent, 0o500)  # read+execute, no write
-
-# runtime_env.runtime_cache_dir honors XDG_STATE_HOME for the
-# supervisor-owned runtime cache root. Override it so the validator
-# attempts to create env_dir under the read-only parent.
+canonical_repo = Path(sys.argv[1])
+fake_uv = Path(sys.argv[3]).resolve()
+root = Path(sys.argv[4])
+bound_uv = ve.build_bound_uv_identity({
+    "executable": str(fake_uv),
+    "version": "uv 99.0-test",
+    "executable_sha256": ve._sha256_file(fake_uv),
+    "network_domains": [],
+    "cache_path": "",
+    "cache_scope": "test",
+})
+parent = root / "readonly-state"
+parent.mkdir(mode=0o700)
+os.chmod(parent, 0o500)
 saved = os.environ.get("XDG_STATE_HOME")
 os.environ["XDG_STATE_HOME"] = str(parent)
 try:
     out = ve.provision_project_environment(
-        canonical_repo=Path(sys.argv[1]), run_id="run-2026-genuine-C",
-        role="builder", candidate_sha=sys.argv[2],
-        candidate_worktree=Path(sys.argv[1]), timeout_seconds=30,
+        canonical_repo=canonical_repo,
+        run_id="run-2026-genuine-C",
+        role="builder",
+        candidate_sha=sys.argv[2],
+        candidate_worktree=canonical_repo,
+        bound_uv=bound_uv,
+        timeout_seconds=30,
     )
 finally:
     if saved is None:
         os.environ.pop("XDG_STATE_HOME", None)
     else:
         os.environ["XDG_STATE_HOME"] = saved
-    # Restore writability so cleanup can delete the tempdir.
-    try:
-        os.chmod(parent, 0o700)
-    except OSError:
-        pass
-
+    os.chmod(parent, 0o700)
 print(json.dumps({
     "outcome": out.get("outcome"),
     "reason": out.get("reason"),
+    "package_uv_unbound": out.get("package_uv_unbound"),
 }))
 PY
 C_OUTCOME="$(jq_field "${TMP}/C.json" outcome)"
 C_REASON="$(jq_field "${TMP}/C.json" reason)"
-# The runtime-cache-create failure must surface as infra_failure.
-# Either it failed in mkdir (most likely) or it surfaced through
-# uv's own file I/O error. Both are infra_failure.
 expect "runtime-cache write refused → OUTCOME_INFRA_FAILURE" "$C_OUTCOME" "infra_failure"
 case "$C_REASON" in
     runtime_cache_create_failed:*|env_dir_clear_failed:*|subprocess_spawn_failed:*|filesystem_*) : ;;
-    *) failures=$((failures+1)); echo "FAIL infra reason pattern: got '$C_REASON' expected infra label" ;;
+    *) failures=$((failures + 1)); echo "FAIL infra reason pattern: got '$C_REASON' expected filesystem infra label" ;;
 esac
 
 # -------------------------------------------------------------------- #
-# Section D: build/review verdict signal mapping                          #
+# D. Verdict routing contract                                            #
 # -------------------------------------------------------------------- #
 section "D. verdict signal mapping: infra_failure → BLOCKED (no repair)"
-
-# Simulate the build_finalize / review_finalize verdict-signal logic.
-# The actual finalizer code reads infra_failure_count + infra marker.
-# We assert the routing rule here without instantiating the full FSM.
 PYTHONPATH="${LIB_DIR}" python3 -B - > "${TMP}/D.json" <<'PY'
-"""The build_finalize and review_finalize routing rule: any infra
-failure → next_state = BLOCKED, no repair round burned."""
 import json
+
 def route(infra_failure_count: int, candidate_invalid_count: int) -> dict:
     if infra_failure_count > 0:
-        return {"next_state": "BLOCKED", "burns_repair_round": False,
-                "reason": "infra_failure"}
+        return {"next_state": "BLOCKED", "burns_repair_round": False}
     if candidate_invalid_count > 0:
-        return {"next_state": "CHANGES_REQUESTED", "burns_repair_round": True,
-                "reason": "candidate_environment_invalid"}
-    return {"next_state": "READY_FOR_REVIEW", "burns_repair_round": False,
-            "reason": "ok"}
+        return {"next_state": "CHANGES_REQUESTED", "burns_repair_round": True}
+    return {"next_state": "READY_FOR_REVIEW", "burns_repair_round": False}
 
 print(json.dumps({
-    "infra_only": route(infra_failure_count=1, candidate_invalid_count=0),
-    "candidate_only": route(infra_failure_count=0, candidate_invalid_count=1),
-    "neither": route(infra_failure_count=0, candidate_invalid_count=0),
+    "infra_only": route(1, 0),
+    "candidate_only": route(0, 1),
+    "neither": route(0, 0),
 }))
 PY
-
-INFRA_NEXT="$(python3 -c "
-import json
-d = json.load(open('${TMP}/D.json'))
-print(d['infra_only']['next_state'])
-")"
-INFRA_BURN="$(python3 -c "
-import json
-d = json.load(open('${TMP}/D.json'))
-print(d['infra_only']['burns_repair_round'])
-")"
-CAND_NEXT="$(python3 -c "
-import json
-d = json.load(open('${TMP}/D.json'))
-print(d['candidate_only']['next_state'])
-")"
-CAND_BURN="$(python3 -c "
-import json
-d = json.load(open('${TMP}/D.json'))
-print(d['candidate_only']['burns_repair_round'])
-")"
-NEITHER_NEXT="$(python3 -c "
-import json
-d = json.load(open('${TMP}/D.json'))
-print(d['neither']['next_state'])
-")"
-
+INFRA_NEXT="$(python3 -c "import json; d=json.load(open('${TMP}/D.json')); print(d['infra_only']['next_state'])")"
+INFRA_BURN="$(python3 -c "import json; d=json.load(open('${TMP}/D.json')); print(d['infra_only']['burns_repair_round'])")"
+CAND_NEXT="$(python3 -c "import json; d=json.load(open('${TMP}/D.json')); print(d['candidate_only']['next_state'])")"
+CAND_BURN="$(python3 -c "import json; d=json.load(open('${TMP}/D.json')); print(d['candidate_only']['burns_repair_round'])")"
+NEITHER_NEXT="$(python3 -c "import json; d=json.load(open('${TMP}/D.json')); print(d['neither']['next_state'])")"
 expect "infra_failure → next_state=BLOCKED" "$INFRA_NEXT" "BLOCKED"
 expect "infra_failure → burns_repair_round=False" "$INFRA_BURN" "False"
 expect "candidate_invalid → next_state=CHANGES_REQUESTED" "$CAND_NEXT" "CHANGES_REQUESTED"
 expect "candidate_invalid → burns_repair_round=True" "$CAND_BURN" "True"
 expect "neither → next_state=READY_FOR_REVIEW" "$NEITHER_NEXT" "READY_FOR_REVIEW"
 
-# -------------------------------------------------------------------- #
-# Summary                                                                #
-# -------------------------------------------------------------------- #
 echo
 if [[ "${failures}" -eq 0 ]]; then
     echo "VALIDATION_INFRA_FAILURE=yes"

@@ -13,6 +13,8 @@ import stat
 import subprocess
 from pathlib import Path
 
+from . import process_runner
+
 IGNORED_DIR_NAMES = {".git", "logs", ".ownframework-loop", "__pycache__"}
 IGNORED_FILE_NAMES = {
     ".payload.manifest", ".payload.manifest.tmp", ".ownframework-loop-managed", ".install.provenance",
@@ -88,12 +90,13 @@ def payload_tree_digest(root: Path) -> str:
 
 
 def _git(root: Path, *args: str, text: bool = True) -> subprocess.CompletedProcess:
-    return subprocess.run(
-        ["git", "-C", str(root), *args],
-        capture_output=True,
-        text=text,
-        check=False,
-        timeout=10,
+    argv = ["git", "-C", str(root), *args]
+    if text:
+        return process_runner.run_bounded_capture(
+            argv, timeout_seconds=10,
+        )
+    return process_runner.run_bounded_capture_bytes(
+        argv, timeout_seconds=10,
     )
 
 
@@ -102,7 +105,7 @@ def _git_head(root: Path) -> str:
     try:
         top = _git(root, "rev-parse", "--show-toplevel")
         r = _git(root, "rev-parse", "HEAD")
-    except (OSError, subprocess.TimeoutExpired):
+    except (OSError, subprocess.SubprocessError):
         return ""
     if top.returncode != 0 or r.returncode != 0:
         return ""
@@ -120,7 +123,7 @@ def _dirty_git_digest(root: Path, head: str) -> str:
     try:
         diff = _git(root, "diff", "--binary", "HEAD", "--", text=False)
         untracked = _git(root, "ls-files", "--others", "--exclude-standard", "-z", text=False)
-    except (OSError, subprocess.TimeoutExpired) as exc:
+    except (OSError, subprocess.SubprocessError) as exc:
         raise RuntimeIdentityError("git worktree identity probe failed") from exc
     if diff.returncode != 0 or untracked.returncode != 0:
         raise RuntimeIdentityError("git worktree identity probe returned non-zero")
@@ -150,7 +153,7 @@ def runtime_generation_for_root(root: Path, version: str) -> str:
     if head:
         try:
             status_probe = _git(root, "status", "--porcelain=v1", "--untracked-files=all")
-        except (OSError, subprocess.TimeoutExpired) as exc:
+        except (OSError, subprocess.SubprocessError) as exc:
             raise RuntimeIdentityError("git status identity probe failed") from exc
         if status_probe.returncode != 0:
             raise RuntimeIdentityError("git status identity probe returned non-zero")

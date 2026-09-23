@@ -3,7 +3,8 @@
 #
 # Proves the validator's failure classification distinguishes
 # candidate-repairable failures (stale uv.lock) from genuine
-# infrastructure failures (uv missing / timeout / FS refused).
+# infrastructure failures (missing/drifted frozen package.uv authority,
+# timeout, registry failure, or runtime-cache filesystem refusal).
 #
 # Scenario:
 #   Candidate A: coherent pyproject.toml + uv.lock  → validation PASSES
@@ -14,10 +15,8 @@
 #   Candidate C: pyproject.toml + uv.lock re-synchronized
 #                 → validation PASSES (autonomous repair)
 #
-# Also proves the genuine-infra taxonomy in a sibling test:
-#   - uv missing on PATH    → infra_failure / terminal BLOCKED
-#   - provisioning timeout   → infra_failure / terminal BLOCKED
-#   - runtime-cache write refused → infra_failure / terminal BLOCKED
+# Direct provisioner calls deliberately resolve package.uv first and pass the
+# resulting BoundUvIdentity. Ambient PATH is not authority.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -29,7 +28,6 @@ export PYTHONPATH="${LIB_DIR}${PYTHONPATH:+:${PYTHONPATH}}"
 export OFLOOP_LIB="${LIB_DIR}"
 export OFLOOP_ROOT="${REPO_ROOT}"
 
-# Helper: extract a top-level field from a JSON file.
 jq_field() {
     python3 -c "import json, sys; d=json.load(open(sys.argv[1])); print(d[sys.argv[2]])" "$1" "$2"
 }
@@ -74,11 +72,9 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["src/samplepkg"]
 EOF
-
 cat > "${REAL_REPO}/src/samplepkg/__init__.py" <<'EOF'
 EOF
 
-# Initial baseline: candidate A with click dependency.
 (
     cd "${REAL_REPO}"
     uv lock --quiet --python-preference only-system
@@ -88,40 +84,66 @@ git -C "${REAL_REPO}" commit -qm "A: coherent pyproject + uv.lock"
 SHA_A="$(git -C "${REAL_REPO}" rev-parse HEAD)"
 
 # -------------------------------------------------------------------- #
-# Section 1: Candidate A coherent → PROVISIONED + validation PASS       #
+# Section 1: Candidate A coherent → PROVISIONED                          #
 # -------------------------------------------------------------------- #
 section "1. Candidate A coherent → PROVISIONED + validation PASS"
 
 PYTHONPATH="${LIB_DIR}" python3 -B - "${REAL_REPO}" "${SHA_A}" > "${TMP}/a.json" <<'PY'
 import json, sys
 from pathlib import Path
+from ownframework_loop import capabilities, runtime_env
 from ownframework_loop import validation_environment as ve
 
 canonical_repo = Path(sys.argv[1])
 candidate_sha = sys.argv[2]
 run_id = "run-2026-stale-lock-A"
+resolution = capabilities.resolve_capabilities(
+    ["package.uv"],
+    canonical_repo=canonical_repo,
+    role="reviewer",
+    repo_cache_root=runtime_env.repo_tool_cache_dir(canonical_repo),
+    ephemeral_cache_root=(
+        runtime_env.runtime_cache_dir(canonical_repo, run_id, "validation")
+        / "capability-cache"
+    ),
+    evidence_run_key=run_id,
+)
+uv_item = next(
+    item for item in resolution.get("resolved", [])
+    if str(item.get("name") or "") == "package.uv"
+)
+bound_uv = ve.build_bound_uv_identity(
+    uv_item,
+    cache_path=str(uv_item.get("cache_path") or ""),
+    cache_scope=str(uv_item.get("cache_scope") or ""),
+)
 out = ve.provision_project_environment(
-    canonical_repo=canonical_repo, run_id=run_id, role="builder",
-    candidate_sha=candidate_sha, candidate_worktree=canonical_repo,
+    canonical_repo=canonical_repo,
+    run_id=run_id,
+    role="builder",
+    candidate_sha=candidate_sha,
+    candidate_worktree=canonical_repo,
+    bound_uv=bound_uv,
     timeout_seconds=600,
 )
 print(json.dumps({
     "outcome": out.get("outcome"),
     "reason": out.get("reason"),
-    "stderr_excerpt": out.get("stderr_excerpt"),
+    "package_uv_unbound": out.get("package_uv_unbound"),
 }))
 PY
 A_OUTCOME="$(jq_field "${TMP}/a.json" outcome)"
 A_REASON="$(jq_field "${TMP}/a.json" reason)"
+A_UNBOUND="$(jq_field "${TMP}/a.json" package_uv_unbound)"
 expect "candidate A outcome is provisioned" "$A_OUTCOME" "provisioned"
 expect "candidate A reason is uv_sync_returned_zero" "$A_REASON" "uv_sync_returned_zero"
+expect "candidate A direct provision is bound" "$A_UNBOUND" "False"
 
 # -------------------------------------------------------------------- #
 # Section 2: Candidate B stale lock → CANDIDATE_INVALID                  #
 # -------------------------------------------------------------------- #
 section "2. Candidate B (stale lock) → CANDIDATE_INVALID"
 
-# Modify pyproject.toml: add a new dependency but do NOT update uv.lock.
 cat > "${REAL_REPO}/pyproject.toml" <<'EOF'
 [project]
 name = "samplepkg-stale"
@@ -151,44 +173,69 @@ SHA_B="$(git -C "${REAL_REPO}" rev-parse HEAD)"
 PYTHONPATH="${LIB_DIR}" python3 -B - "${REAL_REPO}" "${SHA_B}" > "${TMP}/b.json" <<'PY'
 import json, sys
 from pathlib import Path
+from ownframework_loop import capabilities, runtime_env
 from ownframework_loop import validation_environment as ve
 
 canonical_repo = Path(sys.argv[1])
 candidate_sha = sys.argv[2]
 run_id = "run-2026-stale-lock-B"
+resolution = capabilities.resolve_capabilities(
+    ["package.uv"],
+    canonical_repo=canonical_repo,
+    role="reviewer",
+    repo_cache_root=runtime_env.repo_tool_cache_dir(canonical_repo),
+    ephemeral_cache_root=(
+        runtime_env.runtime_cache_dir(canonical_repo, run_id, "validation")
+        / "capability-cache"
+    ),
+    evidence_run_key=run_id,
+)
+uv_item = next(
+    item for item in resolution.get("resolved", [])
+    if str(item.get("name") or "") == "package.uv"
+)
+bound_uv = ve.build_bound_uv_identity(
+    uv_item,
+    cache_path=str(uv_item.get("cache_path") or ""),
+    cache_scope=str(uv_item.get("cache_scope") or ""),
+)
 out = ve.provision_project_environment(
-    canonical_repo=canonical_repo, run_id=run_id, role="builder",
-    candidate_sha=candidate_sha, candidate_worktree=canonical_repo,
+    canonical_repo=canonical_repo,
+    run_id=run_id,
+    role="builder",
+    candidate_sha=candidate_sha,
+    candidate_worktree=canonical_repo,
+    bound_uv=bound_uv,
     timeout_seconds=600,
 )
 print(json.dumps({
     "outcome": out.get("outcome"),
     "reason": out.get("reason"),
+    "package_uv_unbound": out.get("package_uv_unbound"),
     "stderr_excerpt": out.get("stderr_excerpt", "")[:512],
     "returncode": out.get("returncode"),
 }))
 PY
 B_OUTCOME="$(jq_field "${TMP}/b.json" outcome)"
 B_REASON="$(jq_field "${TMP}/b.json" reason)"
-B_STDERR="$(jq_field "${TMP}/b.json" stderr_excerpt)"
-
+B_UNBOUND="$(jq_field "${TMP}/b.json" package_uv_unbound)"
 expect "candidate B outcome is candidate_invalid" "$B_OUTCOME" "candidate_invalid"
 expect "candidate B classification reason is stale_lockfile" "$B_REASON" "stale_lockfile"
+expect "candidate B direct provision is bound" "$B_UNBOUND" "False"
 
-# Drive the executor end-to-end so we verify the receipt-level
-# verdict signal: candidate_invalid=True, infra_failure=False.
+# Drive the executor end-to-end so we verify the receipt-level verdict signal:
+# candidate_invalid=True, infra_failure=False.
 PYTHONPATH="${LIB_DIR}" python3 -B - "${REAL_REPO}" "${SHA_B}" > "${TMP}/b_exec.json" <<'PY'
 import json, sys
 from pathlib import Path
 from ownframework_loop import (
-    capabilities, capability_binding, runner_profiles,
+    capabilities, capability_binding, runner_profiles, runtime_env,
     validation_executor as vx,
 )
 
 canonical_repo = Path(sys.argv[1])
 candidate_sha = sys.argv[2]
 run_id = "run-2026-stale-lock-B-exec"
-
 packet = {
     "schema": "ownframework-work-packet/v3",
     "packet_id": "stale-lock-B",
@@ -210,27 +257,33 @@ packet = {
     "capabilities": ["toolchain.python", "package.uv"],
     "runner_profile": "default",
 }
-
 resolution = capabilities.resolve_capabilities(
     list(packet["capabilities"]), canonical_repo=canonical_repo, role="builder",
-    repo_cache_root=__import__("ownframework_loop.runtime_env", fromlist=["repo_tool_cache_dir"]).repo_tool_cache_dir(canonical_repo),
-    ephemeral_cache_root=__import__("ownframework_loop.runtime_env", fromlist=["runtime_cache_dir"]).runtime_cache_dir(canonical_repo, run_id, "validation") / "capability-cache",
+    repo_cache_root=runtime_env.repo_tool_cache_dir(canonical_repo),
+    ephemeral_cache_root=runtime_env.runtime_cache_dir(canonical_repo, run_id, "validation") / "capability-cache",
     evidence_run_key=run_id,
 )
 profile = runner_profiles.resolve_profile("default", provider="claude-code")
 runner_profiles.verify_profile_integrity(profile)
 effort_attestation = runner_profiles.verify_effort_attestation(profile)
 if effort_attestation is not None:
-    profile = dict(profile); profile["effort_attestation"] = effort_attestation
+    profile = dict(profile)
+    profile["effort_attestation"] = effort_attestation
 capability_binding.ensure_run_binding(canonical_repo, run_id, resolution, profile, allow_create=True)
-
 result = vx.run_required_validation(
     cwd=canonical_repo,
-    validation={"name": "uv-ping", "command": "uv run --no-sync pytest -q",
-                "kind": "fast", "expected_exit_code": 0},
+    validation={
+        "name": "uv-ping",
+        "command": "uv run --no-sync python -c 'import click'",
+        "kind": "fast",
+        "expected_exit_code": 0,
+    },
     timeout_seconds=300,
-    canonical_repo=canonical_repo, run_id=run_id,
-    packet=packet, candidate_sha=candidate_sha, role="builder",
+    canonical_repo=canonical_repo,
+    run_id=run_id,
+    packet=packet,
+    candidate_sha=candidate_sha,
+    role="builder",
 )
 print(json.dumps({
     "passed": result.get("passed"),
@@ -251,10 +304,6 @@ expect "stale lock → passed=False" "$B_EXEC_PASS" "False"
 # Section 3: STALE_LOCK_REPAIR_FLOW                                     #
 # -------------------------------------------------------------------- #
 section "3. STALE_LOCK_REPAIR_FLOW=yes (repair entitlement available, NOT terminal BLOCKED)"
-
-# Build the build_finalize verdict signal locally — what would the
-# run do? infra_failure=False AND candidate_invalid=True → CHANGES_REQUESTED
-# (candidate-repairable), NOT terminal BLOCKED.
 FLOW="$(python3 -c "
 infra = ${B_EXEC_INFRA}
 cand = ${B_EXEC_CAND}
@@ -266,18 +315,13 @@ else:
     print('UNKNOWN')
 ")"
 expect "stale-lock build flow is CHANGES_REQUESTED (repairable)" "$FLOW" "CHANGES_REQUESTED"
-
-# The repair entitlement is available: the candidate author can
-# regenerate uv.lock in the next builder pass.
 REPAIR_AVAILABLE="$(python3 -c "print('yes' if not ${B_EXEC_INFRA} else 'no')")"
 expect "repair entitlement is available (burns_repair_round=True path)" "$REPAIR_AVAILABLE" "yes"
 
 # -------------------------------------------------------------------- #
-# Section 4: Candidate C (repaired lock) → REPAIRED_LOCK_VALIDATION=PASS  #
+# Section 4: Candidate C repaired lock → PROVISIONED + validation PASS   #
 # -------------------------------------------------------------------- #
 section "4. Candidate C (repaired lock) → PROVISIONED + REPAIRED_LOCK_VALIDATION=PASS"
-
-# Regenerate the lockfile.
 (
     cd "${REAL_REPO}"
     uv lock --quiet --python-preference only-system
@@ -289,38 +333,63 @@ SHA_C="$(git -C "${REAL_REPO}" rev-parse HEAD)"
 PYTHONPATH="${LIB_DIR}" python3 -B - "${REAL_REPO}" "${SHA_C}" > "${TMP}/c.json" <<'PY'
 import json, sys
 from pathlib import Path
+from ownframework_loop import capabilities, runtime_env
 from ownframework_loop import validation_environment as ve
 
 canonical_repo = Path(sys.argv[1])
 candidate_sha = sys.argv[2]
 run_id = "run-2026-stale-lock-C"
+resolution = capabilities.resolve_capabilities(
+    ["package.uv"],
+    canonical_repo=canonical_repo,
+    role="reviewer",
+    repo_cache_root=runtime_env.repo_tool_cache_dir(canonical_repo),
+    ephemeral_cache_root=(
+        runtime_env.runtime_cache_dir(canonical_repo, run_id, "validation")
+        / "capability-cache"
+    ),
+    evidence_run_key=run_id,
+)
+uv_item = next(
+    item for item in resolution.get("resolved", [])
+    if str(item.get("name") or "") == "package.uv"
+)
+bound_uv = ve.build_bound_uv_identity(
+    uv_item,
+    cache_path=str(uv_item.get("cache_path") or ""),
+    cache_scope=str(uv_item.get("cache_scope") or ""),
+)
 out = ve.provision_project_environment(
-    canonical_repo=canonical_repo, run_id=run_id, role="builder",
-    candidate_sha=candidate_sha, candidate_worktree=canonical_repo,
+    canonical_repo=canonical_repo,
+    run_id=run_id,
+    role="builder",
+    candidate_sha=candidate_sha,
+    candidate_worktree=canonical_repo,
+    bound_uv=bound_uv,
     timeout_seconds=600,
 )
 print(json.dumps({
     "outcome": out.get("outcome"),
     "reason": out.get("reason"),
-    "stderr_excerpt": out.get("stderr_excerpt", "")[:512],
+    "package_uv_unbound": out.get("package_uv_unbound"),
 }))
 PY
 C_OUTCOME="$(jq_field "${TMP}/c.json" outcome)"
+C_UNBOUND="$(jq_field "${TMP}/c.json" package_uv_unbound)"
 expect "candidate C outcome is provisioned" "$C_OUTCOME" "provisioned"
+expect "candidate C direct provision is bound" "$C_UNBOUND" "False"
 
-# Now run the validation executor on candidate C — must PASS.
 PYTHONPATH="${LIB_DIR}" python3 -B - "${REAL_REPO}" "${SHA_C}" > "${TMP}/c_exec.json" <<'PY'
 import json, sys
 from pathlib import Path
 from ownframework_loop import (
-    capabilities, capability_binding, runner_profiles,
+    capabilities, capability_binding, runner_profiles, runtime_env,
     validation_executor as vx,
 )
 
 canonical_repo = Path(sys.argv[1])
 candidate_sha = sys.argv[2]
 run_id = "run-2026-stale-lock-C-exec"
-
 packet = {
     "schema": "ownframework-work-packet/v3",
     "packet_id": "stale-lock-C",
@@ -342,37 +411,40 @@ packet = {
     "capabilities": ["toolchain.python", "package.uv"],
     "runner_profile": "default",
 }
-
 resolution = capabilities.resolve_capabilities(
     list(packet["capabilities"]), canonical_repo=canonical_repo, role="builder",
-    repo_cache_root=__import__("ownframework_loop.runtime_env", fromlist=["repo_tool_cache_dir"]).repo_tool_cache_dir(canonical_repo),
-    ephemeral_cache_root=__import__("ownframework_loop.runtime_env", fromlist=["runtime_cache_dir"]).runtime_cache_dir(canonical_repo, run_id, "validation") / "capability-cache",
+    repo_cache_root=runtime_env.repo_tool_cache_dir(canonical_repo),
+    ephemeral_cache_root=runtime_env.runtime_cache_dir(canonical_repo, run_id, "validation") / "capability-cache",
     evidence_run_key=run_id,
 )
 profile = runner_profiles.resolve_profile("default", provider="claude-code")
 runner_profiles.verify_profile_integrity(profile)
 effort_attestation = runner_profiles.verify_effort_attestation(profile)
 if effort_attestation is not None:
-    profile = dict(profile); profile["effort_attestation"] = effort_attestation
+    profile = dict(profile)
+    profile["effort_attestation"] = effort_attestation
 capability_binding.ensure_run_binding(canonical_repo, run_id, resolution, profile, allow_create=True)
-
-# Use a benign command that exits 0 from the candidate env (the
-# installed click is now resolvable, so the env is real).
 result = vx.run_required_validation(
     cwd=canonical_repo,
-    validation={"name": "benign", "command": "uv run --no-sync python -c 'import click; print(click.__version__)'",
-                "kind": "fast", "expected_exit_code": 0,
-                "expected_marker": "."},
+    validation={
+        "name": "benign",
+        "command": "uv run --no-sync python -c 'import click; print(click.__version__)'",
+        "kind": "fast",
+        "expected_exit_code": 0,
+        "expected_marker": ".",
+    },
     timeout_seconds=300,
-    canonical_repo=canonical_repo, run_id=run_id,
-    packet=packet, candidate_sha=candidate_sha, role="builder",
+    canonical_repo=canonical_repo,
+    run_id=run_id,
+    packet=packet,
+    candidate_sha=candidate_sha,
+    role="builder",
 )
 print(json.dumps({
     "passed": result.get("passed"),
     "exit_code": result.get("exit_code"),
     "infra_failure": result.get("infra_failure"),
     "candidate_invalid": result.get("candidate_invalid"),
-    "stdout_excerpt_redacted": result.get("stdout_excerpt_redacted", ""),
 }))
 PY
 C_EXEC_PASS="$(jq_field "${TMP}/c_exec.json" passed)"
@@ -382,9 +454,6 @@ expect "candidate C validation passes" "$C_EXEC_PASS" "True"
 expect "candidate C infra_failure=False" "$C_EXEC_INFRA" "False"
 expect "candidate C candidate_invalid=False" "$C_EXEC_CAND" "False"
 
-# -------------------------------------------------------------------- #
-# Summary                                                                #
-# -------------------------------------------------------------------- #
 echo
 if [[ "${failures}" -eq 0 ]]; then
     echo "STALE_LOCK_CLASSIFICATION=candidate_repairable"

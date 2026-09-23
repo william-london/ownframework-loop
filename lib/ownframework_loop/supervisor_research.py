@@ -63,7 +63,7 @@ Flow
    g. counts the accept against the durable rate limit;
    h. respects the per-tick time budget; remaining futures are
       reaped on subsequent ticks.
-4. The executor invokes the broker via ``subprocess.run`` (NOT
+4. The executor invokes the broker via the bounded supervisor process runner (NOT
    under Claude sandbox). The broker's executable SHA256 is
    re-verified immediately before launch via the canonical
    commissioning owner.
@@ -110,6 +110,8 @@ import time
 import uuid as _uuid
 from pathlib import Path
 from typing import Any, Callable
+
+from . import process_runner
 
 REQUEST_SCHEMA = "ownframework-loop-research-request/v1"
 RESPONSE_SCHEMA = "ownframework-loop-research-response/v1"
@@ -467,7 +469,7 @@ class _ResearchBusy(Exception):
 
 
 class _ResearchExecutor:
-    """Process-wide bounded executor for broker subprocess.run calls.
+    """Process-wide bounded executor for broker bounded broker process calls.
 
     Concurrency is bounded so a flood of queued requests cannot fork
     N broker processes simultaneously and exhaust the host.
@@ -687,12 +689,9 @@ def _run_broker_blocking(
     if op == "search" and search_backend:
         cmd += ["--search-backend", search_backend]
     try:
-        proc = subprocess.run(
+        proc = process_runner.run_bounded_capture(
             cmd,
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=float(os.environ.get(
+            timeout_seconds=float(os.environ.get(
                 "OFLOOP_RESEARCH_BROKER_TIMEOUT",
                 "60",
             )),
@@ -702,6 +701,12 @@ def _run_broker_blocking(
             "ok": False,
             "error_class": "BrokerTimeout",
             "error": f"broker exceeded timeout: {exc}",
+        }
+    except process_runner.ProcessGroupLeakError as exc:
+        return {
+            "ok": False,
+            "error_class": "BrokerProcessLeak",
+            "error": str(exc),
         }
     except Exception as exc:  # pragma: no cover
         return {

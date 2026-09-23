@@ -84,7 +84,6 @@ from pathlib import Path
 import sys
 from ownframework_loop import supervisor
 tmp=Path(sys.argv[1]); db=tmp/"gen-unavailable.sqlite3"; repo=tmp/"gen-unavailable"; repo.mkdir()
-# v0.9.9 admission invariant: pre-write a minimal valid v3 packet.
 _rd = repo / ".ownframework-loop" / "run-generation-proof"
 _rd.mkdir(parents=True, exist_ok=True)
 _pk = {
@@ -125,7 +124,6 @@ import json, sqlite3, sys
 from pathlib import Path
 from ownframework_loop import supervisor
 tmp=Path(sys.argv[1]); db=tmp/"reenqueue.sqlite3"; repo=tmp/"reenqueue-repo"; repo.mkdir()
-# v0.9.9 admission invariant: pre-write a minimal valid v3 packet.
 _rd = repo / ".ownframework-loop" / "run-live"
 _rd.mkdir(parents=True, exist_ok=True)
 _pk = {
@@ -157,9 +155,6 @@ out=supervisor.enqueue(canonical_repo=repo, run_id="run-live", db_path=db, runti
 assert out["ok"] is False and out["reason"] == "cannot_change_runtime_generation_while_running", out
 c=sqlite3.connect(str(db)); row=c.execute("SELECT runtime_generation,max_wall_seconds,worker_pid FROM jobs WHERE run_id='run-live'").fetchone(); c.close()
 assert row == ("ofloop-old@git-a",600,12345), row
-
-# Re-enqueue under the SAME generation is an explicit operator configuration
-# update and may widen/narrow ceilings without rewriting worker ownership.
 out2=supervisor.enqueue(canonical_repo=repo, run_id="run-live", db_path=db, runtime_generation="ofloop-old@git-a", max_wall_seconds=900)
 assert out2["ok"] is True and out2["status"] == "RUNNING", out2
 assert out2["runtime_generation"] == "ofloop-old@git-a", out2
@@ -228,11 +223,6 @@ cat > "$SHIMS/uname" <<'SH'
 #!/bin/sh
 echo Darwin
 SH
-# T8's launchctl shim models the proven-removal contract required
-# by Seam 3 of the architectural addendum.  After a successful
-# bootout, the shim unloads the label so the installer's re-probe
-# (Seam 3) can confirm the label is genuinely unloaded.  Bootstrap
-# fails on the first call (LC_COUNT counts the attempts).
 LC_STATE="${LC_STATE:-$TMP/lc-state}"
 [[ -f "$LC_STATE" ]] || printf 'loaded\n' > "$LC_STATE"
 cat > "$SHIMS/launchctl" <<'SH'
@@ -244,6 +234,7 @@ case "$1" in
       if [[ -f "$LC_STATE" ]]; then
         exit 0
       fi
+      printf 'Could not find service "com.ownframework.loop-supervisor" in domain for user gui: 501\n' >&2
       exit 1
     fi
     exit 0
@@ -268,12 +259,6 @@ IHOME="$TMP/install-home"; IXDG="$TMP/install-xdg"; mkdir -p "$IHOME/Library/Lau
 IPLIST="$IHOME/Library/LaunchAgents/com.ownframework.loop-supervisor.plist"
 IPROV="$IXDG/ownframework-loop/runtime-provenance.json"
 printf 'OLD-PLIST\n' > "$IPLIST"; printf 'OLD-PROVENANCE\n' > "$IPROV"
-# T8 models an already-commissioned supervisor whose replacement reaches the
-# launchctl bootstrap/rollback path. Under the current fail-closed runtime
-# dependency contract, a commissioned service without its supervisor ledger is
-# intentionally unverifiable and must refuse earlier. Create an intact empty
-# ledger so this fixture represents a legitimate commissioned system with no
-# unfinished runtime dependencies.
 PYTHONPATH="$ROOT_DIR/lib" python3 -B - "$IXDG/ownframework-loop/supervisor.sqlite3" <<'PY'
 import sys
 from pathlib import Path
@@ -288,26 +273,15 @@ IOUT="$(HOME="$IHOME" XDG_STATE_HOME="$IXDG" PATH="$SHIMS:$PATH" LC_COUNT="$TMP/
 IRC=$?
 set -e
 [[ "$IRC" -eq 14 ]] || fail "T8 expected bootstrap refusal rc14, got rc=$IRC out=$IOUT"
-# Seam 5 + Seam 7 of the residual-closure: an unverified restored
-# service must NOT be left executing.  On rollback the prior
-# configuration bytes are restored for evidence/retry but the
-# canonical label is left absent (no rebootstrap).  The honest
-# marker is ``previous_config_bytes_restored_label_absent``.
 assert_contains "$IOUT" "rollback=previous_config_bytes_restored_label_absent" "T8 prior bytes restored, label absent"
 [[ "$(cat "$IPLIST")" == "OLD-PLIST" ]] || fail "T8 plist rollback failed"
 [[ "$(cat "$IPROV")" == "OLD-PROVENANCE" ]] || fail "T8 provenance rollback failed"
 pass "T8 supervisor replacement rolls back on bootstrap failure"
 
-# T8b proves commissioned macOS auth/model material is NOT embedded in the
-# launchd plist/provenance and instead lives in one private service-env file.
-# macOS OAuth credentials are Keychain-backed, so ~/.claude is not reopened.
 if [[ "$(uname -s)" != "Darwin" ]]; then
   pass "T8b private service auth material (skipped on non-Darwin)"
 else
 S2SHIMS="$TMP/s2-shims"; mkdir -p "$S2SHIMS"
-# T8b uses the consolidated launchctl fixture helper so the receipt
-# + startup-ready attestation are written through the real
-# service_identity code path.
 . "$HERE/../launchctl_fixture.sh"
 write_launchctl_fixture "$S2SHIMS"
 S2HOME="$TMP/s2-home"; S2XDG="$TMP/s2-xdg"
@@ -370,26 +344,27 @@ for path in (service_env, prov, plist, state_root/"supervisor.stdout.log", state
     assert stat.S_IMODE(path.stat().st_mode)==0o600, (path, oct(stat.S_IMODE(path.stat().st_mode)))
 PY
 
-# Negative control: an idle-only install must not capture shell auth material or
-# advertise a service-env path to the service.
 NCSHIMS="$TMP/nc-shims"; mkdir -p "$NCSHIMS"
-cat > "$NCSHIMS/uname" <<'SH'
-#!/bin/sh
-echo Darwin
-SH
-cat > "$NCSHIMS/launchctl" <<'SH'
-#!/bin/bash
-exit 0
-SH
-chmod +x "$NCSHIMS/uname" "$NCSHIMS/launchctl"
+. "$HERE/../launchctl_fixture.sh"
+write_launchctl_fixture "$NCSHIMS"
 MINIMAL_PATH="/usr/bin:/bin"
 NCHOME="$TMP/nc-home"; NCXDG="$TMP/nc-xdg"
 rm -rf "$NCHOME" "$NCXDG"
 mkdir -p "$NCHOME/Library/LaunchAgents" "$NCXDG/ownframework-loop"
 NCPLIST="$NCHOME/Library/LaunchAgents/com.ownframework.loop-supervisor.plist"
 NCSERVICE_ENV="$NCXDG/ownframework-loop/service-env.json"
-HOME="$NCHOME" XDG_STATE_HOME="$NCXDG" PATH="$MINIMAL_PATH:$NCSHIMS" \
+NCSTUB_STATE="$TMP/nc-stub-state"; mkdir -p "$NCSTUB_STATE"
+HOME="$NCHOME" XDG_STATE_HOME="$NCXDG" PATH="$NCSHIMS:$MINIMAL_PATH" \
+  PYTHON_BIN="${PYTHON_BIN:-$(command -v python3)}" \
   OFLOOP_BIN="$ROOT_DIR/bin/ofloop" \
+  OFLOOP_TEST_STUB_STATE_DIR="$NCSTUB_STATE" \
+  OFLOOP_TEST_STUB_PLIST="$NCPLIST" \
+  OFLOOP_TEST_STUB_RECEIPT_PATH="$NCXDG/ownframework-loop/supervisor-activation.json" \
+  OFLOOP_TEST_STUB_SUPERVISOR_DB="$NCXDG/ownframework-loop/supervisor.sqlite3" \
+  OFLOOP_TEST_STUB_LEDGER_MARKER="$NCXDG/ownframework-loop/ledger-incarnation.json" \
+  OFLOOP_TEST_STUB_INSTALL_ROOT="$ROOT_DIR" \
+  OFLOOP_TEST_STUB_LIB_ROOT="$ROOT_DIR" \
+  OFLOOP_TEST_STUB_LAUNCHER_NOOP=1 \
   ANTHROPIC_AUTH_TOKEN="sk-leaked" \
   bash "$ROOT_DIR/scripts/supervisor/install-macos.sh" > /tmp/v082-t8b.out 2>&1 \
   || fail "T8b idle-only macOS supervisor install failed"
@@ -433,13 +408,6 @@ set -e
 [[ ! -e "$TMP/claude-called" ]] || fail "T9 plugin manager called despite unfinished runtime dependency"
 pass "T9 managed uninstall preserves runtime bytes for unfinished jobs"
 
-# T10 install manifest generation excludes the manifest file itself
-# AND its temporary form. The current implementation uses Python with an
-# explicit skip_names set; verify the SEMANTIC by inspecting the
-# generated payload manifest file itself rather than grepping for a
-# specific implementation pattern. Both ``.payload.manifest`` and
-# ``.payload.manifest.tmp`` MUST NOT appear inside the manifest's own
-# file entries.
 TMP_MANIFEST="$TMP/manifest-check"
 T10_HOME="$TMP_MANIFEST/home"
 T10_DATA="$TMP_MANIFEST/data"
@@ -471,9 +439,6 @@ assert_install_manifest_contract() {
   assert_manifest_self_exclusion "$manifest"
 }
 assert_install_manifest_contract "$T10_INSTALL_RC" "$MANIFEST_FILE" ||   fail "T10 successful install/manifest contract did not hold"
-
-# Negative regressions: neither a failed installer nor absence of the subject
-# artifact may satisfy the proof.
 if assert_install_manifest_contract 17 "$MANIFEST_FILE"; then
   fail "T10 nonzero installer status incorrectly satisfied manifest proof"
 fi
@@ -499,8 +464,6 @@ assert classify_required_validation(
 PY
 pass "T11 deterministic finalizers enforce external-action policy on required validation"
 
-# T12: commissioned lifecycle operations fail closed when the supervisor
-# ledger is missing and dependency state cannot be proven.
 MDB_HOME="$TMP/missingdb-home"; MDB_XDG="$TMP/missingdb-xdg"
 mkdir -p "$MDB_HOME/Library/LaunchAgents" "$MDB_XDG/ownframework-loop"
 touch "$MDB_HOME/Library/LaunchAgents/com.ownframework.loop-supervisor.plist"
@@ -523,7 +486,6 @@ set -e
 assert_contains "$MDB_OUT" "ledger_missing" "T12 missing dependency ledger fails closed"
 pass "T12 commissioned runtime lifecycle refuses unverifiable missing ledger"
 
-# T13: reviewer elevated/sensitive scope matcher uses the same dir/** semantics.
 python3 -B <<'PY'
 from ownframework_loop import review_finalize
 assert review_finalize._path_in_list("apps/web/page.tsx", "apps/**")
@@ -531,7 +493,6 @@ assert not review_finalize._path_in_list("application/page.tsx", "apps/**")
 PY
 pass "T13 reviewer scope semantics match packet prefix compatibility"
 
-# T14: dispatch finalizer subprocess supports a hard timeout.
 python3 -B - "$TMP" <<'PY'
 import os, stat, sys
 from pathlib import Path
@@ -553,7 +514,6 @@ finally:
 PY
 pass "T14 deterministic finalization is timeout-bounded when wall budget is funded"
 
-# T15: common direct remote-effect surfaces are mechanically refused.
 python3 -B <<'PY'
 from ownframework_loop import external_action, guards
 blocked = [
@@ -572,21 +532,14 @@ for cmd in blocked:
         tool_name="Bash", tool_input={"command":cmd}, active_run="run-prod"
     )
     assert decision.startswith("BLOCK:"), (cmd, decision)
-# Structural Bash policy and external-action policy are intentionally layered:
-# remote-effect commands may remain structurally parseable while the external
-# authority classifier refuses them.
 assert guards.classify_bash_command("ssh deploy@example.com uptime")["severity"] != "forbidden"
 assert guards.classify_bash_command("gh workflow run deploy.yml")["severity"] != "forbidden"
-
-# A mutating MCP name containing a read token must not be misclassified read-only.
 assert external_action._classify_mcp("mcp__mail__mark_read").startswith("BLOCK:")
 assert external_action._classify_mcp("mcp__mail__forward_message").startswith("BLOCK:")
 assert external_action._classify_mcp("mcp__jobs__retry_get_status").startswith("BLOCK:")
 PY
 pass "T15 common direct remote mutation surfaces and mixed-token MCP mutations fail closed"
 
-# T16: system-temp prefixes never supersede repository-owned authority.
-# make_tmp_repo deliberately lives below the platform temp root on Linux/macOS.
 TREPO="$(make_tmp_repo)"
 TRID="run-v082-temp-authority"
 mkdir -p "$TREPO/.ownframework-loop/$TRID/scratch/builder/pass-0001"
@@ -628,7 +581,6 @@ TOUT="$(temp_hook "$EXT_SCRATCH/cache.txt")"
 rm -rf "$EXT_SCRATCH"
 pass "T16 temp-root topology preserves canonical/reviewer/historical-pass authority"
 
-# T17: release/static gate truth is fail-closed.
 python3 -B - "$TMP" <<'PY'
 import sys
 from pathlib import Path

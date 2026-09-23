@@ -46,19 +46,25 @@ case "${1:-}" in
     target="${2:-}"
     case "$target" in
       gui/*/com.ownframework.loop-supervisor)
-        # Service is loaded iff the state file exists.
+        # Model launchd's authority surface directly: a loaded label prints
+        # successfully whether or not the test receipt has been published yet.
+        # An absent label returns nonzero WITH the explicit missing-service
+        # diagnostic production code requires before treating absence as proven.
         if [[ -n "$state_dir" && -f "${state_dir}/com.ownframework.loop-supervisor" ]]; then
+          receipt_pid=""
           if [[ -n "${OFLOOP_TEST_STUB_RECEIPT_PATH:-}" && \
                 -f "${OFLOOP_TEST_STUB_RECEIPT_PATH}" ]]; then
             receipt_pid="$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['pid'])" "${OFLOOP_TEST_STUB_RECEIPT_PATH}" 2>/dev/null || echo "")"
-            printf 'gui/501/com.ownframework.loop-supervisor = {\n'
-            printf '\tstate = running\n'
-            printf '\tpid = %s\n' "$receipt_pid"
-            printf '}\n'
-            exit 0
           fi
-          exit 1
+          printf 'gui/501/com.ownframework.loop-supervisor = {\n'
+          printf '\tstate = running\n'
+          if [[ -n "$receipt_pid" ]]; then
+            printf '\tpid = %s\n' "$receipt_pid"
+          fi
+          printf '}\n'
+          exit 0
         fi
+        printf 'Could not find service "com.ownframework.loop-supervisor" in domain for user gui: 501\n' >&2
         exit 1
         ;;
       *) exit 0 ;;

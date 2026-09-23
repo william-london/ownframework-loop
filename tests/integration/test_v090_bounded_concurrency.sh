@@ -672,14 +672,14 @@ reset(retry_job)
 # If Git common-dir discovery fails for a real repository, scheduling identity
 # must be unproven rather than a path-based false positive.
 identity_repo = repo("identity-failclosed")
-orig_run = supervisor.subprocess.run
+orig_run = supervisor_identity.git_checks.run_subprocess
 def _fail_git_probe(*args, **kwargs):
     raise OSError("synthetic git identity probe failure")
-supervisor.subprocess.run = _fail_git_probe
+supervisor_identity.git_checks.run_subprocess = _fail_git_probe
 try:
     identity_key, identity_proven = supervisor._repository_scheduling_identity(identity_repo)
 finally:
-    supervisor.subprocess.run = orig_run
+    supervisor_identity.git_checks.run_subprocess = orig_run
 assert identity_proven is False and identity_key.startswith("unproven-git:"), (
     identity_key, identity_proven
 )

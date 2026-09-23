@@ -7,9 +7,13 @@
 # here is a release blocker.
 #
 # v0.3.5 (A6-F12/A6-F13): tests are discovered from an explicit
-# allow-list (tests/canonical.txt) rather than by glob, and each test
-# is wrapped in `timeout 180 bash` so a hung test cannot block the
-# gate indefinitely.
+# allow-list (tests/canonical.txt) rather than by glob.
+#
+# Final hardening: every canonical test runs in its own process group. Timeout
+# and exceptional cleanup drain the WHOLE group, and a test whose direct shell
+# exits while descendants remain is refused as a lifecycle failure rather than
+# counted as PASS. Explicit rc capture keeps `set -e` from short-circuiting the
+# aggregate report.
 
 set -euo pipefail
 
@@ -39,42 +43,44 @@ OF_LOOP_PLUGIN_VERSION="$(PYTHONDONTWRITEBYTECODE=1 python3 -B -c "import sys; s
 echo "OF_LOOP_PLUGIN_VERSION=$OF_LOOP_PLUGIN_VERSION"
 echo
 
-while IFS= read -r rel; do
+run_test_bounded() {
+  local test_path="$1"
+  python3 - "$test_path" <<'PY'
+import subprocess
+import sys
+
+from ownframework_loop import process_runner
+
+path = sys.argv[1]
+proc = subprocess.Popen(["bash", path], start_new_session=True)
+try:
+    rc = int(proc.wait(timeout=180))
+except subprocess.TimeoutExpired:
+    process_runner.terminate_process_group(proc)
+    rc = 124
+except BaseException:
+    process_runner.terminate_process_group(proc)
+    raise
+else:
+    if process_runner.process_group_exists(proc.pid):
+        process_runner.terminate_process_group(proc)
+        print(process_runner.PROCESS_GROUP_LEAK_MARKER, file=sys.stderr, flush=True)
+        rc = process_runner.PROCESS_GROUP_LEAK_RC
+sys.exit(rc)
+PY
+}
+
+while IFS= read -r rel || [[ -n "$rel" ]]; do
   [[ -z "$rel" || "$rel" == \#* ]] && continue
   full="$ROOT/$rel"
   [[ -e "$full" ]] || { echo "MISSING: $rel" >&2; FAILED_TESTS+=("$rel"); FAILED=$((FAILED+1)); TOTAL=$((TOTAL+1)); continue; }
   TOTAL=$((TOTAL+1))
   name="$(basename "$full")"
   echo "--- $name ---"
-  # Portable 180s timeout: try `timeout`, then `gtimeout`, then a
-  # POSIX-only shell alarm fallback. The alarm fallback uses `kill -0`
-  # polling at 1s intervals so a hung test is always detected.
-  if command -v timeout >/dev/null 2>&1; then
-    timeout 180 bash "$full"
-    rc=$?
-  elif command -v gtimeout >/dev/null 2>&1; then
-    gtimeout 180 bash "$full"
-    rc=$?
-  else
-    bash "$full" &
-    pid=$!
-    elapsed=0
+  if run_test_bounded "$full"; then
     rc=0
-    while kill -0 "$pid" 2>/dev/null; do
-      if [[ "$elapsed" -ge 180 ]]; then
-        kill -TERM "$pid" 2>/dev/null
-        sleep 1
-        kill -KILL "$pid" 2>/dev/null
-        rc=124  # conventional timeout exit code
-        break
-      fi
-      sleep 1
-      elapsed=$((elapsed+1))
-    done
-    if [[ "$rc" == "0" ]]; then
-      wait "$pid"
-      rc=$?
-    fi
+  else
+    rc=$?
   fi
   if [[ $rc -eq 0 ]]; then
     PASSED=$((PASSED+1))

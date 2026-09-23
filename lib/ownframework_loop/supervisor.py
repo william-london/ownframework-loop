@@ -104,9 +104,23 @@ _LOCAL_CONNECTION_DEPTH_SUPERVISOR = _process_mod._LOCAL_CONNECTION_DEPTH_SUPERV
 _SUPERVISOR_LIFECYCLE_LOCK_NAME = "SUPERVISOR_LIFECYCLE.lock"
 
 
-def _supervisor_lifecycle_lock_path(canonical_repo: Path, run_id: str) -> Path:
+def _supervisor_lifecycle_lock_path(
+    canonical_repo: Path,
+    run_id: str,
+    db_path: Path | None = None,
+) -> Path:
     state_mod.validate_run_id(run_id)
-    return state_mod.run_dir(canonical_repo, run_id) / _SUPERVISOR_LIFECYCLE_LOCK_NAME
+    repo = Path(canonical_repo).expanduser().resolve(strict=False)
+    if repo.exists():
+        return state_mod.run_dir(repo, run_id) / _SUPERVISOR_LIFECYCLE_LOCK_NAME
+    # A ledger-only retirement of a deleted disposable repo must not recreate
+    # .ownframework-loop/run-id just to obtain its lifecycle lock. Keep the
+    # same per-logical-run serialization in a private lock beside the ledger.
+    db = Path(db_path).expanduser() if db_path is not None else default_db_path()
+    lock_identity = hashlib.sha256(
+        (str(repo) + "\0" + run_id).encode("utf-8")
+    ).hexdigest()
+    return db.parent / f".lifecycle-{lock_identity}.lock"
 
 
 def _serialize_run_lifecycle(func):
@@ -124,7 +138,9 @@ def _serialize_run_lifecycle(func):
         if canonical_repo is None or run_id is None:
             raise TypeError("lifecycle operation requires canonical_repo and run_id")
         with flock_exclusive(
-            _supervisor_lifecycle_lock_path(Path(canonical_repo), str(run_id)),
+            _supervisor_lifecycle_lock_path(
+                Path(canonical_repo), str(run_id), kwargs.get("db_path")
+            ),
             blocking=True,
             timeout_seconds=30,
         ):
@@ -2622,7 +2638,7 @@ def serve(
             # consumes queued research requests for active runs,
             # validates against the run's frozen capability binding
             # and the live jobs table, dispatches the broker via
-            # subprocess.run (NOT under Claude's Bash sandbox), and
+            # the bounded supervisor process runner (NOT under Claude's Bash sandbox), and
             # publishes responses back into the worker's per-attempt
             # scratch research dir. Defensive try/except so a tick
             # failure cannot bring down the scheduler.
@@ -3011,14 +3027,20 @@ def retire(
     Retirement is a SUPERVISOR-LEDGER lifecycle transition only. It MUST NOT
     modify the target repository, .ownframework-loop run artifacts, WORK_PACKET.md,
     STATE.json, EVENTS.log, APPROVAL.json, scratch evidence, candidate refs,
-    runtime_generation, semantic-attempt history, or cost/token/retry evidence.
+    runtime_generation, or cost/token/retry aggregates. The one exception is a
+    gated RESERVED attempt whose durable row proves that worker ownership was
+    never published: it is atomically terminalized as FAILED with known-zero
+    usage before retirement, preserving the attempt row and its provenance.
 
     Supported transition: ``QUARANTINED -> RETIRED`` only. ``QUEUED``,
     ``BACKOFF``, ``RUNNING``, ``DONE``, and ``RETIRED`` are refused because
     retirement is not a reactivation, migration, or completion.
 
-    A live or ambiguous semantic worker / attempt refuses retirement; the
-    enrollment must first drain through the normal supervisor lifecycle.
+    A live or ambiguous semantic worker / attempt refuses retirement. Only a
+    pristine gate-v1 reservation with no published PID, completion, accepted
+    result, or accounting may be normalized as a known-zero pre-provider
+    failure; every other attempt must already be terminal through normal
+    supervisor recovery.
 
     A retired row's existing ``runtime_generation`` value (including an empty
     legacy ``UNBOUND`` value) is preserved. Retirement never masquerades as
@@ -3062,65 +3084,112 @@ def retire(
             ),
         })
         return result
-    # An unresolved semantic-attempt row is ambiguous paid/model execution
-    # evidence even when the job-level PID is empty or dead. Retirement must
-    # not hide it behind a historical status before crash reconciliation has
-    # proven the attempt terminal.
-    with _managed_connect_readonly(db) as attempt_conn:
-        attempt_rows = attempt_conn.execute(
-            "SELECT attempt_id,status,worker_pid FROM semantic_attempts "
-            "WHERE job_id=? ORDER BY started_at DESC",
+    # Retirement and any provably pre-provider terminalization share one
+    # SQLite transaction. A gated RESERVED row is safe to settle only when
+    # the durable attempt still has its pristine no-worker/no-accounting
+    # shape; every other unresolved row remains an ambiguity and refuses the
+    # entire transition without partial mutation.
+    pre_provider_attempts_terminalized: list[str] = []
+    with _managed_connect(db) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        current = conn.execute(
+            "SELECT * FROM jobs WHERE id=?", (int(existing["id"]),)
+        ).fetchone()
+        if (
+            current is None
+            or str(current["repo"] or "") != str(existing["repo"] or "")
+            or str(current["run_id"] or "") != run_id
+            or str(current["status"] or "") != "QUARANTINED"
+        ):
+            conn.rollback()
+            result = _job_dict(current, db) if current is not None else {
+                "schema": SCHEMA, "ok": False, "status": "NOT_ENQUEUED",
+            }
+            result.update({
+                "ok": False,
+                "retired": False,
+                "reason": "retire_lost_quarantine_race",
+            })
+            return result
+        if current["worker_pid"] and _pid_alive(
+            int(current["worker_pid"]),
+            float(current["worker_started_at"])
+            if current["worker_started_at"] else None,
+        ):
+            conn.rollback()
+            result = _job_dict(current, db)
+            result.update({
+                "ok": False,
+                "retired": False,
+                "reason": "quarantined_worker_still_alive",
+            })
+            return result
+
+        attempt_rows = conn.execute(
+            "SELECT * FROM semantic_attempts WHERE job_id=? ORDER BY started_at DESC",
             (int(existing["id"]),),
         ).fetchall()
-    unresolved_attempts = [
-        row for row in attempt_rows
-        if str(row["status"] or "") not in TERMINAL_SEMANTIC_ATTEMPT_STATUSES
-    ]
-    if unresolved_attempts:
-        result = _job_dict(existing, db)
-        result.update({
-            "ok": False,
-            "retired": False,
-            "reason": "retire_refuses_unresolved_semantic_attempt",
-            "unresolved_attempts": [
-                {
-                    "attempt_id": str(row["attempt_id"] or ""),
-                    "status": str(row["status"] or ""),
-                    "worker_pid": row["worker_pid"],
-                }
-                for row in unresolved_attempts[:8]
-            ],
-        })
-        return result
+        unresolved_attempts = [
+            row for row in attempt_rows
+            if str(row["status"] or "") not in TERMINAL_SEMANTIC_ATTEMPT_STATUSES
+        ]
+        safe_pre_provider = [
+            row for row in unresolved_attempts
+            if _attempts_mod._is_proven_unpublished_gated_reservation(row)
+        ]
+        safe_attempt_ids = {
+            str(row["attempt_id"] or "") for row in safe_pre_provider
+        }
+        ambiguous_attempts = [
+            row for row in unresolved_attempts
+            if str(row["attempt_id"] or "") not in safe_attempt_ids
+        ]
+        if ambiguous_attempts:
+            conn.rollback()
+            result = _job_dict(current, db)
+            result.update({
+                "ok": False,
+                "retired": False,
+                "reason": "retire_refuses_unresolved_semantic_attempt",
+                "unresolved_attempts": [
+                    {
+                        "attempt_id": str(row["attempt_id"] or ""),
+                        "status": str(row["status"] or ""),
+                        "worker_pid": row["worker_pid"],
+                    }
+                    for row in ambiguous_attempts[:8]
+                ],
+            })
+            return result
+        for attempt in safe_pre_provider:
+            if not _attempts_mod._terminalize_proven_unpublished_gated_reservation(
+                conn, job_id=int(existing["id"]), attempt=attempt, now=now
+            ):
+                conn.rollback()
+                result = _job_dict(current, db)
+                result.update({
+                    "ok": False,
+                    "retired": False,
+                    "reason": "retire_refuses_unresolved_semantic_attempt",
+                    "unresolved_attempts": [{
+                        "attempt_id": str(attempt["attempt_id"] or ""),
+                        "status": str(attempt["status"] or ""),
+                        "worker_pid": attempt["worker_pid"],
+                    }],
+                })
+                return result
+            pre_provider_attempts_terminalized.append(str(attempt["attempt_id"]))
 
-    # Live job ownership also refuses retirement. The operator must wait for
-    # the worker to drain through the normal supervisor lifecycle before
-    # retiring the enrollment.
-    if existing["worker_pid"] and _pid_alive(
-        int(existing["worker_pid"]),
-        float(existing["worker_started_at"]) if existing["worker_started_at"] else None,
-    ):
-        result = _job_dict(existing, db)
-        result.update({
-            "ok": False,
-            "retired": False,
-            "reason": "quarantined_worker_still_alive",
-        })
-        return result
-    # Preserve runtime_generation verbatim, including legacy empty / UNBOUND.
-    preserved_runtime_generation = str(existing["runtime_generation"] or "")
-    preserved_cost_usd = float(existing["total_cost_usd"] or 0.0)
-    preserved_attempt_id = str(existing["latest_attempt_id"] or "")
-    with _managed_connect(db) as conn:
+        preserved_runtime_generation = str(current["runtime_generation"] or "")
+        preserved_cost_usd = float(current["total_cost_usd"] or 0.0)
+        preserved_attempt_id = str(current["latest_attempt_id"] or "")
         cur = conn.execute(
-            """UPDATE jobs SET
-                 status='RETIRED',
-                 updated_at=?
+            """UPDATE jobs SET status='RETIRED', updated_at=?
                WHERE id=? AND status='QUARANTINED'""",
             (now, int(existing["id"])),
         )
         if cur.rowcount != 1:
-            # Concurrent transition lost; refuse without rewriting state.
+            conn.rollback()
             row = conn.execute(
                 "SELECT * FROM jobs WHERE id=?", (int(existing["id"]),)
             ).fetchone()
@@ -3163,4 +3232,5 @@ def retire(
     result = _job_dict(row, db)
     result["retired"] = True
     result["runtime_generation_preserved"] = preserved_runtime_generation
+    result["pre_provider_attempts_terminalized"] = pre_provider_attempts_terminalized
     return result

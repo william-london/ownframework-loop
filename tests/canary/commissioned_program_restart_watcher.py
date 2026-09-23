@@ -337,6 +337,18 @@ def arm(root: Path, helper: Path) -> int:
     while time.monotonic() < deadline:
         c = load(control)
         c["control"] = str(control)
+        # A watcher may legitimately exit immediately after recording a
+        # specific fail-closed result (for example, an already-claimed
+        # checkpoint boundary). Preserve that authoritative reason instead
+        # of replacing it with the less-specific startup diagnosis below.
+        if c.get("watcher_status") == "FAILED" and c.get("watcher_result"):
+            update_control(control, watcher_durable=False)
+            print(
+                "CANARY_STATE=TERMINAL_FAIL "
+                f"reason={c.get('watcher_result', 'watcher_failed')}",
+                file=sys.stderr,
+            )
+            return 1
         if manager_alive(c):
             pid = manager_pid(c)
             update_control(control, watcher_durable=True, watcher_pid=pid or c.get("watcher_pid"))

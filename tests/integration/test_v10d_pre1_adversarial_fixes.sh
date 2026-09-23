@@ -42,10 +42,20 @@ sig = inspect.signature(dispatch._claim_or_terminal)
 assert 'timeout_seconds' in sig.parameters, 'A001: _claim_or_terminal must accept timeout_seconds'
 assert sig.parameters['timeout_seconds'].default is None, 'A001: default must be None (caller-supplied)'
 
-# _run_cli forwards timeout_seconds to subprocess.run
-src = inspect.getsource(dispatch._run_cli)
-assert 'timeout=' in src, 'A001: _run_cli must forward timeout to subprocess.run'
-assert 'timeout_seconds' in src, 'A001: _run_cli must consult timeout_seconds'
+# _run_cli forwards the caller's timeout to the canonical bounded process owner.
+import json, subprocess
+calls = []
+dispatch._ofloop_bin = lambda: '/trusted/ofloop'
+dispatch.process_runner.run_bounded_capture = lambda argv, **kwargs: (
+    calls.append((argv, kwargs))
+    or subprocess.CompletedProcess(argv, 0, json.dumps(dict(ok=True)), '')
+)
+result = dispatch._run_cli(['spec', 'status'], timeout_seconds=73)
+assert result == {'ok': True}, result
+assert calls == [(
+    ['/trusted/ofloop', 'spec', 'status'],
+    {'timeout_seconds': 73},
+)], calls
 print('ok')
 " || fail "A001 regression"
 pass "A001: claim_next threads timeout_seconds with positive safety fuse"
