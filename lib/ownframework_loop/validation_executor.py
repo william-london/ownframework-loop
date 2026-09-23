@@ -424,6 +424,20 @@ def run_required_validation(
             try:
                 validation_environment.verify_bound_uv_identity(bound_uv)
             except validation_environment.ValidationEnvironmentError as exc:
+                infra_failure_reason = f"bound_uv_drift_pre_launch:{exc}"
+                if infra_failure_path is not None:
+                    _write_infra_failure_marker(infra_failure_path, {
+                        "name": name,
+                        "command": command,
+                        "reason": infra_failure_reason,
+                        "validation_env_id": env_id,
+                        "validation_env_path": (
+                            str(env_dir) if env_dir is not None else ""
+                        ),
+                        "recorded_at": time.strftime(
+                            "%Y-%m-%dT%H:%M:%SZ", time.gmtime()
+                        ),
+                    })
                 return {
                     "name": name,
                     "command": command,
@@ -448,7 +462,7 @@ def run_required_validation(
                     "diagnostic_stdout_path": str(stdout_path),
                     "diagnostic_stderr_path": str(stderr_path),
                     "infra_failure": True,
-                    "infra_failure_reason": f"bound_uv_drift_pre_launch:{exc}",
+                    "infra_failure_reason": infra_failure_reason,
                     "candidate_invalid": False,
                     "validation_env_id": env_id,
                     "validation_env_path": (
