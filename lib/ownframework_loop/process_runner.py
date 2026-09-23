@@ -11,6 +11,10 @@ from pathlib import Path
 from typing import Mapping, Sequence
 
 
+PROCESS_GROUP_LEAK_RC = 125
+PROCESS_GROUP_LEAK_MARKER = "OFLOOP_PROCESS_GROUP_LEAK=refused"
+
+
 @dataclass(frozen=True)
 class CommandResult:
     returncode: int
@@ -18,7 +22,7 @@ class CommandResult:
     timed_out: bool = False
 
 
-def _process_group_exists(pgid: int) -> bool:
+def process_group_exists(pgid: int) -> bool:
     """Return whether a POSIX process group still has any members."""
     try:
         os.killpg(pgid, 0)
@@ -29,10 +33,12 @@ def _process_group_exists(pgid: int) -> bool:
     return True
 
 
-def _terminate_group(proc: subprocess.Popen[str], grace_seconds: float = 3.0) -> None:
+def terminate_process_group(
+    proc: subprocess.Popen[str], grace_seconds: float = 3.0
+) -> None:
     """Terminate a whole child group even when its original leader exited.
 
-    ``Popen.poll()`` only tells us about the direct child.  A shell/wrapper may
+    ``Popen.poll()`` only tells us about the direct child. A shell/wrapper may
     exit while descendants remain in the process group, so leader exit is never
     accepted as proof that the group is drained.
     """
@@ -45,13 +51,11 @@ def _terminate_group(proc: subprocess.Popen[str], grace_seconds: float = 3.0) ->
         return
 
     deadline = time.monotonic() + grace_seconds
-    while _process_group_exists(pgid) and time.monotonic() < deadline:
-        # Reap the direct child when possible, but group existence—not leader
-        # status—is the cleanup authority.
+    while process_group_exists(pgid) and time.monotonic() < deadline:
         proc.poll()
         time.sleep(0.05)
 
-    if _process_group_exists(pgid):
+    if process_group_exists(pgid):
         try:
             os.killpg(pgid, signal.SIGKILL)
         except ProcessLookupError:
@@ -59,6 +63,22 @@ def _terminate_group(proc: subprocess.Popen[str], grace_seconds: float = 3.0) ->
 
     if proc.poll() is None:
         proc.wait()
+
+
+# Backward-compatible private name used by older imports/tests.
+_terminate_group = terminate_process_group
+
+
+def _refuse_live_group_after_success(
+    proc: subprocess.Popen[str], stdout: str, stderr: str
+) -> tuple[int, str, str]:
+    """Convert leader success with live descendants into a lifecycle failure."""
+    returncode = int(proc.returncode)
+    if not process_group_exists(proc.pid):
+        return returncode, stdout, stderr
+    terminate_process_group(proc)
+    suffix = PROCESS_GROUP_LEAK_MARKER + "\n"
+    return PROCESS_GROUP_LEAK_RC, stdout, (stderr or "") + suffix
 
 
 def run_bounded_capture(
@@ -71,11 +91,11 @@ def run_bounded_capture(
 ) -> subprocess.CompletedProcess[str]:
     """Run explicit argv with separate captured streams and bounded lifecycle.
 
-    The child is always the leader of a fresh session/process group. A timeout
-    therefore drains descendants before the traditional ``TimeoutExpired``
-    contract is re-raised. Callers that historically used ``subprocess.run``
-    can adopt this helper without changing success/failure semantics while
-    gaining the stronger guarantee that a timed-out in-group effect is gone.
+    The child is always the leader of a fresh session/process group. Timeout
+    drains descendants before the traditional ``TimeoutExpired`` contract is
+    re-raised. Normal direct-child completion is accepted only after the whole
+    process group is empty; a surviving descendant is terminated and reported
+    as ``PROCESS_GROUP_LEAK_RC`` rather than silently accepting partial exit.
     """
     proc = subprocess.Popen(
         list(argv),
@@ -90,17 +110,20 @@ def run_bounded_capture(
     try:
         stdout, stderr = proc.communicate(timeout=timeout_seconds)
     except subprocess.TimeoutExpired as exc:
-        _terminate_group(proc)
+        terminate_process_group(proc)
         stdout, stderr = proc.communicate()
         raise subprocess.TimeoutExpired(
             list(argv), timeout_seconds, output=stdout, stderr=stderr
         ) from exc
     except BaseException:
-        _terminate_group(proc)
+        terminate_process_group(proc)
         raise
+    returncode, stdout, stderr = _refuse_live_group_after_success(
+        proc, stdout, stderr
+    )
     return subprocess.CompletedProcess(
         args=list(argv),
-        returncode=int(proc.returncode),
+        returncode=returncode,
         stdout=stdout,
         stderr=stderr,
     )
@@ -126,14 +149,19 @@ def run_bounded(
     )
     try:
         output, _ = proc.communicate(timeout=timeout_seconds)
-        return CommandResult(proc.returncode, output)
     except subprocess.TimeoutExpired:
-        _terminate_group(proc)
+        terminate_process_group(proc)
         output, _ = proc.communicate()
         return CommandResult(124, output, timed_out=True)
     except BaseException:
-        _terminate_group(proc)
+        terminate_process_group(proc)
         raise
+
+    if process_group_exists(proc.pid):
+        terminate_process_group(proc)
+        output = (output or "") + "\n" + PROCESS_GROUP_LEAK_MARKER + "\n"
+        return CommandResult(PROCESS_GROUP_LEAK_RC, output)
+    return CommandResult(int(proc.returncode), output)
 
 
 def process_group_drained(pgid: int) -> bool:
@@ -141,26 +169,11 @@ def process_group_drained(pgid: int) -> bool:
 
     "Drained" of leaked children means: every direct child of the caller
     whose state is not "Z" (zombie already reaped) has exited. The gate
-    uses `run_bounded` with `start_new_session=True` for every
-    subprocess, so each child becomes the leader of its own session and
-    process group and is reaped by the gate via `proc.communicate()`.
-    Any non-zombie direct child still alive at gate end is a leak.
+    uses group-bounded subprocess execution for every owned effect. Any
+    non-zombie direct child still alive at gate end is therefore a leak.
 
-    Zombie children are intentionally counted as drained: they are
-    already dead, just not yet `wait()`-ed by their grandparent. Any
-    live (R/S/D/T) direct child is a real leak.
-
-    Earlier implementations probed the caller's own pgid, but on any
-    real shell (CI runner or developer terminal) the caller's pgid is
-    shared with the launching shell and its other children, which made
-    that probe useless on populated environments. Direct-parent probing
-    is the narrowest correct check for "did we leak a child?".
-
-    FAIL-CLOSED: any probe failure (non-zero returncode, empty stdout,
-    TimeoutExpired, FileNotFoundError, OSError) returns False. "Unknown
-    process state" is NEVER collapsed to "drained" — the release gate
-    and recovery paths must prove the tree is empty rather than assume
-    it.
+    FAIL-CLOSED: any probe failure returns False. "Unknown process state" is
+    never collapsed to "drained".
     """
     _ = pgid
     try:
