@@ -1,0 +1,536 @@
+name: Final hardening apply v2
+
+on:
+  push:
+    branches:
+      - hardening/github-authority-closure-2026-09-22
+    paths:
+      - .github/workflows/final-hardening-apply-v2.yml
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Verify staging-only ancestry
+        shell: bash
+        run: |
+          set -euo pipefail
+          git merge-base --is-ancestor 597b1b121c3246100978f480fcf8c50456ef373d HEAD
+          actual="$(git diff --name-only 597b1b121c3246100978f480fcf8c50456ef373d HEAD | sort)"
+          expected="$(printf '%s\n' \
+            .github/workflows/final-hardening-apply-v2.yml \
+            .github/workflows/final-hardening-apply.yml | sort)"
+          test "$actual" = "$expected"
+      - name: Apply bounded source hardening
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import textwrap
+
+          def read(path: str) -> str:
+              return Path(path).read_text(encoding="utf-8")
+
+          def write(path: str, text: str) -> None:
+              Path(path).write_text(text, encoding="utf-8")
+
+          def replace_once(text: str, old: str, new: str, label: str) -> str:
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f"{label}: expected exactly one match, found {count}")
+              return text.replace(old, new, 1)
+
+          def replace_between(text: str, start: str, end: str, new: str, label: str) -> str:
+              if text.count(start) != 1 or text.count(end) != 1:
+                  raise SystemExit(f"{label}: boundary mismatch")
+              a = text.index(start)
+              b = text.index(end, a)
+              return text[:a] + new + text[b:]
+
+          # A1/A2/A3: close bounded visible command reconstruction and direct
+          # low-level Git transport primitives without treating arbitrary data
+          # literals as executable commands.
+          p = "lib/ownframework_loop/external_action.py"
+          text = read(p)
+          git_push = '    (re.compile(r"\\bgit\\s+push\\b"), "OF_LOOP_EXTERNAL_PR", "git push"),\n'
+          text = replace_once(
+              text,
+              git_push,
+              git_push
+              + '    (re.compile(r"\\bgit\\s+send-pack\\b"), "OF_LOOP_EXTERNAL_PR", "git send-pack"),\n'
+              + '    (re.compile(r"\\bgit\\s+http-push\\b"), "OF_LOOP_EXTERNAL_PR", "git http-push"),\n'
+              + '    (re.compile(r"\\bgit\\s+-c\\s+alias\\.[A-Za-z0-9_.-]+=(?:!?git\\s+)?(?:push|send-pack|http-push)\\b"), "OF_LOOP_EXTERNAL_PR", "inline git push alias"),\n',
+              "external git transport blocks",
+          )
+
+          new_normalizers = r'''def _normalize_python_argv(cmd: str) -> str:
+              """Normalize flat literal argv at Python process-execution call sites.
+
+              Arbitrary-length literal argv such as
+              ``subprocess.run(["git", "push", "--force", "origin", "main"])``
+              are reconstructed for classification. Unrelated data literals are
+              intentionally untouched; dynamic Python remains owned by the
+              commissioned execution/network boundary and post-pass verification.
+              """
+              import ast as _ast
+              import re as _re
+
+              call_re = _re.compile(
+                  r"(?P<prefix>(?:\bsubprocess\.(?:run|Popen|call|check_call|check_output)"
+                  r"|(?<![A-Za-z0-9_.])(?:run|Popen|call|check_call|check_output))"
+                  r"\s*\(\s*)(?P<argv>\[[^\[\]\r\n]{1,16384}\]"
+                  r"|(?<![A-Za-z0-9_.])\([^()\r\n]{1,16384}\))"
+              )
+
+              def normalize_container(raw: str) -> str | None:
+                  try:
+                      value = _ast.literal_eval(raw)
+                  except (SyntaxError, ValueError):
+                      # The caller strips shell quotes before reaching this helper,
+                      # so accept a bounded flat comma-list fallback as well.
+                      if len(raw) < 2 or raw[0] not in "[(" or raw[-1] not in ")]":
+                          return None
+                      body = raw[1:-1]
+                      if "," not in body:
+                          return None
+                      atoms = [item.strip() for item in body.split(",")]
+                      if len(atoms) < 2 or any(not item for item in atoms):
+                          return None
+                      cleaned: list[str] = []
+                      for atom in atoms:
+                          if (
+                              len(atom) >= 2
+                              and atom[0] == atom[-1]
+                              and atom[0] in {"'", '"'}
+                          ):
+                              atom = atom[1:-1]
+                          if (
+                              not atom
+                              or any(ch.isspace() for ch in atom)
+                              or any(ch in atom for ch in "`$;|&()[]{}")
+                          ):
+                              return None
+                          cleaned.append(atom)
+                      return " ".join(cleaned)
+                  if not isinstance(value, (list, tuple)) or len(value) < 2:
+                      return None
+                  if not all(isinstance(item, str) and item for item in value):
+                      return None
+                  return " ".join(str(item) for item in value)
+
+              def repl(match: "_re.Match[str]") -> str:
+                  normalized = normalize_container(match.group("argv"))
+                  if normalized is None:
+                      return match.group(0)
+                  return match.group("prefix") + normalized
+
+              out = call_re.sub(repl, cmd)
+              out = _re.sub(
+                  r'executable\s*=\s*[\'\"](\S+)[\'\"]\s*,\s*args\s*=\s*\[\s*[\'\"]([^\'\"]+)[\'\"]\s*\]',
+                  lambda m: f"{m.group(1)} {m.group(2)}", out,
+              )
+              return out
+
+
+          def _normalize_variable_assignment(cmd: str) -> str:
+              """Resolve bounded visible shell assignment reconstruction.
+
+              Multiple leading assignments and both ``$VAR`` / ``${VAR}``
+              references are supported. Dynamic shell expansion is left
+              unresolved rather than guessed.
+              """
+              import re as _re
+
+              mapping: dict[str, str] = {}
+              parts = _re.split(r"(?:&&|\|\||;|\r?\n)", cmd)
+              rebuilt: list[str] = []
+              assignment_re = _re.compile(
+                  r"""\s*([A-Za-z_][A-Za-z0-9_]*)=(?:"([^"\r\n]*)"|'([^'\r\n]*)'|([^\s;]+))"""
+              )
+              variable_re = _re.compile(
+                  r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)"
+              )
+
+              def substitute(value: str) -> str:
+                  def sub(match: "_re.Match[str]") -> str:
+                      var = match.group(1) or match.group(2)
+                      return mapping.get(var, match.group(0))
+                  return variable_re.sub(sub, value)
+
+              for part in parts:
+                  part_stripped = part.lstrip()
+                  cursor = 0
+                  export = _re.match(r"(?:export|readonly)\s+", part_stripped)
+                  if export:
+                      cursor = export.end()
+                  while True:
+                      match = assignment_re.match(part_stripped, cursor)
+                      if not match:
+                          break
+                      raw_value = next(
+                          value for value in match.groups()[1:] if value is not None
+                      )
+                      mapping[match.group(1)] = substitute(raw_value)
+                      cursor = match.end()
+                  rebuilt.append(substitute(part_stripped))
+              return ";".join(rebuilt)
+
+
+          '''
+          text = replace_between(
+              text,
+              "def _normalize_python_argv(cmd: str) -> str:\n",
+              "def _normalize_hyphenated_executable(cmd: str) -> str:\n",
+              textwrap.dedent(new_normalizers),
+              "external normalizers",
+          )
+          text = replace_once(
+              text,
+              '        ("git-push", "git push"),\n',
+              '        ("git-push", "git push"),\n'
+              '        ("git-send-pack", "git send-pack"),\n'
+              '        ("git-http-push", "git http-push"),\n',
+              "hyphenated git transport normalization",
+          )
+          write(p, text)
+
+          p = "lib/ownframework_loop/guards.py"
+          text = read(p)
+          first_push = '    (re.compile(r"\\bgit\\s+push\\b"), "git push is prohibited", "subcommand"),\n'
+          text = replace_once(
+              text,
+              first_push,
+              first_push
+              + '    (re.compile(r"\\bgit\\s+send-pack\\b"), "git send-pack is prohibited", "subcommand"),\n'
+              + '    (re.compile(r"\\bgit\\s+http-push\\b"), "git http-push is prohibited", "subcommand"),\n'
+              + '    (re.compile(r"\\bgit\\s+-c\\s+alias\\.[A-Za-z0-9_.-]+=(?:!?git\\s+)?(?:push|send-pack|http-push)\\b"), "inline git push alias is prohibited", "subcommand"),\n',
+              "guard git transport blocks",
+          )
+          write(p, text)
+
+          # A4: validate and consume the same private authority file descriptor.
+          p = "lib/ownframework_loop/util.py"
+          text = read(p)
+          new_private_reader = r'''def read_private_json(path: Path, default: Any = None) -> Any:
+              """Read one supervisor-owned private JSON authority artifact safely.
+
+              Validation and consumption are bound to one opened descriptor.
+              Redirected, non-regular, wrong-owner, loose-mode, missing, or
+              malformed artifacts fail closed to ``default``.
+              """
+              p = Path(path)
+              nofollow = int(getattr(os, "O_NOFOLLOW", 0) or 0)
+              fd: int | None = None
+              try:
+                  fd = os.open(str(p), os.O_RDONLY | nofollow)
+                  st = os.fstat(fd)
+                  if not stat.S_ISREG(st.st_mode):
+                      return default
+                  if hasattr(os, "getuid") and st.st_uid != os.getuid():
+                      return default
+                  if stat.S_IMODE(st.st_mode) & 0o077:
+                      return default
+                  if not nofollow:
+                      lst = os.lstat(str(p))
+                      if stat.S_ISLNK(lst.st_mode):
+                          return default
+                      if (lst.st_dev, lst.st_ino) != (st.st_dev, st.st_ino):
+                          return default
+                  stream = os.fdopen(fd, "r", encoding="utf-8")
+                  fd = None
+                  with stream:
+                      return json.load(stream)
+              except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+                  return default
+              finally:
+                  if fd is not None:
+                      try:
+                          os.close(fd)
+                      except OSError:
+                          pass
+
+
+          '''
+          text = replace_between(
+              text,
+              "def read_private_json(path: Path, default: Any = None) -> Any:\n",
+              "def fsync_dir(dirpath: Path) -> None:\n",
+              textwrap.dedent(new_private_reader),
+              "private json reader",
+          )
+          write(p, text)
+
+          # B1: universal job transition must never silently lose durable row authority.
+          p = "lib/ownframework_loop/supervisor_db.py"
+          text = read(p)
+          text = replace_once(
+              text,
+              '    if row is None:\n        return\n    conn.execute(\n',
+              '    if row is None:\n'
+              '        conn.rollback()\n'
+              '        raise RuntimeError(\n'
+              '            f"job transition lost durable row authority: job_id={int(job_id)}"\n'
+              '        )\n'
+              '    cur = conn.execute(\n',
+              "strict missing job transition",
+          )
+          text = replace_once(
+              text,
+              '    )\n    conn.commit()\n\n\ndef _persist_job_last_error(\n',
+              '    )\n'
+              '    if cur.rowcount != 1:\n'
+              '        conn.rollback()\n'
+              '        raise RuntimeError(\n'
+              '            f"job transition lost durable row authority during update: job_id={int(job_id)}"\n'
+              '        )\n'
+              '    conn.commit()\n\n\ndef _persist_job_last_error(\n',
+              "strict transition rowcount",
+          )
+          write(p, text)
+
+          # C2: all successful stale-owner quarantines count as recoveries.
+          p = "lib/ownframework_loop/supervisor_recovery.py"
+          text = read(p)
+          text = replace_once(
+              text,
+              '''                conn.commit()\n                continue\n\n            if (\n                str(attempt["status"] or "") == "RESERVED"\n''',
+              '''                conn.commit()\n                recovered += 1\n                continue\n\n            if (\n                str(attempt["status"] or "") == "RESERVED"\n''',
+              "missing-attempt recovery count",
+          )
+          text = replace_once(
+              text,
+              '''                    conn.commit()\n                    continue\n\n                effective_cost = (\n''',
+              '''                    conn.commit()\n                    recovered += 1\n                    continue\n\n                effective_cost = (\n''',
+              "cost-unknown recovery count",
+          )
+          text = replace_once(
+              text,
+              '''                    conn.commit()\n                    continue\n\n                usage = recovered_usage or {}\n''',
+              '''                    conn.commit()\n                    recovered += 1\n                    continue\n\n                usage = recovered_usage or {}\n''',
+              "token-unknown recovery count",
+          )
+          write(p, text)
+
+          # C1: shared and exclusive nonblocking lock APIs expose one exception contract.
+          p = "lib/ownframework_loop/locking.py"
+          text = read(p)
+          text = replace_once(
+              text,
+              '        else:\n            fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)\n        yield\n',
+              '        else:\n'
+              '            try:\n'
+              '                fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)\n'
+              '            except BlockingIOError as e:\n'
+              '                raise LockBusyError(f"shared lock {path} busy") from e\n'
+              '        yield\n',
+              "shared nonblocking lock contract",
+          )
+          write(p, text)
+
+          # B2: release drain proof ignores only its exact ps probe PID.
+          p = "lib/ownframework_loop/process_runner.py"
+          text = read(p)
+          old_probe = '''    try:\n        result = subprocess.run(\n            ["ps", "-axo", "pid=,ppid=,stat=,comm="],\n            capture_output=True, text=True, check=False, timeout=5,\n        )\n    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):\n        return False\n    if result.returncode != 0 or not result.stdout.strip():\n        return False\n    own_pid = os.getpid()\n'''
+          new_probe = '''    probe: subprocess.Popen[str] | None = None\n    try:\n        probe = subprocess.Popen(\n            ["ps", "-axo", "pid=,ppid=,stat=,comm="],\n            stdin=subprocess.DEVNULL,\n            stdout=subprocess.PIPE,\n            stderr=subprocess.DEVNULL,\n            text=True,\n        )\n        probe_pid = int(probe.pid)\n        stdout, _ = probe.communicate(timeout=5)\n    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):\n        if probe is not None and probe.poll() is None:\n            try:\n                probe.kill()\n                probe.wait(timeout=2)\n            except (OSError, subprocess.TimeoutExpired):\n                pass\n        return False\n    if probe.returncode != 0 or not stdout.strip():\n        return False\n    own_pid = os.getpid()\n'''
+          text = replace_once(text, old_probe, new_probe, "exact ps probe identity")
+          text = replace_once(
+              text,
+              '    for line in result.stdout.splitlines():\n',
+              '    for line in stdout.splitlines():\n',
+              "ps probe stdout",
+          )
+          text = replace_once(
+              text,
+              '''        # The probe's own `ps` child appears in ps's own row at the moment\n        # ps walks /proc. That is the calling-side race, not a leak.\n        if pid_str == str(own_pid):\n            continue\n        if comm.startswith("ps"):\n            continue\n''',
+              '''        # Ignore the probe process by exact PID only; executable-name\n        # prefixes are not identity proof for leaked descendants.\n        if pid_str == str(probe_pid):\n            continue\n''',
+              "ps-name leak bypass",
+          )
+          write(p, text)
+
+          # Canonical behavioral + structural proof.
+          test_path = Path("tests/integration/test_v122_final_source_hardening.sh")
+          if test_path.exists():
+              raise SystemExit("final hardening test unexpectedly already exists")
+          test_text = textwrap.dedent(r'''\
+              #!/usr/bin/env bash
+              set -euo pipefail
+              HERE="$(cd "$(dirname "$0")" && pwd)"
+              . "$HERE/../_helpers.sh"
+              ROOT_DIR="$(cd "$HERE/../.." && pwd)"
+              export PYTHONPATH="$ROOT_DIR/lib${PYTHONPATH:+:$PYTHONPATH}"
+
+              python3 -B <<'PYTEST'
+              import fcntl
+              import inspect
+              import json
+              import os
+              import sqlite3
+              import tempfile
+              from pathlib import Path
+
+              from ownframework_loop import external_action, guards, locking, process_runner
+              from ownframework_loop import supervisor_db, supervisor_recovery, util
+
+              blocked = [
+                  "X=git Y=push; ${X} ${Y} origin main",
+                  "X=git && Y=push && ${X} ${Y} origin main",
+                  "python -c \"import subprocess; subprocess.run(['git','push','--force','origin','main'])\"",
+                  "git send-pack origin refs/heads/main",
+                  "git http-push https://example.invalid/repo.git",
+                  "git -c alias.ship=push ship origin main",
+              ]
+              for command in blocked:
+                  decision = external_action.classify_tool_call(
+                      tool_name="Bash",
+                      tool_input={"command": command},
+                      active_run="run-final-hardening",
+                  )
+                  assert decision.startswith("BLOCK:"), (command, decision)
+                  classified = guards.classify_bash_command(command, role="builder")
+                  assert classified["severity"] == "forbidden", (command, classified)
+
+              harmless = "python -c \"print(['git','push','docs','only','x'])\""
+              assert external_action.classify_tool_call(
+                  tool_name="Bash",
+                  tool_input={"command": harmless},
+                  active_run="run-final-hardening",
+              ) == "ALLOW"
+              assert guards.classify_bash_command(harmless, role="builder")["severity"] == "allowed"
+
+              with tempfile.TemporaryDirectory() as td:
+                  p = Path(td) / "authority.json"
+                  p.write_text(json.dumps({"ok": True}), encoding="utf-8")
+                  os.chmod(p, 0o600)
+                  original = Path.read_text
+                  def forbidden_reopen(*args, **kwargs):
+                      raise AssertionError("authority reader reopened pathname after validation")
+                  Path.read_text = forbidden_reopen
+                  try:
+                      assert util.read_private_json(p) == {"ok": True}
+                  finally:
+                      Path.read_text = original
+                  link = Path(td) / "authority-link.json"
+                  link.symlink_to(p)
+                  assert util.read_private_json(link, default="refused") == "refused"
+              private_src = inspect.getsource(util.read_private_json)
+              assert "os.open" in private_src and "os.fstat" in private_src
+              assert "O_NOFOLLOW" in private_src and ".read_text" not in private_src
+
+              conn = sqlite3.connect(":memory:")
+              conn.row_factory = sqlite3.Row
+              conn.execute("CREATE TABLE jobs (id INTEGER PRIMARY KEY)")
+              try:
+                  supervisor_db._update_job(conn, 777, status_value="QUEUED")
+              except RuntimeError as exc:
+                  assert "lost durable row authority" in str(exc)
+              else:
+                  raise AssertionError("missing durable job row was silently accepted")
+              assert "cur.rowcount != 1" in inspect.getsource(supervisor_db._update_job)
+              conn.close()
+
+              with tempfile.TemporaryDirectory() as td:
+                  lock_path = Path(td) / "busy.lock"
+                  fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
+                  try:
+                      fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                      try:
+                          with locking.flock_shared(lock_path, blocking=False):
+                              raise AssertionError("conflicting shared lock unexpectedly acquired")
+                      except locking.LockBusyError:
+                          pass
+                  finally:
+                      fcntl.flock(fd, fcntl.LOCK_UN)
+                      os.close(fd)
+
+              conn = sqlite3.connect(":memory:")
+              conn.row_factory = sqlite3.Row
+              conn.executescript("""
+              CREATE TABLE jobs (
+                id INTEGER PRIMARY KEY, status TEXT, worker_role TEXT, worker_pid INTEGER,
+                worker_started_at REAL, worker_pgid INTEGER, worker_deadline_at REAL,
+                worker_start_identity TEXT, worker_attempt_id TEXT,
+                max_total_cost_usd REAL DEFAULT 0, max_total_tokens INTEGER DEFAULT 0,
+                last_error TEXT, last_failure_class TEXT, last_failure_reason TEXT,
+                next_attempt_at REAL DEFAULT 0, updated_at REAL
+              );
+              CREATE TABLE semantic_attempts (attempt_id TEXT, job_id INTEGER);
+              INSERT INTO jobs (
+                id,status,worker_role,worker_pid,worker_started_at,worker_pgid,
+                worker_deadline_at,worker_start_identity,worker_attempt_id,updated_at
+              ) VALUES (1,'RUNNING','builder',NULL,NULL,NULL,NULL,'','missing-attempt',0);
+              """)
+              old_local = supervisor_recovery._process_mod._local_execution_owned
+              old_alive = supervisor_recovery._process_mod._pid_alive
+              try:
+                  supervisor_recovery._process_mod._local_execution_owned = lambda job_id: False
+                  supervisor_recovery._process_mod._pid_alive = lambda pid, started_at: False
+                  recovered = supervisor_recovery._recover_stale_running(conn)
+              finally:
+                  supervisor_recovery._process_mod._local_execution_owned = old_local
+                  supervisor_recovery._process_mod._pid_alive = old_alive
+              assert recovered == 1, recovered
+              assert conn.execute("SELECT status FROM jobs WHERE id=1").fetchone()[0] == "QUARANTINED"
+              conn.close()
+
+              drain_src = inspect.getsource(process_runner.process_group_drained)
+              assert 'comm.startswith("ps")' not in drain_src
+              assert "probe_pid" in drain_src
+
+              print("V122_FINAL_SOURCE_HARDENING=PASS")
+              PYTEST
+
+              pass "final A/B/C hardening regressions"
+          ''')
+          test_path.write_text(test_text, encoding="utf-8")
+          test_path.chmod(0o755)
+
+          canonical = Path("tests/canonical.txt")
+          canon = canonical.read_text(encoding="utf-8")
+          entry = "tests/integration/test_v122_final_source_hardening.sh"
+          if entry in canon:
+              raise SystemExit("final hardening test unexpectedly already registered")
+          canonical.write_text(canon.rstrip() + "\n" + entry + "\n", encoding="utf-8")
+          PY
+      - name: Run focused hardening proof
+        shell: bash
+        run: |
+          set -euo pipefail
+          export PYTHONPATH="$PWD/lib${PYTHONPATH:+:$PYTHONPATH}"
+          python3 -m compileall -q lib
+          bash tests/integration/test_v122_final_source_hardening.sh
+          bash tests/integration/test_v085_network_mutation_defense.sh
+          bash tests/integration/test_v10d_pre1_adversarial_fixes.sh
+          bash tests/integration/test_runtime_recovery_lane.sh
+          python3 -B -m ownframework_loop.static_checks "$PWD"
+          git diff --check
+      - name: Commit exact tested patch and remove staging workflows
+        shell: bash
+        run: |
+          set -euo pipefail
+          git rm .github/workflows/final-hardening-apply.yml \
+                 .github/workflows/final-hardening-apply-v2.yml
+          git add lib/ownframework_loop/external_action.py \
+                  lib/ownframework_loop/guards.py \
+                  lib/ownframework_loop/util.py \
+                  lib/ownframework_loop/supervisor_db.py \
+                  lib/ownframework_loop/supervisor_recovery.py \
+                  lib/ownframework_loop/locking.py \
+                  lib/ownframework_loop/process_runner.py \
+                  tests/integration/test_v122_final_source_hardening.sh \
+                  tests/canonical.txt
+          git diff --cached --check
+          git config user.name "OwnFramework hardening bot"
+          git config user.email "actions@users.noreply.github.com"
+          git commit -m "hardening: close final source authority defects"
+          git push origin HEAD:hardening/github-authority-closure-2026-09-22
