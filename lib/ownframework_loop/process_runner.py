@@ -1,4 +1,4 @@
-"""Bounded, foreground subprocess execution for the release gate."""
+"""Bounded, foreground subprocess execution for Loop-owned effects."""
 
 from __future__ import annotations
 
@@ -35,6 +35,51 @@ def _terminate_group(proc: subprocess.Popen[str], grace_seconds: float = 3.0) ->
     except ProcessLookupError:
         pass
     proc.wait()
+
+
+def run_bounded_capture(
+    argv: Sequence[str],
+    *,
+    cwd: Path | str | None = None,
+    timeout_seconds: float | None = None,
+    env: Mapping[str, str] | None = None,
+    stdin: int | None = subprocess.DEVNULL,
+) -> subprocess.CompletedProcess[str]:
+    """Run explicit argv with separate captured streams and bounded lifecycle.
+
+    The child is always the leader of a fresh session/process group.  A timeout
+    therefore drains descendants before the traditional ``TimeoutExpired``
+    contract is re-raised.  Callers that historically used ``subprocess.run``
+    can adopt this helper without changing success/failure semantics while
+    gaining the stronger guarantee that a timed-out effect is actually gone.
+    """
+    proc = subprocess.Popen(
+        list(argv),
+        cwd=str(cwd) if cwd is not None else None,
+        env=dict(env) if env is not None else None,
+        stdin=stdin,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout_seconds)
+    except subprocess.TimeoutExpired as exc:
+        _terminate_group(proc)
+        stdout, stderr = proc.communicate()
+        raise subprocess.TimeoutExpired(
+            list(argv), timeout_seconds, output=stdout, stderr=stderr
+        ) from exc
+    except BaseException:
+        _terminate_group(proc)
+        raise
+    return subprocess.CompletedProcess(
+        args=list(argv),
+        returncode=int(proc.returncode),
+        stdout=stdout,
+        stderr=stderr,
+    )
 
 
 def run_bounded(
@@ -94,8 +139,6 @@ def process_group_drained(pgid: int) -> bool:
     it.
     """
     _ = pgid  # accepted for API symmetry; the drain semantics is by-ppid
-    # Reap any zombie children before the probe so a recent fork-exit
-    # does not show up as a live child to a race-prone `ps` snapshot.
     try:
         while True:
             waited_pid, _ = os.waitpid(-1, os.WNOHANG)
@@ -130,11 +173,8 @@ def process_group_drained(pgid: int) -> bool:
             continue
         if ppid != own_pid:
             continue
-        # Zombies are already-dead children not yet reaped; not a leak.
         if stat.startswith("Z"):
             continue
-        # The probe's own `ps` child appears in ps's own row at the moment
-        # ps walks /proc. That is the calling-side race, not a leak.
         if pid_str == str(own_pid):
             continue
         if comm.startswith("ps"):
