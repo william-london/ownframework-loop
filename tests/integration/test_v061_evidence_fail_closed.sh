@@ -87,6 +87,27 @@ ok, failures = integrity.verify_all_artifacts(
     {"REVIEW_VERDICT.json": never_published}, events
 )
 assert ok and not failures, failures
+
+# Symlinked authority is filesystem redirection, not evidence.
+real_events = root / "real-events.log"
+real_events.write_text("", encoding="utf-8")
+events_link = root / "events-link.log"
+events_link.symlink_to(real_events)
+try:
+    integrity.read_event_chain(events_link)
+except integrity.TamperingDetected as exc:
+    assert "must not be a symlink" in str(exc), exc
+else:
+    raise SystemExit("symlinked event chain was followed")
+
+real_artifact = root / "real-artifact.json"
+real_artifact.write_text("{}\n", encoding="utf-8")
+artifact_link = root / "artifact-link.json"
+artifact_link.symlink_to(real_artifact)
+ok, reason = integrity.verify_artifact_sha(
+    artifact_link, root / "missing-events.log", "BUILD_RECEIPT.json"
+)
+assert not ok and "must not be a symlink" in reason, reason
 PY
 
 # Static guards pin the authoritative callers to strict evidence.

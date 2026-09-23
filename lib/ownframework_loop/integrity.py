@@ -86,8 +86,12 @@ def read_event_chain(path: Path) -> list[dict[str, Any]]:
       - non-empty parseable JSON line -> appended
       - non-empty malformed line      -> raises TamperingDetected
     """
+    if path.is_symlink():
+        raise TamperingDetected("event chain must not be a symlink")
     if not path.exists():
         return []
+    if not path.is_file():
+        raise TamperingDetected("event chain must be a regular file")
     out: list[dict[str, Any]] = []
     for raw in path.read_text(encoding="utf-8").splitlines():
         line = raw.strip()
@@ -154,6 +158,10 @@ def verify_state_sha(state_path: Path, events_log: Path) -> tuple[bool, str]:
     Once a digest exists, deletion is an integrity failure exactly like byte
     mutation: the authoritative state can no longer be proven.
     """
+    if state_path.is_symlink():
+        return False, "state must not be a symlink"
+    if events_log.is_symlink():
+        return False, "event chain must not be a symlink"
     if not events_log.exists():
         if not state_path.exists():
             return True, "no state or event chain yet"
@@ -205,6 +213,10 @@ def verify_artifact_sha(
     publication, disappearance is tampering/unprovable authority and fails
     closed rather than collapsing back to the pre-publication state.
     """
+    if artifact_path.is_symlink():
+        return False, f"{artifact_name} must not be a symlink"
+    if events_log.is_symlink():
+        return False, "event chain must not be a symlink"
     if not events_log.exists():
         if not artifact_path.exists():
             return True, "no artifact or event chain yet"

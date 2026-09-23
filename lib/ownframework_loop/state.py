@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import stat
 import uuid
 from pathlib import Path
 from typing import Any
@@ -255,8 +256,30 @@ def _recover_pending_state_txn_locked(
     """
     _cleanup_stale_event_append_tmp_locked(canonical_repo, run_id)
     tp = state_txn_path(canonical_repo, run_id)
+    if tp.is_symlink():
+        raise integrity.TamperingDetected(
+            "pending state transaction must not be a symlink"
+        )
     if not tp.exists():
         return None
+    try:
+        st = tp.stat()
+    except OSError as exc:
+        raise integrity.TamperingDetected(
+            f"pending state transaction metadata is unreadable: {exc}"
+        ) from exc
+    if not stat.S_ISREG(st.st_mode):
+        raise integrity.TamperingDetected(
+            "pending state transaction must be a regular file"
+        )
+    if hasattr(os, "getuid") and st.st_uid != os.getuid():
+        raise integrity.TamperingDetected(
+            "pending state transaction must be owned by supervisor user"
+        )
+    if stat.S_IMODE(st.st_mode) & 0o077:
+        raise integrity.TamperingDetected(
+            "pending state transaction must be private (0600)"
+        )
     try:
         with tp.open("r", encoding="utf-8") as f:
             txn = json.load(f)
@@ -364,7 +387,7 @@ def _commit_state_event_locked(
     # Reject invalid caller metadata before writing the journal or STATE bytes.
     _validate_event_extras(extras)
     tp = state_txn_path(canonical_repo, run_id)
-    if tp.exists():
+    if tp.exists() or tp.is_symlink():
         raise integrity.TamperingDetected(
             "pending state transaction exists after integrity recovery"
         )
