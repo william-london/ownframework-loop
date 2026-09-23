@@ -1,0 +1,554 @@
+name: Final core subprocess closure
+
+on:
+  push:
+    branches:
+      - hardening/github-authority-closure-2026-09-22
+    paths:
+      - .github/workflows/final-core-subprocess-closure.yml
+
+permissions:
+  contents: write
+
+jobs:
+  close:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: hardening/github-authority-closure-2026-09-22
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Apply audited core subprocess closure
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          def edit(path_s: str, fn):
+              path = Path(path_s)
+              src = path.read_text(encoding='utf-8')
+              out = fn(src)
+              if out == src:
+                  raise SystemExit(f'{path_s}: expected transformation produced no change')
+              path.write_text(out, encoding='utf-8')
+
+          def once(src: str, old: str, new: str, label: str) -> str:
+              count = src.count(old)
+              if count != 1:
+                  raise SystemExit(f'{label}: expected exactly 1 anchor, found {count}')
+              return src.replace(old, new, 1)
+
+          # Central bounded runner: retain subprocess.run-compatible binary/check
+          # semantics while making lifecycle ownership authoritative.
+          def patch_process_runner(src: str) -> str:
+              src = once(src, 'from typing import Mapping, Sequence\n',
+                         'from typing import Any, Mapping, Sequence\n', 'process_runner typing')
+              src = once(
+                  src,
+                  '    def __init__(self, argv: Sequence[str], stdout: str = "", stderr: str = "") -> None:\n',
+                  '    def __init__(self, argv: Sequence[str], stdout: Any = "", stderr: Any = "") -> None:\n',
+                  'ProcessGroupLeakError types',
+              )
+              old_sig = '''def run_bounded_capture(
+    argv: Sequence[str],
+    *,
+    cwd: Path | str | None = None,
+    timeout_seconds: float | None = None,
+    env: Mapping[str, str] | None = None,
+    stdin: int | None = subprocess.DEVNULL,
+) -> subprocess.CompletedProcess[str]:
+'''
+              new_sig = '''def run_bounded_capture(
+    argv: Sequence[str],
+    *,
+    cwd: Path | str | None = None,
+    timeout_seconds: float | None = None,
+    env: Mapping[str, str] | None = None,
+    stdin: int | None = subprocess.DEVNULL,
+    text: bool = True,
+    capture_output: bool = True,
+    check: bool = False,
+) -> subprocess.CompletedProcess[Any]:
+'''
+              src = once(src, old_sig, new_sig, 'run_bounded_capture signature')
+              old_popen = '''        stdin=stdin,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+'''
+              new_popen = '''        stdin=stdin,
+        stdout=subprocess.PIPE if capture_output else None,
+        stderr=subprocess.PIPE if capture_output else None,
+        text=text,
+        start_new_session=True,
+'''
+              src = once(src, old_popen, new_popen, 'run_bounded_capture Popen')
+              old_return = '''    return subprocess.CompletedProcess(
+        args=list(argv),
+        returncode=int(proc.returncode),
+        stdout=stdout,
+        stderr=stderr,
+    )
+'''
+              new_return = '''    result = subprocess.CompletedProcess(
+        args=list(argv),
+        returncode=int(proc.returncode),
+        stdout=stdout,
+        stderr=stderr,
+    )
+    if check and result.returncode != 0:
+        raise subprocess.CalledProcessError(
+            result.returncode,
+            result.args,
+            output=result.stdout,
+            stderr=result.stderr,
+        )
+    return result
+'''
+              src = once(src, old_return, new_return, 'run_bounded_capture result')
+              old_ps = '''        result = subprocess.run(
+            ["ps", "-axo", "pid=,ppid=,stat=,comm="],
+            capture_output=True, text=True, check=False, timeout=5,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+'''
+              new_ps = '''        result = run_bounded_capture(
+            ["ps", "-axo", "pid=,ppid=,stat=,comm="],
+            timeout_seconds=5,
+        )
+    except (subprocess.SubprocessError, FileNotFoundError, OSError):
+'''
+              src = once(src, old_ps, new_ps, 'process_group_drained ps')
+              return src
+          edit('lib/ownframework_loop/process_runner.py', patch_process_runner)
+
+          def patch_dispatch(src: str) -> str:
+              src = once(src, '    packet as packet_mod,\n    program as program_mod,\n',
+                         '    packet as packet_mod,\n    process_runner,\n    program as program_mod,\n', 'dispatch import')
+              old = '''        proc = subprocess.run(
+            [_ofloop_bin(), *args],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=(int(timeout_seconds) if timeout_seconds and timeout_seconds > 0 else None),
+        )
+'''
+              new = '''        proc = process_runner.run_bounded_capture(
+            [_ofloop_bin(), *args],
+            timeout_seconds=(
+                int(timeout_seconds) if timeout_seconds and timeout_seconds > 0 else None
+            ),
+        )
+'''
+              return once(src, old, new, 'dispatch _run_cli')
+          edit('lib/ownframework_loop/dispatch.py', patch_dispatch)
+
+          def patch_runtime_identity(src: str) -> str:
+              src = once(src, 'from pathlib import Path\n\nIGNORED_DIR_NAMES',
+                         'from pathlib import Path\n\nfrom . import process_runner\n\nIGNORED_DIR_NAMES', 'runtime_identity import')
+              old = '''    return subprocess.run(
+        ["git", "-C", str(root), *args],
+        capture_output=True,
+        text=text,
+        check=False,
+        timeout=10,
+    )
+'''
+              new = '''    return process_runner.run_bounded_capture(
+        ["git", "-C", str(root), *args],
+        text=text,
+        timeout_seconds=10,
+    )
+'''
+              src = once(src, old, new, 'runtime_identity git')
+              src = src.replace('(OSError, subprocess.TimeoutExpired)', '(OSError, subprocess.SubprocessError)')
+              if 'subprocess.TimeoutExpired' in src:
+                  raise SystemExit('runtime_identity: TimeoutExpired catch remained unexpectedly')
+              return src
+          edit('lib/ownframework_loop/runtime_identity.py', patch_runtime_identity)
+
+          def patch_release_gate(src: str) -> str:
+              src = once(src, 'from .process_runner import CommandResult, run_bounded\n',
+                         'from .process_runner import CommandResult, run_bounded, run_bounded_capture\n', 'release gate import')
+              old = '    return subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True, check=False, timeout=10).stdout.strip()\n'
+              new = '    return run_bounded_capture(["git", "-C", str(root), *args], timeout_seconds=10).stdout.strip()\n'
+              return once(src, old, new, 'release gate git')
+          edit('lib/ownframework_loop/release_gate_runtime.py', patch_release_gate)
+
+          def patch_macos_lifecycle(src: str) -> str:
+              src = once(src, 'from typing import Sequence\n\n\n_LAUNCHCTL',
+                         'from typing import Sequence\n\nfrom . import process_runner\n\n\n_LAUNCHCTL', 'macos lifecycle import')
+              old = '''    proc = subprocess.run(
+        list(args),
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=_LAUNCHCTL_TIMEOUT_SECONDS,
+    )
+'''
+              new = '''    proc = process_runner.run_bounded_capture(
+        list(args),
+        timeout_seconds=_LAUNCHCTL_TIMEOUT_SECONDS,
+    )
+'''
+              return once(src, old, new, 'launchctl run')
+          edit('lib/ownframework_loop/macos_service_lifecycle.py', patch_macos_lifecycle)
+
+          def patch_readmodel(src: str) -> str:
+              src = once(src, 'from . import state as state_mod\n',
+                         'from . import process_runner\nfrom . import state as state_mod\n', 'readmodel import')
+              old = '''        r = subprocess.run(
+            ["git", "-C", str(repo), *args],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=timeout,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+'''
+              new = '''        r = process_runner.run_bounded_capture(
+            ["git", "-C", str(repo), *args],
+            timeout_seconds=timeout,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+'''
+              return once(src, old, new, 'readmodel git')
+          edit('lib/ownframework_loop/supervisor_readmodel.py', patch_readmodel)
+
+          def patch_supervisor_process(src: str) -> str:
+              src = once(src, 'import time\n\n_LOCAL_EXECUTION_LOCK',
+                         'import time\n\nfrom . import process_runner\n\n_LOCAL_EXECUTION_LOCK', 'supervisor_process import')
+              old = '''        r = subprocess.run(
+            ["ps", "-o", "etime=", "-p", str(pid)],
+            capture_output=True, text=True, check=False, timeout=2,
+        )
+'''
+              new = '''        r = process_runner.run_bounded_capture(
+            ["ps", "-o", "etime=", "-p", str(pid)],
+            timeout_seconds=2,
+        )
+'''
+              return once(src, old, new, 'supervisor_process ps')
+          edit('lib/ownframework_loop/supervisor_process.py', patch_supervisor_process)
+
+          def patch_research(src: str) -> str:
+              src = once(src, 'from typing import Any, Callable\n\nREQUEST_SCHEMA',
+                         'from typing import Any, Callable\n\nfrom . import process_runner\n\nREQUEST_SCHEMA', 'research import')
+              src = src.replace('subprocess.run calls', 'bounded broker process calls')
+              src = src.replace('via ``subprocess.run`` (NOT', 'via the bounded supervisor process runner (NOT')
+              src = src.replace('dispatches the broker via subprocess.run —', 'dispatches the broker via the bounded process runner —')
+              old = '''        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=float(os.environ.get(
+                "OFLOOP_RESEARCH_BROKER_TIMEOUT",
+                "60",
+            )),
+        )
+    except subprocess.TimeoutExpired as exc:
+'''
+              new = '''        proc = process_runner.run_bounded_capture(
+            cmd,
+            timeout_seconds=float(os.environ.get(
+                "OFLOOP_RESEARCH_BROKER_TIMEOUT",
+                "60",
+            )),
+        )
+    except subprocess.TimeoutExpired as exc:
+'''
+              src = once(src, old, new, 'research broker run')
+              anchor = '''    except Exception as exc:  # pragma: no cover
+        return {
+            "ok": False,
+            "error_class": "BrokerDispatchFailed",
+'''
+              replacement = '''    except process_runner.ProcessGroupLeakError as exc:
+        return {
+            "ok": False,
+            "error_class": "BrokerProcessLeak",
+            "error": str(exc),
+        }
+    except Exception as exc:  # pragma: no cover
+        return {
+            "ok": False,
+            "error_class": "BrokerDispatchFailed",
+'''
+              return once(src, anchor, replacement, 'research leak classification')
+          edit('lib/ownframework_loop/supervisor_research.py', patch_research)
+
+          def patch_execution_start(src: str) -> str:
+              src = once(src, '    packet as packet_mod,\n    state as state_mod,\n',
+                         '    packet as packet_mod,\n    process_runner,\n    state as state_mod,\n', 'execution_start import')
+              old = '''    p = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(canonical_repo),
+            "status",
+            "--porcelain",
+            "--untracked-files=no",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+'''
+              new = '''    p = process_runner.run_bounded_capture(
+        [
+            "git",
+            "-C",
+            str(canonical_repo),
+            "status",
+            "--porcelain",
+            "--untracked-files=no",
+        ],
+        timeout_seconds=10,
+    )
+'''
+              return once(src, old, new, 'execution_start git status')
+          edit('lib/ownframework_loop/execution_start.py', patch_execution_start)
+
+          def patch_program(src: str) -> str:
+              src = once(src, 'from typing import Any\n\nfrom .util',
+                         'from typing import Any\n\nfrom . import process_runner\nfrom .util', 'program import')
+              old = '''    diff = subprocess.run(
+        ["git", "-C", str(canonical_repo), "diff", "--no-color", baseline_sha, candidate_sha, "--numstat"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+'''
+              new = '''    diff = process_runner.run_bounded_capture(
+        ["git", "-C", str(canonical_repo), "diff", "--no-color", baseline_sha, candidate_sha, "--numstat"],
+        timeout_seconds=30,
+        check=True,
+    )
+'''
+              return once(src, old, new, 'program source accounting')
+          edit('lib/ownframework_loop/program.py', patch_program)
+
+          def patch_cli(src: str) -> str:
+              src = once(src, '    branch_resolver, capabilities as capabilities_mod, commissioning as commissioning_mod, execution_start,\n',
+                         '    branch_resolver, capabilities as capabilities_mod, commissioning as commissioning_mod, execution_start,\n    process_runner,\n', 'cli import')
+              src = once(src, '    import subprocess\n    subprocess.run(["git", "init", "-b", "master", str(target)], check=True)\n',
+                         '    process_runner.run_bounded_capture(\n        ["git", "init", "-b", "master", str(target)],\n        timeout_seconds=30, capture_output=False, check=True,\n    )\n', 'cli git init')
+              src = once(src, '        subprocess.run(["git", "-C", str(target), "add", "README.md", ".gitignore"], check=True)\n',
+                         '        process_runner.run_bounded_capture(\n            ["git", "-C", str(target), "add", "README.md", ".gitignore"],\n            timeout_seconds=30, capture_output=False, check=True,\n        )\n', 'cli git add')
+              old = '''        subprocess.run(
+            ["git", "-C", str(target), "commit", "-m", "loop-v1: minimal bootstrap baseline"],
+            check=True, env=env,
+        )
+'''
+              new = '''        process_runner.run_bounded_capture(
+            ["git", "-C", str(target), "commit", "-m", "loop-v1: minimal bootstrap baseline"],
+            timeout_seconds=30, capture_output=False, check=True, env=env,
+        )
+'''
+              return once(src, old, new, 'cli git commit')
+          edit('lib/ownframework_loop/cli.py', patch_cli)
+
+          def patch_runner(src: str) -> str:
+              src = once(src, 'from . import git_checks\n',
+                         'from . import git_checks\nfrom . import process_runner\n', 'supervisor_runner import')
+              old_version = '''        proc = subprocess.run(
+            [executable, "--version"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+'''
+              new_version = '''        proc = process_runner.run_bounded_capture(
+            [executable, "--version"],
+            timeout_seconds=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+'''
+              src = once(src, old_version, new_version, 'runner version probe')
+              old_term = '''def _terminate_group(proc: subprocess.Popen[str], grace_seconds: float = 3.0) -> None:
+    """Terminate and reap one semantic worker process group."""
+    if proc.poll() is not None:
+        return
+    try:
+        os.killpg(proc.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    try:
+        proc.wait(timeout=grace_seconds)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    proc.wait()
+'''
+              new_term = '''def _terminate_group(proc: subprocess.Popen[str], grace_seconds: float = 3.0) -> None:
+    """Terminate and reap one semantic worker process group."""
+    process_runner.terminate_process_group(proc, grace_seconds=grace_seconds)
+'''
+              src = once(src, old_term, new_term, 'runner terminate group')
+              src = once(src, '        timed_out = False\n        # Use communicate(input=prompt)',
+                         '        timed_out = False\n        lifecycle_leak = False\n        # Use communicate(input=prompt)', 'runner lifecycle flag')
+              old_timeout = '''        except subprocess.TimeoutExpired:
+            timed_out = True
+            try:
+                os.killpg(proc.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            try:
+                stdout_data, stderr_data = proc.communicate(timeout=10)
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                stdout_data, stderr_data = proc.communicate()
+        except BaseException:
+            _terminate_group(proc)
+'''
+              new_timeout = '''        except subprocess.TimeoutExpired:
+            timed_out = True
+            process_runner.terminate_process_group(proc)
+            stdout_data, stderr_data = proc.communicate()
+        except BaseException:
+            _terminate_group(proc)
+'''
+              src = once(src, old_timeout, new_timeout, 'runner timeout cleanup')
+              anchor = '''            raise
+
+        if durable_files is not None:
+'''
+              insert = '''            raise
+
+        if not timed_out and process_runner.process_group_exists(proc.pid):
+            lifecycle_leak = True
+            process_runner.terminate_process_group(proc)
+
+        if durable_files is not None:
+'''
+              src = once(src, anchor, insert, 'runner normal drain proof')
+              before_timeout = '''        if timed_out:
+            if durable_files is not None and envelope_error:
+'''
+              leak_then_timeout = '''        if lifecycle_leak:
+            return RunnerResult(
+                ok=False,
+                returncode=process_runner.PROCESS_GROUP_LEAK_RC,
+                cost_usd=0.0,
+                stdout=(stdout_data or "")[-RUNNER_DIAGNOSTIC_MAX_CHARS:],
+                stderr=((stderr_data or "") + "\n" + process_runner.PROCESS_GROUP_LEAK_MARKER)[-RUNNER_DIAGNOSTIC_MAX_CHARS:],
+                pid=int(proc.pid),
+                cost_known=False,
+                tokens_known=False,
+            )
+
+        if timed_out:
+            if durable_files is not None and envelope_error:
+'''
+              return once(src, before_timeout, leak_then_timeout, 'runner leak result')
+          edit('lib/ownframework_loop/supervisor_runner.py', patch_runner)
+
+          # Strengthen canonical regression: no raw subprocess.run calls in core,
+          # and only audited lifecycle-owner modules may instantiate Popen.
+          def patch_test(src: str) -> str:
+              src = once(src, 'import os\nimport shlex\n', 'import ast\nimport os\nimport shlex\n', 'test ast import')
+              marker = '''def prove_validation_timeout_drains_descendants() -> None:
+'''
+              fn = '''def prove_core_has_no_raw_subprocess_run() -> None:
+    root = Path(os.environ["OFLOOP_ROOT"])
+    raw_runs: list[str] = []
+    popen_calls: list[str] = []
+    allowed_popen = {
+        "process_runner.py",
+        "validation_environment.py",
+        "validation_executor.py",
+        "supervisor_runner.py",
+    }
+    for path in sorted((root / "lib" / "ownframework_loop").rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+                continue
+            if not isinstance(node.func.value, ast.Name) or node.func.value.id != "subprocess":
+                continue
+            if node.func.attr == "run":
+                raw_runs.append(f"{path.relative_to(root)}:{node.lineno}")
+            elif node.func.attr == "Popen" and path.name not in allowed_popen:
+                popen_calls.append(f"{path.relative_to(root)}:{node.lineno}")
+    assert not raw_runs, f"raw subprocess.run bypasses remain: {raw_runs}"
+    assert not popen_calls, f"unaudited subprocess.Popen owners remain: {popen_calls}"
+
+
+'''
+              src = once(src, marker, fn + marker, 'test raw subprocess regression')
+              src = once(src, 'prove_capability_version_probe_requires_zero_exit()\nprove_validation_timeout_drains_descendants()\n',
+                         'prove_capability_version_probe_requires_zero_exit()\nprove_core_has_no_raw_subprocess_run()\nprove_validation_timeout_drains_descendants()\n', 'test invoke raw subprocess regression')
+              return src
+          edit('tests/unit/test_final_hardening_process_and_lock.sh', patch_test)
+
+          # Verify this transformation achieved the intended static boundary.
+          import ast
+          hits = []
+          bad_popen = []
+          allowed = {'process_runner.py', 'validation_environment.py', 'validation_executor.py', 'supervisor_runner.py'}
+          for path in sorted(Path('lib/ownframework_loop').rglob('*.py')):
+              tree = ast.parse(path.read_text(encoding='utf-8'), filename=str(path))
+              for node in ast.walk(tree):
+                  if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Name) and node.func.value.id == 'subprocess':
+                      if node.func.attr == 'run':
+                          hits.append(f'{path}:{node.lineno}')
+                      if node.func.attr == 'Popen' and path.name not in allowed:
+                          bad_popen.append(f'{path}:{node.lineno}')
+          if hits:
+              raise SystemExit(f'raw subprocess.run remains: {hits}')
+          if bad_popen:
+              raise SystemExit(f'unaudited Popen owners remain: {bad_popen}')
+          PY
+
+          export OFLOOP_ROOT="$PWD"
+          export PYTHONPATH="$PWD/lib${PYTHONPATH:+:$PYTHONPATH}"
+          python3 -m compileall -q lib/ownframework_loop
+          bash tests/unit/test_final_hardening_process_and_lock.sh
+          bash tests/integration/test_v122_final_source_hardening.sh
+          bash tests/integration/test_runtime_recovery_lane.sh
+          python3 -B -m ownframework_loop.static_checks "$PWD"
+          git diff --check
+
+      - name: Commit source closure and remove mutation workflow
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin hardening/github-authority-closure-2026-09-22
+          test "$(git rev-parse HEAD)" = "$(git rev-parse origin/hardening/github-authority-closure-2026-09-22)"
+          git rm .github/workflows/final-core-subprocess-closure.yml
+          git add lib/ownframework_loop/process_runner.py \
+                  lib/ownframework_loop/dispatch.py \
+                  lib/ownframework_loop/runtime_identity.py \
+                  lib/ownframework_loop/release_gate_runtime.py \
+                  lib/ownframework_loop/macos_service_lifecycle.py \
+                  lib/ownframework_loop/supervisor_readmodel.py \
+                  lib/ownframework_loop/supervisor_process.py \
+                  lib/ownframework_loop/supervisor_research.py \
+                  lib/ownframework_loop/execution_start.py \
+                  lib/ownframework_loop/program.py \
+                  lib/ownframework_loop/cli.py \
+                  lib/ownframework_loop/supervisor_runner.py \
+                  tests/unit/test_final_hardening_process_and_lock.sh
+          git diff --cached --check
+          git config user.name "OwnFramework hardening bot"
+          git config user.email "actions@users.noreply.github.com"
+          git commit -m "hardening: close core subprocess lifecycle authority"
+          git push origin HEAD:hardening/github-authority-closure-2026-09-22
