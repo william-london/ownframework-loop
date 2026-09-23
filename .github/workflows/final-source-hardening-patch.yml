@@ -1,0 +1,107 @@
+name: Final source hardening patch
+
+on:
+  push:
+    branches:
+      - hardening/github-authority-closure-2026-09-22
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: hardening/github-authority-closure-2026-09-22
+
+      - name: Patch capability probes and audit process surfaces
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          path = Path('lib/ownframework_loop/capabilities.py')
+          src = path.read_text(encoding='utf-8')
+          original = src
+
+          if 'from . import process_runner\n' not in src:
+              needle = 'from typing import Any\n\nSCHEMA = '
+              if needle not in src:
+                  raise SystemExit('capabilities import anchor missing')
+              src = src.replace(
+                  needle,
+                  'from typing import Any\n\nfrom . import process_runner\n\nSCHEMA = ',
+                  1,
+              )
+
+          raw_count = src.count('proc = subprocess.run(')
+          if raw_count != 3:
+              raise SystemExit(f'expected exactly 3 raw capability probes, found {raw_count}')
+          src = src.replace('proc = subprocess.run(', 'proc = process_runner.run_bounded_capture(')
+
+          src, kw_replacements = re.subn(
+              r'capture_output=True,\s*text=True,\s*check=False,\s*timeout=(\d+),',
+              r'timeout_seconds=\1,',
+              src,
+          )
+          if kw_replacements != 3:
+              raise SystemExit(
+                  f'expected to normalize 3 subprocess.run kwarg sets, got {kw_replacements}'
+              )
+
+          semantic_old = '                if lines:\n                    claude_version = lines[0][:512]\n'
+          semantic_new = (
+              '                if proc.returncode == 0 and lines:\n'
+              '                    claude_version = lines[0][:512]\n'
+          )
+          if semantic_old not in src:
+              raise SystemExit('semantic runtime version-result anchor missing')
+          src = src.replace(semantic_old, semantic_new, 1)
+
+          resolve_anchor = (
+              '            ) from exc\n'
+              '        text = (proc.stdout or proc.stderr or "").strip().splitlines()\n'
+          )
+          resolve_replacement = (
+              '            ) from exc\n'
+              '        if proc.returncode != 0:\n'
+              '            raise CapabilityResolutionError(\n'
+              '                f"could not prove version for {definition.name!r}: "\n'
+              '                f"rc={proc.returncode}"\n'
+              '            )\n'
+              '        text = (proc.stdout or proc.stderr or "").strip().splitlines()\n'
+          )
+          if resolve_anchor not in src:
+              raise SystemExit('generic capability version-result anchor missing')
+          src = src.replace(resolve_anchor, resolve_replacement, 1)
+
+          if 'subprocess.run(' in src:
+              raise SystemExit('raw subprocess.run remains in capabilities.py')
+          if src == original:
+              raise SystemExit('capabilities.py did not change')
+          path.write_text(src, encoding='utf-8')
+          PY
+
+          echo '--- remaining process surfaces in lib/ownframework_loop ---'
+          grep -RInE 'subprocess\.(run|Popen)|os\.system\(|shell[[:space:]]*=[[:space:]]*True|setsid|systemd-run|launchctl[[:space:]]+(bootstrap|kickstart|start|submit)' lib/ownframework_loop || true
+
+          python3 -m compileall -q lib/ownframework_loop
+
+      - name: Commit bounded probe hardening
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --check
+          git diff -- lib/ownframework_loop/capabilities.py
+          test -n "$(git status --porcelain -- lib/ownframework_loop/capabilities.py)"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add lib/ownframework_loop/capabilities.py
+          git commit -m 'hardening: bound capability version probes'
+          git push origin HEAD:hardening/github-authority-closure-2026-09-22
