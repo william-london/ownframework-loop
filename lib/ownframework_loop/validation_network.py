@@ -13,6 +13,7 @@ import os
 import select
 import socket
 import socketserver
+import subprocess
 import sys
 import tempfile
 import threading
@@ -453,12 +454,20 @@ def _probe_linux_namespace(
         result = process_runner.run_bounded_capture(
             probe, timeout_seconds=8.0
         )
+    except subprocess.TimeoutExpired as exc:
+        raise ValidationNetworkError(
+            "Linux validation namespace preflight timed out"
+        ) from exc
+    except process_runner.ProcessGroupLeakError as exc:
+        raise ValidationNetworkError(
+            "Linux validation namespace preflight left an owned process group"
+        ) from exc
     except OSError as exc:
         raise ValidationNetworkError(
             "Linux validation namespace preflight could not be completed"
         ) from exc
-    if result.timed_out or result.returncode != 0:
-        detail = "timed out" if result.timed_out else f"exit={result.returncode}"
+    if result.returncode != 0:
+        detail = f"exit={result.returncode}"
         raise ValidationNetworkError(
             f"Linux validation namespace is unavailable ({detail})"
         )

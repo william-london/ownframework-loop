@@ -10,6 +10,7 @@ python3 -B <<'PYTEST'
 import hashlib
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import threading
@@ -635,7 +636,9 @@ with tempfile.TemporaryDirectory(prefix="ofloop-v121-namespace-refusal-") as td:
     launches = []
 
     def denied_namespace(*_args, **_kwargs):
-        return SimpleNamespace(returncode=1, timed_out=False, stderr="uid_map denied")
+        return subprocess.CompletedProcess(
+            args=["namespace-probe"], returncode=1, stdout="", stderr="uid_map denied"
+        )
 
     def unexpected_validation_launch(*_args, **_kwargs):
         launches.append(True)
@@ -680,6 +683,42 @@ with tempfile.TemporaryDirectory(prefix="ofloop-v121-namespace-refusal-") as td:
     assert "Linux validation namespace is unavailable" in result["infra_failure_reason"], result
     assert marker.is_file(), marker
     assert not launches
+
+# The successful subprocess contract is CompletedProcess, not a Loop-specific
+# timed_out result. A host with working namespaces must pass this preflight.
+original_platform = vn.sys
+original_prefix = vn._linux_namespace_prefix
+original_capture = process_runner.run_bounded_capture
+try:
+    vn.sys = SimpleNamespace(platform="linux", executable=sys.executable)
+    vn._linux_namespace_prefix = lambda *_a, **_k: ["namespace-probe"]
+    process_runner.run_bounded_capture = lambda *_a, **_k: subprocess.CompletedProcess(
+        args=["namespace-probe"], returncode=0, stdout="", stderr=""
+    )
+    vn._probe_linux_namespace(protected_paths=())
+finally:
+    process_runner.run_bounded_capture = original_capture
+    vn._linux_namespace_prefix = original_prefix
+    vn.sys = original_platform
+
+# Timeouts use subprocess.run semantics and are translated to a deterministic
+# infrastructure refusal rather than escaping as an uncaught exception.
+try:
+    vn.sys = SimpleNamespace(platform="linux", executable=sys.executable)
+    vn._linux_namespace_prefix = lambda *_a, **_k: ["namespace-probe"]
+    def timed_out_namespace(*_args, **_kwargs):
+        raise subprocess.TimeoutExpired(["namespace-probe"], 8.0)
+    process_runner.run_bounded_capture = timed_out_namespace
+    try:
+        vn._probe_linux_namespace(protected_paths=())
+    except vn.ValidationNetworkError as exc:
+        assert "preflight timed out" in str(exc), exc
+    else:
+        raise AssertionError("namespace preflight timeout was accepted")
+finally:
+    process_runner.run_bounded_capture = original_capture
+    vn._linux_namespace_prefix = original_prefix
+    vn.sys = original_platform
 
 print("VALIDATION_AUTHORITY_CLOSURE=PASS")
 PYTEST
