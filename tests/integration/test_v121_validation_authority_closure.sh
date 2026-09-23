@@ -13,11 +13,8 @@ import os
 import subprocess
 import sys
 import tempfile
-import threading
-import urllib.request
 import socket
 from types import SimpleNamespace
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from ownframework_loop import packet
@@ -57,46 +54,58 @@ ambiguous_packet = {
 ambiguous_errors = packet.validate_validation_contract(ambiguous_packet)
 assert any("ambiguous-uv" in err and "ambiguous" in err for err in ambiguous_errors), ambiguous_errors
 
-# OS-level validator isolation preserves loopback test servers, denies public
-# sockets, and strips an ambient proxy that could otherwise tunnel around it.
-class _LoopbackHandler(BaseHTTPRequestHandler):
+# OS-level validator isolation permits a candidate-owned loopback service
+# within the isolated network namespace, denies public sockets, and strips an
+# ambient proxy that could otherwise tunnel around the boundary. Starting the
+# service inside the command is important on Linux: a private network
+# namespace must not reach a listener bound in the host namespace.
+with tempfile.TemporaryDirectory(prefix="ofloop-net-boundary-") as td:
+    root = Path(td)
+    stdout_path, stderr_path = root / "out", root / "err"
+    script = r"""
+import http.server, socket, threading, urllib.request
+class Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
         self.wfile.write(b"local-ok")
     def log_message(self, *_args):
         pass
-
-server = ThreadingHTTPServer(("127.0.0.1", 0), _LoopbackHandler)
-server_thread = threading.Thread(target=server.serve_forever, daemon=True)
-server_thread.start()
+server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+thread = threading.Thread(target=server.serve_forever, daemon=True)
+thread.start()
 try:
-    with tempfile.TemporaryDirectory(prefix="ofloop-net-boundary-") as td:
-        root = Path(td)
-        stdout_path, stderr_path = root / "out", root / "err"
-        script = (
-            "import socket,urllib.request; "
-            f"assert urllib.request.urlopen('http://127.0.0.1:{server.server_port}/', timeout=2).read()==b'local-ok'; "
-            "print('LOCAL_OK'); "
-            "s=socket.socket(); s.settimeout(1); "
-            "exec(\"try:\\n s.connect(('1.1.1.1',443)); raise SystemExit('PUBLIC_EGRESS_ALLOWED')"
-            "\\nexcept OSError as e:\\n print('PUBLIC_BLOCKED',e.errno)\")"
-        )
-        ambient = dict(os.environ)
-        ambient.update({"HTTPS_PROXY": "http://127.0.0.1:9", "https_proxy": "http://127.0.0.1:9"})
-        with stdout_path.open("wb") as out, stderr_path.open("wb") as err:
-            result = vn.run_isolated_to_files(
-                [os.sys.executable, "-c", script], cwd=root,
-                timeout_seconds=8, stdout_fh=out, stderr_fh=err,
-                env=ambient,
-            )
-        assert result.returncode == 0, stderr_path.read_text(errors="replace")
-        output = stdout_path.read_text(errors="replace")
-        assert "LOCAL_OK" in output and "PUBLIC_BLOCKED" in output, output
+    body = urllib.request.urlopen(
+        f"http://127.0.0.1:{server.server_port}/", timeout=2
+    ).read()
+    assert body == b"local-ok", body
+    print("LOCAL_OK")
 finally:
     server.shutdown()
     server.server_close()
-    server_thread.join(timeout=2)
+    thread.join(timeout=2)
+s = socket.socket()
+s.settimeout(1)
+try:
+    s.connect(("1.1.1.1", 443))
+except OSError as exc:
+    print("PUBLIC_BLOCKED", exc.errno)
+else:
+    raise SystemExit("PUBLIC_EGRESS_ALLOWED")
+finally:
+    s.close()
+"""
+    ambient = dict(os.environ)
+    ambient.update({"HTTPS_PROXY": "http://127.0.0.1:9", "https_proxy": "http://127.0.0.1:9"})
+    with stdout_path.open("wb") as out, stderr_path.open("wb") as err:
+        result = vn.run_isolated_to_files(
+            [os.sys.executable, "-c", script], cwd=root,
+            timeout_seconds=8, stdout_fh=out, stderr_fh=err,
+            env=ambient,
+        )
+    assert result.returncode == 0, stderr_path.read_text(errors="replace")
+    output = stdout_path.read_text(errors="replace")
+    assert "LOCAL_OK" in output and "PUBLIC_BLOCKED" in output, output
 
 try:
     vn._allowed_upstream("attacker.example", 443, frozenset({"pypi.org"}))
