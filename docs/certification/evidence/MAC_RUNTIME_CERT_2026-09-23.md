@@ -54,7 +54,7 @@ CLAUDE_ADAPTER_IDENTITY = claude-code (stable, hardened,
                                supervisor_runner_supported,
                                native_hooks, native_subagents,
                                skills_supported)
-CLAUDE_RUNTIME_IDENTITY = /Users/mr.mrs.london/.local/share/claude/versions/2.1.280
+CLAUDE_RUNTIME_IDENTITY = ~/.local/share/claude/versions/2.1.280
 RUNNER_PROFILE         = primary
                          provider = claude-code
                          model    = MiniMax-M3
@@ -69,7 +69,7 @@ SUPERVISOR_SERVICE_STATE     = running (launchd
                                active count = 1)
 SUPERVISOR_PROCESS_IDENTITY  = PID 9416 / launch-commissioned-supervisor.py
                                under
-                               /Users/mr.mrs.london/.local/share/ownframework-loop/1.1.0.dev0/
+                               ~/.local/share/ownframework-loop/1.1.0.dev0/
                                (verified post-restart)
 SERVICE_ENVIRONMENT_COHERENCE = yes
                                (plist declares OFLOOP_SERVICE_ENV_FILE →
@@ -86,7 +86,7 @@ RESEARCH_PUBLIC_COMMISSIONED = yes
 RESEARCH_HELPER_IDENTITY     =
   bin/ofloop-research-call (in installed runtime root)
 RESEARCH_BROKER_IDENTITY     =
-  /Users/mr.mrs.london/.local/share/ownframework-loop/1.1.0.dev0/bin/ofloop-research-broker
+  ~/.local/share/ownframework-loop/1.1.0.dev0/bin/ofloop-research-broker
 RESEARCH_BROKER_BYTE_PARITY  =
   sha256 a6fcf251d15e2aca641cc0b7ac7d6c2249dff3274e7f9ac3f37d6e0c040f3f6a
   (matches host-capabilities.json research.public broker_executable;
@@ -146,7 +146,7 @@ v1.0.0_TAG                   = f4b1188c80c66327011754a71c166572ee94963b
 ADAPTER_CONFORMANCE = PASS
 ADAPTER_PORTABILITY = PASS
 ADAPTER_DOCTOR      = PASS
-RUNTIME_DOCTOR      = PASS  (ofloop doctor /Users/mr.mrs.london/projects/ownframework-loop
+RUNTIME_DOCTOR      = PASS  (ofloop doctor <canonical_repo>
                               -> ok=true, current_branch=master, status=clean)
 ```
 
