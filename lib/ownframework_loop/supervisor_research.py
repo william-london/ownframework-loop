@@ -65,9 +65,12 @@ Key invariants:
   Restart-resilient via the receipts and claims directories.
 
 Search posture:
-    ``SEARCH_DISCOVERY_BACKEND=wikipedia``
-    ``GENERAL_WEB_DISCOVERY=DEFERRED``
-    search orphan claims deliberately refuse auto-retry;
+    ``SEARCH_DISCOVERY_BACKEND=bing-rss`` (general public-web
+    discovery default; ``wikipedia`` remains the narrow alternate).
+    ``GENERAL_WEB_DISCOVERY=SUPPORTED`` — both backends are
+    commissioned, get-only, and routed through the canonical
+    ``_browse()`` SSRF primitive. ``ddg-lite`` is removed.
+    Search orphan claims deliberately refuse auto-retry;
     read / asset-read orphan claims are recoverable.
 
 Flow
@@ -2393,15 +2396,17 @@ def process_research_queue(
         #    authority that picks a search provider. The policy
         #    MUST be one of the currently-commissioned providers;
         #    anything else is fail-closed BEFORE the broker is
-        #    launched. ``ddg-lite`` is removed in the third mid-run
-        #    repair; ``wikipedia`` is the only currently-commissioned
-        #    search provider.
+        #    launched. The commissioned public-web discovery
+        #    providers are ``bing-rss`` (general; default) and
+        #    ``wikipedia`` (narrow alternate). ``ddg-lite`` remains
+        #    removed; supervisor-owned policy is the only authority
+        #    for picking a search provider; the worker cannot choose.
         search_backend: str | None = None
         if op == "search":
             policy = os.environ.get(
-                "OFLOOP_RESEARCH_DEFAULT_SEARCH_BACKEND", "wikipedia"
+                "OFLOOP_RESEARCH_DEFAULT_SEARCH_BACKEND", "bing-rss"
             )
-            if policy not in ("wikipedia",):
+            if policy not in ("bing-rss", "wikipedia"):
                 response = {
                     "schema": RESPONSE_SCHEMA,
                     "ok": False,
@@ -2411,7 +2416,8 @@ def process_research_queue(
                     "error": (
                         f"OFLOOP_RESEARCH_DEFAULT_SEARCH_BACKEND={policy!r} "
                         f"is not a currently-commissioned search backend; "
-                        f"only 'wikipedia' is accepted (ddg-lite REMOVED)"
+                        f"only 'bing-rss' (general) and 'wikipedia' (narrow) "
+                        f"are accepted (ddg-lite REMOVED)"
                     ),
                     "timestamp": _dt.datetime.now(_dt.timezone.utc).isoformat(),
                 }

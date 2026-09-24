@@ -240,7 +240,35 @@ on the assembled product, in addition to per-checkpoint work:
   existing trusted commissioning;
 - local-service topology — a supported local-service / container
   capability only when the final reviewer would materially inspect
-  the running service to prove the assembled product.
+  the running service to prove the assembled product;
+- **public-web discovery** — `research.public` (the
+  `ofloop-research-call` → supervisor → commissioned broker
+  surface, with `bing-rss` as the general default and `wikipedia`
+  as the narrow alternate) is inferred when completing the
+  mission materially requires current public facts unavailable
+  from local repository evidence: vendor / API / framework
+  documentation, a company or product's current public presence,
+  external references or examples, public source material needed
+  to verify a claim, legitimate public product assets, or any
+  public URL not knowable at packet-authoring time. The final
+  whole-product review also needs it when the assembled product
+  must be checked against current public truth.
+  Do **not** infer `research.public` merely because internet
+  access might be nice, for purely repository-local
+  implementation, for deterministic local validation, for
+  package installation already covered by package capabilities,
+  or for work whose complete evidence is already local. The
+  capability is added by the SPEC adapter only when the mission
+  materially requires it, and sized across the whole PROGRAM
+  lifetime (every checkpoint + `PROGRAM_FINAL`) so the binding
+  cannot be silently widened later.
+- **rendered web deliverable** — `browser.playwright.chromium`
+  is inferred when the actual rendered deliverable materially
+  needs browser inspection (NOT because `research.public`
+  exists).
+- **local HTTP service under review** — `local.http-service`
+  is inferred when the reviewer materially needs to exercise a
+  running local web service (NOT because `research.public` exists).
 
 Do NOT automatically add a browser, Docker, or web surface
 capability. The semantic inference belongs to the SPEC adapter;
