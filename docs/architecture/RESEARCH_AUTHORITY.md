@@ -235,14 +235,13 @@ The transport is **core-owned, host-commissioned, and
 supervisor-mediated**. The worker never speaks HTTP/HTTPS for
 research; the worker's only research surface is a small helper
 executable in `bin/ofloop-research-call` that publishes an
-immutable REQUEST to a supervisor-owned queue and blocks until a
-RESPONSE is published back to the worker's scratch dir. The
-supervisor — running as a launchd service with the operator's
-full network authority — validates the request against the run's
-frozen capability binding and invokes the broker (the same
-underlying stdlib-only Python executable, but launched by the
-supervisor as a child of the supervisor process, NOT a child of
-Claude's Bash).
+immutable REQUEST to the run-scoped inbox and blocks until the
+supervisor publishes the authoritative RESPONSE in the operator-owned
+run-scoped response directory. The supervisor — running as a launchd
+service with the operator's full network authority — validates the
+request against the run's frozen capability binding and invokes the
+commissioned broker as a child of the supervisor process, NOT a child
+of Claude's Bash.
 
 ```text
 semantic worker (Bash sandbox: allowedDomains=[]; strictAllowlist: true)
@@ -264,13 +263,18 @@ helper blocks polling the operator-owned RESPONSE file:
 supervisor (launchd; user-level network authority; NOT Claude sandbox):
     serve() loop tick scans the per-run inbox for new requests;
     for each:
-        1. Validate REQUEST (single canonical admission primitive
-           shared by normal admission and restart recovery):
-            - run-id exists in supervisor DB, non-terminal, the
-              job's latest_attempt_id equals the request's
-              attempt_id, the worker pid is alive, and the
-              worker's role matches the request's role
-              (live-attempt authority reproof)
+        1. Validate REQUEST through the single canonical admission
+           primitive shared by normal admission and restart recovery:
+            - run-id exists and the job is exactly RUNNING
+            - job.latest_attempt_id equals the request attempt_id
+            - job.worker_attempt_id equals the request attempt_id
+            - job.worker_role exactly equals the request role
+            - the recorded worker process is alive and its recorded
+              start identity still matches the live OS process
+            - the matching semantic_attempt row exists and is still
+              the current live semantic attempt for the job/role
+              (the persisted claim is historical evidence, never
+              perpetual network authority)
             - the run's resolved capabilities include
               research.public
             - URL passes the broker's SSRF deny rules
@@ -290,29 +294,32 @@ supervisor (launchd; user-level network authority; NOT Claude sandbox):
               published BEFORE the broker is invoked; every
               accepted transport carries a fresh UUIDv4 launch_id
               so the same semantic request_id may legitimately
-              perform a recovery transport without aliasing
+              perform a bounded recovery transport without aliasing
               durable launch evidence
             - restart recovery (`recover_claims`) reuses this
               primitive unchanged so it cannot obtain a bypass
               lane around the live-attempt proof, the in-flight
               atomicity, or the rate-limit gate
+            - response budget remaining
+        2. Dispatch the broker through the bounded supervisor process
+           runner (`process_runner.run_bounded_capture`) — the broker
+           runs under the supervisor process tree, with DNS/TCP egress;
+           immediately before launch its commissioned executable bytes
+           are re-verified against the recorded SHA-256. The broker
+           validates destinations itself and writes durable
+           content-addressed receipts and asset bytes to:
+             ~/.local/state/ownframework-loop/research/<run>/receipts/op-<uuid>.json
+             ~/.local/state/ownframework-loop/research/<run>/artifacts/<sha256>.<safe-ext>
+        3. Publish the RESPONSE atomically to the operator-owned
+           per-run responses directory. The helper, which is already
+           polling that directory read-only, verifies the response
+           schema/request identity and emits the response on stdout.
 
 Search posture:
     SEARCH_DISCOVERY_BACKEND=wikipedia
     GENERAL_WEB_DISCOVERY=DEFERRED
     (search orphan claims deliberately refuse auto-retry;
      read / asset-read orphan claims are recoverable)
-            - response budget remaining
-        2. Dispatch broker subprocess (subprocess.run) — the
-           broker runs under the supervisor process tree, with
-           full DNS/TCP egress; it validates destinations itself
-           and writes durable content-addressed receipt +
-           content-addressed asset bytes to:
-             ~/.local/state/ownframework-loop/research/<run>/receipts/op-<uuid>.json
-             ~/.local/state/ownframework-loop/research/<run>/artifacts/<sha256>.<safe-ext>
-        3. Write RESPONSE file under the worker's per-attempt
-           scratch dir (which the worker can READ); the helper
-           unblocks and emits the response on stdout.
 ```
 
 ### 5.b Why this is necessary — Claude sandbox subprocess inheritance
@@ -370,10 +377,9 @@ A single new built-in capability family:
    * NO entry for the broker executable (the worker must NOT be able
      to invoke the broker directly).
 
-The worker helper ships at `bin/ofloop-research-call` (also installed
-to `~/.local/share/ownframework-loop/1.0.0/bin/ofloop-research-call`
-in the canonical install). It is **the only** public-research
-surface exposed to the worker.
+The worker helper ships at `bin/ofloop-research-call` and is installed
+inside the managed active Loop payload's `bin/` directory. It is **the
+only** public-research surface exposed to the worker.
 
 ### 5.e Why this is a generic contract, not a `claude.*` contract
 
@@ -431,21 +437,15 @@ an audit entry before the network attempt.
 
 ### Credential boundary
 
-The broker is a normal executable and inherits the worker's
-**credential-stripped** subprocess env (the existing
-`CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1` plus the existing
-`sandbox.network.credentials` deny-list). It must NOT inherit any of:
-
-* `GITHUB_TOKEN`, `GH_TOKEN`, `NPM_TOKEN`, `NODE_AUTH_TOKEN`
-* `PYPI_TOKEN`, `TWINE_PASSWORD`
-* `DOCKER_AUTH_CONFIG`
-* `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, or any
-  Anthropic/cloud-provider credential
-
-The broker additionally strips itself (defence in depth) before issuing
-the request: it removes any inherited `Authorization`, `Cookie`,
-`Proxy-Authorization`, and any env var matching `*TOKEN*`,
-`*SECRET*`, `*KEY*`, `*PASS*` (case-insensitive).
+The broker is launched by the supervisor, not by the semantic worker, so
+it does **not** inherit authority from the worker's Bash sandbox and the
+worker's credential-deny settings are not relied on as the broker's security
+boundary. Before issuing any outbound request, the broker strips
+credential-shaped environment variables from its own process environment and
+does not synthesize or forward `Authorization`, `Cookie`,
+`Proxy-Authorization`, or API-key headers. URL userinfo is refused. This is the
+broker-side credential boundary; the worker remains separately credential-
+scrubbed by the Claude sandbox and `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1`.
 
 Search queries are themselves outbound disclosure. The broker writes
 every issued query to the receipt unredacted; this ADR documents that
@@ -455,34 +455,39 @@ long base64 runs, paths under `.git`/`.ssh`/`.aws`).
 
 ### Research evidence model
 
-```
-<canonical_repo>/
-  .ownframework-loop/
-    <run-id>/
-      research/
-        RECIPES.json           (per-pass attempt → recipe index)
-        rec-<attempt>/
-          RECIPE.json          (declared operation, capability bound, attempt)
-          op-<op-id>.json      (per-receipt: query/URL/final-URL/bytes/
-                                sha256/MIME/timestamp/redirect-chain/
-                                source-title/retained-artifact-sha256)
-          artifacts/
-            <digest>.bin       (only when the operation retained bytes)
-            <digest>.mime      (text/plain)
+The live supervisor-mediated bridge uses the operator-owned per-run evidence
+root:
+
+```text
+~/.local/state/ownframework-loop/research/<run-id>/
+  requests/                 worker-writable request inbox only
+    req-<request-id>.json
+  claims/                   operator-owned durable in-flight claims
+    claim-<request-id>.json
+  launches/                 durable accepted physical-transport units
+    launch-<launch-id>.json
+  responses/                operator-owned immutable canonical responses
+    resp-<request-id>.json
+  receipts/                 broker-written provenance / operation receipts
+    op-<operation-id>.json
+  artifacts/                broker-written content-addressed retained bytes
+    <sha256>.<safe-ext>
 ```
 
-* Bound to the run id.
-* Mirrors the CAPABILITY_BINDING.json authority surface: any later pass
-  reading research evidence must satisfy the same run-binding digest.
-* Appending/changing the evidence is a state mutation; the broker is
-  the only writer and writes through the existing
-  `_publish_complete_no_replace()` pattern so no partial receipt is
-  observable from another thread.
-* Research artifacts are **not** automatically promoted into the
-  product worktree. The builder must explicitly copy an artifact into
-  the worktree as part of its normal `Write` action under the packet's
-  `allowed_paths`. The copied artifact retains its provenance because
-  the source digest from the receipt is preserved.
+* The entire layout is bound to the run id; path-bearing identifiers are
+  canonicalized before trusted paths are constructed.
+* `requests/` is the only worker-writable bridge directory. `claims/`,
+  `launches/`, `responses/`, `receipts/`, and `artifacts/` are operator-owned.
+* Semantic replay identity is `(request_id, request_digest)`; physical network
+  admission identity is the distinct UUIDv4 `launch_id` recorded under
+  `launches/`.
+* Later passes may read accepted receipts/artifacts only through the same
+  run-bound authority surface; a durable claim is historical evidence, not
+  perpetual authorization to create another network effect.
+* Research artifacts are **not** automatically promoted into the product
+  worktree. The builder must explicitly copy an authorized retained artifact
+  into the worktree under the packet's ordinary write scope while preserving
+  receipt provenance.
 
 ### Asset provenance model
 
@@ -490,8 +495,9 @@ When the operation is `asset-read`, the broker:
 
 * validates exactly as for `read`;
 * records the asset byte count, MIME, final URL, and content SHA-256;
-* retains the artifact bytes inside the per-attempt `artifacts/`
-  directory under the research evidence root, named by digest only;
+* retains the artifact bytes inside the per-run `artifacts/` directory under
+  the research evidence root, named from content identity rather than a
+  worker-controlled URL filename;
 * records attribution/license evidence that was visible at the page
   (e.g. visible `license: ...` / `alt: ...` / `rel="license"` markers
   in surrounding HTML the broker already fetched);
@@ -602,32 +608,30 @@ operator-owned, exactly like the Docker broker entry today.
   install. **The broker is invoked ONLY by the supervisor, NOT by
   the worker.**
 * A new `bin/ofloop-research-call` worker helper (stdlib-only
-  Python executable, also installed to the operator install dir).
+  Python executable, also installed to the managed active payload).
   This is the worker's only public-research surface.
 * A new `supervisor_research` module that extends the existing
   `supervisor.serve()` loop with a per-tick queue consume step.
-  The supervisor — not the worker — invokes the broker subprocess
-  via `subprocess.run`, so the broker runs with the supervisor's
-  full DNS/TCP egress and never inherits Claude's Bash sandbox.
+  The supervisor — not the worker — invokes the broker through the
+  bounded supervisor process runner, so the broker never inherits
+  Claude's Bash sandbox and broker descendants remain lifecycle-owned.
 * A new evidence root at
   `~/.local/state/ownframework-loop/research/<run-id>/`:
-  - `queue/` — supervisor-owned REQUEST queue (mode 0o700).
-  - `responses/` — per-request RESPONSE files (mode 0o700).
-    The worker calls the helper; the helper polls `responses/<req
-    -id>.json` under the supervisor-owned responses dir. (Not the
-    same path the worker reads; the worker reads
-    `scratch/.../research/resp-<req-id>.json` published by the
-    supervisor on the worker's behalf.)
-  - `receipts/` — durable content-addressed receipts (mode 0o600).
-    Written by the broker; never readable as writable by the
-    worker.
-  - `artifacts/` — content-addressed asset bytes (mode 0o600).
-    Filenames derived from validated MIME + SHA-256, never from
-    URL path.
+  - `requests/` — the run-scoped worker-writable REQUEST inbox.
+  - `claims/` — operator-owned durable in-flight claims.
+  - `launches/` — operator-owned accepted physical-transport records used
+    by the trailing-window rate gate.
+  - `responses/` — operator-owned immutable per-request RESPONSE files;
+    the helper polls `resp-<request-id>.json` here read-only.
+  - `receipts/` — durable content-addressed provenance receipts written by
+    the broker.
+  - `artifacts/` — content-addressed retained asset bytes written by the
+    broker.
 * The worker's `allowWrite` is still limited to packet `allowed_paths`
-  + the per-attempt scratch dir. The worker's `allowRead` gains
-  the helper executable, the per-run evidence dir (read-only), but
-  **not** the broker executable.
+  + its run-scoped research request inbox / ordinary per-attempt scratch
+  authority. The worker may read the helper and authorized research
+  evidence, but it cannot write claims, launches, responses, receipts,
+  artifacts, or invoke the broker executable directly.
 
 ## 7. Authority still forbidden (preserved — and restored after the
 rejected temporary widening)
@@ -638,8 +642,8 @@ rejected temporary widening)
 * Bash `strictAllowlist: true`: unchanged. **The new capability does
   NOT widen `allowedDomains` at all** — the worker's
   `sandbox.network.allowedDomains` is `[]` when `research.public`
-  is committed (verified by `tests/unit/test_v200_research_authority
-  .sh`'s worker-sandbox assertion).
+  is committed (verified by `tests/unit/test_v200_research_authority.sh`'s
+  worker-sandbox assertion).
 * `sandbox.network.credentials` deny list: unchanged. The worker
   helper inherits the scrubbed subprocess env (the same
   `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1` and the same deny list).
@@ -664,12 +668,12 @@ rejected temporary widening)
 
 ## 8. Security-test surface
 
-The new `tests/unit/test_v200_research_authority.sh` covers the A–AJ
-behavioural matrix from the directive. Tests are deterministic and
-do not require real network egress: the broker is exercised against
-synthetic destinations (loopback, RFC1918 ranges, IPv6 link-local,
-cloud metadata endpoints, redirects into forbidden targets, oversized
-payloads, malicious-content pages, agent userinfo, non-http schemes).
+`tests/unit/test_v200_research_authority.sh` covers the governed research
+boundary deterministically, including request identity, immutable responses,
+restart recovery, live-attempt reproof, atomic in-flight ownership,
+transport-launch accounting/rate admission, SSRF destination refusal,
+credential/path hardening, and bounded broker execution. These tests do not
+require real public-network egress for their authority proofs.
 
 ## 9. Out of scope (deferred)
 
