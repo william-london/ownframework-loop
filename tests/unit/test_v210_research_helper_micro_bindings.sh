@@ -226,8 +226,8 @@ for i in range(3):
         json.dumps({"request_id": f"r{i}", "submitted_at": time.time()}) + "\n"
     )
 
-# Add a recoverable claim (orphan)
-claim_id = ("0" * 32) + "abcd1234"  # not a real UUIDv4, just a 40-char placeholde
+# Add a recoverable claim (orphan) with a deterministic canonical UUIDv4.
+claim_id = "00000000-0000-4000-8000-000000000001"
 claim = {
     "schema": "ownframework-loop-research-claim/v1",
     "run_id": run, "request_id": claim_id, "request_digest": "0"*64,
