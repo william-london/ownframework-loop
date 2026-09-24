@@ -252,29 +252,56 @@ semantic worker (Bash sandbox: allowedDomains=[]; strictAllowlist: true)
     |                            --request-id <uuid>
     |
     v
-helper writes REQUEST file under:
-    ~/.local/state/ownframework-loop/research/queue/req-<uuid>.json
+helper writes REQUEST file under the worker-writable per-run inbox:
+    $OFLOOP_RESEARCH_EVIDENCE_ROOT/<run-id>/requests/req-<uuid>.json
         (atomic publish: O_EXCL tmp + os.link + dir fsync; 0o600)
-helper blocks polling RESPONSE file under:
-    <canonical_repo>/.ownframework-loop/<run-id>/scratch/<role>/pass-N/research/resp-<uuid>.json
-        (worker's allowRead includes scratch; broker writes
-         it via supervisor-mediated path)
+helper blocks polling the operator-owned RESPONSE file:
+    $OFLOOP_RESEARCH_EVIDENCE_ROOT/<run-id>/responses/resp-<uuid>.json
+        (worker's allowRead includes responses; the canonical
+         supervisor-mediated transport publishes it)
         |
         v
 supervisor (launchd; user-level network authority; NOT Claude sandbox):
-    serve() loop tick scans queue for new requests; for each:
-        1. Validate REQUEST:
-            - run-id exists in supervisor DB, non-terminal
-            - attempt-id corresponds to a currently-active
-              semantic_attempt for that run
+    serve() loop tick scans the per-run inbox for new requests;
+    for each:
+        1. Validate REQUEST (single canonical admission primitive
+           shared by normal admission and restart recovery):
+            - run-id exists in supervisor DB, non-terminal, the
+              job's latest_attempt_id equals the request's
+              attempt_id, the worker pid is alive, and the
+              worker's role matches the request's role
+              (live-attempt authority reproof)
             - the run's resolved capabilities include
               research.public
             - URL passes the broker's SSRF deny rules
               (loopback / RFC1918 / link-local / multicast /
               cloud-metadata / carrier-grade-NAT / IPv6 private /
               credential-shaped)
-            - op ∈ {search, read, asset-read}
-            - per-attempt rate-limit not exceeded
+            - op ∈ {search, read, asset-read}; search is wikipedia-only
+            - canonical request digest is supervisor-computed;
+              worker-supplied digest is verified but never trusted
+            - trailing-window accepted-launch rate-limit not
+              exceeded (durable via launches/launch-<launch-id>.json)
+            - atomic in-flight absence via
+              _InFlightRegistry.insert_if_absent (rejects duplicate
+              (run_id, request_id, request_digest); existing entry
+              wins)
+            - durable launches/launch-<launch_id>.json record is
+              published BEFORE the broker is invoked; every
+              accepted transport carries a fresh UUIDv4 launch_id
+              so the same semantic request_id may legitimately
+              perform a recovery transport without aliasing
+              durable launch evidence
+            - restart recovery (`recover_claims`) reuses this
+              primitive unchanged so it cannot obtain a bypass
+              lane around the live-attempt proof, the in-flight
+              atomicity, or the rate-limit gate
+
+Search posture:
+    SEARCH_DISCOVERY_BACKEND=wikipedia
+    GENERAL_WEB_DISCOVERY=DEFERRED
+    (search orphan claims deliberately refuse auto-retry;
+     read / asset-read orphan claims are recoverable)
             - response budget remaining
         2. Dispatch broker subprocess (subprocess.run) — the
            broker runs under the supervisor process tree, with

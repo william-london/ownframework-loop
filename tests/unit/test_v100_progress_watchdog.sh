@@ -688,3 +688,486 @@ PY
 
 echo
 echo "ALL PROGRESS-WATCHDOG TESTS PASS"
+
+# ---------------------------------------------------------------------------
+# 10. Watchdog + failure-policy bounded retry authority
+#     progress_stalled MUST consume the existing transient retry budget
+#     in the canonical failure-policy owner exactly once per stall.
+# ---------------------------------------------------------------------------
+python3 - "$ROOT" <<'PY'
+import sys, time, sqlite3
+from pathlib import Path
+sys.path.insert(0, str(Path(sys.argv[1]) / "lib"))
+from ownframework_loop import progress_watchdog as pw
+from ownframework_loop.supervisor_recovery import _apply_failure_policy
+
+# Use the same full schema as section 3 so _update_job's column set
+# matches the rows we insert.
+SCHEMA = """
+CREATE TABLE jobs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    repo TEXT NOT NULL,
+    run_id TEXT NOT NULL,
+    runner TEXT NOT NULL DEFAULT 'claude-code',
+    status TEXT NOT NULL DEFAULT 'QUEUED',
+    infra_failures INTEGER NOT NULL DEFAULT 0,
+    max_infra_failures INTEGER NOT NULL DEFAULT 3,
+    progress_stall_count INTEGER NOT NULL DEFAULT 0,
+    transient_failures INTEGER NOT NULL DEFAULT 0,
+    max_transient_failures INTEGER NOT NULL DEFAULT 4,
+    transient_recovery_cycles INTEGER NOT NULL DEFAULT 0,
+    max_transient_recovery_cycles INTEGER NOT NULL DEFAULT 2,
+    total_cost_usd REAL NOT NULL DEFAULT 0,
+    total_input_tokens INTEGER NOT NULL DEFAULT 0,
+    total_output_tokens INTEGER NOT NULL DEFAULT 0,
+    total_cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+    total_cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT,
+    last_failure_class TEXT,
+    last_failure_reason TEXT,
+    next_attempt_at REAL NOT NULL DEFAULT 0,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL,
+    worker_pid INTEGER,
+    worker_started_at REAL,
+    worker_pgid INTEGER,
+    worker_deadline_at REAL,
+    worker_start_identity TEXT,
+    worker_attempt_id TEXT,
+    worker_role TEXT,
+    max_total_cost_usd REAL NOT NULL DEFAULT 0,
+    max_total_tokens INTEGER NOT NULL DEFAULT 0,
+    max_wall_seconds INTEGER NOT NULL DEFAULT 0,
+    execution_started_at REAL,
+    worker_stdout_path TEXT,
+    worker_stderr_path TEXT,
+    runtime_generation TEXT NOT NULL DEFAULT '',
+    legacy_budget_ambiguous INTEGER NOT NULL DEFAULT 0,
+    repository_scheduling_key TEXT NOT NULL DEFAULT '',
+    repository_identity_proven INTEGER NOT NULL DEFAULT 0,
+    candidate_branch TEXT NOT NULL DEFAULT '',
+    workspace_scheduling_key TEXT NOT NULL DEFAULT '',
+    workspace_identity_proven INTEGER NOT NULL DEFAULT 0,
+    execution_mode TEXT NOT NULL DEFAULT 'SINGLE',
+    dispatch_count INTEGER NOT NULL DEFAULT 0,
+    last_dispatch_sequence INTEGER NOT NULL DEFAULT 0,
+    max_pass_runtime_seconds INTEGER NOT NULL DEFAULT 1800,
+    progress_signature_stdout_size INTEGER NOT NULL DEFAULT -1,
+    progress_signature_stdout_mtime REAL NOT NULL DEFAULT 0,
+    progress_signature_stderr_size INTEGER NOT NULL DEFAULT -1,
+    progress_signature_stderr_mtime REAL NOT NULL DEFAULT 0,
+    progress_signature_worktree_head TEXT NOT NULL DEFAULT '',
+    progress_signature_worktree_max_mtime REAL NOT NULL DEFAULT 0,
+    progress_signature_worktree_file_count INTEGER NOT NULL DEFAULT -1,
+    progress_signature_at REAL NOT NULL DEFAULT 0,
+    progress_watchdog_window_seconds INTEGER NOT NULL DEFAULT 0,
+    latest_attempt_id TEXT NOT NULL DEFAULT '',
+    UNIQUE(repo, run_id)
+);
+"""
+tmpdir = Path("/tmp/ofloop-watchdog-retry-test")
+import shutil
+if tmpdir.exists():
+    shutil.rmtree(str(tmpdir))
+tmpdir.mkdir()
+db = tmpdir / "ledger.sqlite3"
+conn = sqlite3.connect(str(db))
+conn.row_factory = sqlite3.Row
+conn.executescript(SCHEMA)
+now = time.time()
+conn.execute(
+    """INSERT INTO jobs(repo, run_id, status, last_failure_class,
+                       transient_failures, created_at, updated_at)
+       VALUES ('/tmp/somewhere', 'run-retry-budget-test',
+               'BACKOFF', 'progress_stalled', 0, ?, ?)""",
+    (now, now),
+)
+conn.commit()
+
+policy1 = _apply_failure_policy(
+    conn, job_id=1, failure_class="progress_stalled",
+    failure_reason="watchdog_no_progress_window=600",
+    detail="progress_stalled; watchdog kill",
+)
+assert int(policy1["transient_failures"]) == 1, (
+    f"first stall consumes 1 transient unit: {policy1}"
+)
+assert policy1["status"] == "BACKOFF", policy1["status"]
+assert policy1["quarantined"] is False, policy1
+
+last = None
+# Drive 3 more stalls (total 4). On the 4th, the ceiling is hit and
+# the transient_recovery_cycles circuit must open.
+for _ in range(3):
+    last = _apply_failure_policy(
+        conn, job_id=1, failure_class="progress_stalled",
+        failure_reason="watchdog_no_progress_window=600",
+        detail="progress_stalled; watchdog kill",
+    )
+assert last["circuit_opened"] is True, (
+    f"4th stall must open bounded provider circuit: {last}"
+)
+assert last["transient_failures"] == 0, (
+    f"transient reset after circuit-open: {last}"
+)
+row = conn.execute(
+    "SELECT transient_failures, transient_recovery_cycles FROM jobs WHERE id=1"
+).fetchone()
+assert int(row[0]) == 0, f"transient reset after circuit-open: {row[0]}"
+assert int(row[1]) == 1, f"transient_recovery_cycles=1 after first circuit: {row[1]}"
+
+# Second circuit (max_transient_recovery_cycles=2) opens after
+# another 4 stalls (8 total). The 8th invocation opens the circuit.
+for _ in range(4):
+    last = _apply_failure_policy(
+        conn, job_id=1, failure_class="progress_stalled",
+        failure_reason="r", detail="d",
+    )
+assert last["circuit_opened"] is True, (
+    f"8th stall must open second circuit: {last}"
+)
+row = conn.execute(
+    "SELECT transient_recovery_cycles FROM jobs WHERE id=1"
+).fetchone()
+assert int(row[0]) == 2, f"second circuit: {row[0]}"
+
+# 9th stall is past the cycle budget AND the streak JUST
+# RESET to 0 from the second circuit_opened. Per the canonical
+# algorithm shared by ordinary transient and progress_stalled,
+# cycles_exhausted alone does NOT force terminalization;
+# bounded backoff continues until the streak reaches the
+# configured ceiling. Thus the 9th stall is bounded backoff.
+final = _apply_failure_policy(
+    conn, job_id=1, failure_class="progress_stalled",
+    failure_reason="r", detail="d",
+)
+assert final["status"] == "BACKOFF", final
+assert final["quarantined"] is False, final
+assert final["transient_failures"] == 1, final
+
+# Drive 3 more stalls (10th, 11th, 12th total). On the 12th the
+# streak reaches the configured ceiling AND cycles_open is False,
+# so the SINGLE canonical branch deterministically reaches
+# QUARANTINED. infinite progress-stalled retry is impossible.
+last = final
+for _ in range(3):
+    last = _apply_failure_policy(
+        conn, job_id=1, failure_class="progress_stalled",
+        failure_reason="r", detail="d",
+    )
+assert last["status"] == "QUARANTINED", last
+assert last["quarantined"] is True, last
+row = conn.execute(
+    "SELECT status, last_failure_class FROM jobs WHERE id=1"
+).fetchone()
+assert row[0] == "QUARANTINED", f"row state after max_cycles + threshold: {row[0]}"
+assert row[1] == "progress_stalled"
+
+print("PASS progress_stall consumes transient retry budget + finite exhaustion")
+shutil.rmtree(str(tmpdir))
+PY
+
+# ---------------------------------------------------------------------------
+# 11. Watchdog itself does NOT increment transient_failures or
+#     infra_failures (no double-charge). It only increments its own
+#     progress_stall_count diagnostic.
+# ---------------------------------------------------------------------------
+python3 - "$ROOT" <<'PY'
+import sys, time, sqlite3, shutil
+from pathlib import Path
+sys.path.insert(0, str(Path(sys.argv[1]) / "lib"))
+from ownframework_loop.progress_watchdog import tick
+
+SCHEMA = """
+CREATE TABLE jobs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    repo TEXT NOT NULL,
+    run_id TEXT NOT NULL,
+    runner TEXT NOT NULL DEFAULT 'claude-code',
+    status TEXT NOT NULL DEFAULT 'QUEUED',
+    infra_failures INTEGER NOT NULL DEFAULT 0,
+    max_infra_failures INTEGER NOT NULL DEFAULT 3,
+    progress_stall_count INTEGER NOT NULL DEFAULT 0,
+    transient_failures INTEGER NOT NULL DEFAULT 0,
+    max_transient_failures INTEGER NOT NULL DEFAULT 4,
+    transient_recovery_cycles INTEGER NOT NULL DEFAULT 2,
+    max_transient_recovery_cycles INTEGER NOT NULL DEFAULT 2,
+    total_cost_usd REAL NOT NULL DEFAULT 0,
+    last_error TEXT,
+    last_failure_class TEXT,
+    last_failure_reason TEXT,
+    next_attempt_at REAL NOT NULL DEFAULT 0,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL,
+    worker_pid INTEGER,
+    worker_started_at REAL,
+    worker_pgid INTEGER,
+    worker_deadline_at REAL,
+    worker_start_identity TEXT,
+    worker_role TEXT,
+    worker_attempt_id TEXT,
+    max_total_cost_usd REAL NOT NULL DEFAULT 0,
+    max_wall_seconds INTEGER NOT NULL DEFAULT 0,
+    execution_started_at REAL,
+    worker_stdout_path TEXT,
+    worker_stderr_path TEXT,
+    runtime_generation TEXT NOT NULL DEFAULT '',
+    legacy_budget_ambiguous INTEGER NOT NULL DEFAULT 0,
+    repository_scheduling_key TEXT NOT NULL DEFAULT '',
+    repository_identity_proven INTEGER NOT NULL DEFAULT 0,
+    candidate_branch TEXT NOT NULL DEFAULT '',
+    workspace_scheduling_key TEXT NOT NULL DEFAULT '',
+    workspace_identity_proven INTEGER NOT NULL DEFAULT 0,
+    execution_mode TEXT NOT NULL DEFAULT 'SINGLE',
+    dispatch_count INTEGER NOT NULL DEFAULT 0,
+    last_dispatch_sequence INTEGER NOT NULL DEFAULT 0,
+    max_pass_runtime_seconds INTEGER NOT NULL DEFAULT 1800,
+    progress_signature_stdout_size INTEGER NOT NULL DEFAULT -1,
+    progress_signature_stdout_mtime REAL NOT NULL DEFAULT 0,
+    progress_signature_stderr_size INTEGER NOT NULL DEFAULT -1,
+    progress_signature_stderr_mtime REAL NOT NULL DEFAULT 0,
+    progress_signature_worktree_head TEXT NOT NULL DEFAULT '',
+    progress_signature_worktree_max_mtime REAL NOT NULL DEFAULT 0,
+    progress_signature_worktree_file_count INTEGER NOT NULL DEFAULT -1,
+    progress_signature_at REAL NOT NULL DEFAULT 0,
+    progress_watchdog_window_seconds INTEGER NOT NULL DEFAULT 0,
+    latest_attempt_id TEXT NOT NULL DEFAULT '',
+    UNIQUE(repo, run_id)
+);
+CREATE TABLE semantic_attempts (
+    attempt_id TEXT PRIMARY KEY,
+    job_id INTEGER NOT NULL,
+    role TEXT NOT NULL,
+    status TEXT NOT NULL,
+    started_at REAL NOT NULL,
+    completed_at REAL,
+    worker_pid INTEGER,
+    stdout_path TEXT NOT NULL,
+    stderr_path TEXT NOT NULL,
+    returncode INTEGER,
+    cost_usd REAL NOT NULL DEFAULT 0,
+    cost_accounted INTEGER NOT NULL DEFAULT 0,
+    cost_known INTEGER NOT NULL DEFAULT 1,
+    failure_class TEXT,
+    failure_reason TEXT
+);
+"""
+tmpdir = Path("/tmp/ofloop-watchdog-no-double-charge")
+if tmpdir.exists():
+    shutil.rmtree(str(tmpdir))
+tmpdir.mkdir()
+db = tmpdir / "ledger.sqlite3"
+conn = sqlite3.connect(str(db))
+conn.row_factory = sqlite3.Row
+conn.executescript(SCHEMA)
+now = time.time()
+conn.execute(
+    """INSERT INTO jobs(
+        repo, run_id, status, worker_pid, worker_started_at,
+        worker_pgid, worker_role, worker_stdout_path, worker_stderr_path,
+        worker_deadline_at, max_pass_runtime_seconds,
+        progress_signature_at,
+        progress_signature_stdout_size, progress_signature_stdout_mtime,
+        progress_signature_stderr_size, progress_signature_stderr_mtime,
+        progress_signature_worktree_head, progress_signature_worktree_max_mtime,
+        progress_signature_worktree_file_count,
+        created_at, updated_at, latest_attempt_id
+    ) VALUES (
+        '/tmp/somewhere', 'run-no-double-charge', 'RUNNING',
+        99999, ?, 99999, 'builder',
+        '/tmp/does-not-exist-stdout.log',
+        '/tmp/does-not-exist-stderr.log',
+        ?, 1800, ?, 0, 0, 0, 0, '', 0, -1, ?, ?, 'attempt-no-double-charge'
+    )""",
+    (now-60, now+1740, now-600, now, now),
+)
+conn.execute(
+    """INSERT INTO semantic_attempts(
+        attempt_id, job_id, role, status, started_at,
+        stdout_path, stderr_path
+    ) VALUES (
+        'attempt-no-double-charge', 1, 'builder', 'RUNNING', ?,
+        '/tmp/does-not-exist-stdout.log', '/tmp/does-not-exist-stderr.log'
+    )""",
+    (now-600,),
+)
+conn.commit()
+def fake_term(pid, pgid, identity, started_at): return True
+summary = tick(conn, terminate=fake_term)
+assert summary["terminated"] == 1, summary
+row = conn.execute(
+    "SELECT progress_stall_count, transient_failures, infra_failures "
+    "FROM jobs WHERE run_id='run-no-double-charge'"
+).fetchone()
+assert int(row[0]) == 1, f"watchdog increments progress_stall_count: {row[0]}"
+assert int(row[1]) == 0, f"watchdog does NOT increment transient_failures: {row[1]}"
+assert int(row[2]) == 0, f"watchdog does NOT increment infra_failures: {row[2]}"
+
+# Second stall: re-stall the worker. The watchdog UPDATE cleared
+# worker_role to NULL on the first tick; the WHERE clause requires
+# worker_role='builder' so restore it (mirrors how a real dispatch
+# would re-claim the row).
+conn.execute(
+    "UPDATE jobs SET progress_signature_at = ?, "
+    "worker_deadline_at=?, status='RUNNING', worker_pid=99999, "
+    "worker_pgid=99999, worker_role='builder', "
+    "worker_started_at=? WHERE id=1",
+    (time.time() - 700, time.time() + 1740, time.time() - 60),
+)
+conn.execute(
+    "UPDATE semantic_attempts SET status='RUNNING' "
+    "WHERE attempt_id='attempt-no-double-charge'"
+)
+conn.commit()
+summary2 = tick(conn, terminate=fake_term)
+assert summary2["terminated"] == 1, summary2
+row = conn.execute(
+    "SELECT progress_stall_count, transient_failures, infra_failures "
+    "FROM jobs WHERE run_id='run-no-double-charge'"
+).fetchone()
+assert int(row[0]) == 2, f"second stall: {row[0]}"
+assert int(row[1]) == 0, f"watchdog still does NOT increment transient: {row[1]}"
+assert int(row[2]) == 0, f"watchdog still does NOT increment infra: {row[2]}"
+print("PASS watchdog only increments progress_stall_count (no double-charge)")
+
+shutil.rmtree(str(tmpdir))
+PY
+
+# ---------------------------------------------------------------------------
+# 12. Watchdog termination does NOT seal cost_accounted; the
+#     canonical accounting owner can still attach real provider cost
+#     later.
+# ---------------------------------------------------------------------------
+python3 - "$ROOT" <<'PY'
+import sys, time, sqlite3, shutil
+from pathlib import Path
+sys.path.insert(0, str(Path(sys.argv[1]) / "lib"))
+from ownframework_loop.progress_watchdog import tick
+
+SCHEMA = """
+CREATE TABLE jobs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    repo TEXT NOT NULL,
+    run_id TEXT NOT NULL,
+    runner TEXT NOT NULL DEFAULT 'claude-code',
+    status TEXT NOT NULL DEFAULT 'QUEUED',
+    infra_failures INTEGER NOT NULL DEFAULT 0,
+    max_infra_failures INTEGER NOT NULL DEFAULT 3,
+    progress_stall_count INTEGER NOT NULL DEFAULT 0,
+    transient_failures INTEGER NOT NULL DEFAULT 0,
+    max_transient_failures INTEGER NOT NULL DEFAULT 4,
+    transient_recovery_cycles INTEGER NOT NULL DEFAULT 2,
+    max_transient_recovery_cycles INTEGER NOT NULL DEFAULT 2,
+    total_cost_usd REAL NOT NULL DEFAULT 0,
+    last_error TEXT,
+    last_failure_class TEXT,
+    last_failure_reason TEXT,
+    next_attempt_at REAL NOT NULL DEFAULT 0,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL,
+    worker_pid INTEGER,
+    worker_started_at REAL,
+    worker_pgid INTEGER,
+    worker_deadline_at REAL,
+    worker_start_identity TEXT,
+    worker_role TEXT,
+    worker_attempt_id TEXT,
+    max_total_cost_usd REAL NOT NULL DEFAULT 0,
+    max_wall_seconds INTEGER NOT NULL DEFAULT 0,
+    execution_started_at REAL,
+    worker_stdout_path TEXT,
+    worker_stderr_path TEXT,
+    runtime_generation TEXT NOT NULL DEFAULT '',
+    legacy_budget_ambiguous INTEGER NOT NULL DEFAULT 0,
+    repository_scheduling_key TEXT NOT NULL DEFAULT '',
+    repository_identity_proven INTEGER NOT NULL DEFAULT 0,
+    candidate_branch TEXT NOT NULL DEFAULT '',
+    workspace_scheduling_key TEXT NOT NULL DEFAULT '',
+    workspace_identity_proven INTEGER NOT NULL DEFAULT 0,
+    execution_mode TEXT NOT NULL DEFAULT 'SINGLE',
+    dispatch_count INTEGER NOT NULL DEFAULT 0,
+    last_dispatch_sequence INTEGER NOT NULL DEFAULT 0,
+    max_pass_runtime_seconds INTEGER NOT NULL DEFAULT 1800,
+    progress_signature_stdout_size INTEGER NOT NULL DEFAULT -1,
+    progress_signature_stdout_mtime REAL NOT NULL DEFAULT 0,
+    progress_signature_stderr_size INTEGER NOT NULL DEFAULT -1,
+    progress_signature_stderr_mtime REAL NOT NULL DEFAULT 0,
+    progress_signature_worktree_head TEXT NOT NULL DEFAULT '',
+    progress_signature_worktree_max_mtime REAL NOT NULL DEFAULT 0,
+    progress_signature_worktree_file_count INTEGER NOT NULL DEFAULT -1,
+    progress_signature_at REAL NOT NULL DEFAULT 0,
+    progress_watchdog_window_seconds INTEGER NOT NULL DEFAULT 0,
+    latest_attempt_id TEXT NOT NULL DEFAULT '',
+    UNIQUE(repo, run_id)
+);
+CREATE TABLE semantic_attempts (
+    attempt_id TEXT PRIMARY KEY,
+    job_id INTEGER NOT NULL,
+    role TEXT NOT NULL,
+    status TEXT NOT NULL,
+    started_at REAL NOT NULL,
+    completed_at REAL,
+    worker_pid INTEGER,
+    stdout_path TEXT NOT NULL,
+    stderr_path TEXT NOT NULL,
+    returncode INTEGER,
+    cost_usd REAL NOT NULL DEFAULT 0,
+    cost_accounted INTEGER NOT NULL DEFAULT 0,
+    cost_known INTEGER NOT NULL DEFAULT 1,
+    failure_class TEXT,
+    failure_reason TEXT
+);
+"""
+tmpdir = Path("/tmp/ofloop-watchdog-cost-accounting")
+if tmpdir.exists():
+    shutil.rmtree(str(tmpdir))
+tmpdir.mkdir()
+db = tmpdir / "ledger.sqlite3"
+conn = sqlite3.connect(str(db))
+conn.row_factory = sqlite3.Row
+conn.executescript(SCHEMA)
+now = time.time()
+conn.execute(
+    """INSERT INTO jobs(
+        repo, run_id, status, worker_pid, worker_started_at,
+        worker_pgid, worker_role, worker_stdout_path, worker_stderr_path,
+        worker_deadline_at, max_pass_runtime_seconds,
+        progress_signature_at,
+        progress_signature_stdout_size, progress_signature_stdout_mtime,
+        progress_signature_stderr_size, progress_signature_stderr_mtime,
+        progress_signature_worktree_head, progress_signature_worktree_max_mtime,
+        progress_signature_worktree_file_count,
+        created_at, updated_at, latest_attempt_id
+    ) VALUES (
+        '/tmp/somewhere', 'run-watchdog-cost', 'RUNNING',
+        99999, ?, 99999, 'builder',
+        '/tmp/does-not-exist-stdout.log',
+        '/tmp/does-not-exist-stderr.log',
+        ?, 1800, ?, 0, 0, 0, 0, '', 0, -1, ?, ?, 'attempt-watchdog-cost'
+    )""",
+    (now-60, now+1740, now-600, now, now),
+)
+conn.execute(
+    """INSERT INTO semantic_attempts(
+        attempt_id, job_id, role, status, started_at,
+        stdout_path, stderr_path
+    ) VALUES (
+        'attempt-watchdog-cost', 1, 'builder', 'RUNNING', ?,
+        '/tmp/does-not-exist-stdout.log', '/tmp/does-not-exist-stderr.log'
+    )""",
+    (now-600,),
+)
+conn.commit()
+def fake_term(pid, pgid, identity, started_at): return True
+tick(conn, terminate=fake_term)
+att = conn.execute(
+    "SELECT status, cost_accounted, cost_known, failure_class "
+    "FROM semantic_attempts WHERE attempt_id='attempt-watchdog-cost'"
+).fetchone()
+assert att[0] == "FAILED"
+assert int(att[1]) == 0, f"watchdog must NOT seal cost_accounted: {att[1]}"
+assert int(att[2]) == 0, f"cost_known must be honest unknown: {att[2]}"
+assert att[3] == "progress_stalled"
+print("PASS watchdog termination does NOT seal cost_accounted")
+shutil.rmtree(str(tmpdir))
+PY
