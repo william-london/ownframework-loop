@@ -1,6 +1,6 @@
 ---
 schema: ofloop-mac-runtime-cert/v1
-certified_at_iso: 2026-09-24T04:48:00Z
+certified_at_iso: 2026-09-24T05:00:00Z
 ---
 
 # Mac Runtime Certification — 2026-09-23
@@ -20,10 +20,10 @@ This is **NOT** a certification of any program; this certifies the
 ```
 REPOSITORY                 = william-london/ownframework-loop
 CANONICAL_BRANCH           = master
-SOURCE_SHA                 = b47a920b6170abadfcfcc775977619fad8f47e12
-SOURCE_TREE                = 801cdc94a5bb384a5bc43905d24fbc9f872b98ae
-ORIGIN_MASTER_SHA          = b47a920b6170abadfcfcc775977619fad8f47e12
-LOCAL_MASTER_SHA           = b47a920b6170abadfcfcc775977619fad8f47e12
+SOURCE_SHA                 = 7667b640fabe04ea873a3c928e4da8f20018509c
+SOURCE_TREE                = fb4c31ab1080ed499b6ec30bed2aa05d61ac2173
+ORIGIN_MASTER_SHA          = 7667b640fabe04ea873a3c928e4da8f20018509c
+LOCAL_MASTER_SHA           = 7667b640fabe04ea873a3c928e4da8f20018509c
 MASTER_PARITY              = yes
 WORKTREE_CLEAN             = yes
 
@@ -39,10 +39,10 @@ SOURCE_RUNTIME_GENERATION =
   (computed in-tree from git-head + source tree + manifest)
 
 INSTALLED_RUNTIME_GENERATION =
-  ofloop-1.1.0.dev0@payload-11c36542d7a1063f3680692d4a1db6532dcadc4de1e82db871f83d16326b1ac7
+  ofloop-1.1.0.dev0@payload-0acb37d2c9ea6a056c9ddeb1947183c841527a7400255506f6a343353466b6b0
 
 SUPERVISOR_RUNTIME_GENERATION =
-  ofloop-1.1.0.dev0@payload-11c36542d7a1063f3680692d4a1db6532dcadc4de1e82db871f83d16326b1ac7
+  ofloop-1.1.0.dev0@payload-0acb37d2c9ea6a056c9ddeb1947183c841527a7400255506f6a343353466b6b0
 
 RUNTIME_GENERATION_PARITY = yes
 ```
@@ -67,7 +67,7 @@ RUNNER_PROFILE         = primary
 SUPERVISOR_SERVICE_STATE     = running (launchd
                                com.ownframework.loop-supervisor,
                                active count = 1)
-SUPERVISOR_PROCESS_IDENTITY  = PID 55570 / launch-commissioned-supervisor.py
+SUPERVISOR_PROCESS_IDENTITY  = PID 56906 / launch-commissioned-supervisor.py
                                under
                                ~/.local/share/ownframework-loop/1.1.0.dev0/
                                (verified post-restart)
@@ -122,8 +122,9 @@ VALIDATE_RESULT           = PASS
 GIT_DIFF_CHECK            = clean
 RELEASE_GATE_RESULT       = PASS
 
-CANONICAL_EXACT_SHA_CI    = PASS  (run 36002619075 on the
-                            EXACT master SHA b47a920b6170abadfcfcc775977619fad8f47e12)
+CANONICAL_EXACT_SHA_CI    = PASS  (run 36004425205 on the
+                            EXACT master SHA 7667b640fabe04ea873a3c928e4da8f20018509c;
+                            previous run 36002619075 10/10 PASS also green)
 ```
 
 ## Branch / History Posture
@@ -169,14 +170,28 @@ LOOP_IMPLEMENTATION_DEFECTS_FOUND = 0
 SOURCE_REPAIRS_REQUIRED          = 1 (the cert file)
 SOURCE_REPAIR_COMMITS            =
   b47a920 fix(cert): remove developer-machine paths from Mac runtime cert
+  (followed by 7667b64 docs(cert): update Mac runtime cert with final
+   commissioned identities — pure documentation synchronization,
+   no source/path/code change)
+```
+
+## Defects Repair Path
+
+The commissioning layer did NOT manufacture a fake product run. The
+single HOST_COMMISSIONING_DEFECT (developer-machine paths in the new
+cert file) was repaired narrowly by replacing those paths with
+HOME-relative forms consistent with the rest of the canonical
+certification evidence convention; `tests/integration/test_checkout_portability.sh`
+and `tests/run_all.sh` both pass after the repair; the exact new
+master SHA `7667b64...` CI run `36004425205` is 10/10 PASS.
 ```
 
 ## Host-Identity Determinism
 
 ```
-FINAL_SOURCE_SHA         = b47a920b6170abadfcfcc775977619fad8f47e12
-FINAL_ORIGIN_MASTER_SHA  = b47a920b6170abadfcfcc775977619fad8f47e12
-FINAL_LOCAL_MASTER_SHA   = b47a920b6170abadfcfcc775977619fad8f47e12
+FINAL_SOURCE_SHA         = 7667b640fabe04ea873a3c928e4da8f20018509c
+FINAL_ORIGIN_MASTER_SHA  = 7667b640fabe04ea873a3c928e4da8f20018509c
+FINAL_LOCAL_MASTER_SHA   = 7667b640fabe04ea873a3c928e4da8f20018509c
 FINAL_WORKTREE_CLEAN     = yes
 ```
 
