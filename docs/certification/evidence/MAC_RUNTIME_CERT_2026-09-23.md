@@ -1,6 +1,6 @@
 ---
 schema: ofloop-mac-runtime-cert/v1
-certified_at_iso: 2026-09-24T04:34:00Z
+certified_at_iso: 2026-09-24T04:48:00Z
 ---
 
 # Mac Runtime Certification — 2026-09-23
@@ -20,10 +20,10 @@ This is **NOT** a certification of any program; this certifies the
 ```
 REPOSITORY                 = william-london/ownframework-loop
 CANONICAL_BRANCH           = master
-SOURCE_SHA                 = 91b4adb4ef0acab06d186767fd65b25bfb1bf061
-SOURCE_TREE                = 377def8191047000387953eb6aaeb82ee2647ada
-ORIGIN_MASTER_SHA          = 91b4adb4ef0acab06d186767fd65b25bfb1bf061
-LOCAL_MASTER_SHA           = 91b4adb4ef0acab06d186767fd65b25bfb1bf061
+SOURCE_SHA                 = b47a920b6170abadfcfcc775977619fad8f47e12
+SOURCE_TREE                = 801cdc94a5bb384a5bc43905d24fbc9f872b98ae
+ORIGIN_MASTER_SHA          = b47a920b6170abadfcfcc775977619fad8f47e12
+LOCAL_MASTER_SHA           = b47a920b6170abadfcfcc775977619fad8f47e12
 MASTER_PARITY              = yes
 WORKTREE_CLEAN             = yes
 
@@ -39,10 +39,10 @@ SOURCE_RUNTIME_GENERATION =
   (computed in-tree from git-head + source tree + manifest)
 
 INSTALLED_RUNTIME_GENERATION =
-  ofloop-1.1.0.dev0@payload-8ff925c18ba5e9123f2c206f2ec1155daa572d3ce92ce329c21468f8a04ccb8b
+  ofloop-1.1.0.dev0@payload-11c36542d7a1063f3680692d4a1db6532dcadc4de1e82db871f83d16326b1ac7
 
 SUPERVISOR_RUNTIME_GENERATION =
-  ofloop-1.1.0.dev0@payload-8ff925c18ba5e9123f2c206f2ec1155daa572d3ce92ce329c21468f8a04ccb8b
+  ofloop-1.1.0.dev0@payload-11c36542d7a1063f3680692d4a1db6532dcadc4de1e82db871f83d16326b1ac7
 
 RUNTIME_GENERATION_PARITY = yes
 ```
@@ -67,7 +67,7 @@ RUNNER_PROFILE         = primary
 SUPERVISOR_SERVICE_STATE     = running (launchd
                                com.ownframework.loop-supervisor,
                                active count = 1)
-SUPERVISOR_PROCESS_IDENTITY  = PID 9416 / launch-commissioned-supervisor.py
+SUPERVISOR_PROCESS_IDENTITY  = PID 55570 / launch-commissioned-supervisor.py
                                under
                                ~/.local/share/ownframework-loop/1.1.0.dev0/
                                (verified post-restart)
@@ -121,6 +121,9 @@ VALIDATE_RESULT           = PASS
                             (./validate.sh)
 GIT_DIFF_CHECK            = clean
 RELEASE_GATE_RESULT       = PASS
+
+CANONICAL_EXACT_SHA_CI    = PASS  (run 36002619075 on the
+                            EXACT master SHA b47a920b6170abadfcfcc775977619fad8f47e12)
 ```
 
 ## Branch / History Posture
@@ -153,18 +156,27 @@ RUNTIME_DOCTOR      = PASS  (ofloop doctor <canonical_repo>
 ## Defects
 
 ```
-HOST_COMMISSIONING_DEFECTS_FOUND = 0
+HOST_COMMISSIONING_DEFECTS_FOUND = 1 (self-introduced at first cert commit;
+                                       developer-machine paths in the new evidence
+                                       file tripped test_checkout_portability.sh;
+                                       classified HOST_COMMISSIONING_DEFECT;
+                                       repaired by removing the user-specific paths
+                                       and using HOME-relative forms consistent
+                                       with the rest of docs/certification/*.md;
+                                       same commit-and-push repair cycle on
+                                       canonical master as the documented loop)
 LOOP_IMPLEMENTATION_DEFECTS_FOUND = 0
-SOURCE_REPAIRS_REQUIRED          = 0
-SOURCE_REPAIR_COMMITS            = none
+SOURCE_REPAIRS_REQUIRED          = 1 (the cert file)
+SOURCE_REPAIR_COMMITS            =
+  b47a920 fix(cert): remove developer-machine paths from Mac runtime cert
 ```
 
 ## Host-Identity Determinism
 
 ```
-FINAL_SOURCE_SHA         = 91b4adb4ef0acab06d186767fd65b25bfb1bf061
-FINAL_ORIGIN_MASTER_SHA  = 91b4adb4ef0acab06d186767fd65b25bfb1bf061
-FINAL_LOCAL_MASTER_SHA   = 91b4adb4ef0acab06d186767fd65b25bfb1bf061
+FINAL_SOURCE_SHA         = b47a920b6170abadfcfcc775977619fad8f47e12
+FINAL_ORIGIN_MASTER_SHA  = b47a920b6170abadfcfcc775977619fad8f47e12
+FINAL_LOCAL_MASTER_SHA   = b47a920b6170abadfcfcc775977619fad8f47e12
 FINAL_WORKTREE_CLEAN     = yes
 ```
 
