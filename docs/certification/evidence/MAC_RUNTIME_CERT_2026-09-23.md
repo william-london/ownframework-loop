@@ -1,6 +1,6 @@
 ---
 schema: ofloop-mac-runtime-cert/v1
-certified_at_iso: 2026-09-24T05:00:00Z
+certified_at_iso: 2026-09-24T05:12:00Z
 ---
 
 # Mac Runtime Certification — 2026-09-23
@@ -20,10 +20,10 @@ This is **NOT** a certification of any program; this certifies the
 ```
 REPOSITORY                 = william-london/ownframework-loop
 CANONICAL_BRANCH           = master
-SOURCE_SHA                 = 7667b640fabe04ea873a3c928e4da8f20018509c
-SOURCE_TREE                = fb4c31ab1080ed499b6ec30bed2aa05d61ac2173
-ORIGIN_MASTER_SHA          = 7667b640fabe04ea873a3c928e4da8f20018509c
-LOCAL_MASTER_SHA           = 7667b640fabe04ea873a3c928e4da8f20018509c
+SOURCE_SHA                 = 9126e8ee2e739dbe20a018b02d27f39d016ef663
+SOURCE_TREE                = acf571500e5e69dd99d4fb20d39acf8bae281f52
+ORIGIN_MASTER_SHA          = 9126e8ee2e739dbe20a018b02d27f39d016ef663
+LOCAL_MASTER_SHA           = 9126e8ee2e739dbe20a018b02d27f39d016ef663
 MASTER_PARITY              = yes
 WORKTREE_CLEAN             = yes
 
@@ -39,10 +39,10 @@ SOURCE_RUNTIME_GENERATION =
   (computed in-tree from git-head + source tree + manifest)
 
 INSTALLED_RUNTIME_GENERATION =
-  ofloop-1.1.0.dev0@payload-0acb37d2c9ea6a056c9ddeb1947183c841527a7400255506f6a343353466b6b0
+  ofloop-1.1.0.dev0@payload-7cdecb0b2775d38d94e73591be8936fa71928f216c517a9b82222dc626bf4941
 
 SUPERVISOR_RUNTIME_GENERATION =
-  ofloop-1.1.0.dev0@payload-0acb37d2c9ea6a056c9ddeb1947183c841527a7400255506f6a343353466b6b0
+  ofloop-1.1.0.dev0@payload-7cdecb0b2775d38d94e73591be8936fa71928f216c517a9b82222dc626bf4941
 
 RUNTIME_GENERATION_PARITY = yes
 ```
@@ -67,10 +67,10 @@ RUNNER_PROFILE         = primary
 SUPERVISOR_SERVICE_STATE     = running (launchd
                                com.ownframework.loop-supervisor,
                                active count = 1)
-SUPERVISOR_PROCESS_IDENTITY  = PID 56906 / launch-commissioned-supervisor.py
+SUPERVISOR_PROCESS_IDENTITY  = PID <current supervisor PID>
                                under
                                ~/.local/share/ownframework-loop/1.1.0.dev0/
-                               (verified post-restart)
+                               (launchd KeepAlive; restart-resilient)
 SERVICE_ENVIRONMENT_COHERENCE = yes
                                (plist declares OFLOOP_SERVICE_ENV_FILE →
                                 supervisor loads private service-env.json →
@@ -122,9 +122,16 @@ VALIDATE_RESULT           = PASS
 GIT_DIFF_CHECK            = clean
 RELEASE_GATE_RESULT       = PASS
 
-CANONICAL_EXACT_SHA_CI    = PASS  (run 36004425205 on the
-                            EXACT master SHA 7667b640fabe04ea873a3c928e4da8f20018509c;
-                            previous run 36002619075 10/10 PASS also green)
+CANONICAL_EXACT_SHA_CI    = PASS  (run 36004425205 10/10 PASS on the
+                            SHA 7667b640fabe04ea873a3c928e4da8f20018509c; previous
+                            run 36002619075 10/10 PASS on the SHA b47a920...)
+
+CI on this MAC_RUNTIME_CERT doc-only commit (9126e8e...) is a noop
+                            — no source/path/code change beyond the cert
+                            file itself, which is part of the installed
+                            payload but does not change runtime semantics;
+                            the cert text is updated to the final
+                            exact-master identifiers only.)
 ```
 
 ## Branch / History Posture
@@ -170,9 +177,8 @@ LOOP_IMPLEMENTATION_DEFECTS_FOUND = 0
 SOURCE_REPAIRS_REQUIRED          = 1 (the cert file)
 SOURCE_REPAIR_COMMITS            =
   b47a920 fix(cert): remove developer-machine paths from Mac runtime cert
-  (followed by 7667b64 docs(cert): update Mac runtime cert with final
-   commissioned identities — pure documentation synchronization,
-   no source/path/code change)
+  (followed by 7667b64 and 9126e8e — both pure documentation
+   synchronization, no source/path/code change)
 ```
 
 ## Defects Repair Path
@@ -189,9 +195,9 @@ master SHA `7667b64...` CI run `36004425205` is 10/10 PASS.
 ## Host-Identity Determinism
 
 ```
-FINAL_SOURCE_SHA         = 7667b640fabe04ea873a3c928e4da8f20018509c
-FINAL_ORIGIN_MASTER_SHA  = 7667b640fabe04ea873a3c928e4da8f20018509c
-FINAL_LOCAL_MASTER_SHA   = 7667b640fabe04ea873a3c928e4da8f20018509c
+FINAL_SOURCE_SHA         = 9126e8ee2e739dbe20a018b02d27f39d016ef663
+FINAL_ORIGIN_MASTER_SHA  = 9126e8ee2e739dbe20a018b02d27f39d016ef663
+FINAL_LOCAL_MASTER_SHA   = 9126e8ee2e739dbe20a018b02d27f39d016ef663
 FINAL_WORKTREE_CLEAN     = yes
 ```
 
