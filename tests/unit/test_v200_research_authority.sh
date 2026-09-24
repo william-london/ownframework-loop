@@ -3417,14 +3417,15 @@ check("WATCHDOG_EMERGENCY_FUSE: cycles=2/2 + threshold hit → quarantine",
 # ----------------------------------------------------------------- #
 # Module docstring lists the canonical-admission primitive, the
 # authority-predicate version, the transport-launch identity, and
-# the wikipedia-only / GENERAL_WEB_DISCOVERY=DEFERRED search posture.
+# the bing-rss / wikipedia search posture.
 docstring = sr.__doc__ or ""
 required_phrases = [
     "_admit_research_transport",
     "_prove_live_semantic_attempt_authority",
     "launch_id",
+    "bing-rss",
     "wikipedia",
-    "GENERAL_WEB_DISCOVERY=DEFERRED",
+    "GENERAL_WEB_DISCOVERY=SUPPORTED",
 ]
 missing = [p for p in required_phrases if p not in docstring]
 check("RESEARCH_DOCS: module docstring lists canonical primitives",

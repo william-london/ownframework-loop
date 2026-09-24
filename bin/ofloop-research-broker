@@ -28,6 +28,18 @@ Architectural shape:
 
     semantic worker (Bash sandbox unchanged)
         |
+        |  ofloop-research-call --op <op> --<args>
+        |      --run-id <r> --attempt <a> --request-id <UUIDv4>
+        |      --request-digest <64-hex>
+        |
+        v
+    supervisor research admission primitive
+    (live-attempt authority, in-flight ownership, rate-limit,
+     launch-id, durable launch record)
+        |
+        v
+    commissioned broker (no wildcard network, no credentials)
+        |
         |  ofloop-research-broker --op <op> --<args> --evidence-dir <e>
         |                            --run-id <r> --attempt <a>
         |                            --request-id <UUIDv4>
@@ -36,6 +48,12 @@ Architectural shape:
         v
     broker validates -> _browse() SSRF-primed read -> writes evidence
     -> returns receipt path
+
+The helper has no network authority of its own; the broker is the
+only thing in the run that talks to the public internet for
+research purposes — the worker's Claude sandbox does not get any
+``allowedDomains`` widening, and its --tools list does not gain
+``WebSearch``/``WebFetch``.
 
 Every outbound HTTP exchange (read / asset-read / search) routes
 through the single ``_browse()`` transport, which:
@@ -50,7 +68,10 @@ through the single ``_browse()`` transport, which:
 - scrubs credential-shaped env vars before any request;
 - inherits no Authorization / Cookie / X-API-Key headers.
 
-Search is GET-only via wikipedia's REST endpoint. The historical
+Search is GET-only via two operator-commissioned public-discovery
+backends routed through the canonical ``_browse()`` SSRF primitive:
+``bing-rss`` for general public-web discovery (default) and
+``wikipedia`` for the narrow encyclopedia alternate. The historical
 ``ddg-lite`` backend (form-POST) was removed in the third mid-run
 bridge repair because its POST transport bypassed ``_browse()``;
 no operator-controlled network call may bypass the canonical SSRF
@@ -81,6 +102,7 @@ import time
 import unicodedata
 import urllib.parse as _urllib_parse
 import uuid as _uuid
+import xml.etree.ElementTree as _ET
 from html.parser import HTMLParser as _HTMLParser
 from ipaddress import AddressValueError
 from pathlib import Path
@@ -97,7 +119,7 @@ READ_CONNECT_TIMEOUT = 10.0
 READ_READ_TIMEOUT = 30.0
 READ_DEFAULT_MAX_BYTES = 5 * 1024 * 1024         # 5 MiB response cap
 READ_TEXT_PREVIEW_BYTES = 1500                    # small preview returned on stdout
-SEARCH_DEFAULT_MAX_BYTES = 2 * 1024 * 1024        # 2 MiB for DDG HTML responses
+SEARCH_DEFAULT_MAX_BYTES = 2 * 1024 * 1024        # 2 MiB for search responses
 SEARCH_MAX_RESULTS = 12
 ASSET_DEFAULT_MAX_BYTES = 32 * 1024 * 1024       # 32 MiB asset cap
 
@@ -113,37 +135,46 @@ ASSET_MIME_ALLOWLIST = frozenset((
     "application/octet-stream",
 ))
 
-# Search is currently provided by the Wikipedia REST query endpoint, which
-# returns unauthenticated JSON and survives the anti-bot restrictions the
-# legacy search engines have been tightening for years. Architectural
-# note: the search backend is a deployment choice, not a worker choice
-# -- the broker is the only authority that picks a search provider, and
-# alternative providers (Brave, Kagi, etc.) can be added by branching on
-# a --search-backend flag in this same module without ever widening the
-# worker's Bash allowedDomains.
-SEARCH_DEFAULT_ENDPOINT = "https://en.wikipedia.org/w/api.php"
-SEARCH_MAX_RESULTS = 12
+# Search is currently provided by two commissioned public-discovery
+# backends, both HTTP/HTTPS GET-only and both routed through the
+# canonical ``_browse()`` SSRF primitive:
+#
+#   - ``bing-rss`` — general public-web discovery via Bing's RSS
+#     surface. Default. Returned results are discovery data only;
+#     subsequent page reads continue through ``op=read`` so every
+#     destination receives the existing SSRF/DNS/redirect checks
+#     at actual fetch time.
+#   - ``wikipedia`` — the narrow encyclopedia backend via the
+#     existing Wikipedia REST ``action=query`` endpoint. Selected
+#     only through the operator-commissioned policy.
+#
+# Architectural note: the search backend is a deployment choice, not
+# a worker choice — the broker is the only authority that picks a
+# search provider. Alternative GET-only providers can be added by
+# branching on the ``--search-backend`` flag in this same module
+# without ever widening the worker's Bash ``allowedDomains``.
+SEARCH_DEFAULT_ENDPOINT_WIKIPEDIA = "https://en.wikipedia.org/w/api.php"
+SEARCH_DEFAULT_ENDPOINT_BING_RSS = "https://www.bing.com/search"
 SEARCH_USER_AGENT = f"OwnFrameworkLoop-ResearchBroker/{BROKER_VERSION}"
 
 # Provider-neutral search backend abstraction. The worker contract
 # says ``--op search --query <q>``; the broker chooses the backend.
-#
-# The whole broker is HTTP/HTTPS GET-only — there is no POST path.
-# The historical ``ddg-lite`` backend required a form-POST to
-# ``https://lite.duckduckgo.com/lite/`` and therefore bypassed the
-# unified ``_browse()`` SSRF / byte-cap / redirect-re-validate
-# transport, which violated the third-mid-run bridge boundary
-# invariant (no operator-controlled network call may bypass the
-# canonical SSRF primitive). ddg-lite is REMOVED; only wikipedia
-# (the GET endpoint) remains. Operator-commissioned search providers
-# (Brave, Kagi, etc.) can be re-added ONLY by adding an
-# ``_search_<name>`` function whose outbound transport is
-# ``_browse()`` — there is no path for a backend to bypass it.
+# Both commissioned backends route their outbound transport through
+# ``_browse()`` — there is no path for a backend to bypass the
+# canonical SSRF primitive. The historical ``ddg-lite`` backend
+# (form-POST) was REMOVED in the third-mid-run bridge repair
+# because its POST transport bypassed ``_browse()``. If a future
+# operator-chosen provider requires POST, the canonical discovery
+# contract is violated and that provider MUST NOT be added without
+# a separate architectural decision.
 #
 # The worker contract is unchanged: ``--op search --query <q>``.
 # The broker is the only authority that picks a search provider.
-SEARCH_BACKENDS = frozenset(("wikipedia",))
-SEARCH_DEFAULT_BACKEND = "wikipedia"
+# ``bing-rss`` is the default for the supported general public-web
+# discovery posture; ``wikipedia`` is the narrow alternate kept for
+# targeted encyclopedia lookups.
+SEARCH_BACKENDS = frozenset(("bing-rss", "wikipedia"))
+SEARCH_DEFAULT_BACKEND = "bing-rss"
 
 
 # -------------------------------------------------------------------- #
@@ -551,13 +582,17 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--kind-cap", type=int, default=128,
                    help="Maximum bytes for --kind (default 128).")
     p.add_argument("--search-backend", default=None,
-                   choices=("wikipedia",),
+                   choices=("bing-rss", "wikipedia"),
                    help=(
-                       "Provider-neutral search backend (default: wikipedia). "
-                       "ddg-lite was REMOVED in the third mid-run bridge "
-                       "repair because its form-POST transport bypassed the "
-                       "canonical _browse() SSRF primitive; only wikipedia "
-                       "(GET-only via _browse()) is currently commissioned."
+                       "Provider-neutral search backend (default: bing-rss — "
+                       "general public-web discovery via the commissioned "
+                       "Bing RSS surface, GET-only, routed through _browse()). "
+                       "wikipedia is the narrow encyclopedia alternate. The "
+                       "historical ddg-lite backend (form-POST) was REMOVED "
+                       "in the third mid-run bridge repair because its POST "
+                       "transport bypassed the canonical _browse() SSRF "
+                       "primitive; any future provider MUST also route "
+                       "through _browse()."
                    ))
     return p
 
@@ -614,11 +649,14 @@ def _emit_help() -> dict[str, Any]:
             "Filenames derived from content digest + validated MIME, never "
             "from URL path.",
             "Inherited credential env vars stripped before any request.",
-            "Provider-neutral search: --op search dispatches to wikipedia "
-            "(the only commissioned backend); backend identity is "
-            "recorded in the receipt. ddg-lite was removed because "
-            "its POST transport bypassed the canonical _browse() "
-            "SSRF primitive (third mid-run bridge repair).",
+            "Provider-neutral search: --op search dispatches to a "
+            "commissioned backend — bing-rss (general public-web "
+            "discovery, default) or wikipedia (narrow alternate) — "
+            "and the backend identity is recorded in the receipt. "
+            "ddg-lite was removed because its POST transport "
+            "bypassed the canonical _browse() SSRF primitive "
+            "(third mid-run bridge repair); any new backend MUST "
+            "also route through _browse().",
         ],
     }
 
@@ -994,13 +1032,20 @@ def _now_iso() -> str:
     return _dt.datetime.now(_dt.timezone.utc).isoformat()
 
 
-def _publish_evidence(evidence_dir: Path, payload: dict[str, Any]) -> Path:
+def _publish_evidence(evidence_dir: Path, payload: dict[str, Any], op_id: str) -> Path:
     """Atomically publish one evidence JSON under evidence_dir/receipts/.
 
     The directory layout is hardened: 0o700 created on demand, atomic
     replace via O_EXCL tmp+rename, content-addressed by op-id so
     identical receipts never collide and so the file name itself is a
     stable identifier.
+
+    Single canonical op_id: ``op_id`` is the operation handler's
+    unique physical id, passed explicitly. The receipt filename stem
+    is the SAME ``op_id`` -- ``response.op_id`` == receipt
+    JSON ``op_id`` == receipt filename stem for every supported op.
+    The caller MUST pass the same id used in
+    ``response["op_id"]``.
     """
     if not evidence_dir.exists() or not evidence_dir.is_dir():
         raise InvalidRequest(
@@ -1009,7 +1054,7 @@ def _publish_evidence(evidence_dir: Path, payload: dict[str, Any]) -> Path:
     receipts_dir = evidence_dir / "receipts"
     receipts_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     os.chmod(receipts_dir, 0o700)
-    op_id = str(payload.get("op_id") or _op_id())
+    op_id = str(op_id)
     payload["op_id"] = op_id
     payload["schema"] = BROKER_OPERATION_SCHEMA
     target = receipts_dir / f"{op_id}.json"
@@ -1125,16 +1170,23 @@ def _sanitize_query(q: str) -> str:
     return unicodedata.normalize("NFKC", q).strip()
 
 
-def _receipt_base(args: argparse.Namespace, op: str) -> dict[str, Any]:
+def _receipt_base(args: argparse.Namespace, op: str, op_id: str) -> dict[str, Any]:
     """Common fields every receipt includes so audit can attribute
-    the operation to its originating bridge request."""
+    the operation to its originating bridge request.
+
+    Single canonical op_id owner: the operation handler mints
+    exactly one ``op_id`` and threads it through both this base
+    receipt and the published-receipt filename so worker-visible
+    ``response.op_id`` equals receipt-JSON ``op_id`` equals the
+    on-disk receipt filename stem.
+    """
     return {
         "ok": True,
         "op": op,
         "capability": BROKER_CAPABILITY_NAME,
         "version": BROKER_VERSION,
         "broker_sha256": _self_sha256(),
-        "op_id": _op_id(),
+        "op_id": op_id,
         "run_id": str(args.run_id),
         "attempt": str(args.attempt),
         "request_id": str(args.request_id or ""),
@@ -1158,7 +1210,7 @@ def _search_wikipedia(query: str) -> tuple[list[dict[str, str]], dict[str, Any]]
         "format": "json",
         "utf8": "1",
     })
-    url = f"{SEARCH_DEFAULT_ENDPOINT}?{q}"
+    url = f"{SEARCH_DEFAULT_ENDPOINT_WIKIPEDIA}?{q}"
     response = _browse(
         url, max_bytes=SEARCH_DEFAULT_MAX_BYTES,
         accept="application/json,text/plain,*/*;q=0.5",
@@ -1204,7 +1256,124 @@ def _search_wikipedia(query: str) -> tuple[list[dict[str, str]], dict[str, Any]]
         "connect_log": response.connect_log,
         "final_url": response.final_url,
         "request_url": url,
-        "endpoint": SEARCH_DEFAULT_ENDPOINT,
+        "endpoint": SEARCH_DEFAULT_ENDPOINT_WIKIPEDIA,
+    }
+    return results, debug
+
+
+def _search_bing_rss(query: str) -> tuple[list[dict[str, str]], dict[str, Any]]:
+    """Bing RSS general public-web discovery backend.
+
+    This is the DEFAULT commissioned provider for general public-web
+    discovery. Bing exposes a public RSS surface for SERP results at
+    ``https://www.bing.com/search?q=<encoded>&format=rss&mkt=en-US&setlang=en-US``.
+    The endpoint is unauthenticated GET, so it MUST route through the
+    canonical ``_browse()`` SSRF primitive (which it does).
+
+    Returned ``results`` are discovery data only — the worker MUST
+    not interpret returned URLs as authoritative. Any subsequent
+    page read of a returned URL goes through ``op=read`` so that
+    destination receives the existing SSRF / DNS / redirect-revalidate
+    / byte-cap checks at actual fetch time.
+
+    RSS normalization (stdlib-only ``xml.etree.ElementTree``):
+      - accept only absolute ``http://`` or ``https://`` URLs;
+      - drop userinfo URLs;
+      - drop malformed URLs;
+      - never perform an outbound GET to the result during search;
+      - cap to ``SEARCH_MAX_RESULTS``.
+
+    Per-result shape::
+
+        {"url": <str>, "title": <str>, "snippet": <str>}
+
+    Optional publication/date metadata is preserved verbatim if
+    naturally present (e.g. ``pubDate``) but the worker protocol is
+    not widened beyond ``url/title/snippet``.
+    """
+    q = _urllib_parse.urlencode({
+        "q": query,
+        "format": "rss",
+        "mkt": "en-US",
+        "setlang": "en-US",
+    })
+    url = f"{SEARCH_DEFAULT_ENDPOINT_BING_RSS}?{q}"
+    response = _browse(
+        url, max_bytes=SEARCH_DEFAULT_MAX_BYTES,
+        accept="application/rss+xml,application/xml,text/xml,*/*;q=0.5",
+    )
+    if response.status_code != 200:
+        raise TransientFailure(
+            f"bing-rss search backend returned HTTP {response.status_code} "
+            f"{response.reason}"
+        )
+    body = response.body
+    if not body:
+        raise InvalidRequest(
+            "bing-rss search backend returned empty body"
+        )
+    try:
+        root = _ET.fromstring(body)
+    except _ET.ParseError as exc:
+        raise InvalidRequest(
+            f"bing-rss search backend returned malformed XML: {exc}"
+        )
+    # RSS uses {http://www.w3.org/2005/Atom} or default; Bing uses
+    # the default RSS 2.0 namespace.
+    channel = root.find("channel") if root.tag == "rss" else root
+    items = []
+    if channel is not None:
+        items = channel.findall("item")
+    results: list[dict[str, str]] = []
+    for item in items:
+        link_text = (item.findtext("link") or "").strip()
+        title_text = (item.findtext("title") or "").strip()
+        desc_text = (item.findtext("description") or "").strip()
+        pub_text = (item.findtext("pubDate") or "").strip()
+        if not link_text or not title_text:
+            continue
+        # Drop userinfo before any URL parse.
+        if "@" in link_text.split("://", 1)[-1].split("/", 1)[0]:
+            continue
+        # Accept only absolute http/https URLs.
+        if not (link_text.startswith("http://") or link_text.startswith("https://")):
+            continue
+        if "://" not in link_text:
+            continue
+        # Reject malformed URLs via stdlib parser.
+        try:
+            parsed = _urllib_parse.urlparse(link_text)
+        except ValueError:
+            continue
+        if not parsed.netloc or not parsed.scheme:
+            continue
+        if parsed.scheme not in ("http", "https"):
+            continue
+        if parsed.username or parsed.password:
+            continue
+        # Strip HTML from description snippet.
+        snippet = _re.sub(r"<[^>]+>", "", desc_text)
+        snippet = _re.sub(r"\s+", " ", snippet).strip()
+        result: dict[str, str] = {
+            "url": link_text,
+            "title": title_text,
+            "snippet": snippet,
+        }
+        if pub_text:
+            result["pubDate"] = pub_text
+        results.append(result)
+        if len(results) >= SEARCH_MAX_RESULTS:
+            break
+    debug = {
+        "status_code": response.status_code,
+        "response_bytes": len(body),
+        "response_sha256": hashlib.sha256(body).hexdigest(),
+        "redirect_chain": response.redirect_chain,
+        "connect_log": response.connect_log,
+        "final_url": response.final_url,
+        "request_url": url,
+        "endpoint": SEARCH_DEFAULT_ENDPOINT_BING_RSS,
+        "provider": "bing-rss",
     }
     return results, debug
 
@@ -1217,17 +1386,18 @@ def _search_ddg_lite(query: str) -> tuple[list[dict[str, str]], dict[str, Any]]:
     bypass the canonical ``_browse()`` SSRF primitive. The third
     mid-run repair removes this backend entirely.
 
-    This function is preserved as a hard refusal so any caller
+    This function is preserved as a hard refusal so any stale caller
     (including stale tests or a future operator regression that
     re-enables the dispatcher branch) gets a fail-closed response
     instead of silently using a non-canonical transport.
     """
     raise InvalidRequest(
-        "search backend 'ddg-lite' is removed; the only commissioned "
-        "search backend is 'wikipedia' (GET-only, via _browse()). "
-        "Any new backend must route its outbound transport through "
-        "_browse(); POST-only / connection-pool / non-_browse() "
-        "transports are not part of the public-network authority."
+        "search backend 'ddg-lite' is removed; the commissioned "
+        "search backends are 'bing-rss' (default; general public-web "
+        "discovery) and 'wikipedia' (narrow encyclopedia). Both "
+        "GET-only, both routed through _browse(); POST-only or "
+        "non-_browse() transports are not part of the public-network "
+        "authority."
     )
 
 
@@ -1235,32 +1405,36 @@ def _op_search(args: argparse.Namespace) -> dict[str, Any]:
     """op=search: query a public search backend, return top results.
 
     Provider-neutral: the worker contract is ``--op search --query <q>``.
-    The broker chooses the backend (``wikipedia`` or ``ddg-lite``);
+    The broker chooses the backend (``bing-rss`` or ``wikipedia``);
     the backend identity is recorded in the receipt so audit can
     attribute the outbound disclosure to a known operator-chosen
-    provider. Wikipedia remains the default for stability / no
-    credentials; ddg-lite is an additional unauthenticated general-
-    public-web discovery backend.
+    provider. ``bing-rss`` is the commissioned general public-web
+    discovery backend (default); ``wikipedia`` is the narrow
+    encyclopedia alternate. The historical ``ddg-lite`` backend
+    was REMOVED in the third mid-run bridge repair because its
+    POST transport bypassed ``_browse()``.
+
+    SINGLE op_id owner: this handler mints exactly one ``op_id``
+    and threads it through (1) the durable receipt JSON, (2) the
+    receipt filename stem, (3) the worker-visible response. All
+    three bear the same value.
     """
     query = _sanitize_query(args.query or "")
     evidence_dir = Path(args.evidence_dir).expanduser()
     backend = str(args.search_backend or SEARCH_DEFAULT_BACKEND)
     # Backend selection. The broker is the ONLY authority that picks a
     # search provider; the worker contract is ``--op search --query <q>``.
-    # Wikipedia is the only currently-commissioned backend, and it
-    # MUST route through ``_browse()`` (which it does).
-    if backend == "wikipedia":
+    # Every commissioned backend MUST route through ``_browse()``.
+    if backend == "bing-rss":
+        results, debug = _search_bing_rss(query)
+        search_backend_label = "bing-rss"
+    elif backend == "wikipedia":
         results, debug = _search_wikipedia(query)
         search_backend_label = "wikipedia-rest-query"
-    elif backend == "ddg-lite":
-        # Hard refusal. ddg-lite was removed in the third mid-run
-        # repair because its POST transport bypassed _browse().
-        results, debug = _search_ddg_lite(query)  # raises InvalidRequest
-        search_backend_label = "ddg-lite-refused"  # unreachable
     else:  # pragma: no cover -- argparse choices pre-validate
         raise InvalidRequest(f"unknown search backend: {backend!r}")
     op_id = _op_id()
-    payload = _receipt_base(args, "search")
+    payload = _receipt_base(args, "search", op_id)
     payload.update({
         "finished_at": _now_iso(),
         "query": query,
@@ -1277,7 +1451,7 @@ def _op_search(args: argparse.Namespace) -> dict[str, Any]:
         "results_count": len(results),
         "evidence_received_at": _now_iso(),
     })
-    receipt_path = _publish_evidence(evidence_dir, payload)
+    receipt_path = _publish_evidence(evidence_dir, payload, op_id)
     return {
         "schema": BROKER_OPERATION_SCHEMA,
         "ok": True,
@@ -1299,6 +1473,12 @@ def _op_search(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def _op_read(args: argparse.Namespace) -> dict[str, Any]:
+    """op=read: fetch a public URL, strip HTML, retain text evidence.
+
+    SINGLE op_id owner: mints exactly one ``op_id`` and threads it
+    through (1) durable receipt JSON, (2) receipt filename stem,
+    (3) worker-visible response. All three bear the same value.
+    """
     """op=read: fetch a public URL, strip HTML, retain text evidence."""
     url = args.url
     max_bytes = int(args.max_bytes) if args.max_bytes else READ_DEFAULT_MAX_BYTES
@@ -1322,7 +1502,7 @@ def _op_read(args: argparse.Namespace) -> dict[str, Any]:
         title = ""
     text_sha = hashlib.sha256(text.encode("utf-8")).hexdigest()
     op_id = _op_id()
-    payload = _receipt_base(args, "read")
+    payload = _receipt_base(args, "read", op_id)
     payload.update({
         "finished_at": _now_iso(),
         "url_original": url,
@@ -1340,7 +1520,7 @@ def _op_read(args: argparse.Namespace) -> dict[str, Any]:
         "extracted_truncated": len(text) > READ_TEXT_PREVIEW_BYTES,
         "max_bytes": max_bytes,
     })
-    receipt_path = _publish_evidence(evidence_dir, payload)
+    receipt_path = _publish_evidence(evidence_dir, payload, op_id)
     return {
         "schema": BROKER_OPERATION_SCHEMA,
         "ok": True,
@@ -1364,10 +1544,21 @@ def _op_read(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def _op_asset_read(args: argparse.Namespace) -> dict[str, Any]:
-    """op=asset-read: fetch a public asset, retain content-addressed bytes."""
+    """op=asset-read: fetch a public asset, retain content-addressed bytes.
+
+    SINGLE op_id owner: this handler mints exactly one ``op_id``
+    which is used as (1) the artifact-provenance identifier, (2)
+    the durable receipt JSON ``op_id``, (3) the receipt filename
+    stem, (4) the worker-visible response ``op_id``. The historical
+    separate call to ``_op_id()`` for the artifact path is removed
+    so the operation identity is consistent across all five
+    artifacts (request→receipt→artifact-path→response).
+    """
     url = args.url
     max_bytes = int(args.max_bytes) if args.max_bytes else ASSET_DEFAULT_MAX_BYTES
     evidence_dir = Path(args.evidence_dir).expanduser()
+    # SINGLE canonical op_id first so every downstream use cites it.
+    op_id = _op_id()
     response = _browse(url, max_bytes=max_bytes,
                        accept="*/*")
     if response.status_code != 200:
@@ -1382,13 +1573,12 @@ def _op_asset_read(args: argparse.Namespace) -> dict[str, Any]:
     digest = hashlib.sha256(response.body).hexdigest()
     safe_ext = _safe_ext_for_mime(content_type)
     artifact_path = _publish_artifact(
-        evidence_dir, _op_id(), digest, safe_ext, response.body
+        evidence_dir, op_id, digest, safe_ext, response.body
     )
     # Determine legitimacy signals visible at the response (none for
     # asset-only endpoints; the receipt records this explicitly so the
     # worker can decide to inspect the upstream page if it cares).
-    op_id = _op_id()
-    payload = _receipt_base(args, "asset-read")
+    payload = _receipt_base(args, "asset-read", op_id)
     payload.update({
         "finished_at": _now_iso(),
         "url_original": url,
@@ -1407,7 +1597,7 @@ def _op_asset_read(args: argparse.Namespace) -> dict[str, Any]:
         },
         "usage_hints": [],
     })
-    receipt_path = _publish_evidence(evidence_dir, payload)
+    receipt_path = _publish_evidence(evidence_dir, payload, op_id)
     return {
         "schema": BROKER_OPERATION_SCHEMA,
         "ok": True,

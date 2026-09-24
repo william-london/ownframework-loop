@@ -281,7 +281,9 @@ supervisor (launchd; user-level network authority; NOT Claude sandbox):
               (loopback / RFC1918 / link-local / multicast /
               cloud-metadata / carrier-grade-NAT / IPv6 private /
               credential-shaped)
-            - op ∈ {search, read, asset-read}; search is wikipedia-only
+            - op ∈ {search, read, asset-read}; search is bing-rss (general)
+              or wikipedia (narrow); both GET-only and routed through
+              the canonical _browse() SSRF primitive
             - canonical request digest is supervisor-computed;
               worker-supplied digest is verified but never trusted
             - trailing-window accepted-launch rate-limit not
@@ -315,9 +317,12 @@ supervisor (launchd; user-level network authority; NOT Claude sandbox):
            polling that directory read-only, verifies the response
            schema/request identity and emits the response on stdout.
 
-Search posture:
-    SEARCH_DISCOVERY_BACKEND=wikipedia
-    GENERAL_WEB_DISCOVERY=DEFERRED
+Search posture (current, authoritative):
+    SEARCH_DISCOVERY_BACKEND=bing-rss   (general public-web discovery,
+                                        GET-only, _browse() only)
+    NARROW_SEARCH_BACKEND=wikipedia    (encyclopedia alternate)
+    GENERAL_WEB_DISCOVERY=SUPPORTED    (both backends commissioned;
+                                        ddg-lite remains removed)
     (search orphan claims deliberately refuse auto-retry;
      read / asset-read orphan claims are recoverable)
 ```

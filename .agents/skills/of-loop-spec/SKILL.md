@@ -217,6 +217,38 @@ Before a v3 PROGRAM is considered ready:
   it, no wall-clock ceiling applies and the run is bounded only by its
   semantic pass/repair/no-progress protections.
 
+### Capabilities across the whole PROGRAM lifetime
+
+When inferring or declaring capabilities, reason across the complete
+mission lifecycle — every checkpoint **and** the final `PROGRAM_FINAL`
+whole-product review — because the capability binding cannot be
+silently widened after the first execution seal.
+
+Specific inference doctrine for the commissioned research surface:
+
+- **`research.public`** (governed via `ofloop-research-call` →
+  supervisor admission → commissioned broker; `bing-rss` is the
+  default general public-web discovery backend; `wikipedia` is the
+  narrow alternate) is inferred when the mission materially requires
+  current public facts unavailable from local repository evidence:
+  vendor / API / framework documentation, a company or product's
+  current public presence, external references or examples, public
+  source material needed to verify a claim, legitimate public
+  product assets, or any public URL not knowable at packet-authoring
+  time. The final whole-product review also needs it when the
+  assembled product must be checked against current public truth.
+  Do **not** infer it merely because internet access might be nice,
+  for purely repository-local implementation, for deterministic
+  local validation, for package installation already covered by
+  package capabilities, or for work whose complete evidence is
+  already local.
+- **`browser.playwright.chromium`** is inferred when the actual
+  rendered deliverable materially needs browser inspection (NOT
+  because `research.public` exists).
+- **`local.http-service`** is inferred when the reviewer materially
+  needs to exercise a running local web service (NOT because
+  `research.public` exists).
+
 A packet that can only discover an impossible deterministic ceiling after a
 model has already done work is a spec defect and must not be startable.
 
