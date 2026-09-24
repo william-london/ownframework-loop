@@ -1,12 +1,23 @@
 #!/usr/bin/env python3
 """OwnFramework Loop governed public research broker.
 
-A small, host-commissioned, stdlib-only executable that OwnFramework Loop's
-semantic workers invoke through their existing Bash sandbox in order to
-perform bounded public read operations (search, page read, asset read). The
-broker is the ONLY thing in the run that talks to the public internet for
-research purposes — the worker's Claude sandbox does not get any
-``allowedDomains`` widening, and its --tools list does not gain
+A small, host-commissioned, stdlib-only executable that performs bounded
+public read operations (search, page read, asset read) for OwnFramework
+Loop runs. The broker does NOT talk to a worker directly; the live
+authority chain is:
+
+    semantic worker
+        → ofloop-research-call (governed helper, no network authority)
+        → supervisor research admission (live-attempt authority,
+            in-flight ownership, rate-limit budget, launch-id, durable
+            launch record)
+        → commissioned broker (THIS binary, launched through the bounded
+            supervisor process runner — never raw ``subprocess.run`` and
+            never invoked by the worker directly)
+
+The broker is the ONLY thing in the run that talks to the public internet
+for research purposes — the worker's Claude sandbox does NOT get any
+``allowedDomains`` widening, and its --tools list does NOT gain
 ``WebSearch``/``WebFetch``.
 
 Design constraints (full ADR: docs/architecture/RESEARCH_AUTHORITY.md):
