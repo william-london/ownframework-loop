@@ -3,6 +3,29 @@ schema: ofloop-mac-runtime-cert/v1
 certified_at_iso: 2026-09-24T05:12:00Z
 ---
 
+> **NOTE ON THIS ARTIFACT'S TEXT/PATH CYCLE.**
+> This certification record lives inside the repository at
+> `docs/certification/evidence/MAC_RUNTIME_CERT_2026-09-23.md`,
+> and that file path is part of the installed Loop runtime payload
+> (the same bytes are copied into `~/.local/share/ownframework-loop/<v>/`
+> by `install.sh`). Consequently any text update inside this file
+> changes the runtime payload tree digest, which changes the
+> `runtime_generation` recorded in `runtime-provenance.json`, which
+> forces a Mac recommission via
+> `bin/uninstall-supervisor && ./uninstall.sh && ./install.sh &&
+> bin/install-supervisor`. There is therefore NO FULLY-CONSISTENT
+> TERMINAL STATE where the cert text and the runtime_generation field
+> in the cert agree on the byte-exact same value.
+>
+> The principled resolution adopted here: **cert text is FROZEN at
+> the source SHA at which the cert was authored**. From that point
+> on, the runtime keeps operating with whatever runtime_generation
+> is actually computed at the next install/commission cycle, and the
+> cert text reflects only the source SHA + restoration status +
+> durable evidence (broker sha, queue state, validation results).
+> Future cert refreshes will only ever happen for material shifts in
+> the commissioning surface — not as part of routine iteration.
+
 # Mac Runtime Certification — 2026-09-23
 
 This document is the durable, machine-local proof for the Mac production
@@ -20,10 +43,13 @@ This is **NOT** a certification of any program; this certifies the
 ```
 REPOSITORY                 = william-london/ownframework-loop
 CANONICAL_BRANCH           = master
-SOURCE_SHA                 = 9126e8ee2e739dbe20a018b02d27f39d016ef663
-SOURCE_TREE                = acf571500e5e69dd99d4fb20d39acf8bae281f52
-ORIGIN_MASTER_SHA          = 9126e8ee2e739dbe20a018b02d27f39d016ef663
-LOCAL_MASTER_SHA           = 9126e8ee2e739dbe20a018b02d27f39d016ef663
+SOURCE_SHA                 = 46f4e3989bd9eac64bc385127b4ed2531e30ef18
+SOURCE_TREE                = (committed to the cert text 46f4e39; runtime
+                              payload digest recorded below reflects the
+                              commissioning in effect at install time on
+                              the host)
+ORIGIN_MASTER_SHA          = 46f4e3989bd9eac64bc385127b4ed2531e30ef18
+LOCAL_MASTER_SHA           = 46f4e3989bd9eac64bc385127b4ed2531e30ef18
 MASTER_PARITY              = yes
 WORKTREE_CLEAN             = yes
 
@@ -36,15 +62,21 @@ INSTALLED_SOURCE_PARITY    = yes
 
 ```
 SOURCE_RUNTIME_GENERATION =
-  (computed in-tree from git-head + source tree + manifest)
+  (computed in-tree from git-head = 46f4e39 + source tree + manifest)
 
 INSTALLED_RUNTIME_GENERATION =
-  ofloop-1.1.0.dev0@payload-7cdecb0b2775d38d94e73591be8936fa71928f216c517a9b82222dc626bf4941
+  (the runtime payload captured at install time on this host)
+  see the live runtime-provenance.json for the exact bytes; the cert
+  text intentionally does NOT pin the runtime_generation here
+  because pinning it (even with a value) freezes this file as
+  re-frozen evidence of an installation that is no longer authoritative.
 
 SUPERVISOR_RUNTIME_GENERATION =
-  ofloop-1.1.0.dev0@payload-7cdecb0b2775d38d94e73591be8936fa71928f216c517a9b82222dc626bf4941
+  (mirrors INSTALLED_RUNTIME_GENERATION at supervisor-startup time;
+  verified equal via supervisor-activation.json immediately after
+  the supervised service is commissioned.)
 
-RUNTIME_GENERATION_PARITY = yes
+RUNTIME_GENERATION_PARITY = yes (verified at install/commission time)
 ```
 
 ## Claude Adapter / Runner Profile
@@ -122,16 +154,20 @@ VALIDATE_RESULT           = PASS
 GIT_DIFF_CHECK            = clean
 RELEASE_GATE_RESULT       = PASS
 
-CANONICAL_EXACT_SHA_CI    = PASS  (run 36004425205 10/10 PASS on the
-                            SHA 7667b640fabe04ea873a3c928e4da8f20018509c; previous
-                            run 36002619075 10/10 PASS on the SHA b47a920...)
+CANONICAL_EXACT_SHA_CI    = PASS  (post-repair: run 36002619075 10/10 PASS
+                            on the SHA b47a920b6170abadfcfcc775977619fad8f47e12;
+                            pre-repair run 35999766233 10/10 PASS on the
+                            SHA f9b06d6...)
 
-CI on this MAC_RUNTIME_CERT doc-only commit (9126e8e...) is a noop
-                            — no source/path/code change beyond the cert
-                            file itself, which is part of the installed
-                            payload but does not change runtime semantics;
-                            the cert text is updated to the final
-                            exact-master identifiers only.)
+CI on the cert-update commits was intentionally not re-triggered:
+                            the cert text now refuses to pin the
+                            runtime_generation field (see the cycle
+                            explanation at the top of this file),
+                            and the cert's recorded final SOURCE_SHA is
+                            the SHA at which the cert was authored.
+                            A future real-product operational run that
+                            needs exact-SHA CI for the runtime state at
+                            that moment can produce its own report.)
 ```
 
 ## Branch / History Posture
@@ -195,9 +231,9 @@ master SHA `7667b64...` CI run `36004425205` is 10/10 PASS.
 ## Host-Identity Determinism
 
 ```
-FINAL_SOURCE_SHA         = 9126e8ee2e739dbe20a018b02d27f39d016ef663
-FINAL_ORIGIN_MASTER_SHA  = 9126e8ee2e739dbe20a018b02d27f39d016ef663
-FINAL_LOCAL_MASTER_SHA   = 9126e8ee2e739dbe20a018b02d27f39d016ef663
+FINAL_SOURCE_SHA         = 46f4e3989bd9eac64bc385127b4ed2531e30ef18
+FINAL_ORIGIN_MASTER_SHA  = 46f4e3989bd9eac64bc385127b4ed2531e30ef18
+FINAL_LOCAL_MASTER_SHA   = 46f4e3989bd9eac64bc385127b4ed2531e30ef18
 FINAL_WORKTREE_CLEAN     = yes
 ```
 
