@@ -198,8 +198,9 @@ ev3 = tmp / "ev3"
 (ev3 / run / "responses").mkdir(parents=True, mode=0o700)
 (ev3 / run / "launches").mkdir(parents=True, mode=0o700)
 
-# Stub out everything except the admission primitive so the rate
-# check sees the same canonical context.
+# Stub only external capability/broker effects. Keep the REAL
+# _admit_research_transport so this fixture proves the actual shared
+# rate gate rather than passing via an injected exception.
 sr._capability_resolution_has_research_public = lambda *a, **kw: True
 sr._broker_commissioning_identity = lambda: {"path": "/bin/true", "sha256": "0"*64}
 sr._run_broker_blocking = lambda *a, **kw: (
@@ -214,9 +215,6 @@ sr._run_broker_blocking = lambda *a, **kw: (
 
 # Drop env override; rate_limit=3 explicit.
 os.environ.pop("OFLOOP_RESEARCH_RATE_LIMIT_PER_MINUTE", None)
-def _stub_admit(*a, **kw):
-    raise NotImplementedError  # we are testing process_research_queue path
-sr._admit_research_transport = _stub_admit
 
 # Submit 3 transport-launch identities under rate=3 (env unset).
 import uuid as _u
@@ -269,8 +267,10 @@ print("PASS NORMAL_RECOVERY_RATE_CONTEXT_PARITY: recovery observed same rate as 
 del os.environ["OFLOOP_RESEARCH_RATE_LIMIT_PER_MINUTE"]
 # drop existing launches
 for l in (ev3 / run / "launches").glob("launch-*.json"): l.unlink()
-(ev3 / run / "launches" / "launch-x.json").write_text(
-    json.dumps({"request_id": "rX", "submitted_at": time.time()}) + "\n"
+explicit_launch_id = _u.uuid4().hex
+(ev3 / run / "launches" / f"launch-{explicit_launch_id}.json").write_text(
+    json.dumps({"request_id": "rX", "launch_id": explicit_launch_id,
+                "submitted_at": time.time()}) + "\n"
 )
 os.environ["OFLOOP_RESEARCH_RATE_LIMIT_PER_MINUTE"] = "3"
 result3 = sr.process_research_queue(
