@@ -377,34 +377,97 @@ PYEOF
 assert_in "$F_OUT" '"fixed_id_overlap": []' "TEST F: deterministic fills do NOT carry fixed-identity fields"
 assert_in "$F_OUT" '"fillable_payload_keys":' "TEST F: deterministic fill payload is enumerable"
 
-# TEST G - accountancy invariants: completion does not create new provider calls.
-# Use the state root resolved via XDG_STATE_HOME or HOME so the test is
-# portable across operator machines (checkout_portability invariant).
+# TEST G - accountancy invariants: deterministic completion must not create
+# provider attempts. Keep this hermetic: point the canonical state root at a
+# private temp ledger, seed one semantic-attempt row, perform deterministic
+# completion, and prove the ledger count is byte-for-byte unchanged.
 G_OUT="$(python3 <<'PYEOF'
-import os, sqlite3, pathlib
-state_root = pathlib.Path(
-    os.environ.get("XDG_STATE_HOME")
-    or os.environ.get("OFLOOP_STATE_HOME")
-    or pathlib.Path.home() / ".local/state"
-)
+import json, os, pathlib, sqlite3, subprocess, tempfile
+from unittest.mock import patch
+from ownframework_loop import build_agent
+
+state_root = pathlib.Path(tempfile.mkdtemp(prefix="ofloop-h-g-state-"))
+os.environ["XDG_STATE_HOME"] = str(state_root)
+os.environ["OFLOOP_STATE_HOME"] = str(state_root)
 db_path = state_root / "ownframework-loop" / "supervisor.sqlite3"
-if not db_path.is_file():
-  print("row_count 0 (no ledger on this host)")
-else:
-  con = sqlite3.connect(str(db_path))
-  try:
-    rows = con.execute(
-      "SELECT COUNT(*) FROM semantic_attempts sa "
-      "JOIN jobs j ON sa.job_id = j.id "
-      "WHERE j.run_id = ?",
-      ("run-20260914T155437Z-0006dd58",),
-    ).fetchone()
-    print("row_count", rows[0])
-  except Exception as e:
-    print("err", str(e))
+db_path.parent.mkdir(parents=True, exist_ok=True)
+con = sqlite3.connect(str(db_path))
+con.execute("CREATE TABLE semantic_attempts (id INTEGER PRIMARY KEY, attempt_id TEXT NOT NULL)")
+con.execute("INSERT INTO semantic_attempts(id, attempt_id) VALUES (?, ?)", (1, "sentinel-attempt"))
+con.commit()
+before = con.execute("SELECT COUNT(*) FROM semantic_attempts").fetchone()[0]
+con.close()
+
+root = pathlib.Path(tempfile.mkdtemp(prefix="ofloop-h-g-repo-"))
+subprocess.run(["git", "init", "-b", "master"], cwd=str(root), capture_output=True, check=True)
+subprocess.run(["git", "config", "user.email", "t@t"], cwd=str(root), capture_output=True, check=True)
+subprocess.run(["git", "config", "user.name", "t"], cwd=str(root), capture_output=True, check=True)
+(root / "a.txt").write_text("hello\n")
+subprocess.run(["git", "add", "a.txt"], cwd=str(root), capture_output=True, check=True)
+subprocess.run(["git", "commit", "-m", "init"], cwd=str(root), capture_output=True, check=True)
+baseline = subprocess.run(
+    ["git", "rev-parse", "HEAD"], cwd=str(root), capture_output=True, text=True, check=True
+).stdout.strip()
+(root / "b.txt").write_text("world\n")
+subprocess.run(["git", "add", "b.txt"], cwd=str(root), capture_output=True, check=True)
+subprocess.run(["git", "commit", "-m", "feature"], cwd=str(root), capture_output=True, check=True)
+head = subprocess.run(
+    ["git", "rev-parse", "HEAD"], cwd=str(root), capture_output=True, text=True, check=True
+).stdout.strip()
+art_path = root / "BUILD_AGENT_RESULT.json"
+skel = {
+  "schema": build_agent.SCHEMA_AGENT_RESULT,
+  "run_id": "run-x",
+  "work_unit_id": "UNIT-1",
+  "candidate_branch": "master",
+  "baseline_sha": baseline,
+  "packet_sha256": "y" * 64,
+  "approval_sha256": "z" * 64,
+  "summary": "",
+  "blocker_reason": None,
+  "escalation_recommended": False,
+  "escalation_reason": None,
+  "unit_ids_completed": [],
+  "acceptance_addressed": [],
+  "notes": "",
+  "builder_identity": "of-builder",
+  "candidate_sha_claimed": "",
+  "files_changed": [],
+  "added_lines": 0,
+  "removed_lines": 0,
+  "evidence": {
+    "validate_sh_exit": 0,
+    "validate_sh_marker_found": False,
+    "pytest_offline_exit": 0,
+    "pytest_offline_summary": "",
+    "files_changed": [],
+    "diff_lines_total": 0,
+    "diff_lines_protected_path_violations": [],
+    "protected_paths_touched": [],
+  },
+  "timestamp": "2026-09-16T20:00:00Z",
+  "outcome_requested": "candidate_ready",
+}
+art_path.write_text(json.dumps(skel))
+with patch.object(build_agent, "agent_result_path", return_value=art_path):
+    completed = build_agent.semantically_complete_artifact(
+        canonical_repo=root, run_id="run-x", worktree=root,
+        baseline_sha=baseline, current_sha=head, role="builder",
+        cp_id="CP-A", packet=None)
+
+con = sqlite3.connect(str(db_path))
+after = con.execute("SELECT COUNT(*) FROM semantic_attempts").fetchone()[0]
+con.close()
+print(json.dumps({
+    "completion_succeeded": completed is not None,
+    "attempt_count_before": before,
+    "attempt_count_after": after,
+    "attempt_count_unchanged": before == after == 1,
+}, sort_keys=True))
 PYEOF
 )"
-assert_in "$G_OUT" "row_count" "TEST G: attempt count observed (structural check)"
+assert_in "$G_OUT" '"completion_succeeded": true' "TEST G: deterministic completion succeeds without provider work"
+assert_in "$G_OUT" '"attempt_count_unchanged": true' "TEST G: deterministic completion creates zero provider attempts"
 
 # TEST H - adapter neutrality.
 H_OUT="$(python3 <<'PYEOF'
