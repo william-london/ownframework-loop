@@ -662,6 +662,588 @@ def save(canonical_repo: Path, run_id: str, payload: dict[str, Any]) -> None:
         pass
 
 
+def initialize_program_rollover(
+    canonical_repo: Path,
+    run_id: str,
+    *,
+    program_block: dict[str, Any],
+    build_pass_count: int,
+    review_pass_count: int,
+    repair_round: int,
+    no_progress_streak: int,
+    candidate_sha: str,
+    baseline_sha: str,
+    baseline_branch: str,
+    candidate_branch: str,
+    parent_run_id: str,
+    rollover_authority_sha256: str,
+) -> dict[str, Any]:
+    """Import frozen PROGRAM progress into a newly-created rollover child.
+
+    This is a creation-only typed owner. It may only extend a pristine
+    AWAITING_APPROVAL state created by ``spec new``; it cannot alter an
+    existing or terminal run. The source-run authority and copied packet are
+    verified by the rollover owner before this call, while this function
+    enforces the state/counter/graph invariants under the child's state lock.
+    """
+    validate_run_id(run_id)
+    validate_run_id(parent_run_id)
+    if not isinstance(program_block, dict) or not program_block:
+        raise ValueError("rollover PROGRAM block must be a non-empty object")
+    if not re.fullmatch(r"[0-9a-f]{40}", str(candidate_sha or "")):
+        raise ValueError("rollover candidate SHA must be a full Git SHA")
+    if not re.fullmatch(r"[0-9a-f]{64}", str(rollover_authority_sha256 or "")):
+        raise ValueError("rollover authority digest must be SHA-256")
+    counters = {
+        "build_pass_count": _owner_int("build_pass_count", build_pass_count),
+        "review_pass_count": _owner_int("review_pass_count", review_pass_count),
+        "repair_round_count": _owner_int("repair_round", repair_round),
+        "files_changed_unique": _owner_int(
+            "files_changed_unique", int((program_block.get("cumulative_counters") or {}).get("files_changed_unique", -1))
+        ),
+        "diff_lines_total": _owner_int(
+            "diff_lines_total", int((program_block.get("cumulative_counters") or {}).get("diff_lines_total", -1))
+        ),
+    }
+    copied = json.loads(integrity.canonical_json_dumps(program_block))
+    from . import packet as packet_mod, program as program_mod, schema_validate, util as util_mod
+
+    run_root = run_dir(canonical_repo, run_id)
+    packet_path = run_root / "WORK_PACKET.md"
+    authority_path = run_root / "ROLLOVER_AUTHORITY.json"
+    if not packet_path.is_file() or not authority_path.is_file():
+        raise RuntimeError("rollover packet/authority must exist before state import")
+    if integrity.sha256_file(authority_path) != rollover_authority_sha256:
+        raise RuntimeError("rollover authority digest does not match its durable file")
+    authority_doc = util_mod.read_private_json(authority_path, default=None)
+    if (
+        not isinstance(authority_doc, dict)
+        or authority_doc.get("schema") != "ownframework-loop-program-rollover-authority/v1"
+        or authority_doc.get("child_run_id") != run_id
+        or authority_doc.get("parent_run_id") != parent_run_id
+        or authority_doc.get("candidate_sha") != candidate_sha
+        or authority_doc.get("child_packet_sha256") != integrity.sha256_file(packet_path)
+        or authority_doc.get("child_baseline_sha") != baseline_sha
+        or authority_doc.get("child_baseline_branch") != baseline_branch
+        or authority_doc.get("child_candidate_branch") != candidate_branch
+    ):
+        raise RuntimeError("rollover authority does not bind the child state import")
+    packet_meta, _ = packet_mod.parse_packet_file(packet_path)
+    packet_errors = packet_mod.validate_packet_for_approval(packet_meta)
+    if packet_errors:
+        raise RuntimeError("rollover child packet is invalid: " + "; ".join(packet_errors))
+    graph_ok, graph_reason = program_mod.verify_frozen_graph(packet_meta, copied)
+    if not graph_ok:
+        raise RuntimeError(f"rollover PROGRAM graph does not match copied packet: {graph_reason}")
+    if packet_mod.packet_is_program(packet_meta) is not True:
+        raise RuntimeError("rollover child packet is not PROGRAM mode")
+    prog_counters = copied.get("cumulative_counters") or {}
+    expected_mirrors = {
+        "build_pass_count": counters["build_pass_count"],
+        "review_pass_count": counters["review_pass_count"],
+        "repair_round_count": counters["repair_round_count"],
+    }
+    if any(int(prog_counters.get(key, -1)) != value for key, value in expected_mirrors.items()):
+        raise ValueError("rollover counters do not match copied PROGRAM cumulative counters")
+    if copied.get("blocked") is True:
+        raise ValueError("rollover refuses a terminal/blocked PROGRAM graph")
+    current_checkpoints = copied.get("current_checkpoints") or []
+    if len(current_checkpoints) != 1:
+        raise ValueError("rollover requires exactly one current checkpoint")
+    finalized_rows = copied.get("finalized_checkpoints") or []
+    finalized_ids = [str(row.get("id") or "") for row in finalized_rows if isinstance(row, dict)]
+    if (
+        len(finalized_ids) != len(finalized_rows)
+        or len(finalized_ids) != len(set(finalized_ids))
+        or any(row.get("terminal_state") != "APPROVED" for row in finalized_rows)
+    ):
+        raise ValueError("rollover finalized-checkpoint evidence is contradictory")
+    checkpoints_by_id = {
+        str(cp.get("id")): cp for cp in copied.get("checkpoints", []) if isinstance(cp, dict)
+    }
+    if any(checkpoints_by_id.get(cp_id, {}).get("terminal") != "APPROVED" for cp_id in finalized_ids):
+        raise ValueError("rollover finalized list does not match checkpoint terminal states")
+    if any(
+        cp.get("terminal") == "APPROVED" and str(cp.get("id")) not in set(finalized_ids)
+        for cp in checkpoints_by_id.values()
+    ):
+        raise ValueError("rollover checkpoint approval lacks finalized evidence")
+    expected_current = program_mod.advance_to_next(copied, packet_meta).get("current_checkpoints") or []
+    if current_checkpoints != expected_current:
+        raise ValueError("rollover current checkpoint is not the next eligible frozen checkpoint")
+    provenance = copied.get("rollover_provenance") or {}
+    if (
+        provenance.get("schema") != "ownframework-loop-program-rollover/v1"
+        or provenance.get("parent_run_id") != parent_run_id
+        or provenance.get("rollover_authority_sha256") != rollover_authority_sha256
+        or provenance.get("candidate_sha") != candidate_sha
+        or provenance.get("imported_counters") != counters
+    ):
+        raise ValueError("copied PROGRAM rollover provenance is inconsistent")
+    source_provenance = copied.get("source_sha_provenance") or {}
+    if (
+        source_provenance.get("baseline_sha") != baseline_sha
+        or source_provenance.get("candidate_branch") != candidate_branch
+    ):
+        raise ValueError("rollover PROGRAM baseline/branch provenance is inconsistent")
+    cp_id = str(current_checkpoints[0])
+    cp_state = next(
+        (cp for cp in (copied.get("checkpoints") or []) if cp.get("id") == cp_id),
+        None,
+    )
+    cp_counters = provenance.get("checkpoint_counters") or {}
+    if not isinstance(cp_state, dict) or any(
+        int(cp_state.get(key) or 0) != int(cp_counters.get(key, -1))
+        for key in ("build_pass_count", "review_pass_count", "repair_round_count")
+    ):
+        raise ValueError("rollover current-checkpoint counters are inconsistent")
+
+    sp = state_path(canonical_repo, run_id)
+    with flock_exclusive(lock_path(canonical_repo, run_id)):
+        _verify_mutation_integrity_locked(canonical_repo, run_id)
+        current = read_json(sp)
+        if not isinstance(current, dict) or current.get("run_id") != run_id:
+            raise FileNotFoundError(f"new rollover state missing for {run_id}")
+        if current.get("state") != "AWAITING_APPROVAL" or current.get("schema") != SCHEMA_VERSION:
+            raise RuntimeError("rollover import requires pristine AWAITING_APPROVAL state")
+        if any(int(current.get(key) or 0) != 0 for key in (
+            "build_pass_count", "review_pass_count", "repair_round"
+        )):
+            raise RuntimeError("rollover import refuses a child with already-used counters")
+        if "program" in current:
+            raise RuntimeError("rollover import refuses an already initialized child PROGRAM")
+        if (
+            current.get("spec_baseline_sha") != baseline_sha
+            or current.get("spec_baseline_branch") != baseline_branch
+        ):
+            raise RuntimeError("rollover child source snapshot does not match the frozen baseline")
+
+        new = dict(current)
+        new["schema"] = PROGRAM_STATE_SCHEMA_VERSION
+        new["program"] = copied
+        new["build_pass_count"] = counters["build_pass_count"]
+        new["review_pass_count"] = counters["review_pass_count"]
+        new["repair_round"] = counters["repair_round_count"]
+        new["no_progress_streak"] = _owner_int("no_progress_streak", no_progress_streak)
+        new["last_candidate_sha"] = candidate_sha
+        new["updated_at"] = utc_now_iso()
+        new["last_actor"] = "ofloop-program-rollover"
+        schema_errors = schema_validate.validate_state(new)
+        if schema_errors:
+            raise ValueError(
+                "rollover imported STATE schema invalid: " + "; ".join(schema_errors[:20])
+            )
+        _commit_state_event_locked(
+            canonical_repo,
+            run_id,
+            new,
+            event_type="program_rollover_materialized",
+            old_state="AWAITING_APPROVAL",
+            new_state="AWAITING_APPROVAL",
+            actor="ofloop-program-rollover",
+            commit_sha=candidate_sha,
+            reason="copied immutable PROGRAM counters for linked candidate rollover",
+            extras={
+                "parent_run_id": parent_run_id,
+                "candidate_sha": candidate_sha,
+                "rollover_authority_sha256": rollover_authority_sha256,
+                "imported_counters": counters,
+            },
+        )
+    try:
+        fsync_dir(sp.parent)
+    except OSError:
+        pass
+    return new
+
+
+def transition_program_rollover_to_review(
+    canonical_repo: Path,
+    run_id: str,
+    *,
+    candidate_sha: str,
+    rollover_authority_sha256: str,
+    preflight_sha256: str,
+    receipt_sha256: str,
+) -> dict[str, Any]:
+    """Move an approved, validated rollover candidate into ordinary REVIEW.
+
+    This is the only READY_TO_BUILD -> READY_FOR_REVIEW edge. It is not a
+    general FSM escape: the child must carry the typed rollover provenance,
+    unchanged imported counters, a schema-valid rollover-origin build receipt,
+    and exact digest bindings for the deterministic preflight and receipt.
+    """
+    validate_run_id(run_id)
+    for label, value in (
+        ("candidate", candidate_sha),
+        ("rollover authority", rollover_authority_sha256),
+        ("preflight", preflight_sha256),
+        ("build receipt", receipt_sha256),
+    ):
+        expected_len = 40 if label == "candidate" else 64
+        if not re.fullmatch(rf"[0-9a-f]{{{expected_len}}}", str(value or "")):
+            raise ValueError(f"invalid {label} digest")
+
+    from . import (
+        approval as approval_mod,
+        branch_resolver,
+        build_finalize as build_finalize_mod,
+        git_checks,
+        packet as packet_mod,
+        program as program_mod,
+        program_rollover as program_rollover_mod,
+        receipts as receipts_mod,
+        util as util_mod,
+        worktrees as worktrees_mod,
+    )
+
+    run_root = run_dir(canonical_repo, run_id)
+    authority_path = run_root / "ROLLOVER_AUTHORITY.json"
+    preflight_path = run_root / "ROLLOVER_PREFLIGHT.json"
+    receipt_path = receipts_mod.receipt_path(canonical_repo, run_id)
+    sp = state_path(canonical_repo, run_id)
+    with flock_exclusive(lock_path(canonical_repo, run_id)):
+        _verify_mutation_integrity_locked(canonical_repo, run_id)
+        current = read_json(sp)
+        if not isinstance(current, dict) or current.get("state") != "READY_TO_BUILD":
+            raise RuntimeError("rollover review admission requires READY_TO_BUILD")
+        program = current.get("program")
+        rollover = (program or {}).get("rollover_provenance") if isinstance(program, dict) else None
+        if not isinstance(rollover, dict):
+            raise RuntimeError("rollover PROGRAM provenance is missing")
+        if (
+            rollover.get("candidate_sha") != candidate_sha
+            or rollover.get("rollover_authority_sha256") != rollover_authority_sha256
+        ):
+            raise RuntimeError("rollover candidate/preflight identity mismatch")
+        counters = rollover.get("imported_counters") or {}
+        if (
+            int(current.get("build_pass_count") or 0) != int(counters.get("build_pass_count", -1))
+            or int(current.get("review_pass_count") or 0) != int(counters.get("review_pass_count", -1))
+            or int(current.get("repair_round") or 0) != int(counters.get("repair_round_count", -1))
+        ):
+            raise RuntimeError("rollover counters changed before review admission")
+        if not authority_path.is_file() or util_mod.sha256_file(authority_path) != rollover_authority_sha256:
+            raise RuntimeError("rollover authority file is absent or changed")
+        authority_doc = util_mod.read_private_json(authority_path, default=None)
+        if (
+            not isinstance(authority_doc, dict)
+            or authority_doc.get("schema") != "ownframework-loop-program-rollover-authority/v1"
+            or authority_doc.get("child_run_id") != run_id
+            or authority_doc.get("candidate_sha") != candidate_sha
+            or authority_doc.get("parent_run_id") != rollover.get("parent_run_id")
+        ):
+            raise RuntimeError("rollover authority identity is invalid")
+        program_rollover_mod._verify_parent_source_authority(
+            Path(canonical_repo).resolve(strict=False), authority_doc,
+        )
+        source = authority_doc.get("source") or {}
+        child_packet_path = run_root / "WORK_PACKET.md"
+        child_packet_sha = util_mod.sha256_file(child_packet_path) if child_packet_path.is_file() else ""
+        child_approval_path = run_root / "APPROVAL.json"
+        child_approval_doc = approval_mod.load_approval(canonical_repo, run_id)
+        child_approval_sha = (
+            approval_mod.approval_artifact_sha256(child_approval_doc)
+            if isinstance(child_approval_doc, dict) else ""
+        )
+        child_packet_meta, _ = packet_mod.parse_packet_file(child_packet_path)
+        child_approval_ok = bool(
+            isinstance(child_approval_doc, dict)
+            and child_approval_doc.get("run_id") == run_id
+            and child_approval_doc.get("canonical_repo") == str(Path(canonical_repo).resolve(strict=False))
+            and child_approval_doc.get("packet_sha256") == child_packet_sha
+            and child_approval_doc.get("canonical_repo")
+                == str(Path(str((child_packet_meta.get("target") or {}).get("repo") or "")).expanduser().resolve(strict=False))
+            and child_approval_doc.get("baseline_branch") == current.get("spec_baseline_branch")
+            and child_approval_doc.get("baseline_sha") == current.get("spec_baseline_sha")
+            and child_approval_doc.get("baseline_sha")
+                == git_checks.branch_head(canonical_repo, str(current.get("spec_baseline_branch") or ""))
+            and child_approval_doc.get("candidate_branch") == authority_doc.get("child_candidate_branch")
+            and child_approval_doc.get("confirmation_token")
+                == approval_mod.derive_confirmation_token(child_packet_sha)
+            and not approval_mod.validate_approval_shape(child_approval_doc)
+            and child_packet_sha == authority_doc.get("child_packet_sha256")
+            and child_approval_sha
+        )
+        if not child_approval_ok:
+            raise RuntimeError("rollover child approval is invalid or not bound to the frozen authority")
+        if (
+            authority_doc.get("child_baseline_sha") != current.get("spec_baseline_sha")
+            or authority_doc.get("child_baseline_branch") != current.get("spec_baseline_branch")
+            or authority_doc.get("child_candidate_branch") != child_approval_doc.get("candidate_branch")
+        ):
+            raise RuntimeError("rollover authority source/baseline/candidate branch mismatch")
+        expected_candidate_branch = branch_resolver.resolve_candidate_branch(
+            canonical_repo, run_id, packet=child_packet_meta, state_doc=current,
+        )
+        if child_approval_doc.get("candidate_branch") != expected_candidate_branch:
+            raise RuntimeError("rollover child approval candidate branch is not packet/run-derived")
+        if (
+            child_packet_meta.get("target", {}).get("branch")
+            != current.get("spec_baseline_branch")
+            or Path(str(child_packet_meta.get("target", {}).get("repo") or "")).expanduser().resolve(strict=False)
+            != Path(canonical_repo).resolve(strict=False)
+            or child_packet_meta.get("target", {}).get("expected_baseline_sha")
+            != current.get("spec_baseline_sha")
+        ):
+            raise RuntimeError("rollover child packet target does not match the frozen source authority")
+        parent_root = run_dir(canonical_repo, str(rollover.get("parent_run_id") or ""))
+        parent_events = parent_root / "EVENTS.log"
+        source_paths = {
+            "WORK_PACKET.md": parent_root / "WORK_PACKET.md",
+            "APPROVAL.json": parent_root / "APPROVAL.json",
+            "STATE.json": parent_root / "STATE.json",
+            "BUILD_RECEIPT.json": parent_root / "BUILD_RECEIPT.json",
+            "REVIEW_VERDICT.json": parent_root / "REVIEW_VERDICT.json",
+            "REVIEW_AGENT_ASSESSMENT.json": Path(str(source.get("review_assessment_path") or "")),
+        }
+        source_names = {
+            "WORK_PACKET.md": "packet_sha256",
+            "APPROVAL.json": "approval_sha256",
+            "STATE.json": "state_sha256",
+            "BUILD_RECEIPT.json": "build_receipt_sha256",
+            "REVIEW_VERDICT.json": "review_verdict_sha256",
+            "REVIEW_AGENT_ASSESSMENT.json": "review_assessment_sha256",
+        }
+        for artifact_name, artifact_path in source_paths.items():
+            expected_source_sha = str(source.get(source_names[artifact_name]) or "")
+            if (
+                not expected_source_sha
+                or not artifact_path.is_file()
+                or util_mod.sha256_file(artifact_path) != expected_source_sha
+            ):
+                raise RuntimeError(f"rollover parent source artifact changed: {artifact_name}")
+        if (
+            not parent_events.is_file()
+            or integrity.compute_event_chain_hash(parent_events) != source.get("event_chain_sha256")
+        ):
+            raise RuntimeError("rollover parent event chain changed")
+        if not preflight_path.is_file() or util_mod.sha256_file(preflight_path) != preflight_sha256:
+            raise RuntimeError("rollover preflight file is absent or changed")
+        preflight_doc = util_mod.read_private_json(preflight_path, default=None)
+        cp_id = str(rollover.get("checkpoint_id") or "")
+        cp_state = next(
+            (cp for cp in (program.get("checkpoints") or []) if cp.get("id") == cp_id),
+            None,
+        )
+        cp_counters = rollover.get("checkpoint_counters") or {}
+        if (
+            not isinstance(cp_state, dict)
+            or cp_state.get("terminal")
+            or (program.get("current_checkpoints") or []) != [cp_id]
+            or any(int(cp_state.get(key) or 0) != int(cp_counters.get(key, -1)) for key in (
+                "build_pass_count", "review_pass_count", "repair_round_count", "no_progress_streak"
+            ))
+        ):
+            raise RuntimeError("rollover checkpoint/counter authority changed before review admission")
+        checkpoint_meta = next(
+            (cp for cp in (child_packet_meta.get("checkpoint_graph") or {}).get("checkpoints", []) if cp.get("id") == cp_id),
+            None,
+        )
+        if not isinstance(checkpoint_meta, dict) or int(cp_state.get("build_pass_count") or 0) != int(
+            (checkpoint_meta.get("risk_budget") or {}).get("max_build_passes") or 0
+        ):
+            raise RuntimeError("rollover no longer has an exactly exhausted checkpoint BUILD cap")
+        candidate_wt = worktrees_mod.builder_worktree(Path(canonical_repo), run_id)
+        if (
+            not candidate_wt.is_dir()
+            or not worktrees_mod.is_registered_worktree(Path(canonical_repo), candidate_wt)
+            or git_checks.current_head(candidate_wt) != candidate_sha
+            or git_checks.current_branch(candidate_wt) != child_approval_doc.get("candidate_branch")
+            or git_checks.dirty_status(candidate_wt) != "clean"
+            or not git_checks.commit_exists(Path(canonical_repo), candidate_sha)
+            or not build_finalize_mod._ancestor_of(Path(canonical_repo), candidate_sha, str(current.get("spec_baseline_sha") or ""))
+            or not build_finalize_mod._candidate_branch_contains(Path(canonical_repo), str(child_approval_doc.get("candidate_branch") or ""), candidate_sha)
+        ):
+            raise RuntimeError("rollover candidate worktree or lineage changed before review admission")
+        source_stats = receipts_mod.compute_diff_stats(
+            candidate_wt,
+            str(current.get("spec_baseline_sha") or ""),
+            candidate_sha,
+        )
+        if not receipt_path.is_file() or util_mod.sha256_file(receipt_path) != receipt_sha256:
+            raise RuntimeError("rollover BUILD_RECEIPT is absent or changed")
+        receipt_doc = receipts_mod.load_receipt(canonical_repo, run_id)
+        if not isinstance(receipt_doc, dict):
+            raise RuntimeError("rollover BUILD_RECEIPT is invalid")
+        receipts_mod.validate_receipt_contract(receipt_doc)
+        source_check = receipt_doc.get("program_source_ceiling_check") or {}
+        cumulative = program.get("cumulative_counters") or {}
+        cumulative_ceilings = program.get("cumulative_ceilings") or {}
+        top_budget = child_packet_meta.get("risk_budget") or {}
+        effective_files = build_finalize_mod._strict_ceiling(
+            int(top_budget.get("max_files_changed") or 0),
+            int(cumulative_ceilings.get("max_unique_changed_files") or 0),
+        )
+        effective_lines = build_finalize_mod._strict_ceiling(
+            int(top_budget.get("max_diff_lines") or 0),
+            int(cumulative_ceilings.get("max_baseline_to_final_diff_lines") or 0),
+        )
+        if any((
+            source_check.get("result") != "pass",
+            source_check.get("accounting") != "absolute_baseline_to_candidate",
+            source_check.get("files_changed_unique") != int(source_stats["files_changed"]),
+            source_check.get("diff_lines_total") != int(source_stats["added_lines"] + source_stats["removed_lines"]),
+            source_check.get("effective_max_files_changed") != effective_files,
+            source_check.get("effective_max_diff_lines") != effective_lines,
+            int(cumulative.get("files_changed_unique") or 0) != int(source_stats["files_changed"]),
+            int(cumulative.get("diff_lines_total") or 0) != int(source_stats["added_lines"] + source_stats["removed_lines"]),
+            effective_files > 0 and int(source_stats["files_changed"]) > effective_files,
+            effective_lines > 0 and int(source_stats["added_lines"] + source_stats["removed_lines"]) > effective_lines,
+        )):
+            raise RuntimeError("rollover candidate does not pass exact PROGRAM source-ceiling proof")
+        identity_reproof = receipt_doc.get("candidate_identity_reproof") or {}
+        if any((
+            identity_reproof.get("result") != "pass",
+            identity_reproof.get("head_before_validation") != candidate_sha,
+            identity_reproof.get("head_after_validation") != candidate_sha,
+            identity_reproof.get("worktree_status_after_validation") != "clean",
+            identity_reproof.get("canonical_branch_ok_after_validation") is not True,
+        )):
+            raise RuntimeError("rollover candidate identity reproof is incomplete")
+        required_validation = program_mod.resolve_effective_required_validation(child_packet_meta, current)
+        if (
+            not isinstance(preflight_doc, dict)
+            or preflight_doc.get("schema") != "ownframework-loop-rollover-preflight/v1"
+            or preflight_doc.get("run_id") != run_id
+            or preflight_doc.get("parent_run_id") != rollover.get("parent_run_id")
+            or preflight_doc.get("rollover_authority_sha256") != rollover_authority_sha256
+            or preflight_doc.get("candidate_sha") != candidate_sha
+            or preflight_doc.get("packet_sha256") != util_mod.sha256_file(run_root / "WORK_PACKET.md")
+            or preflight_doc.get("result") != "PASS"
+            or preflight_doc.get("approval_sha256") != child_approval_sha
+            or preflight_doc.get("candidate_branch") != child_approval_doc.get("candidate_branch")
+            or preflight_doc.get("baseline_sha") != current.get("spec_baseline_sha")
+            or preflight_doc.get("checkpoint_id") != cp_id
+            or preflight_doc.get("build_pass_count_unchanged") != int(current.get("build_pass_count") or 0)
+            or preflight_doc.get("repair_round_unchanged") != int(current.get("repair_round") or 0)
+            or preflight_doc.get("candidate_identity_reproof") != "pass"
+            or not program_rollover_mod._validation_rows_match(
+                required_validation,
+                preflight_doc.get("validations"),
+                checkpoint_id=cp_id,
+                pass_number=int(current.get("build_pass_count") or 0),
+            )
+            or authority_doc.get("child_packet_sha256") != preflight_doc.get("packet_sha256")
+        ):
+            raise RuntimeError("rollover validation preflight identity/result is invalid")
+        origin = receipt_doc.get("candidate_origin") or {}
+        if (
+            origin.get("schema") != "ownframework-loop-candidate-origin/v1"
+            or origin.get("rollover_authority_sha256") != rollover_authority_sha256
+            or origin.get("parent_run_id") != rollover.get("parent_run_id")
+            or origin.get("child_run_id") != run_id
+            or origin.get("candidate_sha") != candidate_sha
+            or origin.get("preflight_sha256") != preflight_sha256
+            or origin.get("child_approval_sha256") != child_approval_sha
+            or origin.get("parent_packet_sha256") != source.get("packet_sha256")
+            or origin.get("parent_approval_sha256") != source.get("approval_sha256")
+            or origin.get("parent_state_sha256") != source.get("state_sha256")
+            or origin.get("parent_event_chain_sha256") != source.get("event_chain_sha256")
+            or origin.get("parent_build_receipt_sha256") != source.get("build_receipt_sha256")
+            or origin.get("parent_review_verdict_sha256") != source.get("review_verdict_sha256")
+            or origin.get("parent_review_assessment_sha256") != source.get("review_assessment_sha256")
+            or origin.get("parent_review_attempt_id") != source.get("review_attempt_id")
+            or origin.get("parent_candidate_sha") != source.get("parent_candidate_sha")
+            or origin.get("parent_candidate_branch") != source.get("parent_candidate_branch")
+            or origin.get("child_packet_sha256") != child_packet_sha
+            or origin.get("child_baseline_sha") != current.get("spec_baseline_sha")
+            or origin.get("child_candidate_branch") != child_approval_doc.get("candidate_branch")
+            or receipt_doc.get("candidate_sha") != candidate_sha
+            or receipt_doc.get("run_id") != run_id
+            or receipt_doc.get("packet_sha256") != preflight_doc.get("packet_sha256")
+            or receipt_doc.get("approval_sha256") != child_approval_sha
+            or receipt_doc.get("baseline_sha") != current.get("spec_baseline_sha")
+            or receipt_doc.get("candidate_branch") != child_approval_doc.get("candidate_branch")
+            or receipt_doc.get("builder_pass_number") != int(current.get("build_pass_count") or 0)
+            or receipt_doc.get("repair_round") != int(current.get("repair_round") or 0)
+            or receipt_doc.get("validation_status") != "PASS"
+            or receipt_doc.get("validation") != preflight_doc.get("validations")
+            or (receipt_doc.get("validation") and any(not v.get("passed") for v in receipt_doc["validation"]))
+            or (receipt_doc.get("scope_check") or {}).get("result") != "pass"
+            or (receipt_doc.get("protected_path_check") or {}).get("result") != "pass"
+            or (receipt_doc.get("secret_scan_check") or {}).get("result") != "pass"
+            or (receipt_doc.get("candidate_identity_reproof") or {}).get("result") != "pass"
+            or (receipt_doc.get("program_source_ceiling_check") or {}).get("result") != "pass"
+            or receipt_doc.get("next_state") != "READY_FOR_REVIEW"
+        ):
+            raise RuntimeError("rollover receipt does not authorize the exact review candidate")
+        if current.get("last_candidate_sha") != candidate_sha:
+            raise RuntimeError("rollover STATE candidate changed before review admission")
+        packet_path = run_root / "WORK_PACKET.md"
+        packet_meta, _ = packet_mod.parse_packet_file(packet_path)
+        if not packet_mod.packet_is_program(packet_meta):
+            raise RuntimeError("rollover packet is not PROGRAM mode")
+        cp_id = str(rollover.get("checkpoint_id") or "")
+        cp_state = next(
+            (cp for cp in (program.get("checkpoints") or []) if cp.get("id") == cp_id),
+            None,
+        )
+        if cp_state is None or cp_state.get("terminal"):
+            raise RuntimeError("rollover checkpoint is absent or already terminal")
+        cp_state["candidate_sha"] = candidate_sha
+        cp_state["build_receipt_sha256"] = receipt_sha256
+
+        now = utc_now_iso()
+        new = dict(current)
+        new_program = json.loads(integrity.canonical_json_dumps(program))
+        new_rollover = dict(new_program["rollover_provenance"])
+        new_rollover["preflight_sha256"] = preflight_sha256
+        new_rollover["review_admission_receipt_sha256"] = receipt_sha256
+        new_rollover["review_admitted_at"] = now
+        new_program["rollover_provenance"] = new_rollover
+        rollover_cp = next(
+            (cp for cp in new_program["checkpoints"] if cp.get("id") == cp_id),
+            None,
+        )
+        rollover_cp["candidate_sha"] = candidate_sha
+        rollover_cp["build_receipt_sha256"] = receipt_sha256
+        new["program"] = new_program
+        new["state"] = "READY_FOR_REVIEW"
+        new["transitions_count"] = int(current.get("transitions_count", 0)) + 1
+        new["updated_at"] = now
+        new["last_actor"] = "ofloop-program-rollover"
+        history = list(current.get("state_history") or [])
+        history.append({
+            "from": "READY_TO_BUILD",
+            "to": "READY_FOR_REVIEW",
+            "at": now,
+            "actor": "ofloop-program-rollover",
+            "reason": "current candidate preflight passed; inherited build budget remains unchanged",
+        })
+        new["state_history"] = history
+        from . import schema_validate
+        state_errors = schema_validate.validate_state(new)
+        if state_errors:
+            raise ValueError(
+                "rollover review-admission STATE schema invalid: "
+                + "; ".join(state_errors[:20])
+            )
+        _commit_state_event_locked(
+            canonical_repo,
+            run_id,
+            new,
+            event_type="program_rollover_review_admitted",
+            old_state="READY_TO_BUILD",
+            new_state="READY_FOR_REVIEW",
+            actor="ofloop-program-rollover",
+            commit_sha=candidate_sha,
+            reason="exact inherited candidate passed current deterministic validation and scope proof",
+            extras={
+                "rollover_authority_sha256": rollover_authority_sha256,
+                "preflight_sha256": preflight_sha256,
+                "rollover_receipt_sha256": receipt_sha256,
+                "build_pass_count_unchanged": int(current.get("build_pass_count") or 0),
+                "repair_round_unchanged": int(current.get("repair_round") or 0),
+            },
+        )
+    try:
+        fsync_dir(sp.parent)
+    except OSError:
+        pass
+    return new
+
+
 def atomic_patch(
     canonical_repo: Path,
     run_id: str,

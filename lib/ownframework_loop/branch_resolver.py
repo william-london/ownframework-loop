@@ -34,6 +34,7 @@ def resolve_candidate_branch(
     run_id: str,
     *,
     packet: dict[str, Any] | None = None,
+    state_doc: dict[str, Any] | None = None,
 ) -> str:
     """Resolve candidate branch without inventing a second source of truth.
 
@@ -44,6 +45,27 @@ def resolve_candidate_branch(
       4. legacy top-level provenance
       5. deterministic default
     """
+    # A linked rollover preserves the packet bytes exactly, including any
+    # parent-run branch prefix.  Its run-specific child branch is instead
+    # sealed by the parent-linked rollover authority and imported PROGRAM
+    # source provenance.  Honor that typed provenance before the immutable
+    # packet's parent-specific branch hint; ordinary runs retain the legacy
+    # precedence below.
+    state = state_doc
+    rollover_path = state_mod.run_dir(canonical_repo, run_id) / "ROLLOVER_AUTHORITY.json"
+    if rollover_path.is_file() and state is None:
+        state = state_mod.load_verified(canonical_repo, run_id)
+    if isinstance(state, dict):
+        program = state.get("program") or {}
+        rollover = program.get("rollover_provenance") or {}
+        source = program.get("source_sha_provenance") or {}
+        if (
+            rollover.get("schema") == "ownframework-loop-program-rollover/v1"
+            and isinstance(source.get("candidate_branch"), str)
+            and source.get("candidate_branch")
+        ):
+            return _validated(str(source["candidate_branch"]))
+
     if packet:
         target = packet.get("target") or {}
         prefix = target.get("candidate_branch_prefix")
@@ -54,7 +76,9 @@ def resolve_candidate_branch(
     if isinstance(approval_doc, dict) and approval_doc.get("candidate_branch"):
         return _validated(str(approval_doc["candidate_branch"]))
 
-    state = state_mod.load_verified(canonical_repo, run_id)
+    if state is None:
+        state = state_mod.load_verified(canonical_repo, run_id)
+
     if isinstance(state, dict):
         program = state.get("program") or {}
         if isinstance(program, dict):

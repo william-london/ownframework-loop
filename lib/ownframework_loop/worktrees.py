@@ -1,6 +1,7 @@
 """Worktree lifecycle — create builder/reviewer worktrees, cleanup, mutation detection."""
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any
 
@@ -39,7 +40,7 @@ from .util import (
     run_subprocess, short_sha, utc_now_iso, worktrees_dir,
 )
 from . import git_checks
-from .git_checks import branch_exists, current_branch, current_head, rev_parse, worktree_list
+from .git_checks import branch_exists, branch_head, current_branch, current_head, rev_parse, worktree_list
 
 
 class WorktreeError(RuntimeError):
@@ -227,6 +228,97 @@ def add_builder_worktree(
             "path": str(wt), "branch": branch, "head": head,
             "actual_branch": actual_branch, "existed": False,
         }
+
+
+def add_candidate_origin_worktree(
+    canonical_repo: Path,
+    run_id: str,
+    *,
+    branch: str,
+    candidate_sha: str,
+    rollover_authority_sha256: str,
+) -> dict[str, Any]:
+    """Create/reuse a child builder worktree pinned to a proven prior candidate.
+
+    Unlike a builder start, this creates no commit and grants no BUILD pass.
+    The ownership marker is written before Git administration changes so a
+    process crash can safely resume this exact branch creation. A pre-existing
+    branch without this child's exact marker is never adopted.
+    """
+    from . import state as state_mod
+
+    state_mod.validate_run_id(run_id)
+    if not re.fullmatch(r"[a-f0-9]{40}", str(candidate_sha or "")):
+        raise WorktreeError("candidate-origin SHA must be a full Git SHA")
+    if not re.fullmatch(r"[a-f0-9]{64}", str(rollover_authority_sha256 or "")):
+        raise WorktreeError("candidate-origin authority must be a SHA-256")
+    repo = Path(canonical_repo).resolve(strict=False)
+    wt = builder_worktree(repo, run_id)
+    ensure_worktree_parent(repo)
+    lock = _wt_lock_path(repo, run_id, "builder")
+    with flock_exclusive(lock):
+        owner_path = _builder_ownership_path(repo, run_id)
+        owner = _load_builder_ownership(repo, run_id)
+
+        def _valid_owner(value: dict[str, Any] | None) -> bool:
+            return bool(
+                isinstance(value, dict)
+                and value.get("run_id") == run_id
+                and value.get("candidate_branch") == branch
+                and value.get("initial_base_sha") == candidate_sha
+                and value.get("created_by") == "ownframework-loop"
+                and value.get("creation_kind") == "candidate_origin_rollover"
+                and value.get("rollover_authority_sha256") == rollover_authority_sha256
+            )
+
+        if owner is not None and not _valid_owner(owner):
+            raise WorktreeError("candidate-origin ownership marker conflicts with this rollover")
+        if owner is None:
+            if branch_exists(repo, branch) or wt.exists():
+                raise WorktreeError("candidate-origin branch/worktree exists without child ownership")
+            owner = {
+                "schema": "ownframework-loop-builder-workspace-ownership/v1",
+                "run_id": run_id,
+                "candidate_branch": branch,
+                "initial_base_sha": candidate_sha,
+                "created_by": "ownframework-loop",
+                "recorded_at": utc_now_iso(),
+                "creation_kind": "candidate_origin_rollover",
+                "rollover_authority_sha256": rollover_authority_sha256,
+            }
+            atomic_write_json(owner_path, owner, mode=0o600)
+
+        if wt.exists():
+            if not is_registered_worktree(repo, wt):
+                raise WorktreeError("candidate-origin builder directory is not a registered worktree")
+            if current_branch(wt) != branch or current_head(wt) != candidate_sha:
+                raise WorktreeError("candidate-origin builder worktree identity drift")
+            if git_checks.dirty_status(wt) != "clean":
+                raise WorktreeError("candidate-origin builder worktree is not clean")
+            return {"path": str(wt), "branch": branch, "head": candidate_sha, "existed": True}
+
+        if branch_exists(repo, branch):
+            actual = branch_head(repo, branch)
+            if actual != candidate_sha:
+                raise WorktreeError("candidate-origin branch moved from the proven candidate")
+            command = ["git", "-C", str(repo), "worktree", "add", str(wt), branch]
+        else:
+            command = ["git", "-C", str(repo), "worktree", "add", "-b", branch, str(wt), candidate_sha]
+        with flock_exclusive(_worktree_admin_lock_path(repo)):
+            result = run_subprocess(command, timeout=30)
+        if result.returncode != 0:
+            if (
+                wt.exists()
+                and is_registered_worktree(repo, wt)
+                and current_branch(wt) == branch
+                and current_head(wt) == candidate_sha
+                and git_checks.dirty_status(wt) == "clean"
+            ):
+                return {"path": str(wt), "branch": branch, "head": candidate_sha, "existed": True}
+            raise WorktreeError(f"candidate-origin worktree creation failed: {result.stderr.strip()}")
+        if current_branch(wt) != branch or current_head(wt) != candidate_sha:
+            raise WorktreeError("created candidate-origin worktree does not match requested identity")
+        return {"path": str(wt), "branch": branch, "head": candidate_sha, "existed": False}
 
 
 def add_reviewer_worktree(

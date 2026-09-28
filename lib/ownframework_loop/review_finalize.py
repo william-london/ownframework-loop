@@ -184,6 +184,17 @@ def finalize_review(
     receipt_candidate_sha = receipt.get("candidate_sha")
     if not receipt_candidate_sha:
         raise RuntimeError("BUILD_RECEIPT.json missing candidate_sha")
+    # Reprove linked candidate-origin authority at deterministic REVIEW
+    # finalization; a prepare-time check alone would leave a mutation window.
+    from . import program_rollover as program_rollover_mod
+    try:
+        program_rollover_mod.verify_candidate_origin(
+            canonical_repo,
+            run_id,
+            expected_review_pass=int(active_state.get("review_pass_count") or 0),
+        )
+    except program_rollover_mod.ProgramRolloverRefused as exc:
+        raise RuntimeError(f"candidate-origin rollover proof failed: {exc}") from exc
 
     # 3. Validate canonical repo.
     if not git_checks.is_git_repo(canonical_repo):

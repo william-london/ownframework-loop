@@ -151,3 +151,4 @@ tests/integration/test_v120_network_authority.sh
 tests/integration/test_v121_validation_authority_closure.sh
 tests/integration/test_v122_package_network_infra_propagation.sh
 tests/integration/test_v123_validation_infrastructure_recovery.sh
+tests/integration/test_v124_blocked_program_candidate_rollover.sh

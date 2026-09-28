@@ -130,6 +130,50 @@ def enqueue(
             "runner": runner,
             "live_runners": list(live_runners),
         }
+    # A linked candidate rollover is not a new budget allocation.  Its exact
+    # inherited operational envelope is enforced before any ledger write.
+    # Ordinary jobs return None and continue through the unchanged path.
+    from . import program_rollover as _program_rollover_mod
+    try:
+        inherited_envelope = _program_rollover_mod.enqueue_envelope_for_child(
+            Path(canonical_repo),
+            run_id,
+            runner=runner,
+            requested={
+                "max_infra_failures": max_infra_failures,
+                "max_transient_failures": max_transient_failures,
+                "max_transient_recovery_cycles": max_transient_recovery_cycles,
+                "max_total_cost_usd": max_total_cost_usd,
+                "max_total_tokens": max_total_tokens,
+                "max_wall_seconds": max_wall_seconds,
+            },
+        )
+        if inherited_envelope is not None:
+            if any(value is not None for value in (
+                dispatch_hold_kind,
+                dispatch_hold_previous_checkpoint_id,
+                dispatch_hold_next_checkpoint_id,
+            )):
+                raise _program_rollover_mod.ProgramRolloverRefused(
+                    "rollover child cannot add an unparented dispatch hold"
+                )
+            max_infra_failures = int(inherited_envelope["max_infra_failures"])
+            max_transient_failures = int(inherited_envelope["max_transient_failures"])
+            max_transient_recovery_cycles = int(inherited_envelope["max_transient_recovery_cycles"])
+            max_total_cost_usd = float(inherited_envelope["max_total_cost_usd"])
+            max_total_tokens = int(inherited_envelope["max_total_tokens"])
+            max_wall_seconds = int(inherited_envelope["max_wall_seconds"])
+    except _program_rollover_mod.ProgramRolloverRefused as exc:
+        return {
+            "schema": _db_mod.SCHEMA,
+            "ok": False,
+            "db_path": str(db),
+            "repo": str(Path(canonical_repo).resolve(strict=False)),
+            "run_id": run_id,
+            "enqueue_refused": True,
+            "reason": "linked_program_rollover_envelope_refused",
+            "detail": str(exc),
+        }
     _holds_mod._validate_dispatch_hold_request(
         dispatch_hold_kind,
         dispatch_hold_previous_checkpoint_id,

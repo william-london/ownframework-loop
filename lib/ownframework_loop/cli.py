@@ -381,6 +381,49 @@ def cmd_program_status(args: argparse.Namespace) -> None:
     })
 
 
+def cmd_spec_rollover_program(args: argparse.Namespace) -> None:
+    """Create one immutable child linked to an exhausted blocked PROGRAM."""
+    from . import program_rollover as program_rollover_mod
+
+    repo = _repo_path(args.repo)
+    try:
+        result = program_rollover_mod.create_linked_program_rollover(
+            canonical_repo=repo,
+            parent_run_id=args.parent_run_id,
+            expected_packet_sha256=args.expected_packet_sha256,
+            expected_baseline_sha=args.expected_baseline_sha,
+            expected_candidate_sha=args.expected_candidate_sha,
+            db_path=Path(args.db).expanduser() if args.db else None,
+        )
+    except (program_rollover_mod.ProgramRolloverRefused, RuntimeError, ValueError) as exc:
+        _emit_error(
+            str(exc),
+            exit_code=4,
+            classification="OF_LOOP_PROGRAM_ROLLOVER_REFUSED",
+        )
+    _emit(result)
+
+
+def cmd_program_prepare_rollover_review(args: argparse.Namespace) -> None:
+    """Freshly validate and admit an inherited candidate to ordinary REVIEW."""
+    from . import program_rollover as program_rollover_mod
+
+    repo = _repo_path(args.repo)
+    try:
+        result = program_rollover_mod.prepare_rollover_review(
+            canonical_repo=repo,
+            run_id=args.run_id,
+            db_path=Path(args.db).expanduser() if args.db else None,
+        )
+    except (program_rollover_mod.ProgramRolloverRefused, RuntimeError, ValueError) as exc:
+        _emit_error(
+            str(exc),
+            exit_code=4,
+            classification="OF_LOOP_PROGRAM_ROLLOVER_REVIEW_REFUSED",
+        )
+    _emit(result)
+
+
 def cmd_spec_status(args: argparse.Namespace) -> None:
     repo = _repo_path(args.repo)
     s = state_mod.load(repo, args.run_id)
@@ -1472,6 +1515,17 @@ def _build_parser() -> argparse.ArgumentParser:
     s_status.add_argument("repo")
     s_status.add_argument("run_id")
     s_status.set_defaults(func=cmd_spec_status)
+    s_rollover = spec_sub.add_parser(
+        "rollover-program",
+        help="create one provenance-linked candidate child for an exhausted blocked PROGRAM",
+    )
+    s_rollover.add_argument("repo")
+    s_rollover.add_argument("parent_run_id")
+    s_rollover.add_argument("--expected-packet-sha256", required=True)
+    s_rollover.add_argument("--expected-baseline-sha", required=True)
+    s_rollover.add_argument("--expected-candidate-sha", required=True)
+    s_rollover.add_argument("--db", default=None)
+    s_rollover.set_defaults(func=cmd_spec_rollover_program)
     s_app = spec_sub.add_parser(
         "approve",
         help="legacy compatibility pre-seal (TTY only; normal 0.6 flow does not require it)",
@@ -1521,6 +1575,14 @@ def _build_parser() -> argparse.ArgumentParser:
     p_stat.add_argument("repo")
     p_stat.add_argument("run_id")
     p_stat.set_defaults(func=cmd_program_status)
+    p_rollover_review = program_sub.add_parser(
+        "prepare-rollover-review",
+        help="freshly validate an inherited rollover candidate and admit it to REVIEW",
+    )
+    p_rollover_review.add_argument("repo")
+    p_rollover_review.add_argument("run_id")
+    p_rollover_review.add_argument("--db", default=None)
+    p_rollover_review.set_defaults(func=cmd_program_prepare_rollover_review)
 
     s_td = spec_sub.add_parser("teardown-branch", help="guarded candidate-branch teardown (packet-controlled)")
     s_td.add_argument("repo")

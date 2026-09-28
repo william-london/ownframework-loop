@@ -624,6 +624,56 @@
     },
     "notes": {
       "type": "string"
+    },
+    "candidate_origin": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "rollover_authority_sha256",
+        "parent_run_id",
+        "child_run_id",
+        "parent_packet_sha256",
+        "parent_approval_sha256",
+        "parent_state_sha256",
+        "parent_event_chain_sha256",
+        "parent_build_receipt_sha256",
+        "parent_review_verdict_sha256",
+        "parent_review_assessment_sha256",
+        "parent_review_attempt_id",
+        "parent_candidate_sha",
+        "candidate_sha",
+        "parent_candidate_branch",
+        "child_packet_sha256",
+        "child_approval_sha256",
+        "child_baseline_sha",
+        "child_candidate_branch",
+        "preflight_sha256"
+      ],
+      "properties": {
+        "schema": {
+          "const": "ownframework-loop-candidate-origin/v1"
+        },
+        "rollover_authority_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+        "parent_run_id": {"type": "string", "minLength": 1},
+        "child_run_id": {"type": "string", "minLength": 1},
+        "parent_packet_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+        "parent_approval_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+        "parent_state_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+        "parent_event_chain_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+        "parent_build_receipt_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+        "parent_review_verdict_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+        "parent_review_assessment_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+        "parent_review_attempt_id": {"type": "string", "pattern": "^[a-f0-9]{32,64}$"},
+        "parent_candidate_sha": {"type": "string", "pattern": "^[a-f0-9]{40}$"},
+        "candidate_sha": {"type": "string", "pattern": "^[a-f0-9]{40}$"},
+        "parent_candidate_branch": {"type": "string", "minLength": 1},
+        "child_packet_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+        "child_approval_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+        "child_baseline_sha": {"type": "string", "pattern": "^[a-f0-9]{40}$"},
+        "child_candidate_branch": {"type": "string", "minLength": 1},
+        "preflight_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+      }
     }
   }
 }

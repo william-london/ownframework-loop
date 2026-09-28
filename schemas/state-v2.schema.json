@@ -474,6 +474,70 @@
               }
             }
           }
+        },
+        "rollover_provenance": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "schema",
+            "parent_run_id",
+            "candidate_sha",
+            "rollover_authority_sha256",
+            "source_packet_sha256",
+            "source_approval_sha256",
+            "source_state_sha256",
+            "source_event_chain_sha256",
+            "source_build_receipt_sha256",
+            "source_review_verdict_sha256",
+            "source_review_assessment_sha256",
+            "source_review_attempt_id",
+            "checkpoint_id",
+            "imported_counters",
+            "checkpoint_counters",
+            "initial_review_pass_number"
+          ],
+          "properties": {
+            "schema": {"const": "ownframework-loop-program-rollover/v1"},
+            "parent_run_id": {"type": "string", "minLength": 1},
+            "candidate_sha": {"type": "string", "pattern": "^[a-f0-9]{40}$"},
+            "rollover_authority_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+            "source_packet_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+            "source_approval_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+            "source_state_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+            "source_event_chain_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+            "source_build_receipt_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+            "source_review_verdict_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+            "source_review_assessment_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+            "source_review_attempt_id": {"type": "string", "pattern": "^[a-f0-9]{32,64}$"},
+            "checkpoint_id": {"type": "string", "pattern": "^CP-[0-9]+$"},
+            "imported_counters": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["build_pass_count", "review_pass_count", "repair_round_count", "files_changed_unique", "diff_lines_total"],
+              "properties": {
+                "build_pass_count": {"type": "integer", "minimum": 0},
+                "review_pass_count": {"type": "integer", "minimum": 0},
+                "repair_round_count": {"type": "integer", "minimum": 0},
+                "files_changed_unique": {"type": "integer", "minimum": 0},
+                "diff_lines_total": {"type": "integer", "minimum": 0}
+              }
+            },
+            "checkpoint_counters": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["build_pass_count", "review_pass_count", "repair_round_count", "no_progress_streak"],
+              "properties": {
+                "build_pass_count": {"type": "integer", "minimum": 0},
+                "review_pass_count": {"type": "integer", "minimum": 0},
+                "repair_round_count": {"type": "integer", "minimum": 0},
+                "no_progress_streak": {"type": "integer", "minimum": 0}
+              }
+            },
+            "initial_review_pass_number": {"type": "integer", "minimum": 1},
+            "preflight_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+            "review_admission_receipt_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+            "review_admitted_at": {"type": "string", "format": "date-time"}
+          }
         }
       }
     }

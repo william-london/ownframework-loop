@@ -98,6 +98,18 @@ def prepare(*, canonical_repo: Path, run_id: str) -> dict[str, Any]:
         raise ReviewPrepareRefused("BUILD_RECEIPT candidate branch mismatch")
     if state.get("last_candidate_sha") != candidate_sha:
         raise ReviewPrepareRefused("STATE last_candidate_sha does not match BUILD_RECEIPT candidate")
+    # A candidate-origin rollover has no fresh semantic BUILD receipt.  Its
+    # dedicated origin receipt is the authority for the first inherited
+    # candidate review and must be reproven before reviewer worktree setup.
+    from . import program_rollover as program_rollover_mod
+    try:
+        program_rollover_mod.verify_candidate_origin(
+            canonical_repo,
+            run_id,
+            expected_review_pass=int(state.get("review_pass_count") or 0),
+        )
+    except program_rollover_mod.ProgramRolloverRefused as exc:
+        raise ReviewPrepareRefused(f"candidate-origin rollover proof failed: {exc}") from exc
     if not git_checks.commit_exists(canonical_repo, candidate_sha):
         raise ReviewPrepareRefused("candidate SHA missing from repository")
     if not _ancestor_of(canonical_repo, candidate_sha, baseline_sha):

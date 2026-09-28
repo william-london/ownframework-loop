@@ -102,6 +102,7 @@ def new_receipt(
     review_pass_number_ref: int | None = None,
     notes: str | None = None,
     validation_status: str | None = None,
+    candidate_origin: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build a build-receipt document. Does not write.
 
@@ -151,6 +152,8 @@ def new_receipt(
         out["escalation_reason"] = escalation_reason
     if notes is not None:
         out["notes"] = notes
+    if candidate_origin is not None:
+        out["candidate_origin"] = candidate_origin
     return out
 
 
