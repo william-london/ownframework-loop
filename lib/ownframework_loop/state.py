@@ -1598,6 +1598,7 @@ def retry_blocked_program_review_after_validation_infrastructure(
     build_receipt_sha256: str,
     prior_capability_binding_sha256: str,
     capability_binding_sha256: str,
+    validation_evidence_sha256: str,
     checkpoint_build_pass_count: int,
     checkpoint_review_pass_count: int,
     checkpoint_repair_round_count: int,
@@ -1608,11 +1609,12 @@ def retry_blocked_program_review_after_validation_infrastructure(
 
     This is a deliberately narrow PROGRAM state owner, not a general escape
     from BLOCKED.  The supervisor proves the accepted semantic attempt,
-    candidate, packet, approval, prior validation-only verdict, worktrees,
-    runtime-generation boundary, and one-use recovery receipt before calling
-    this function.  This owner independently re-proves the frozen graph,
-    current checkpoint, terminality, candidate binding, and exhausted build
-    cap under the STATE/EVENTS lock.  No engineering or repair counter moves.
+    candidate, packet, approval, prior blocked verdict, durable broker
+    evidence, worktrees, runtime-generation boundary, and one-use recovery
+    receipt before calling this function. This owner independently re-proves
+    the frozen graph, current checkpoint, terminality, candidate binding, and
+    preceding review event under the STATE/EVENTS lock. No engineering or
+    repair counter moves.
 
     The ordinary FSM remains unchanged: STOPPED and other BLOCKED runs still
     have no transition out.  The specialized event identity makes a crash
@@ -1629,6 +1631,7 @@ def retry_blocked_program_review_after_validation_infrastructure(
         ("build_receipt_sha256", build_receipt_sha256),
         ("prior_capability_binding_sha256", prior_capability_binding_sha256),
         ("capability_binding_sha256", capability_binding_sha256),
+        ("validation_evidence_sha256", validation_evidence_sha256),
         ("preflight_sha256", preflight_sha256),
         ("accounting_sha256", accounting_sha256),
     ):
@@ -1737,6 +1740,7 @@ def retry_blocked_program_review_after_validation_infrastructure(
                 "recovery_build_receipt_sha256": build_receipt_sha256,
                 "prior_capability_binding_sha256": prior_capability_binding_sha256,
                 "capability_binding_sha256": capability_binding_sha256,
+                "validation_evidence_sha256": validation_evidence_sha256,
                 "preflight_sha256": preflight_sha256,
                 "accounting_sha256": accounting_sha256,
                 "checkpoint_build_pass_count": checkpoint_build_pass_count,
@@ -1783,6 +1787,29 @@ def retry_blocked_program_review_after_validation_infrastructure(
         if matching_events:
             raise integrity.TamperingDetected(
                 "infrastructure-retry event exists while STATE.json is still BLOCKED"
+            )
+        source_review = events[-1] if events else {}
+        evidence_refs = source_review.get("validation_evidence_refs") or []
+        if any((
+            source_review.get("event_type") != "review_finalized",
+            source_review.get("old_state") != "REVIEWING",
+            source_review.get("new_state") != "BLOCKED",
+            source_review.get("verdict") != "BLOCKED",
+            source_review.get("failure_reason") != "infra_failure",
+            source_review.get("validation_pass") is not False,
+            source_review.get("infra_failure_count") != 1,
+            source_review.get("commit_sha") != candidate_sha,
+            source_review.get("review_verdict_sha256") != prior_verdict_sha256,
+            source_review.get("packet_sha256") != packet_sha256,
+            source_review.get("build_receipt_sha256") != build_receipt_sha256,
+            not any(
+                isinstance(item, dict)
+                and item.get("sha256") == validation_evidence_sha256
+                for item in evidence_refs
+            ),
+        )):
+            raise transitions.InvalidTransitionError(
+                "retry lacks the exact preceding blocked verdict and durable evidence"
             )
         if actual_cp_counts != requested_cp_counts:
             raise transitions.InvalidTransitionError(
@@ -1845,6 +1872,7 @@ def retry_blocked_program_review_after_validation_infrastructure(
                 "recovery_build_receipt_sha256": build_receipt_sha256,
                 "prior_capability_binding_sha256": prior_capability_binding_sha256,
                 "capability_binding_sha256": capability_binding_sha256,
+                "validation_evidence_sha256": validation_evidence_sha256,
                 "preflight_sha256": preflight_sha256,
                 "accounting_sha256": accounting_sha256,
                 "build_pass_count": int(current.get("build_pass_count") or 0),

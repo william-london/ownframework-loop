@@ -19,6 +19,7 @@ from pathlib import Path
 from ownframework_loop import (
     approval, assessment, capability_binding, dispatch, program, receipts,
     state, supervisor, supervisor_validation_recovery as recovery, util, verdicts,
+    validation_evidence, transitions,
 )
 from state_seed import seed_state
 
@@ -138,9 +139,43 @@ semantic_path.parent.mkdir(parents=True, exist_ok=True)
 semantic_path.write_bytes(b"fixture accepted reviewer result\n")
 semantic_sha = util.sha256_file(semantic_path)
 verdict_path = verdicts.verdict_path(repo, run_id)
-prior_verdict_bytes = b"fixture validation-only verdict\n"
+evidence_identity = validation_evidence.validation_identity(
+    canonical_repo=repo,
+    run_id=run_id,
+    checkpoint_id="CP-01",
+    role="reviewer",
+    pass_number=1,
+    validation_index=0,
+    candidate_sha=baseline,
+    cwd=util.reviewer_worktree(repo, run_id),
+    validation={"name": "fixture-validation", "command": "true", "kind": "fast"},
+)
+evidence_reference = validation_evidence.publish_package_network_events(
+    identity=evidence_identity,
+    events=[{
+        "kind": "dns_resolution_failed", "host": "pypi.org",
+        "port": 443, "broker": "connect_proxy",
+    }],
+)
+validation_row = {
+    "name": "fixture-validation", "command": "true", "kind": "fast",
+    "expected_exit_code": 0, "passed": False, "infra_failure": True,
+    "candidate_invalid": False, "checkpoint_id": "CP-01", "pass_number": 1,
+    "validation_index": 0, "infrastructure_evidence": evidence_reference,
+}
+prior_verdict_bytes = (json.dumps({"validation_results": [validation_row]}, sort_keys=True) + "\n").encode()
 verdict_path.write_bytes(prior_verdict_bytes)
 prior_verdict_sha = util.sha256_bytes(prior_verdict_bytes)
+state.append_event(
+    repo, run_id, event_type="review_finalized", old_state="REVIEWING",
+    new_state="BLOCKED", actor="fixture-review-finalizer", commit_sha=baseline,
+    reason="fixture trusted validation infrastructure block",
+    extras={
+        "verdict": "BLOCKED", "failure_reason": "infra_failure",
+        "validation_pass": False, "infra_failure_count": 1,
+        "validation_evidence_refs": validation_evidence.event_references([validation_row]),
+    },
+)
 old_binding_sha, new_binding_sha = "7" * 64, "8" * 64
 old_runtime, new_runtime = "old-runtime", "new-runtime"
 accounting = {"cost": 0.0, "input": 0, "output": 0, "cache": 0}
@@ -181,6 +216,9 @@ identity = {
     "review_attempt_id": attempt_id,
     "semantic_sha256": semantic_sha,
     "prior_verdict_sha256": prior_verdict_sha,
+    "validation_evidence_sha256": evidence_reference["sha256"],
+    "validation_evidence_reference": evidence_reference,
+    "validation_evidence_identity": evidence_identity,
     "packet_sha256": packet_sha,
     "approval_sha256": approval_sha,
     "build_receipt_sha256": receipt_sha,
@@ -208,6 +246,7 @@ kwargs = {
     "review_attempt_id": attempt_id,
     "semantic_sha256": semantic_sha,
     "prior_verdict_sha256": prior_verdict_sha,
+    "validation_evidence_sha256": evidence_reference["sha256"],
     "recovery_id": recovery_id,
     "prior_runtime_generation": old_runtime,
     "runtime_generation": new_runtime,
@@ -252,7 +291,10 @@ original_runtime = supervisor._current_runtime_generation
 original_ready = dispatch.semantic_result_ready
 original_provenance = supervisor._attempt_provenance_gate
 original_worktrees = recovery._assert_clean_candidate_worktrees
-capability_binding._read = lambda _path: {"binding_sha256": new_binding_sha}
+capability_binding._read = lambda _path: {
+    "binding_sha256": new_binding_sha,
+    "projection": {"capabilities": [{"name": "package.uv", "network_domains": ["pypi.org"]}]},
+}
 supervisor._current_runtime_generation = lambda: new_runtime
 dispatch.semantic_result_ready = lambda _order: (True, "accepted fixture")
 supervisor._attempt_provenance_gate = lambda *_a, **_k: (True, "accepted fixture", {})
@@ -280,6 +322,19 @@ assert state.load_verified(repo, run_id)["build_pass_count"] == 2
 assert state.load_verified(repo, run_id)["review_pass_count"] == 1
 assert state.load_verified(repo, run_id)["repair_round"] == 1
 print("DONE_TO_QUEUED_CRASH_REPLAY_NO_PROVIDER_OR_COUNTER_DELTA=PASS")
+
+stopped_state = state.load_verified(repo, run_id)
+stopped_state["state"] = "STOPPED"
+seed_state(repo, run_id, stopped_state, actor="fixture", reason="prove STOPPED remains absorbing")
+try:
+    state.retry_blocked_program_review_after_validation_infrastructure(
+        repo, run_id, **kwargs
+    )
+except transitions.InvalidTransitionError as exc:
+    assert "STOPPED is absorbing" in str(exc), exc
+else:
+    raise AssertionError("validation-infrastructure recovery reopened STOPPED")
+print("STOPPED_REMAINS_ABSORBING=PASS")
 PY
 
 echo "VALIDATION_INFRASTRUCTURE_REVIEW_RECOVERY=PASS"

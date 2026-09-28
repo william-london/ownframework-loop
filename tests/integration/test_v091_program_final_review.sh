@@ -33,6 +33,8 @@ sys.path.insert(0, str(ROOT / "tests"))
 from ownframework_loop import (
     approval, dispatch, git_checks, packet as packet_mod, program as program_mod,
     receipts, review_finalize, runtime_env, state as state_mod, util, worktrees,
+    validation_evidence, schema_validate, verdicts,
+    supervisor_validation_recovery,
 )
 import json as _json_mod
 from ownframework_loop import build_prepare as build_prepare_mod, build_finalize as build_finalize_mod
@@ -66,7 +68,7 @@ def make_repo(name, root):
 
 def materialise_program(repo, run_id, *, work_unit_count=1, max_repair=1,
                         cp_build=4, cp_review=4, cum_build=10, cum_review=10,
-                        cum_repair=None):
+                        cum_repair=None, required_validation=None):
     branch = git(repo, "branch", "--show-current") or "master"
     baseline = git(repo, "rev-parse", "HEAD")
     run_dir = repo / ".ownframework-loop" / run_id
@@ -123,6 +125,8 @@ def materialise_program(repo, run_id, *, work_unit_count=1, max_repair=1,
             "max_repair_rounds": cum_repair,
         },
     }
+    if required_validation is not None:
+        packet["required_validation"] = required_validation
     (run_dir / "WORK_PACKET.md").write_text(
         "```json\n" + json.dumps(packet, indent=2) + "\n```\nfixture\n"
     )
@@ -2143,6 +2147,198 @@ assert _recovery_tree == _safe_anchor_tree, (
     "discard the entire violating repair attempt"
 )
 print("TEST_R_PROGRAM_FINAL_PROTECTED_DRIFT_RECOVERY=PASS")
+
+# ============================================================
+# TEST S: finalizers seal durable validation evidence in the artifact/event
+# lineage for both BUILD and REVIEW, with exact pass/candidate identity.
+# ============================================================
+from ownframework_loop import build_agent as build_agent_mod_s
+
+def synthetic_trusted_validation(**kwargs):
+    identity = validation_evidence.validation_identity(
+        canonical_repo=kwargs["canonical_repo"],
+        run_id=kwargs["run_id"],
+        checkpoint_id=kwargs["checkpoint_id"],
+        role=kwargs["role"],
+        pass_number=kwargs["pass_number"],
+        validation_index=kwargs["validation_index"],
+        candidate_sha=kwargs["candidate_sha"],
+        cwd=kwargs["cwd"],
+        validation=kwargs["validation"],
+    )
+    reference = validation_evidence.publish_package_network_events(
+        identity=identity,
+        events=[{
+            "kind": "dns_resolution_failed", "host": "pypi.org",
+            "port": 443, "broker": "connect_proxy",
+        }],
+    )
+    return {
+        "name": kwargs["validation"]["name"],
+        "command": kwargs["validation"]["command"],
+        "kind": kwargs["validation"]["kind"],
+        "exit_code": None,
+        "duration_seconds": 0.01,
+        "expected_exit_code": 0,
+        "passed": False,
+        "timed_out": False,
+        "marker_match": False,
+        "stdout_truncated": False,
+        "stderr_truncated": False,
+        "output_truncated": False,
+        "stdout_excerpt_redacted": "",
+        "stderr_excerpt_redacted": "",
+        "stdout_sha256": "0" * 64,
+        "stderr_sha256": "0" * 64,
+        "diagnostic_stdout_path": "",
+        "diagnostic_stderr_path": "",
+        "infra_failure": True,
+        "infra_failure_reason": "package_registry_dns_resolution_failed:pypi.org",
+        "candidate_invalid": False,
+        "candidate_invalid_reason": "",
+        "candidate_invalid_excerpt": "",
+        "validation_env_id": "",
+        "validation_env_path": "",
+        "checkpoint_id": kwargs["checkpoint_id"],
+        "pass_number": kwargs["pass_number"],
+        "validation_index": kwargs["validation_index"],
+        "infrastructure_evidence": reference,
+    }
+
+validation_contract = [{
+    "name": "fixture-validation", "command": "true", "kind": "fast",
+    "expected_exit_code": 0,
+}]
+
+repo_s_build = make_repo("durable-validation-build", root)
+packet_s_build, _ = materialise_program(
+    repo_s_build, "run-v124-build-evidence", required_validation=validation_contract,
+)
+program_mod.claim_build_pass(
+    canonical_repo=repo_s_build, run_id="run-v124-build-evidence", packet=packet_s_build,
+)
+prep_s_build = build_prepare_mod.prepare(
+    canonical_repo=repo_s_build, run_id="run-v124-build-evidence",
+)
+wt_s_build = Path(prep_s_build["builder_worktree"])
+(wt_s_build / "src" / "durable_evidence.py").write_text("VALUE = 1\n")
+subprocess.run(
+    ["git", "-C", str(wt_s_build), "add", "src/durable_evidence.py"],
+    check=True, capture_output=True,
+)
+subprocess.run(
+    ["git", "-C", str(wt_s_build), "commit", "-qm", "add durable evidence fixture"],
+    check=True, capture_output=True,
+)
+agent_s_path = Path(prep_s_build["agent_result_path"])
+build_agent_mod_s.write_skeleton(
+    canonical_repo=repo_s_build, run_id="run-v124-build-evidence",
+)
+agent_s = _json_mod.loads(agent_s_path.read_text())
+agent_s.update({
+    "summary": "exercise durable validation evidence in BUILD finalizer",
+    "outcome_requested": "candidate_ready",
+    "unit_ids_completed": ["UNIT-1"],
+    "acceptance_addressed": ["AC-1"],
+})
+agent_s_path.write_text(_json_mod.dumps(agent_s, indent=2, sort_keys=True) + "\n")
+original_build_validation = build_finalize_mod.validation_executor.run_required_validation
+build_finalize_mod.validation_executor.run_required_validation = synthetic_trusted_validation
+try:
+    build_receipt_s = build_finalize_mod.finalize_build(
+        canonical_repo=repo_s_build, run_id="run-v124-build-evidence",
+        agent_result_path=agent_s_path, actor="of-builder",
+    )
+finally:
+    build_finalize_mod.validation_executor.run_required_validation = original_build_validation
+assert not schema_validate.validate_receipt(build_receipt_s), schema_validate.validate_receipt(build_receipt_s)
+build_validation_s = build_receipt_s["validation"][0]
+assert build_validation_s["pass_number"] == 1
+build_identity_s = validation_evidence.validation_identity(
+    canonical_repo=repo_s_build, run_id="run-v124-build-evidence",
+    checkpoint_id="CP-1", role="builder", pass_number=1,
+    validation_index=0, candidate_sha=build_receipt_s["candidate_sha"],
+    cwd=wt_s_build, validation=validation_contract[0],
+)
+build_record_s, build_evidence_sha_s = validation_evidence.verify_reference(
+    canonical_repo=repo_s_build, run_id="run-v124-build-evidence",
+    reference=build_validation_s["infrastructure_evidence"],
+    expected_identity=build_identity_s,
+)
+assert build_record_s["identity"]["candidate_sha"] == build_receipt_s["candidate_sha"]
+build_event_s = state_mod.integrity.read_event_chain(
+    state_mod.events_path(repo_s_build, "run-v124-build-evidence")
+)[-1]
+assert build_event_s["event_type"] == "build_finalized", build_event_s
+assert build_event_s["validation_evidence_refs"] == validation_evidence.event_references(
+    build_receipt_s["validation"]
+), build_event_s
+assert build_event_s["validation_evidence_refs"][0]["sha256"] == build_evidence_sha_s
+assert state_mod.load_verified(repo_s_build, "run-v124-build-evidence")["state"] == "BLOCKED"
+
+repo_s_review = make_repo("durable-validation-review", root)
+packet_s_review, _ = materialise_program(
+    repo_s_review, "run-v124-review-evidence", required_validation=validation_contract,
+)
+_cp_s, sha_s_review, _claim_s = advance_to_reviewing(
+    repo_s_review, "run-v124-review-evidence", packet_s_review,
+)
+original_review_validation = review_finalize.validation_executor.run_required_validation
+review_finalize.validation_executor.run_required_validation = synthetic_trusted_validation
+try:
+    verdict_s = approve_finalize_review(
+        repo_s_review, "run-v124-review-evidence", packet_s_review,
+        sha_s_review, make_assessment_path(repo_s_review, "run-v124-review-evidence"),
+    )
+finally:
+    review_finalize.validation_executor.run_required_validation = original_review_validation
+assert not schema_validate.validate_verdict(verdict_s), schema_validate.validate_verdict(verdict_s)
+review_validation_s = verdict_s["validation_results"][0]
+assert review_validation_s["pass_number"] == 1
+review_identity_s = validation_evidence.validation_identity(
+    canonical_repo=repo_s_review, run_id="run-v124-review-evidence",
+    checkpoint_id=_cp_s, role="reviewer", pass_number=1,
+    validation_index=0, candidate_sha=sha_s_review,
+    cwd=util.reviewer_worktree(repo_s_review, "run-v124-review-evidence"),
+    validation=validation_contract[0],
+)
+review_record_s, review_evidence_sha_s = validation_evidence.verify_reference(
+    canonical_repo=repo_s_review, run_id="run-v124-review-evidence",
+    reference=review_validation_s["infrastructure_evidence"],
+    expected_identity=review_identity_s,
+)
+assert review_record_s["identity"]["candidate_sha"] == sha_s_review
+review_event_s = state_mod.integrity.read_event_chain(
+    state_mod.events_path(repo_s_review, "run-v124-review-evidence")
+)[-1]
+assert review_event_s["event_type"] == "review_finalized", review_event_s
+assert review_event_s["infra_failure_count"] == 1, review_event_s
+assert review_event_s["validation_evidence_refs"] == validation_evidence.event_references(
+    verdict_s["validation_results"]
+), review_event_s
+assert review_event_s["validation_evidence_refs"][0]["sha256"] == review_evidence_sha_s
+assert review_event_s["review_verdict_sha256"] == util.sha256_file(
+    verdicts.verdict_path(repo_s_review, "run-v124-review-evidence")
+)
+assert state_mod.load_verified(repo_s_review, "run-v124-review-evidence")["state"] == "BLOCKED"
+review_cache_s = runtime_env.runtime_cache_dir(
+    repo_s_review, "run-v124-review-evidence", "validation",
+)
+review_cache_s.mkdir(parents=True, exist_ok=True)
+(review_cache_s / "ephemeral-diagnostic.txt").write_text("not recovery authority\n")
+shutil.rmtree(review_cache_s.parent)
+recovery_evidence_s = supervisor_validation_recovery._proves_permitted_registry_dns_failure(
+    review_validation_s,
+    allowed_domains={"pypi.org"},
+    canonical_repo=repo_s_review,
+    run_id="run-v124-review-evidence",
+    checkpoint_id=_cp_s,
+    candidate_sha=sha_s_review,
+    review_pass_number=1,
+)
+assert recovery_evidence_s and recovery_evidence_s["sha256"] == review_evidence_sha_s
+print("BUILD_REVIEW_FINALIZERS_BIND_DURABLE_EVIDENCE=PASS")
+print("FINALIZED_REVIEW_EVIDENCE_SURVIVES_RUNTIME_CACHE_REMOVAL=PASS")
 
 print("ALL_V091_PROGRAM_FINAL_REVIEW=PASS")
 PY

@@ -17,7 +17,6 @@ import stat
 import time
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit
 
 from . import (
     approval,
@@ -35,6 +34,7 @@ from . import (
     state,
     util,
     validation_executor,
+    validation_evidence,
     verdicts,
     worktrees,
 )
@@ -103,60 +103,73 @@ def _bound_uv_domains(binding: dict[str, Any]) -> set[str]:
 
 
 def _proves_permitted_registry_dns_failure(
-    row: dict[str, Any], *, allowed_domains: set[str], diagnostic_root: Path,
-) -> bool:
-    """Require exact broker-independent evidence of the historical uv DNS failure.
+    row: dict[str, Any], *, allowed_domains: set[str], canonical_repo: Path,
+    run_id: str, checkpoint_id: str, candidate_sha: str,
+    review_pass_number: int,
+) -> dict[str, Any] | None:
+    """Return the digest of exact, durable broker evidence for a DNS failure.
 
-    The validator stderr is not authority by itself: the diagnostic must be a
-    private executor-owned file whose digest matches the sealed verdict, the
-    failure must be the packet validation row, and the fetched host must be in
-    the frozen package.uv network capability.
+    Candidate-controlled output is deliberately irrelevant. The evidence must
+    be run-owned, immutable, pass/candidate/command-bound, and report a host
+    inside the frozen package.uv network authority.
     """
     if (
         row.get("passed") is not False
-        or row.get("infra_failure") is True
+        or row.get("infra_failure") is not True
         or row.get("candidate_invalid") is True
-        or row.get("stderr_truncated") is True
         or not allowed_domains
+        or row.get("checkpoint_id") != checkpoint_id
+        or row.get("pass_number") != review_pass_number
+        or isinstance(row.get("validation_index"), bool)
+        or not isinstance(row.get("validation_index"), int)
+        or row.get("validation_index") < 0
     ):
-        return False
-    raw_path = str(row.get("diagnostic_stderr_path") or "")
-    if not raw_path:
-        return False
-    path = Path(raw_path)
+        return None
+    reference = row.get("infrastructure_evidence")
+    if not isinstance(reference, dict):
+        return None
+    identity = validation_evidence.validation_identity(
+        canonical_repo=canonical_repo,
+        run_id=run_id,
+        checkpoint_id=checkpoint_id,
+        role="reviewer",
+        pass_number=review_pass_number,
+        validation_index=row["validation_index"],
+        candidate_sha=candidate_sha,
+        cwd=util.reviewer_worktree(canonical_repo, run_id),
+        validation={
+            "name": row.get("name"),
+            "command": row.get("command"),
+            "kind": row.get("kind"),
+            "expected_exit_code": row.get("expected_exit_code", 0),
+            "expected_marker": row.get("expected_marker"),
+        },
+    )
     try:
-        if path.is_symlink():
-            return False
-        resolved = path.resolve(strict=True)
-        root = diagnostic_root.resolve(strict=True)
-        if root not in resolved.parents or not resolved.is_file():
-            return False
-        st = resolved.stat()
-        if stat.S_IMODE(st.st_mode) & 0o077:
-            return False
-        if hasattr(os, "getuid") and st.st_uid != os.getuid():
-            return False
-        if st.st_size > 8 * 1024 * 1024:
-            return False
-        content = resolved.read_bytes()
-    except OSError:
-        return False
-    if hashlib.sha256(content).hexdigest() != str(row.get("stderr_sha256") or ""):
-        return False
-    text = content.decode("utf-8", errors="replace")
-    if "Failed to fetch" not in text or "dns error" not in text.lower():
-        return False
-    if "failed to lookup address information" not in text.lower():
-        return False
-    fetched_urls = re.findall(r"https://[^\s`'\"]+", text, flags=re.IGNORECASE)
-    for raw_url in fetched_urls:
-        try:
-            host = (urlsplit(raw_url.rstrip("),.;]`")).hostname or "").lower().rstrip(".")
-        except ValueError:
-            continue
-        if host and any(host == domain or host.endswith("." + domain) for domain in allowed_domains):
-            return True
-    return False
+        record, digest = validation_evidence.verify_reference(
+            canonical_repo=canonical_repo,
+            run_id=run_id,
+            reference=reference,
+            expected_identity=identity,
+        )
+    except (OSError, RuntimeError, ValueError):
+        return None
+    if not validation_evidence.proves_registry_dns_failure(
+        record=record, allowed_domains=allowed_domains,
+    ):
+        return None
+    first = (record.get("package_network_events") or [None])[0]
+    if not isinstance(first, dict) or (
+        first.get("kind") != "dns_resolution_failed"
+        or row.get("infra_failure_reason")
+        != f"package_registry_dns_resolution_failed:{first.get('host')}"
+    ):
+        return None
+    return {
+        "sha256": digest,
+        "reference": dict(reference),
+        "identity": identity,
+    }
 
 
 def _preflight_result_sha(results: list[dict[str, Any]]) -> str:
@@ -242,7 +255,7 @@ def _validate_predecessor_evidence(
     job: sqlite3.Row, attempt: sqlite3.Row,
     db_conn: sqlite3.Connection, prior_binding: dict[str, Any],
     supervisor_mod: Any,
-) -> tuple[dict[str, Any], dict[str, Any], bytes, str, dict[str, Any]]:
+) -> tuple[dict[str, Any], dict[str, Any], bytes, str, dict[str, Any], str]:
     if cp_packet.get("id") != cp_id or cp_state.get("id") != cp_id:
         raise RuntimeError("active checkpoint identity does not match frozen packet and state")
     receipt = receipts.load_receipt(repo, run_id)
@@ -283,12 +296,12 @@ def _validate_predecessor_evidence(
         verdict.get("approval_sha256") != approval_sha,
         verdict.get("baseline_sha") != approval_doc.get("baseline_sha"),
         verdict.get("review_pass_number") != int(state_doc.get("review_pass_count") or 0),
-        verdict.get("verdict") != "CHANGES_REQUESTED",
-        verdict.get("failure_reason") != "validation_failed",
+        verdict.get("verdict") != "BLOCKED",
+        verdict.get("failure_reason") != "infra_failure",
     )):
-        raise RuntimeError("latest review verdict is not the exact validation-only rejection")
-    if (verdict.get("infra_failure") or {}).get("count") != 0:
-        raise RuntimeError("prior verdict already classified infrastructure failure; refusing duplicate recovery")
+        raise RuntimeError("latest review verdict is not the exact infrastructure-only block")
+    if (verdict.get("infra_failure") or {}).get("count") != 1:
+        raise RuntimeError("prior verdict does not contain exactly one infrastructure failure")
     if (verdict.get("candidate_environment_invalid") or {}).get("count") != 0:
         raise RuntimeError("prior verdict contains candidate-environment failure")
     for key in ("scope_check", "protected_path_check", "secret_scan_check", "integrity_check", "stale_sha_check"):
@@ -304,18 +317,37 @@ def _validate_predecessor_evidence(
         raise RuntimeError("prior review must contain exactly one failed packet validation")
     effective_validations = program.resolve_effective_required_validation(packet_meta, state_doc)
     failed = failed_rows[0]
-    if not any(
-        item.get("name") == failed.get("name")
-        and item.get("command") == failed.get("command")
-        for item in effective_validations
+    validation_index = failed.get("validation_index")
+    if (
+        isinstance(validation_index, bool)
+        or not isinstance(validation_index, int)
+        or validation_index < 0
+        or validation_index >= len(effective_validations)
+    ):
+        raise RuntimeError("failed review validation has no valid declared index")
+    declared_validation = effective_validations[validation_index]
+    if any(
+        declared_validation.get(key, default) != failed.get(key, default)
+        for key, default in (
+            ("name", "validation"),
+            ("command", ""),
+            ("kind", "fast"),
+            ("expected_exit_code", 0),
+            ("expected_marker", None),
+        )
     ):
         raise RuntimeError("failed review validation is not declared by the frozen packet")
-    if not _proves_permitted_registry_dns_failure(
+    validation_evidence_binding = _proves_permitted_registry_dns_failure(
         failed,
         allowed_domains=_bound_uv_domains(prior_binding),
-        diagnostic_root=runtime_env.runtime_cache_dir(repo, run_id, "validation") / "validation-diagnostics",
-    ):
-        raise RuntimeError("prior failure lacks exact permitted package-registry DNS evidence")
+        canonical_repo=repo,
+        run_id=run_id,
+        checkpoint_id=cp_id,
+        candidate_sha=candidate,
+        review_pass_number=int(verdict.get("review_pass_number") or 0),
+    )
+    if not validation_evidence_binding:
+        raise RuntimeError("prior failure lacks exact durable package-registry DNS evidence")
     if any(row.get("result") != "pass" for row in (verdict.get("acceptance_results") or [])):
         raise RuntimeError("prior verdict contains failed acceptance criteria")
     if any(row.get("result") == "violated" for row in (verdict.get("non_goal_results") or [])):
@@ -382,37 +414,36 @@ def _validate_predecessor_evidence(
         raise RuntimeError(f"accepted reviewer attempt provenance failed: {gate_reason}")
 
     events = integrity.read_event_chain(state.events_path(repo, run_id))
-    if len(events) < 2:
-        raise RuntimeError("event chain lacks the validation rejection and cap refusal")
-    review_event, cap_event = events[-2], events[-1]
+    if not events:
+        raise RuntimeError("event chain lacks the infrastructure-blocking review")
+    review_event = events[-1]
+    evidence_refs = validation_evidence.event_references(validation_rows or [])
     if any((
         review_event.get("event_type") != "review_finalized",
-        review_event.get("new_state") != "CHANGES_REQUESTED",
-        review_event.get("failure_reason") != "validation_failed",
-        review_event.get("verdict") != "CHANGES_REQUESTED",
+        review_event.get("new_state") != "BLOCKED",
+        review_event.get("failure_reason") != "infra_failure",
+        review_event.get("verdict") != "BLOCKED",
         review_event.get("validation_pass") is not False,
+        review_event.get("infra_failure_count") != 1,
+        review_event.get("validation_evidence_refs") != evidence_refs,
         review_event.get("review_verdict_sha256") != verdict_sha,
         review_event.get("commit_sha") != candidate,
         review_event.get("packet_sha256") != packet_sha,
         review_event.get("build_receipt_sha256") != receipt_sha,
-        cap_event.get("actor") != "of-loop-cap-gate",
-        cap_event.get("old_state") != "CHANGES_REQUESTED",
-        cap_event.get("new_state") != "BLOCKED",
-        "build_pass_count" not in str(cap_event.get("reason") or ""),
         state_doc.get("state") != "BLOCKED",
-        not str(state_doc.get("terminal_reason") or "").startswith("build claim refused; cap exhausted"),
     )):
-        raise RuntimeError("durable history does not prove validation-only rejection followed by build-cap block")
-    if (
-        int(cp_state.get("build_pass_count") or 0)
-        != int((cp_packet.get("risk_budget") or {}).get("max_build_passes") or 0)
-    ):
-        raise RuntimeError("the active checkpoint is not blocked at its exact build-pass cap")
+        raise RuntimeError("durable history does not bind the blocked review to its validation evidence")
+    validation_evidence_sha256 = str(validation_evidence_binding["sha256"])
+    if not any(ref.get("sha256") == validation_evidence_sha256 for ref in evidence_refs):
+        raise RuntimeError("blocked review event does not bind the verified durable evidence")
     if (state_doc.get("program") or {}).get("blocked") is True:
         raise RuntimeError("PROGRAM authority itself is terminally blocked")
     if state.is_stop_requested(repo, run_id):
         raise RuntimeError("STOP request prevents validation-infrastructure recovery")
-    return receipt, verdict, verdict_bytes, semantic_sha, work_order
+    return (
+        receipt, verdict, verdict_bytes, semantic_sha, work_order,
+        validation_evidence_binding,
+    )
 
 
 def _resolve_current_binding(*, repo: Path, run_id: str, packet_meta: dict[str, Any], job: sqlite3.Row, prior_binding: dict[str, Any], supervisor_mod: Any) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], str]:
@@ -457,7 +488,10 @@ def _validation_preflight(*, repo: Path, run_id: str, packet_meta: dict[str, Any
     if not validations:
         raise RuntimeError("checkpoint has no effective validation contract to preflight")
     results: list[dict[str, Any]] = []
-    for item in validations:
+    checkpoint_id = str(
+        program.select_next_checkpoint(packet_meta, state_doc.get("program") or {}) or ""
+    )
+    for validation_index, item in enumerate(validations):
         result = validation_executor.run_required_validation(
             cwd=util.reviewer_worktree(repo, run_id),
             validation=item,
@@ -467,6 +501,9 @@ def _validation_preflight(*, repo: Path, run_id: str, packet_meta: dict[str, Any
             packet=packet_meta,
             candidate_sha=candidate,
             role="reviewer",
+            checkpoint_id=checkpoint_id,
+            pass_number=0,
+            validation_index=validation_index,
             infra_failure_path=(
                 util.run_dir(repo, run_id) / "recovery" / "validation-infrastructure" / "preflight-infra.json"
             ),
@@ -538,6 +575,7 @@ def _verify_recovery_record(
         "build_receipt_sha256": intent.get("build_receipt_sha256") == event.get("recovery_build_receipt_sha256"),
         "semantic_sha256": intent.get("semantic_sha256") == event.get("semantic_sha256"),
         "prior_verdict_sha256": intent.get("prior_verdict_sha256") == event.get("prior_verdict_sha256"),
+        "validation_evidence_sha256": intent.get("validation_evidence_sha256") == event.get("validation_evidence_sha256"),
         "accounting_sha256": intent.get("accounting_sha256") == event.get("accounting_sha256"),
         "preflight_recovery_id": preflight.get("recovery_id") == recovery_id,
         "preflight_sha256": preflight.get("preflight_sha256") == event.get("preflight_sha256"),
@@ -555,6 +593,7 @@ def _verify_recovery_record(
         "review_attempt_id": intent.get("review_attempt_id"),
         "semantic_sha256": intent.get("semantic_sha256"),
         "prior_verdict_sha256": intent.get("prior_verdict_sha256"),
+        "validation_evidence_sha256": intent.get("validation_evidence_sha256"),
         "prior_runtime_generation": intent.get("prior_runtime_generation"),
         "runtime_generation": intent.get("runtime_generation"),
         "recovery_packet_sha256": intent.get("packet_sha256"),
@@ -578,6 +617,34 @@ def _verify_recovery_record(
         raise RuntimeError("archived prior verdict is missing or redirected")
     if util.sha256_file(archive) != intent.get("prior_verdict_sha256"):
         raise RuntimeError("archived prior verdict digest does not match recovery identity")
+    try:
+        archived_verdict = json.loads(archive.read_bytes())
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RuntimeError("archived prior verdict is malformed") from exc
+    rows = archived_verdict.get("validation_results") if isinstance(archived_verdict, dict) else None
+    failed_rows = [
+        row for row in rows or []
+        if isinstance(row, dict) and row.get("passed") is False
+    ]
+    if (
+        len(failed_rows) != 1
+        or failed_rows[0].get("infrastructure_evidence")
+        != intent.get("validation_evidence_reference")
+    ):
+        raise RuntimeError("archived verdict does not bind the recovered validation evidence")
+    evidence_record, evidence_digest = validation_evidence.verify_reference(
+        canonical_repo=repo,
+        run_id=run_id,
+        reference=intent.get("validation_evidence_reference"),
+        expected_identity=intent.get("validation_evidence_identity"),
+    )
+    if evidence_digest != intent.get("validation_evidence_sha256") or not validation_evidence.proves_registry_dns_failure(
+        record=evidence_record,
+        allowed_domains=_bound_uv_domains(
+            capability_binding._read(capability_binding.binding_path(repo, run_id))
+        ),
+    ):
+        raise RuntimeError("durable broker evidence no longer proves the permitted DNS failure")
     state_doc = state.load_verified(repo, run_id)
     if state_doc.get("state") == "STOPPED":
         raise RuntimeError("STOPPED is absorbing; recovery replay cannot requeue it")
@@ -857,7 +924,10 @@ def retry_blocked_review_after_validation_infrastructure(
                 "repair": int(current.get("repair_round") or 0),
             }
             accounting_before = _accounting_snapshot(conn, job)
-            receipt, _prior_verdict, verdict_bytes, semantic_sha, work_order = _validate_predecessor_evidence(
+            (
+                receipt, _prior_verdict, verdict_bytes, semantic_sha, work_order,
+                validation_evidence_binding,
+            ) = _validate_predecessor_evidence(
                 repo=repo, run_id=run_id, candidate=candidate, attempt_id=attempt_id,
                 packet_meta=packet_meta, packet_sha=packet_sha, approval_doc=approval_doc,
                 approval_sha=approval_sha, state_doc=current, cp_id=checkpoint_id,
@@ -912,6 +982,9 @@ def retry_blocked_review_after_validation_infrastructure(
             "review_attempt_id": attempt_id,
             "semantic_sha256": semantic_sha,
             "prior_verdict_sha256": util.sha256_bytes(verdict_bytes),
+            "validation_evidence_sha256": validation_evidence_binding["sha256"],
+            "validation_evidence_reference": validation_evidence_binding["reference"],
+            "validation_evidence_identity": validation_evidence_binding["identity"],
             "packet_sha256": packet_sha,
             "approval_sha256": approval_sha,
             "build_receipt_sha256": util.sha256_file(receipts.receipt_path(repo, run_id)),
@@ -1011,6 +1084,7 @@ def retry_blocked_review_after_validation_infrastructure(
             checkpoint_repair_round_count=expected_cp_counts[2],
             preflight_sha256=preflight_sha,
             accounting_sha256=recovery_identity["accounting_sha256"],
+            validation_evidence_sha256=recovery_identity["validation_evidence_sha256"],
         )
 
         with supervisor_mod._managed_connect(db) as conn:

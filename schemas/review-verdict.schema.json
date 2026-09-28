@@ -270,6 +270,42 @@
           },
           "validation_env_path": {
             "type": "string"
+          },
+          "checkpoint_id": {
+            "type": "string"
+          },
+          "pass_number": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "validation_index": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "expected_marker": {
+            "type": ["string", "null"]
+          },
+          "infrastructure_evidence": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["schema", "evidence_id", "relative_path", "sha256"],
+            "properties": {
+              "schema": {
+                "const": "ownframework-loop-validation-evidence/v1"
+              },
+              "evidence_id": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              },
+              "relative_path": {
+                "type": "string",
+                "pattern": "^validation-evidence/package-network/[a-f0-9]{64}\\.json$"
+              },
+              "sha256": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              }
+            }
           }
         }
       }

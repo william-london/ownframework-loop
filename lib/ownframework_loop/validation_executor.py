@@ -37,6 +37,7 @@ from . import (
     runtime_env,
     secrets_v2,
     validation_environment,
+    validation_evidence,
     validation_network,
     validation_policy,
 )
@@ -155,6 +156,9 @@ def run_required_validation(
     candidate_sha: str | None = None,
     role: str = "builder",
     infra_failure_path: Path | None = None,
+    checkpoint_id: str = "",
+    pass_number: int = 0,
+    validation_index: int = 0,
 ) -> dict[str, Any]:
     """Run one validation under the sealed capability binding."""
     command = str(validation.get("command") or "")
@@ -525,13 +529,14 @@ def run_required_validation(
                 "validation_env_path": str(env_dir) if env_dir is not None else "",
                 "recorded_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             })
-    return {
+    result_row = {
         "name": name,
         "command": command,
         "kind": kind,
         "exit_code": None if network_failure_reason else int(returncode),
         "duration_seconds": float(duration),
         "expected_exit_code": expected_exit,
+        "expected_marker": expected_marker,
         "passed": passed and not network_failure_reason,
         "timed_out": timed_out,
         "marker_match": marker_match,
@@ -551,7 +556,29 @@ def run_required_validation(
         "candidate_invalid": False,
         "validation_env_id": env_id,
         "validation_env_path": str(env_dir) if env_dir is not None else "",
+        "checkpoint_id": str(checkpoint_id or ""),
+        "pass_number": int(pass_number),
+        "validation_index": int(validation_index),
     }
+    if package_network_failures:
+        identity = validation_evidence.validation_identity(
+            canonical_repo=canonical_repo,
+            run_id=run_id,
+            checkpoint_id=checkpoint_id,
+            role=role,
+            pass_number=pass_number,
+            validation_index=validation_index,
+            candidate_sha=str(candidate_sha or ""),
+            cwd=cwd,
+            validation=validation,
+        )
+        result_row["infrastructure_evidence"] = (
+            validation_evidence.publish_package_network_events(
+                identity=identity,
+                events=package_network_failures,
+            )
+        )
+    return result_row
 
 
 def _write_infra_failure_marker(path: Path, payload: dict[str, Any]) -> None:

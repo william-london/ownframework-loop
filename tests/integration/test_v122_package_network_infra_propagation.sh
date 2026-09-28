@@ -10,6 +10,7 @@ trap 'rm -rf "$TMP"' EXIT
 python3 -B - "$TMP" "$ROOT_DIR" <<'PY'
 import hashlib
 import os
+import shutil
 import socket
 import subprocess
 import sys
@@ -18,8 +19,9 @@ from pathlib import Path
 root = Path(sys.argv[1])
 repo = root / "repo"
 repo.mkdir()
-candidate = root / "candidate"
-candidate.mkdir()
+run_id = "run-20260927T000000Z-v122-review"
+candidate = repo / ".worktrees" / "ownframework-loop" / run_id / "reviewer"
+candidate.mkdir(parents=True)
 scripts = candidate / "scripts"
 scripts.mkdir()
 wrapper = scripts / "check.sh"
@@ -54,7 +56,7 @@ candidate_sha = subprocess.check_output(
     ["git", "-C", str(candidate), "rev-parse", "HEAD"], text=True
 ).strip()
 
-from ownframework_loop import process_runner, review_finalize, runtime_env, validation_environment
+from ownframework_loop import process_runner, review_finalize, runtime_env, validation_environment, validation_evidence, util
 from ownframework_loop import validation_executor as vx, validation_network
 from ownframework_loop import supervisor_validation_recovery as recovery
 
@@ -139,7 +141,7 @@ def patch(obj, name, value):
     originals.append((obj, name, getattr(obj, name)))
     setattr(obj, name, value)
 
-mode = {"broker_event": True}
+mode = {"broker_event": True, "host": "pypi.org"}
 
 def run_wrapper(_argv, **kwargs):
     network_domains_seen.append(tuple(kwargs["package_network_domains"]))
@@ -149,7 +151,7 @@ def run_wrapper(_argv, **kwargs):
     if mode["broker_event"]:
         kwargs["package_network_failures"].append({
             "kind": "dns_resolution_failed",
-            "host": "pypi.org",
+            "host": mode["host"],
             "port": 443,
             "broker": "connect_proxy",
         })
@@ -183,11 +185,14 @@ try:
         validation=validation,
         timeout_seconds=15,
         canonical_repo=repo,
-        run_id="run-v122-infra-event",
+        run_id=run_id,
         packet=packet,
         candidate_sha=candidate_sha,
         role="reviewer",
         infra_failure_path=infra_path,
+        checkpoint_id="CP-01",
+        pass_number=1,
+        validation_index=0,
     )
     assert result["infra_failure"] is True, result
     assert result["passed"] is False, result
@@ -205,44 +210,130 @@ try:
     marker = __import__("json").loads(infra_path.read_text())
     assert marker["package_network_failures"][0]["host"] == "pypi.org", marker
 
-    # The one-use historical recovery accepts the exact executor-owned
-    # diagnostic only when its digest, private path, DNS signature, and host
-    # all match the frozen package.uv authority.
-    diagnostic_root = root / "validation-diagnostics"
-    diagnostic_root.mkdir(mode=0o700)
-    os.chmod(diagnostic_root, 0o700)
-    diagnostic_path = diagnostic_root / "review.stderr"
-    diagnostic_bytes = (
-        b"error: Request failed after retries\n"
-        b"Failed to fetch: `https://pypi.org/simple/ruff/`\n"
-        b"cause: dns error\n"
-        b"failed to lookup address information: nodename nor servname provided, or not known\n"
+    first_ref = result["infrastructure_evidence"]
+    assert first_ref["schema"] == validation_evidence.SCHEMA, first_ref
+    first_evidence_path = util.run_dir(repo, run_id) / first_ref["relative_path"]
+    assert first_evidence_path.stat().st_mode & 0o777 == 0o600
+    assert hashlib.sha256(first_evidence_path.read_bytes()).hexdigest() == first_ref["sha256"]
+    first_identity = validation_evidence.validation_identity(
+        canonical_repo=repo,
+        run_id=run_id,
+        checkpoint_id="CP-01",
+        role="reviewer",
+        pass_number=1,
+        validation_index=0,
+        candidate_sha=candidate_sha,
+        cwd=candidate,
+        validation=validation,
     )
-    diagnostic_path.write_bytes(diagnostic_bytes)
-    os.chmod(diagnostic_path, 0o600)
-    historical_row = {
-        "passed": False,
-        "infra_failure": False,
-        "candidate_invalid": False,
-        "stderr_truncated": False,
-        "stderr_sha256": hashlib.sha256(diagnostic_bytes).hexdigest(),
-        "diagnostic_stderr_path": str(diagnostic_path),
-    }
-    assert recovery._proves_permitted_registry_dns_failure(
-        historical_row,
+    record, _ = validation_evidence.verify_reference(
+        canonical_repo=repo, run_id=run_id, reference=first_ref,
+        expected_identity=first_identity,
+    )
+    assert validation_evidence.proves_registry_dns_failure(
+        record=record, allowed_domains={"pypi.org", "files.pythonhosted.org"}
+    )
+
+    # Identical cwd+command on a later review pass has a distinct immutable
+    # evidence identity even though runtime-cache diagnostics are reused.
+    second = vx.run_required_validation(
+        cwd=candidate,
+        validation=validation,
+        timeout_seconds=15,
+        canonical_repo=repo,
+        run_id=run_id,
+        packet=packet,
+        candidate_sha=candidate_sha,
+        role="reviewer",
+        infra_failure_path=infra_path,
+        checkpoint_id="CP-01",
+        pass_number=2,
+        validation_index=0,
+    )
+    second_ref = second["infrastructure_evidence"]
+    assert second_ref["evidence_id"] != first_ref["evidence_id"]
+    assert second_ref["relative_path"] != first_ref["relative_path"]
+    assert hashlib.sha256(first_evidence_path.read_bytes()).hexdigest() == first_ref["sha256"]
+    second_evidence_path = util.run_dir(repo, run_id) / second_ref["relative_path"]
+    second_evidence_path.unlink()
+    try:
+        validation_evidence.verify_reference(
+            canonical_repo=repo, run_id=run_id, reference=second_ref,
+            expected_identity=validation_evidence.validation_identity(
+                canonical_repo=repo, run_id=run_id, checkpoint_id="CP-01",
+                role="reviewer", pass_number=2, validation_index=0,
+                candidate_sha=candidate_sha, cwd=candidate, validation=validation,
+            ),
+        )
+    except RuntimeError as exc:
+        assert "missing" in str(exc) or "redirected" in str(exc), exc
+    else:
+        raise AssertionError("missing durable validation evidence was accepted")
+    duplicate = vx.run_required_validation(
+        cwd=candidate,
+        validation=validation,
+        timeout_seconds=15,
+        canonical_repo=repo,
+        run_id=run_id,
+        packet=packet,
+        candidate_sha=candidate_sha,
+        role="reviewer",
+        infra_failure_path=infra_path,
+        checkpoint_id="CP-01",
+        pass_number=1,
+        validation_index=0,
+    )
+    assert duplicate["infrastructure_evidence"] == first_ref
+    mode["host"] = "files.pythonhosted.org"
+    try:
+        vx.run_required_validation(
+            cwd=candidate, validation=validation, timeout_seconds=15,
+            canonical_repo=repo, run_id=run_id, packet=packet,
+            candidate_sha=candidate_sha, role="reviewer",
+            infra_failure_path=infra_path, checkpoint_id="CP-01",
+            pass_number=1, validation_index=0,
+        )
+    except RuntimeError as exc:
+        assert "identity collision" in str(exc), exc
+    else:
+        raise AssertionError("contradictory same-pass evidence was overwritten")
+    mode["host"] = "pypi.org"
+
+    # Deleting the complete ephemeral cache cannot remove recovery authority.
+    shutil.rmtree(runtime_env.runtime_cache_dir(repo, run_id, "validation"))
+    recovery_binding = recovery._proves_permitted_registry_dns_failure(
+        dict(result),
         allowed_domains={"pypi.org", "files.pythonhosted.org"},
-        diagnostic_root=diagnostic_root,
+        canonical_repo=repo,
+        run_id=run_id,
+        checkpoint_id="CP-01",
+        candidate_sha=candidate_sha,
+        review_pass_number=1,
     )
-    assert not recovery._proves_permitted_registry_dns_failure(
-        historical_row,
+    assert recovery_binding and recovery_binding["sha256"] == first_ref["sha256"]
+    assert recovery._proves_permitted_registry_dns_failure(
+        dict(result),
         allowed_domains={"registry.npmjs.org"},
-        diagnostic_root=diagnostic_root,
-    )
-    assert not recovery._proves_permitted_registry_dns_failure(
-        {**historical_row, "stderr_sha256": "0" * 64},
+        canonical_repo=repo,
+        run_id=run_id,
+        checkpoint_id="CP-01",
+        candidate_sha=candidate_sha,
+        review_pass_number=1,
+    ) is None
+    assert recovery._proves_permitted_registry_dns_failure(
+        {**result, "infrastructure_evidence": {**first_ref, "sha256": "0" * 64}},
         allowed_domains={"pypi.org"},
-        diagnostic_root=diagnostic_root,
-    )
+        canonical_repo=repo,
+        run_id=run_id,
+        checkpoint_id="CP-01",
+        candidate_sha=candidate_sha,
+        review_pass_number=1,
+    ) is None
+    assert validation_evidence.event_references([result]) == [{
+        "validation_index": 0,
+        "evidence_id": first_ref["evidence_id"],
+        "sha256": first_ref["sha256"],
+    }]
 
     # Text which resembles DNS trouble is not sufficient without a structured
     # event from the trusted package broker.
@@ -252,21 +343,25 @@ try:
         validation={**validation, "command": "python -c 'print(1)'"},
         timeout_seconds=15,
         canonical_repo=repo,
-        run_id="run-v122-output-is-not-authority",
+        run_id="run-20260927T000001Z-v122-fake-stderr",
         packet=packet,
         candidate_sha=candidate_sha,
         role="reviewer",
+        checkpoint_id="CP-01",
+        pass_number=1,
+        validation_index=0,
     )
     assert plain["infra_failure"] is False, plain
     assert plain["passed"] is False and plain["exit_code"] == 1, plain
+    assert "infrastructure_evidence" not in plain, plain
     plain_route = review_finalize._validation_failure_verdict(
         infra_failure_count=int(bool(plain["infra_failure"])),
         candidate_invalid_count=int(bool(plain["candidate_invalid"])),
         validation_pass=bool(plain["passed"]),
     )
     assert plain_route == ("CHANGES_REQUESTED", "validation_failed"), plain_route
-    assert resolution_calls == [True], resolution_calls
-    assert snapshot_calls == [True], snapshot_calls
+    assert len(resolution_calls) == 4, resolution_calls
+    assert len(snapshot_calls) == 4, snapshot_calls
     assert network_domains_seen[-1] == (), network_domains_seen
 finally:
     for obj, name, original in reversed(originals):
@@ -274,7 +369,10 @@ finally:
 
 print("WRAPPED_PACKAGE_FAILURE_TO_INFRA_FAILURE=PASS")
 print("CANDIDATE_STDERR_CANNOT_FORGE_INFRA=PASS")
-print("HISTORICAL_REGISTRY_DNS_RECOVERY_EVIDENCE_BOUND=PASS")
+print("DURABLE_REGISTRY_DNS_EVIDENCE_PASS_BOUND=PASS")
+print("REPEATED_REVIEW_EVIDENCE_IS_IMMUTABLE=PASS")
+print("RUNTIME_CACHE_LOSS_DOES_NOT_REMOVE_RECOVERY_AUTHORITY=PASS")
+print("CONTRADICTORY_DURABLE_EVIDENCE_FAILS_CLOSED=PASS")
 
 # Candidate-controlled PYTHONPATH must not be required to import Loop's
 # pytest plugin. Caller-provided plugins remain untouched.

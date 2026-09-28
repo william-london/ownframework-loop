@@ -50,7 +50,7 @@ from typing import Any
 from . import (
     approval, git_checks, guards, integrity, limits as limits_mod,
     packet as packet_mod, program as program_mod, receipts, runtime_env,
-    secrets_v2, validation_executor,
+    secrets_v2, validation_executor, validation_evidence,
     state as state_mod, transitions, util, worktrees,
     build_agent as build_agent_mod,
     protected_recovery,
@@ -700,7 +700,21 @@ def finalize_build(
         / "infra_failures"
         / "build.json"
     )
-    for v in program_mod.resolve_effective_required_validation(meta, state):
+    # The pass identity is sealed into any broker evidence created while
+    # executing validation. The full claim/cap checks remain authoritative
+    # below, before the BUILD_RECEIPT is published.
+    new_build_pass_count = int(state.get("build_pass_count") or 0)
+    validation_checkpoint_id = ""
+    if state_mod.is_program_state(state):
+        validation_program = state.get("program") or {}
+        if validation_program.get("review_scope") != program_mod.REVIEW_SCOPE_PROGRAM_FINAL:
+            validation_checkpoints = list(validation_program.get("current_checkpoints") or [])
+            if not validation_checkpoints:
+                raise RuntimeError("PROGRAM validation has no current checkpoint identity")
+            validation_checkpoint_id = str(validation_checkpoints[0])
+    for validation_index, v in enumerate(
+        program_mod.resolve_effective_required_validation(meta, state)
+    ):
         timeout = int(meta.get("required_runtime_proof", {}).get("max_runtime_seconds") or 600)
         result = validation_executor.run_required_validation(
             cwd=builder_wt,
@@ -712,6 +726,9 @@ def finalize_build(
             candidate_sha=candidate_sha,
             role="builder",
             infra_failure_path=infra_failure_marker_path,
+            checkpoint_id=validation_checkpoint_id,
+            pass_number=int(new_build_pass_count),
+            validation_index=validation_index,
         )
         if bool(result.get("infra_failure")):
             infra_failure_count += 1
@@ -1159,6 +1176,7 @@ def finalize_build(
             "added_lines": receipt["added_lines"],
             "removed_lines": receipt["removed_lines"],
             "validation_pass": validation_pass,
+            "validation_evidence_refs": validation_evidence.event_references(validations),
             "hard_secret_blocks": len(hard_secret_blocks),
             "protected_findings": len(protected_findings),
             "protected_drift_recovered": protected_drift_recovery is not None,

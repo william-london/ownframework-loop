@@ -59,7 +59,7 @@ from typing import Any
 from . import (
     approval, git_checks, guards, integrity, limits as limits_mod,
     packet as packet_mod, program as program_mod, receipts, runtime_env,
-    secrets_v2, validation_executor,
+    secrets_v2, validation_executor, validation_evidence,
     state as state_mod, transitions, util, verdicts, worktrees,
     assessment as assessment_mod,
 )
@@ -320,7 +320,24 @@ def finalize_review(
         / "infra_failures"
         / "review.json"
     )
-    for v in program_mod.resolve_effective_required_validation(meta, active_state):
+    validation_checkpoint_id = ""
+    validation_pass_number = int(active_state.get("review_pass_count") or 0)
+    if state_mod.is_program_state(active_state):
+        if validation_pass_number < 1:
+            raise RuntimeError(
+                "review_pass_count=0; refuse to validate before claiming a review pass"
+            )
+        review_program = active_state.get("program") or {}
+        if review_program.get("review_scope") != program_mod.REVIEW_SCOPE_PROGRAM_FINAL:
+            current_validation_checkpoints = list(
+                review_program.get("current_checkpoints") or []
+            )
+            if not current_validation_checkpoints:
+                raise RuntimeError("PROGRAM validation has no current checkpoint identity")
+            validation_checkpoint_id = str(current_validation_checkpoints[0])
+    for validation_index, v in enumerate(
+        program_mod.resolve_effective_required_validation(meta, active_state)
+    ):
         if not _validation_shape_ok(v):
             continue
         timeout = int(meta.get("required_runtime_proof", {}).get("max_runtime_seconds") or 600)
@@ -334,6 +351,9 @@ def finalize_review(
             candidate_sha=receipt_candidate_sha,
             role="reviewer",
             infra_failure_path=infra_failure_marker_path,
+            checkpoint_id=validation_checkpoint_id,
+            pass_number=validation_pass_number,
+            validation_index=validation_index,
         )
         if bool(result.get("infra_failure")):
             infra_failure_count += 1
@@ -455,6 +475,8 @@ def finalize_review(
     # as review_pass_number. The finalizer never increments.
     cur_state = state_mod.load_verified(canonical_repo, run_id)
     new_review_pass_count = int(cur_state.get("review_pass_count") or 0)
+    if new_review_pass_count != validation_pass_number:
+        raise RuntimeError("review pass identity changed while deterministic validation was running")
     if new_review_pass_count < 1:
         raise RuntimeError(
             "review_pass_count=0; refuse to finalize. Claim the review pass first."
@@ -880,6 +902,8 @@ def finalize_review(
             "ng_violated_count": len(ng_violated),
             "hard_secret_blocks": len(hard_secret_blocks),
             "validation_pass": validation_pass,
+            "infra_failure_count": int(infra_failure_count),
+            "validation_evidence_refs": validation_evidence.event_references(validations),
         },
     )
 
