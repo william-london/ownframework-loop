@@ -2818,6 +2818,7 @@ def _migrate_quarantined_run_capabilities(
         packet_network_allowlist=[
             str(item) for item in (packet_meta.get("network_read_allowlist") or [])
         ],
+        evidence_run_key=run_id,
     )
     capability_binding_mod._assert_runtime_ready_resolution(resolution, requested)
     program = current_state.get("program") or {}

@@ -76,7 +76,9 @@ def expect_error(fn, text: str) -> None:
     raise AssertionError(f"expected failure: {text}")
 
 
-def packet_and_approval(repo: Path, run_id: str) -> None:
+def packet_and_approval(
+    repo: Path, run_id: str, *, capabilities_requested=None
+) -> None:
     run_dir = repo / ".ownframework-loop" / run_id
     run_dir.mkdir(parents=True)
     packet = {
@@ -88,7 +90,7 @@ def packet_and_approval(repo: Path, run_id: str) -> None:
         "title": "capability migration fixture",
         "target": {"repo": str(repo.resolve()), "branch": "main", "classification": "local_only"},
         "execution_mode": "single",
-        "capabilities": ["toolchain.synthetic"],
+        "capabilities": list(capabilities_requested or ["toolchain.synthetic"]),
         "runner_profile": "default",
         "acceptance_criteria": [{"id": "AC-1", "text": "fixture"}],
         "non_goals": [],
@@ -123,10 +125,18 @@ def packet_and_approval(repo: Path, run_id: str) -> None:
     state.transition(repo, run_id, to_state="READY_TO_BUILD", actor="test", reason="fixture approved")
 
 
-def make_quarantined(root: Path, label: str, old_resolution: dict) -> tuple[Path, str, Path, dict]:
+def make_quarantined(
+    root: Path,
+    label: str,
+    old_resolution: dict,
+    *,
+    capabilities_requested=None,
+) -> tuple[Path, str, Path, dict]:
     repo = make_repo(root, "repo-" + label)
     run_id = "run-" + label
-    packet_and_approval(repo, run_id)
+    packet_and_approval(
+        repo, run_id, capabilities_requested=capabilities_requested
+    )
     old = capability_binding.ensure_run_binding(
         repo, run_id, old_resolution, PROFILE, allow_create=True
     )
@@ -327,6 +337,104 @@ print(json.dumps(out, sort_keys=True))
         with supervisor._connect_readonly(race_db) as conn:
             row = conn.execute("SELECT status FROM jobs WHERE run_id=?", (race_run,)).fetchone()
         assert row["status"] == "QUEUED", row
+
+    # Research evidence is read-only and per-run. Capability migration must
+    # use the same evidence_run_key as semantic dispatch; omitting it binds
+    # the broader shared root, so migration appears idempotent but the next
+    # worker is rejected against its run-scoped projection.
+    research_name = "research.public"
+    research_root = str(state_root / "ownframework-loop" / "research")
+    helper_path = "/trusted/ofloop-research-call"
+
+    def research_resolution(evidence_path: str) -> dict:
+        return {
+            "capability_contract_revision": "host-capability-contract/v2",
+            "requested": [research_name],
+            "host_manifest_sha256": "research-manifest",
+            "semantic_runtime_fingerprint": "research-runtime",
+            "platform_identity": {"platform": "test", "release": "research"},
+            "resolved": [{
+                "name": research_name,
+                "kind": "read-only-network",
+                "privileged": True,
+                "provider": "core_research_broker",
+                "executable": "/trusted/ofloop-research-broker",
+                "version": "0.1.0-test",
+                "executable_sha256": "broker-sha256",
+                "network_domains": [],
+                "commissioning_evidence_sha256": "commissioning-sha256",
+                "commissioning_canary_kind": "core-research-broker-boundary",
+            }],
+            "network_domains": [],
+            "stable_filesystem": {
+                "allowRead": [helper_path, evidence_path],
+                "allowWrite": [],
+            },
+            "sandbox_network": {},
+        }
+
+    old_research_resolution = research_resolution(research_root)
+    research_repo, research_run, research_db, old_research_binding = make_quarantined(
+        root,
+        "research-scope",
+        old_research_resolution,
+        capabilities_requested=[research_name],
+    )
+    observed_resolution = {}
+    original_resolve = capabilities.resolve_capabilities
+
+    def run_scoped_research_resolution(requested, **kwargs):
+        assert requested == [research_name], requested
+        run_key = kwargs.get("evidence_run_key")
+        observed_resolution["evidence_run_key"] = run_key
+        evidence_path = research_root if not run_key else str(Path(research_root) / run_key)
+        return research_resolution(evidence_path)
+
+    before_research_state = state.load_verified(research_repo, research_run)
+    with supervisor._connect_readonly(research_db) as conn:
+        before_research_job = conn.execute(
+            "SELECT * FROM jobs WHERE run_id=?", (research_run,)
+        ).fetchone()
+    capabilities.resolve_capabilities = run_scoped_research_resolution
+    try:
+        research_resume = supervisor.resume(
+            canonical_repo=research_repo,
+            run_id=research_run,
+            db_path=research_db,
+            rebind_capabilities=True,
+        )
+    finally:
+        capabilities.resolve_capabilities = original_resolve
+
+    assert research_resume["resumed"] is True, research_resume
+    assert observed_resolution.get("evidence_run_key") == research_run, observed_resolution
+    migration = research_resume["capability_migration"]
+    assert migration["status"] == "COMPLETE" and not migration["idempotent"], migration
+    assert migration["previous_binding_sha256"] == old_research_binding["binding_sha256"]
+    migrated = capability_binding._read(
+        capability_binding.binding_path(research_repo, research_run)
+    )
+    assert migrated["binding_sha256"] == migration["new_binding_sha256"]
+    scoped_evidence_path = str(Path(research_root) / research_run)
+    allow_read = migrated["projection"]["stable_filesystem"]["allowRead"]
+    assert scoped_evidence_path in allow_read, allow_read
+    assert research_root not in allow_read, allow_read
+    assert migrated["projection"]["requested"] == [research_name]
+    assert capability_binding.historical_binding(
+        research_repo, research_run, old_research_binding["binding_sha256"]
+    ) == old_research_binding
+    after_research_state = state.load_verified(research_repo, research_run)
+    for counter in ("build_pass_count", "review_pass_count", "repair_round"):
+        assert after_research_state[counter] == before_research_state[counter], counter
+    with supervisor._connect_readonly(research_db) as conn:
+        after_research_job = conn.execute(
+            "SELECT * FROM jobs WHERE run_id=?", (research_run,)
+        ).fetchone()
+    for field in (
+        "total_cost_usd", "total_input_tokens", "total_output_tokens",
+        "total_cache_read_tokens",
+    ):
+        assert after_research_job[field] == before_research_job[field], field
 
 print("OF_LOOP_V097_CAPABILITY_BINDING_ATOMICITY=PASS")
 PY
