@@ -49,8 +49,59 @@ class ProgramRolloverRefused(RuntimeError):
     """Raised when linked rollover authority cannot be proven."""
 
 
+def _wall_clock_now() -> float:
+    """Clock seam for absolute rollover deadline calculation."""
+    return time.time()
+
+
 def _json_bytes(value: Any) -> bytes:
     return json.dumps(value, indent=2, sort_keys=True).encode("utf-8")
+
+
+def _rollover_capability_binding(
+    canonical_repo: Path,
+    run_id: str,
+    meta: dict[str, Any],
+    *,
+    runner: str,
+    allow_create: bool,
+) -> dict[str, Any]:
+    """Resolve and verify the child's immutable packet/profile binding.
+
+    A rollover child has no semantic BUILD pass from which the ordinary
+    runner could create its first binding. Its mandatory deterministic
+    validation therefore establishes the standard run binding at the core
+    boundary. Replays may verify an existing binding, but may not silently
+    recreate a missing binding after rollover authority has been published.
+    """
+    from . import capabilities, capability_binding, runner_profiles, runtime_env
+
+    profile = runner_profiles.resolve_profile(
+        str(meta.get("runner_profile") or "default"), provider=runner,
+    )
+    runner_profiles.verify_profile_integrity(profile)
+    attestation = runner_profiles.verify_effort_attestation(profile)
+    if attestation is not None:
+        profile = dict(profile)
+        profile["effort_attestation"] = attestation
+    resolution = capabilities.resolve_capabilities(
+        [str(item) for item in (meta.get("capabilities") or [])],
+        canonical_repo=canonical_repo,
+        role="reviewer",
+        repo_cache_root=runtime_env.repo_tool_cache_dir(canonical_repo),
+        ephemeral_cache_root=(
+            runtime_env.runtime_cache_dir(canonical_repo, run_id, "validation")
+            / "capability-cache"
+        ),
+        packet_network_allowlist=[
+            str(item) for item in (meta.get("network_read_allowlist") or [])
+        ],
+        evidence_run_key=run_id,
+    )
+    capabilities.verify_resolution_integrity(resolution)
+    return capability_binding.ensure_run_binding(
+        canonical_repo, run_id, resolution, profile, allow_create=allow_create,
+    )
 
 
 def _create_once(path: Path, raw: bytes, *, mode: int = 0o600) -> None:
@@ -102,11 +153,84 @@ def _job_snapshot(job: Any) -> dict[str, Any]:
         "worker_attempt_id", "worker_role", "latest_attempt_id",
         "candidate_branch", "execution_mode", "max_pass_runtime_seconds",
     )
-    return {key: job[key] for key in fields if key in job.keys()}
+    snapshot = {key: job[key] for key in fields if key in job.keys()}
+    # ``observed_total_tokens`` is a derived read-model field, not a SQLite
+    # column. Rollover deliberately reads the raw ledger row, so compute the
+    # same projection here before reconciling it against attempt history.
+    if "observed_total_tokens" not in snapshot:
+        snapshot["observed_total_tokens"] = sum(
+            int(snapshot.get(key) or 0)
+            for key in (
+                "total_input_tokens", "total_output_tokens",
+                "total_cache_read_tokens", "total_cache_creation_tokens",
+            )
+        )
+    return snapshot
 
 
 def _snapshot_digest(value: Any) -> str:
     return hashlib.sha256(_json_bytes(value)).hexdigest()
+
+
+def _wall_clock_authority(
+    job: dict[str, Any],
+    *,
+    now: float,
+) -> dict[str, float | None]:
+    """Bind rollover wall authority to the parent's absolute deadline.
+
+    ``max_wall_seconds`` is a duration only when paired with its start time.
+    Copying the parent's *remaining* duration and starting that duration again
+    at child execution would replenish time spent approving or enqueueing the
+    rollover.  The child therefore gets a frozen clock origin at rollover
+    creation, with a duration that ends no later than the parent's deadline.
+    """
+    ceiling = int(job.get("max_wall_seconds") or 0)
+    if ceiling <= 0:
+        return {
+            "parent_deadline_unix": None,
+            "child_execution_started_at": None,
+        }
+    parent_started = float(job.get("execution_started_at") or 0.0)
+    if parent_started <= 0:
+        raise ProgramRolloverRefused(
+            "wall-clock budget is enabled but parent start time is unknown"
+        )
+    deadline = parent_started + ceiling
+    remaining = int(deadline - now)
+    if remaining <= 0:
+        raise ProgramRolloverRefused("parent wall-clock envelope is exhausted")
+    return {
+        "parent_deadline_unix": deadline,
+        "child_execution_started_at": now,
+    }
+
+
+def _validate_frozen_wall_clock_authority(
+    authority_doc: dict[str, Any],
+    envelope: dict[str, Any],
+    *,
+    now: float,
+) -> tuple[float | None, float | None]:
+    """Prove the child clock remains anchored before preflight/enrollment."""
+    clock = authority_doc.get("wall_clock_authority")
+    if not isinstance(clock, dict):
+        raise ProgramRolloverRefused("rollover wall-clock authority is missing")
+    raw_deadline = clock.get("parent_deadline_unix")
+    raw_origin = clock.get("child_execution_started_at")
+    wall = int(envelope.get("max_wall_seconds") or 0)
+    if raw_deadline is None:
+        if raw_origin is not None or wall != 0:
+            raise ProgramRolloverRefused("unlimited rollover wall-clock authority is contradictory")
+        return None, None
+    try:
+        deadline = float(raw_deadline)
+        origin = float(raw_origin)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ProgramRolloverRefused("rollover wall-clock authority is malformed") from exc
+    if wall <= 0 or origin <= 0 or origin + wall > deadline or now >= deadline:
+        raise ProgramRolloverRefused("rollover wall-clock deadline is exhausted or inconsistent")
+    return origin, deadline
 
 
 def _validation_rows_match(
@@ -235,15 +359,12 @@ def _remaining_operational_envelope(
     cycles = int(job.get("max_transient_recovery_cycles") or 0) - int(job.get("transient_recovery_cycles") or 0)
     if min(infra, transient, cycles) < 0:
         raise ProgramRolloverRefused("parent failure counters exceed their frozen operational envelope")
-    wall = int(job.get("max_wall_seconds") or 0)
-    if wall > 0:
-        started = float(job.get("execution_started_at") or 0.0)
-        if started <= 0:
-            raise ProgramRolloverRefused("wall-clock budget is enabled but parent start time is unknown")
-        elapsed = max(0, int((now if now is not None else time.time()) - started))
-        wall -= elapsed
-        if wall <= 0:
-            raise ProgramRolloverRefused("parent wall-clock envelope is exhausted")
+    observed_at = float(now if now is not None else time.time())
+    wall_clock = _wall_clock_authority(job, now=observed_at)
+    deadline = wall_clock["parent_deadline_unix"]
+    wall = int(deadline - observed_at) if deadline is not None else 0
+    if deadline is not None and wall <= 0:
+        raise ProgramRolloverRefused("parent wall-clock envelope is exhausted")
     return {
         "max_infra_failures": infra,
         "max_transient_failures": transient,
@@ -530,6 +651,8 @@ def _assert_parent_artifacts(
         "parent_cost_totals": accounting,
         "parent_attempt_count": len(attempts),
     }
+    observed_at = _wall_clock_now()
+    wall_clock = _wall_clock_authority(parent_job, now=observed_at)
     return {
         "repo": repo,
         "parent_run_id": run_id,
@@ -550,7 +673,11 @@ def _assert_parent_artifacts(
         "accounting": accounting,
         "latest_reviewer_attempt": latest_reviewer,
         "source": source,
-        "operational_envelope": _remaining_operational_envelope(parent_job, accounting),
+        "operational_envelope": _remaining_operational_envelope(
+            parent_job, accounting, now=observed_at,
+        ),
+        "wall_clock_authority": wall_clock,
+        "wall_clock_observed_at": observed_at,
     }
 
 
@@ -597,6 +724,19 @@ def create_linked_program_rollover(
     state.validate_run_id(child_id)
     if not git_checks.is_valid_branch_name(child_branch):
         raise ProgramRolloverRefused("derived child candidate branch is not a valid Git ref")
+    child_root = state.run_dir(repo, child_id)
+    child_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    authority_path = child_root / "ROLLOVER_AUTHORITY.json"
+    child_binding = _rollover_capability_binding(
+        repo,
+        child_id,
+        proof["packet_meta"],
+        runner=str(proof["job"].get("runner") or ""),
+        allow_create=not authority_path.exists(),
+    )
+    child_binding_sha = str(child_binding.get("binding_sha256") or "")
+    if not re.fullmatch(r"[0-9a-f]{64}", child_binding_sha):
+        raise ProgramRolloverRefused("child capability binding has no valid digest")
 
     source_packet_sha = str(proof["source"]["packet_sha256"])
     authority_doc = {
@@ -618,15 +758,14 @@ def create_linked_program_rollover(
         },
         "checkpoint_id": proof["checkpoint_id"],
         "operational_envelope_remaining": proof["operational_envelope"],
+        "wall_clock_authority": proof["wall_clock_authority"],
+        "capability_binding_sha256": child_binding_sha,
         "runner": str(proof["job"].get("runner") or ""),
         "source_failure_classification": "historical_validation_cause_unproven",
         "source_diagnostic_sha256": proof["source"]["failed_validation_stderr_sha256"],
         "source_diagnostic_bytes_found": False,
     }
-    child_root = state.run_dir(repo, child_id)
-    child_root.mkdir(parents=True, exist_ok=True, mode=0o700)
     _create_once(child_root / "WORK_PACKET.md", proof["packet_bytes"])
-    authority_path = child_root / "ROLLOVER_AUTHORITY.json"
     if authority_path.exists():
         prior_authority = _load_private_json(authority_path)
         if not isinstance(prior_authority, dict):
@@ -636,6 +775,8 @@ def create_linked_program_rollover(
         comparable_new = dict(authority_doc)
         comparable_prior.pop("operational_envelope_remaining", None)
         comparable_new.pop("operational_envelope_remaining", None)
+        comparable_prior.pop("wall_clock_authority", None)
+        comparable_new.pop("wall_clock_authority", None)
         if comparable_prior != comparable_new or not isinstance(prior_envelope, dict):
             raise ProgramRolloverRefused("existing child authority conflicts with the proven parent source")
         current_envelope = authority_doc["operational_envelope_remaining"]
@@ -647,11 +788,41 @@ def create_linked_program_rollover(
             raise ProgramRolloverRefused("existing child operational envelope conflicts with parent remaining authority")
         prior_wall = int(prior_envelope.get("max_wall_seconds") or 0)
         current_wall = int(current_envelope.get("max_wall_seconds") or 0)
-        if prior_wall != current_wall and not (prior_wall > 0 and current_wall > 0 and prior_wall < current_wall):
+        prior_clock = prior_authority.get("wall_clock_authority")
+        current_clock = authority_doc.get("wall_clock_authority")
+        if not isinstance(prior_clock, dict) or not isinstance(current_clock, dict):
+            raise ProgramRolloverRefused("existing rollover authority has no wall-clock deadline binding")
+        if prior_clock.get("parent_deadline_unix") != current_clock.get("parent_deadline_unix"):
+            raise ProgramRolloverRefused("existing rollover wall-clock deadline conflicts with parent authority")
+        parent_deadline = current_clock.get("parent_deadline_unix")
+        if parent_deadline is None:
+            if prior_wall != 0 or prior_clock.get("child_execution_started_at") is not None:
+                raise ProgramRolloverRefused("existing rollover wall-clock envelope conflicts with an unlimited parent")
+        else:
+            try:
+                prior_origin = float(prior_clock["child_execution_started_at"])
+                deadline = float(parent_deadline)
+                observed_at = float(proof["wall_clock_observed_at"])
+                prior_duration = int(prior_wall)
+            except (KeyError, TypeError, ValueError, OverflowError) as exc:
+                raise ProgramRolloverRefused("existing rollover wall-clock authority is malformed") from exc
+            if (
+                prior_duration <= 0
+                or prior_origin <= 0
+                or prior_origin > observed_at
+                or prior_origin + prior_duration > deadline
+                or current_wall > prior_duration
+            ):
+                raise ProgramRolloverRefused("existing rollover wall-clock envelope is no longer safe to replay")
+        if prior_wall != current_wall and not (
+            parent_deadline is not None and 0 < current_wall < prior_wall
+        ):
             raise ProgramRolloverRefused("existing rollover wall-clock envelope is no longer safe to replay")
-        # The immutable first-created envelope is reused on replay.  A later
-        # retry may accept a smaller remaining wall budget, but never widen it.
+        # Keep the first-created clock origin and duration immutable.  Replays
+        # may observe less time remaining, but can never restart or widen the
+        # parent deadline.
         authority_doc["operational_envelope_remaining"] = prior_envelope
+        authority_doc["wall_clock_authority"] = prior_clock
     authority_bytes = _json_bytes(authority_doc)
     authority_sha = hashlib.sha256(authority_bytes).hexdigest()
     _create_once(authority_path, authority_bytes)
@@ -887,6 +1058,15 @@ def verify_candidate_origin(
     )
     if not approval_ok:
         raise ProgramRolloverRefused("child approval binding invalid: " + approval_reason)
+    child_binding = _rollover_capability_binding(
+        repo,
+        run_id,
+        meta,
+        runner=str(authority_doc.get("runner") or ""),
+        allow_create=False,
+    )
+    if child_binding.get("binding_sha256") != authority_doc.get("capability_binding_sha256"):
+        raise ProgramRolloverRefused("child capability binding differs from linked rollover authority")
     receipt_path = receipts.receipt_path(repo, run_id)
     receipt_doc = receipts.load_receipt(repo, run_id)
     preflight_path = root / "ROLLOVER_PREFLIGHT.json"
@@ -909,6 +1089,7 @@ def verify_candidate_origin(
         or preflight_doc.get("candidate_sha") != candidate
         or preflight_doc.get("packet_sha256") != authority_doc.get("child_packet_sha256")
         or preflight_doc.get("approval_sha256") != approval.approval_artifact_sha256(approval_doc)
+        or preflight_doc.get("capability_binding_sha256") != authority_doc.get("capability_binding_sha256")
         or rollover.get("preflight_sha256") != preflight_sha
         or rollover.get("review_admission_receipt_sha256") != receipt_sha
         or origin.get("schema") != ORIGIN_SCHEMA
@@ -949,6 +1130,12 @@ def prepare_rollover_review(
     authority_doc, authority_sha = _child_authority(repo, run_id)
     if authority_sha != rollover.get("rollover_authority_sha256"):
         raise ProgramRolloverRefused("child rollover authority digest mismatch")
+    inherited_envelope = authority_doc.get("operational_envelope_remaining")
+    if not isinstance(inherited_envelope, dict):
+        raise ProgramRolloverRefused("child rollover operational envelope is missing")
+    _validate_frozen_wall_clock_authority(
+        authority_doc, inherited_envelope, now=_wall_clock_now(),
+    )
     _verify_parent_source_authority(repo, authority_doc)
     root = state.run_dir(repo, run_id)
     packet_path = root / "WORK_PACKET.md"
@@ -967,6 +1154,16 @@ def prepare_rollover_review(
     )
     if not approval_ok:
         raise ProgramRolloverRefused("child approval binding invalid: " + approval_reason)
+    child_binding = _rollover_capability_binding(
+        repo,
+        run_id,
+        meta,
+        runner=str(authority_doc.get("runner") or ""),
+        allow_create=False,
+    )
+    child_binding_sha = str(child_binding.get("binding_sha256") or "")
+    if child_binding_sha != authority_doc.get("capability_binding_sha256"):
+        raise ProgramRolloverRefused("child capability binding differs from linked rollover authority")
     approval_sha = approval.approval_artifact_sha256(approval_doc or {})
     candidate = str(rollover.get("candidate_sha") or "")
     if child.get("state") not in {"READY_TO_BUILD", "READY_FOR_REVIEW"}:
@@ -1043,6 +1240,7 @@ def prepare_rollover_review(
             or preflight.get("candidate_sha") != candidate
             or preflight.get("packet_sha256") != packet_sha
             or preflight.get("approval_sha256") != approval_sha
+            or preflight.get("capability_binding_sha256") != child_binding_sha
             or preflight.get("candidate_branch") != expected_branch
             or preflight.get("baseline_sha") != approval_doc.get("baseline_sha")
             or preflight.get("checkpoint_id") != checkpoint_id
@@ -1099,6 +1297,7 @@ def prepare_rollover_review(
             "candidate_sha": candidate,
             "packet_sha256": packet_sha,
             "approval_sha256": approval_sha,
+            "capability_binding_sha256": child_binding_sha,
             "candidate_branch": expected_branch,
             "baseline_sha": str(approval_doc.get("baseline_sha") or ""),
             "checkpoint_id": checkpoint_id,
@@ -1368,7 +1567,13 @@ def enqueue_envelope_for_child(
     envelope = authority_doc.get("operational_envelope_remaining")
     if not isinstance(envelope, dict):
         raise ProgramRolloverRefused("rollover child has no inherited operational envelope")
+    execution_started_at, parent_deadline = _validate_frozen_wall_clock_authority(
+        authority_doc, envelope, now=_wall_clock_now(),
+    )
     for key, requested_value in (requested or {}).items():
         if requested_value is not None and requested_value != envelope.get(key):
             raise ProgramRolloverRefused(f"enqueue request would alter inherited ceiling {key}")
-    return dict(envelope)
+    result = dict(envelope)
+    result["execution_started_at"] = execution_started_at
+    result["parent_deadline_unix"] = parent_deadline
+    return result

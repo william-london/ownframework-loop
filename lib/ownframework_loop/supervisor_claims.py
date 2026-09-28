@@ -134,6 +134,8 @@ def enqueue(
     # inherited operational envelope is enforced before any ledger write.
     # Ordinary jobs return None and continue through the unchanged path.
     from . import program_rollover as _program_rollover_mod
+    inherited_execution_started_at: float | None = None
+    inherited_parent_deadline: float | None = None
     try:
         inherited_envelope = _program_rollover_mod.enqueue_envelope_for_child(
             Path(canonical_repo),
@@ -163,6 +165,14 @@ def enqueue(
             max_total_cost_usd = float(inherited_envelope["max_total_cost_usd"])
             max_total_tokens = int(inherited_envelope["max_total_tokens"])
             max_wall_seconds = int(inherited_envelope["max_wall_seconds"])
+            raw_started_at = inherited_envelope.get("execution_started_at")
+            raw_deadline = inherited_envelope.get("parent_deadline_unix")
+            inherited_execution_started_at = (
+                float(raw_started_at) if raw_started_at is not None else None
+            )
+            inherited_parent_deadline = (
+                float(raw_deadline) if raw_deadline is not None else None
+            )
     except _program_rollover_mod.ProgramRolloverRefused as exc:
         return {
             "schema": _db_mod.SCHEMA,
@@ -386,6 +396,7 @@ def enqueue(
             eff_cost = _keep("max_total_cost_usd", max_total_cost_usd, 0.0)
             eff_tokens = _keep("max_total_tokens", max_total_tokens, 0)
             eff_wall = _keep("max_wall_seconds", max_wall_seconds, 0)
+            eff_execution_started_at = existing["execution_started_at"]
             eff_legacy_ambiguous = int(existing["legacy_budget_ambiguous"] or 0)
             if (
                 max_total_cost_usd is not None
@@ -403,7 +414,65 @@ def enqueue(
             eff_cost = max_total_cost_usd if max_total_cost_usd is not None else 0.0
             eff_tokens = max_total_tokens if max_total_tokens is not None else 0
             eff_wall = max_wall_seconds if max_wall_seconds is not None else 0
+            eff_execution_started_at = None
             eff_legacy_ambiguous = 0
+
+        if inherited_envelope is not None:
+            requested_wall = int(max_wall_seconds or 0)
+            existing_wall = int(existing["max_wall_seconds"] or 0) if existing is not None else requested_wall
+            if requested_wall > 0:
+                if (
+                    inherited_execution_started_at is None
+                    or inherited_parent_deadline is None
+                    or inherited_execution_started_at + requested_wall > inherited_parent_deadline
+                ):
+                    return {
+                        "schema": _db_mod.SCHEMA,
+                        "ok": False,
+                        "db_path": str(db),
+                        "repo": repo,
+                        "run_id": run_id,
+                        "enqueue_refused": True,
+                        "reason": "linked_program_rollover_wall_clock_authority_invalid",
+                    }
+                if existing is not None:
+                    existing_started = existing["execution_started_at"]
+                    if existing_wall <= 0 or (
+                        existing_started is not None
+                        and abs(float(existing_started) - inherited_execution_started_at) > 1e-6
+                    ):
+                        return {
+                            "schema": _db_mod.SCHEMA,
+                            "ok": False,
+                            "db_path": str(db),
+                            "repo": repo,
+                            "run_id": run_id,
+                            "enqueue_refused": True,
+                            "reason": "linked_program_rollover_wall_clock_replay_conflict",
+                        }
+                    # Re-enrollment may preserve a stricter existing duration,
+                    # but may never replenish it. SQLite's transaction covers
+                    # this read and the following upsert atomically.
+                    eff_wall = min(existing_wall, requested_wall)
+                    eff_execution_started_at = inherited_execution_started_at
+                else:
+                    eff_wall = requested_wall
+                    eff_execution_started_at = inherited_execution_started_at
+                if float(eff_execution_started_at) + int(eff_wall) > inherited_parent_deadline:
+                    return {
+                        "schema": _db_mod.SCHEMA,
+                        "ok": False,
+                        "db_path": str(db),
+                        "repo": repo,
+                        "run_id": run_id,
+                        "enqueue_refused": True,
+                        "reason": "linked_program_rollover_wall_clock_deadline_exceeded",
+                    }
+            elif existing is not None and existing_wall > 0:
+                # An existing finite wall limit is stricter than the parent's
+                # unlimited envelope and must not be disabled by re-enqueue.
+                eff_wall = existing_wall
+                eff_execution_started_at = existing["execution_started_at"]
         conn.execute(
             """
             INSERT INTO jobs
@@ -412,13 +481,14 @@ def enqueue(
                transient_recovery_cycles, max_transient_recovery_cycles,
                total_cost_usd, next_attempt_at,
                max_total_cost_usd, max_total_tokens, max_wall_seconds,
+               execution_started_at,
                runtime_generation, legacy_budget_ambiguous,
                repository_scheduling_key, repository_identity_proven,
 
                candidate_branch, workspace_scheduling_key, workspace_identity_proven,
 
                execution_mode, created_at, updated_at)
-            VALUES (?, ?, ?, 'QUEUED', 0, ?, 0, ?, 0, ?, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, 'QUEUED', 0, ?, 0, ?, 0, ?, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(repo, run_id) DO UPDATE SET
               runner=excluded.runner,
               max_infra_failures=excluded.max_infra_failures,
@@ -427,6 +497,7 @@ def enqueue(
               max_total_cost_usd=excluded.max_total_cost_usd,
               max_total_tokens=excluded.max_total_tokens,
               max_wall_seconds=excluded.max_wall_seconds,
+              execution_started_at=COALESCE(jobs.execution_started_at, excluded.execution_started_at),
               runtime_generation=excluded.runtime_generation,
               legacy_budget_ambiguous=excluded.legacy_budget_ambiguous,
               repository_scheduling_key=excluded.repository_scheduling_key,
@@ -447,6 +518,7 @@ def enqueue(
                 float(eff_cost),
                 int(eff_tokens),
                 int(eff_wall),
+                float(eff_execution_started_at) if eff_execution_started_at is not None else None,
                 str(eff_generation),
                 int(eff_legacy_ambiguous),
                 scheduling_key,

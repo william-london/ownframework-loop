@@ -10,9 +10,13 @@ trap 'rm -rf "$TMP"' EXIT INT TERM HUP
 python3 -B - "$TMP/repo" <<'PY'
 import hashlib, json, os, subprocess, sys
 from pathlib import Path
-from ownframework_loop import approval, integrity, packet, program, program_rollover, receipts, state, util
+from ownframework_loop import (
+    approval, capabilities, capability_binding, integrity, packet, program,
+    program_rollover, receipts, runner_profiles, runtime_env, state, util,
+)
 
 repo = Path(sys.argv[1]); repo.mkdir(parents=True)
+os.environ["XDG_STATE_HOME"] = str(repo.parent / "state")
 parent, child = "run-2026-09-28-roll-parent", "roll-test-v124-child"
 subprocess.run(["git", "init", "-q", "-b", "master", str(repo)], check=True)
 subprocess.run(["git", "-C", str(repo), "config", "user.name", "Loop test"], check=True)
@@ -33,7 +37,7 @@ child_branch = f"factory/candidate/{child}"
 meta = {
     "schema": "ownframework-work-packet/v3", "packet_id": "v124-rollover",
     "created_at": "2026-09-28T00:00:00Z", "work_class": "HARDENING",
-    "risk_class": "low", "title": "linked rollover fixture", "runner_profile": "primary",
+    "risk_class": "low", "title": "linked rollover fixture", "runner_profile": "default",
     "target": {"repo": str(repo), "branch": "master", "classification": "local_only",
                "candidate_branch_prefix": "factory/candidate/parent-run",
                "expected_baseline_sha": baseline},
@@ -58,6 +62,16 @@ errors = packet.validate_packet_for_approval(meta); assert not errors, errors
 packet_bytes = ("```json\n" + json.dumps(meta, sort_keys=True) + "\n```\n").encode()
 root = state.run_dir(repo, child); root.mkdir(parents=True)
 (root / "WORK_PACKET.md").write_bytes(packet_bytes)
+profile = runner_profiles.resolve_profile("default", provider="claude-code")
+resolution = capabilities.resolve_capabilities(
+    [], canonical_repo=repo, role="reviewer",
+    repo_cache_root=runtime_env.repo_tool_cache_dir(repo),
+    ephemeral_cache_root=runtime_env.runtime_cache_dir(repo, child, "validation") / "capability-cache",
+    evidence_run_key=child,
+)
+child_binding = capability_binding.ensure_run_binding(
+    repo, child, resolution, profile, allow_create=True,
+)
 
 p = program.materialise_initial_program_state(meta, baseline_sha=baseline,
                                                candidate_branch=parent_branch)
@@ -113,7 +127,19 @@ authority = {"schema": program_rollover.AUTHORITY_SCHEMA, "parent_run_id": paren
         "review_assessment_sha256": hashes["assessment"], "review_attempt_id": "1" * 32,
         "review_assessment_path": str(assessment_path),
         "parent_candidate_sha": candidate, "parent_candidate_branch": parent_branch},
-    "imported_counters": counters}
+    "imported_counters": counters,
+    "operational_envelope_remaining": {
+        "max_infra_failures": 0, "max_transient_failures": 0,
+        "max_transient_recovery_cycles": 0, "max_total_cost_usd": 0.0,
+        "max_total_tokens": 0, "max_wall_seconds": 0,
+        "max_pass_runtime_seconds": 0,
+    },
+    "wall_clock_authority": {
+        "parent_deadline_unix": None, "child_execution_started_at": None,
+    },
+    "capability_binding_sha256": child_binding["binding_sha256"],
+    "runner": "claude-code",
+}
 authority_path = root / "ROLLOVER_AUTHORITY.json"
 authority_path.write_text(json.dumps(authority, sort_keys=True, indent=2), encoding="utf-8")
 os.chmod(authority_path, 0o600)
