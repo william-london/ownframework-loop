@@ -1766,6 +1766,54 @@ def _publish_acceptance_for_ready_artifact(
     )
 
 
+def _retryable_failed_attempt_for_ready_artifact(
+    conn: sqlite3.Connection,
+    *,
+    job: sqlite3.Row,
+    work_order: dict[str, Any],
+) -> str | None:
+    """Return the exact failed attempt eligible for same-pass semantic reseed.
+
+    A shape-ready artifact is replayable only when its latest attempt already
+    has accepted provenance. A narrowly classified, fully accounted
+    ``semantic_result_incomplete`` failure is different: the artifact may have
+    become structurally ready after that attempt failed, but failure never
+    grants replay authority. In that case the caller must archive/reseed it
+    and launch a new attempt on the same claimed pass.
+
+    Missing, contradictory, or unrelated attempt evidence returns ``None``;
+    the normal replay provenance gate then remains fail-closed.
+    """
+    decision = str(work_order.get("decision") or "")
+    role = str(work_order.get("role") or "")
+    expected_role = {"BUILD": "builder", "REVIEW": "reviewer"}.get(decision)
+    attempt_id = str(job["latest_attempt_id"] or "")
+    if not expected_role or role != expected_role or not attempt_id:
+        return None
+
+    attempt = conn.execute(
+        "SELECT * FROM semantic_attempts WHERE attempt_id=? AND job_id=?",
+        (attempt_id, int(job["id"])),
+    ).fetchone()
+    if attempt is None:
+        return None
+
+    if (
+        str(attempt["status"] or "") != "FAILED"
+        or str(attempt["role"] or "") != expected_role
+        or str(attempt["failure_class"] or "") != "runner"
+        or str(attempt["failure_reason"] or "") != "semantic_result_incomplete"
+        or not bool(int(attempt["cost_accounted"] or 0))
+        or bool(int(attempt["semantic_accepted"] or 0))
+        or str(attempt["accepted_semantic_sha256"] or "")
+        or str(attempt["accepted_candidate_sha"] or "")
+        or attempt["completed_at"] is None
+        or attempt["returncode"] != 0
+    ):
+        return None
+    return attempt_id
+
+
 def run_one(*, db_path: Path | None = None, timeout_seconds: int = 0) -> dict[str, Any]:
     """Execute at most one semantic BUILD/REVIEW action."""
     db = db_path or default_db_path()
@@ -1902,7 +1950,27 @@ def run_one(*, db_path: Path | None = None, timeout_seconds: int = 0) -> dict[st
             semantic_ready, semantic_reason = dispatch_mod.semantic_result_ready(
                 work_order
             )
-            if not semantic_ready:
+            reseeded_ready_failed_attempt = False
+            if semantic_ready:
+                failed_attempt_id = _retryable_failed_attempt_for_ready_artifact(
+                    conn,
+                    job=job,
+                    work_order=work_order,
+                )
+                if failed_attempt_id:
+                    # The current bytes may now satisfy the semantic shape,
+                    # but the latest durable attempt failed before acceptance.
+                    # Preserve those bytes as rejected evidence and force a
+                    # fresh provider attempt; never publish acceptance or
+                    # replay-finalize under the failed attempt identity.
+                    dispatch_mod.reseed_semantic_artifact_for_retry(
+                        work_order,
+                        previous_attempt_id=failed_attempt_id,
+                    )
+                    semantic_ready = False
+                    reseeded_ready_failed_attempt = True
+
+            if not semantic_ready and not reseeded_ready_failed_attempt:
                 # v0.9.9-h: deterministic semantic-result completion recovery.
                 #
                 # When a paid semantic pass exits with the engineering work
