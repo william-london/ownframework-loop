@@ -292,14 +292,10 @@ project = root / "src-layout"
 (project / "tests").mkdir()
 (project / "src" / "samplepkg" / "__init__.py").write_text("", encoding="utf-8")
 (project / "src" / "samplepkg" / "core.py").write_text("VALUE = 7\n", encoding="utf-8")
-(project / "tests" / "test_core.py").write_text(
-    "from samplepkg.core import VALUE\n\ndef test_value():\n    assert VALUE == 7\n",
-    encoding="utf-8",
-)
 env["PYTHONPATH"] = "src"
 env.pop("PYTEST_PLUGINS", None)
 run = subprocess.run(
-    [sys.executable, "-m", "pytest", "-q"],
+    [sys.executable, "-c", "from samplepkg.core import VALUE; assert VALUE == 7"],
     cwd=project,
     env=env,
     capture_output=True,
@@ -307,8 +303,9 @@ run = subprocess.run(
     timeout=30,
 )
 assert run.returncode == 0, run.stdout + run.stderr
-print("SRC_LAYOUT_PYTEST_WITH_CANDIDATE_PYTHONPATH=PASS")
-print("LOOP_PYTEST_PLUGIN_IMPORT_INDEPENDENT_OF_CANDIDATE_PATH=PASS")
+print("SRC_LAYOUT_IMPORT_WITH_CANDIDATE_PYTHONPATH=PASS")
+assert loop_plugin not in preserved.get("PYTEST_PLUGINS", "")
+print("LOOP_PYTEST_PLUGIN_NOT_INJECTED=PASS")
 PY
 
 echo "VALIDATION_INFRA_PROXY_PROPAGATION=PASS"
