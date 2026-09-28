@@ -330,6 +330,21 @@ parent_before["attempts_snapshot"] = hashlib.sha256(
 expected_packet_sha = util.sha256_file(parent_root / "WORK_PACKET.md")
 first_now = parent_clock_start + 100.0
 real_clock = program_rollover._wall_clock_now
+# Production repositories may leave Loop-owned state/worktree roots unignored.
+# These are control-plane artifacts, not candidate product dirt. The rollover
+# boundary must accept only these reserved roots while still rejecting
+# unrelated untracked product files.
+exclude_path = repo / ".git" / "info" / "exclude"
+exclude_path.write_text("", encoding="utf-8")
+porcelain = subprocess.run(
+    ["git", "-C", str(repo), "status", "--porcelain", "--untracked-files=all"],
+    capture_output=True, text=True, check=True,
+).stdout.splitlines()
+assert porcelain and all(
+    line[3:].startswith((".ownframework-loop/", ".worktrees/ownframework-loop/"))
+    for line in porcelain
+), porcelain
+assert program_rollover._canonical_product_checkout_is_clean(repo)
 try:
     program_rollover._wall_clock_now = lambda: first_now
     first = program_rollover.create_linked_program_rollover(
@@ -378,6 +393,32 @@ assert authority["source"]["parent_candidate_sha"] == second_candidate
 assert authority["source"]["parent_baseline_sha"] == baseline
 assert authority["operational_envelope_remaining"]["max_wall_seconds"] == first_wall
 assert int(first_wall) > int(parent_deadline - (first_now + 7.0))
+
+# Non-Loop product debris still blocks both creation and replay. Removing it
+# restores the exact same deterministic child authority without rewriting it.
+unrelated = repo / "operator-note.txt"
+unrelated.write_text("untracked product file\n", encoding="utf-8")
+assert not program_rollover._canonical_product_checkout_is_clean(repo)
+try:
+    program_rollover.create_linked_program_rollover(
+        canonical_repo=repo, parent_run_id=parent,
+        expected_packet_sha256=expected_packet_sha,
+        expected_baseline_sha=baseline, expected_candidate_sha=second_candidate,
+        db_path=db_path,
+    )
+except program_rollover.ProgramRolloverRefused as exc:
+    assert "canonical product checkout is not clean" in str(exc), str(exc)
+else:
+    raise AssertionError("unrelated untracked product file was accepted")
+unrelated.unlink()
+assert program_rollover._canonical_product_checkout_is_clean(repo)
+external_target = root / "external-control-target"
+external_target.mkdir()
+control_link = repo / ".ownframework-loop" / "unexpected-link"
+control_link.symlink_to(external_target, target_is_directory=True)
+assert not program_rollover._canonical_product_checkout_is_clean(repo)
+control_link.unlink()
+assert authority_path.read_bytes() == authority_bytes
 
 parent_after = {
     "packet": util.sha256_file(parent_root / "WORK_PACKET.md"),
@@ -504,6 +545,9 @@ assert child_enqueue_replay["execution_started_at"] == child_enqueue["execution_
 assert child_enqueue_replay["max_wall_seconds"] == child_enqueue["max_wall_seconds"]
 print("SUPERVISOR_ENQUEUE_PRESERVES_ORIGIN_AND_DEADLINE=PASS")
 print("ROLLOVER_ENQUEUE_CANNOT_WIDEN_WALL_CEILING=PASS")
+print("ROLLOVER_IGNORES_ONLY_RESERVED_LOOP_CONTROL_PLANE_ROOTS=PASS")
+print("ROLLOVER_REJECTS_UNRELATED_UNTRACKED_PRODUCT_FILES=PASS")
+print("ROLLOVER_REJECTS_UNTRACKED_CONTROL_PLANE_SYMLINKS=PASS")
 
 # A separately STOPPED run is refused before any rollover child is created.
 stopped = "run-20260928T000000Z-v125stopped"

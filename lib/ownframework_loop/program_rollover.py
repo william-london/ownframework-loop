@@ -49,6 +49,42 @@ class ProgramRolloverRefused(RuntimeError):
     """Raised when linked rollover authority cannot be proven."""
 
 
+def _canonical_product_checkout_is_clean(repo: Path) -> bool:
+    """Require a clean product checkout while permitting Loop-owned metadata.
+
+    Run state and registered Loop worktrees live below reserved, untracked
+    control-plane roots.  They are not candidate product changes and must not
+    make an otherwise exact baseline checkout appear dirty.  Every tracked
+    change and every untracked path outside those two roots remains a refusal.
+    A failed Git status probe is never treated as clean.
+    """
+    result = util.run_subprocess(
+        [
+            "git", "-C", str(repo), "status", "--porcelain=v1",
+            "--untracked-files=all", "-z",
+        ],
+        timeout=10,
+    )
+    if result.returncode != 0:
+        return False
+    control_roots = (".ownframework-loop", ".worktrees/ownframework-loop")
+    if any((repo / root).is_symlink() for root in control_roots):
+        return False
+    for entry in result.stdout.split("\0"):
+        if not entry:
+            continue
+        if len(entry) < 4 or entry[2] != " ":
+            return False
+        status, path = entry[:2], entry[3:]
+        if status != "??":
+            return False
+        if not any(path == root or path.startswith(root + "/") for root in control_roots):
+            return False
+        if (repo / path).is_symlink():
+            return False
+    return True
+
+
 def _wall_clock_now() -> float:
     """Clock seam for absolute rollover deadline calculation."""
     return time.time()
@@ -496,7 +532,7 @@ def _assert_parent_artifacts(
         raise ProgramRolloverRefused("parent candidate branch does not contain candidate")
     if git_checks.current_branch(repo) != str((approval_doc or {}).get("baseline_branch") or "") or git_checks.current_head(repo) != baseline:
         raise ProgramRolloverRefused("canonical checkout is not at the sealed baseline branch/SHA")
-    if git_checks.dirty_status(repo) != "clean":
+    if not _canonical_product_checkout_is_clean(repo):
         raise ProgramRolloverRefused("canonical product checkout is not clean")
 
     build_receipt = receipts.load_receipt(repo, run_id)
