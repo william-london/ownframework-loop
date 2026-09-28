@@ -24,14 +24,14 @@ BROKER="${REPO_ROOT}/bin/ofloop-research-broker"
 HELPER="${REPO_ROOT}/bin/ofloop-research-call"
 EVIDENCE_ROOT="$(mktemp -d -t ofloop-research-evidence.XXXXXX)"
 mkdir -p "${EVIDENCE_ROOT}"
+export OFLOOP_RESEARCH_EVIDENCE_ROOT="${EVIDENCE_ROOT}"
 trap 'rm -rf "${EVIDENCE_ROOT}"' EXIT
 
 # Canonical test request-id / request-digest / run-id / attempt-id.
 # The broker now strictly validates every path-bearing identifier
-# (UUIDv4 for request_id, 64-hex for request_digest, OwnFramework
-# Loop run-id regex, ASCII-safe attempt). The test harness supplies
-# fixed values so the parse / shape layer is exercised before the
-# SSRF layer.
+# (UUIDv4 for request_id, 64-hex for request_digest, ordinary or linked-
+# rollover OwnFramework Loop run-id, ASCII-safe attempt). The test harness
+# supplies fixed values so the parse / shape layer is exercised before SSRF.
 TEST_REQUEST_ID='aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee'
 TEST_REQUEST_DIGEST='0000000000000000000000000000000000000000000000000000000000000000'
 TEST_RUN_ID='run-20260921T180000Z-aabbccdd'
@@ -531,7 +531,7 @@ PI_EVIDENCE="${PI_FIXTURE}/research"
 mkdir -p "${PI_EVIDENCE}"
 
 # Worker's own run (this is the legit worker)
-WORKER_RUN="run-20260921T190000Z-aaaaaaaa"
+WORKER_RUN="roll-c24c98493e1a98ca91e2acb3"
 # Another run (must not be forgeable by the worker)
 OTHER_RUN="run-20260921T190000Z-bbbbbbbb"
 mkdir -p "${PI_EVIDENCE}/${WORKER_RUN}/requests"
@@ -578,7 +578,8 @@ OFLOOP_RESEARCH_EVIDENCE_DIR="${EV}/${WORKER_RUN}" \
     --request-id "${GOOD_ID}" \
     --run-id "${WORKER_RUN}" \
     --attempt "pass-0001" \
-    --role builder >/dev/null 2>&1 || true
+    --role builder \
+    --timeout-seconds 1 >/dev/null 2>&1 || true
 test -f "${REQ_DIR}/req-${GOOD_ID}.json" && echo "good request published" || {
     echo "FAIL: legit request_id refused: ${GOOD_ID}"
     exit 1
@@ -663,6 +664,7 @@ sys.path.insert(0, os.environ.get("REPO_ROOT", "."))
 ev_root = Path(sys.argv[1])
 worker_run = sys.argv[2]
 other_run = sys.argv[3]
+os.environ["OFLOOP_RESEARCH_EVIDENCE_ROOT"] = str(ev_root)
 
 from ownframework_loop import supervisor_research as sr
 
@@ -688,7 +690,30 @@ resp_other = sr._responses_dir(other_run)
 assert resp_worker != resp_other, "run-id collisions in responses dir"
 print(f"per-run responses isolation: OK ({resp_worker} vs {resp_other})")
 
-# 4) The supervisor rejects requests whose run_id does not match the
+# 4) Linked rollover IDs have a distinct, path-safe canonical form.
+# Exercise the exact entry point used on every supervisor research tick;
+# without the rollover form in the allowlist this raises before checking
+# capability or looking for requests.
+tick = sr.process_research_queue(
+    db_path=ev_root / "unused-supervisor.sqlite3",
+    canonical_repo=ev_root,
+    run_id=worker_run,
+)
+assert tick.get("consumed") == 0 and tick.get("deferred") is None, tick
+print("research bridge accepts a canonical rollover run ID: OK")
+
+for malformed_rollover_id in ("roll-short", "roll-" + "g" * 24,
+                              "roll-" + "a" * 23):
+    try:
+        sr._assert_canonical_run_id(malformed_rollover_id)
+        raise AssertionError(
+            f"accepted malformed rollover ID: {malformed_rollover_id}"
+        )
+    except sr._ValidationError:
+        pass
+print("research bridge rejects malformed rollover run IDs: OK")
+
+# 5) The supervisor rejects requests whose run_id does not match the
 #    worker-run inbox being serviced. The worker has no write authority
 #    over any other run's requests/ dir (capability resolver scopes
 #    allowWrite to OFLOOP_RESEARCH_REQUESTS = the worker's own run inbox
@@ -767,7 +792,7 @@ if worker_req_path.exists():
     worker_req_path.unlink()
 print("cross-run requests isolation: OK")
 
-# 5) The supervisor drops requests whose role does not match the
+# 6) The supervisor drops requests whose role does not match the
 #    live job's worker_role. Behavioural verification is in
 #    section 12 (real test with DB-stored worker_role vs
 #    request-body role mismatch, asserting RoleMismatch response).
@@ -781,6 +806,20 @@ expect "PI: supervisor refuses cross-run / cross-role / path-traversal" "$?" "0"
 # §3 covers; we re-test here as part of the prompt-injection fixture.
 PI_BROKER_EVID="/tmp/pi-broker-evidence-$$"
 mkdir -p "${PI_BROKER_EVID}"
+ROLLOVER_RUN="roll-c24c98493e1a98ca91e2acb3"
+set +e
+out="$("${BROKER}" --op read --url 'http://127.0.0.1/' \
+    --run-id "${ROLLOVER_RUN}" --attempt "pass-0001-test" \
+    --request-id "${TEST_REQUEST_ID}" \
+    --request-digest "${TEST_REQUEST_DIGEST}" \
+    --evidence-dir "${PI_BROKER_EVID}" 2>&1)"
+rc=$?
+set -e
+expect "PI: broker accepts rollover run ID before SSRF gate" \
+    "$(printf '%s' "${out}" | python3 -c "import json,sys;print(json.load(sys.stdin).get('error_class') == 'SSRFRefused')")" \
+    "True"
+expect "PI: rollover broker call remains network-refused" "${rc}" "1"
+
 set +e
 out="$(brk --op read --url 'http://169.254.169.254/latest/meta-data/' --evidence-dir "${PI_BROKER_EVID}" 2>&1)"
 rc=$?
