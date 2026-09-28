@@ -1580,6 +1580,297 @@ def program_transition(
     return new
 
 
+def retry_blocked_program_review_after_validation_infrastructure(
+    canonical_repo: Path,
+    run_id: str,
+    *,
+    packet: dict[str, Any],
+    checkpoint_id: str,
+    candidate_sha: str,
+    review_attempt_id: str,
+    semantic_sha256: str,
+    prior_verdict_sha256: str,
+    recovery_id: str,
+    prior_runtime_generation: str,
+    runtime_generation: str,
+    packet_sha256: str,
+    approval_sha256: str,
+    build_receipt_sha256: str,
+    prior_capability_binding_sha256: str,
+    capability_binding_sha256: str,
+    checkpoint_build_pass_count: int,
+    checkpoint_review_pass_count: int,
+    checkpoint_repair_round_count: int,
+    preflight_sha256: str,
+    accounting_sha256: str,
+) -> dict[str, Any]:
+    """Reopen only the same accepted review after validator infrastructure repair.
+
+    This is a deliberately narrow PROGRAM state owner, not a general escape
+    from BLOCKED.  The supervisor proves the accepted semantic attempt,
+    candidate, packet, approval, prior validation-only verdict, worktrees,
+    runtime-generation boundary, and one-use recovery receipt before calling
+    this function.  This owner independently re-proves the frozen graph,
+    current checkpoint, terminality, candidate binding, and exhausted build
+    cap under the STATE/EVENTS lock.  No engineering or repair counter moves.
+
+    The ordinary FSM remains unchanged: STOPPED and other BLOCKED runs still
+    have no transition out.  The specialized event identity makes a crash
+    replay idempotent without accepting an unrelated REVIEWING state.
+    """
+    validate_run_id(run_id)
+    for label, value in (
+        ("candidate_sha", candidate_sha),
+        ("semantic_sha256", semantic_sha256),
+        ("prior_verdict_sha256", prior_verdict_sha256),
+        ("recovery_id", recovery_id),
+        ("packet_sha256", packet_sha256),
+        ("approval_sha256", approval_sha256),
+        ("build_receipt_sha256", build_receipt_sha256),
+        ("prior_capability_binding_sha256", prior_capability_binding_sha256),
+        ("capability_binding_sha256", capability_binding_sha256),
+        ("preflight_sha256", preflight_sha256),
+        ("accounting_sha256", accounting_sha256),
+    ):
+        if not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}" if label != "candidate_sha" else r"[0-9a-f]{40}", value):
+            raise ValueError(f"{label} is invalid")
+    if not isinstance(review_attempt_id, str) or not re.fullmatch(r"[0-9a-f]{32,64}", review_attempt_id):
+        raise ValueError("review_attempt_id is invalid")
+    if (
+        not isinstance(prior_runtime_generation, str)
+        or not prior_runtime_generation
+        or not isinstance(runtime_generation, str)
+        or not runtime_generation
+        or prior_runtime_generation == runtime_generation
+    ):
+        raise ValueError("validation recovery requires distinct proven runtime generations")
+
+    sp = state_path(canonical_repo, run_id)
+    ep = events_path(canonical_repo, run_id)
+    with flock_exclusive(lock_path(canonical_repo, run_id)):
+        _verify_mutation_integrity_locked(canonical_repo, run_id)
+        current = read_json(sp)
+        if not isinstance(current, dict) or current.get("schema") != PROGRAM_STATE_SCHEMA_VERSION:
+            raise ValueError("PROGRAM state required for validation-infrastructure retry")
+        if current.get("state") == "STOPPED":
+            raise transitions.InvalidTransitionError(
+                "STOPPED is absorbing; validation-infrastructure retry refused"
+            )
+        if not is_program_state(current):
+            raise ValueError("PROGRAM state required for validation-infrastructure retry")
+
+        program_state = current.get("program") or {}
+        from . import program as program_mod
+        frozen_ok, frozen_reason = program_mod.verify_frozen_graph(packet, program_state)
+        if not frozen_ok:
+            raise ValueError(f"PROGRAM frozen-graph verification failed: {frozen_reason}")
+        active_checkpoint = program_mod.select_next_checkpoint(packet, program_state)
+        if active_checkpoint != checkpoint_id:
+            raise transitions.InvalidTransitionError(
+                "validation-infrastructure retry checkpoint does not match the active checkpoint"
+            )
+        if str(current.get("last_candidate_sha") or "") != candidate_sha:
+            raise transitions.InvalidTransitionError(
+                "validation-infrastructure retry candidate does not match STATE.json"
+            )
+        if program_state.get("blocked") is True:
+            raise transitions.InvalidTransitionError(
+                "PROGRAM authority is blocked; infrastructure review retry refused"
+            )
+
+        cp_state = next(
+            (item for item in (program_state.get("checkpoints") or [])
+             if isinstance(item, dict) and item.get("id") == checkpoint_id),
+            None,
+        )
+        cp_packet = next(
+            (item for item in ((packet.get("checkpoint_graph") or {}).get("checkpoints") or [])
+             if isinstance(item, dict) and item.get("id") == checkpoint_id),
+            None,
+        )
+        if cp_state is None or cp_packet is None:
+            raise ValueError("active checkpoint is missing from frozen packet or PROGRAM state")
+        if cp_state.get("terminal"):
+            raise transitions.InvalidTransitionError(
+                "terminal checkpoint cannot use validation-infrastructure retry"
+            )
+        cap = int(((cp_packet.get("risk_budget") or {}).get("max_build_passes") or 0))
+        used = int(cp_state.get("build_pass_count") or 0)
+        if cap <= 0 or used != cap:
+            raise transitions.InvalidTransitionError(
+                "specialized review retry requires the active checkpoint build cap to be exhausted"
+            )
+        actual_cp_counts = (
+            int(cp_state.get("build_pass_count") or 0),
+            int(cp_state.get("review_pass_count") or 0),
+            int(cp_state.get("repair_round_count") or 0),
+        )
+        requested_cp_counts = (
+            int(checkpoint_build_pass_count),
+            int(checkpoint_review_pass_count),
+            int(checkpoint_repair_round_count),
+        )
+
+        events = integrity.read_event_chain(ep) if ep.exists() else []
+        matching_events = [
+            event for event in events
+            if isinstance(event, dict)
+            and event.get("event_type") == "program_review_infrastructure_retry"
+            and event.get("recovery_id") == recovery_id
+        ]
+        if current.get("state") == "REVIEWING":
+            if len(matching_events) != 1:
+                raise transitions.InvalidTransitionError(
+                    "REVIEWING state lacks one matching infrastructure-retry event"
+                )
+            event = matching_events[0]
+            expected_event_values = {
+                "checkpoint_id": checkpoint_id,
+                "candidate_sha": candidate_sha,
+                "review_attempt_id": review_attempt_id,
+                "semantic_sha256": semantic_sha256,
+                "prior_verdict_sha256": prior_verdict_sha256,
+                "prior_runtime_generation": prior_runtime_generation,
+                "runtime_generation": runtime_generation,
+                "recovery_packet_sha256": packet_sha256,
+                "recovery_approval_sha256": approval_sha256,
+                "recovery_build_receipt_sha256": build_receipt_sha256,
+                "prior_capability_binding_sha256": prior_capability_binding_sha256,
+                "capability_binding_sha256": capability_binding_sha256,
+                "preflight_sha256": preflight_sha256,
+                "accounting_sha256": accounting_sha256,
+                "checkpoint_build_pass_count": checkpoint_build_pass_count,
+                "checkpoint_review_pass_count": checkpoint_review_pass_count,
+                "checkpoint_repair_round_count": checkpoint_repair_round_count,
+            }
+            if any(event.get(key) != value for key, value in expected_event_values.items()):
+                raise integrity.TamperingDetected(
+                    "infrastructure-retry event contradicts requested identity"
+                )
+            if actual_cp_counts != requested_cp_counts:
+                raise integrity.TamperingDetected(
+                    "checkpoint counters changed after validation-infrastructure retry"
+                )
+            program_counters = program_state.get("cumulative_counters") or {}
+            if (
+                int(current.get("build_pass_count") or 0)
+                != int(program_counters.get("build_pass_count") or 0)
+                or int(current.get("review_pass_count") or 0)
+                != int(program_counters.get("review_pass_count") or 0)
+                or int(current.get("repair_round") or 0)
+                != int(program_counters.get("repair_round_count") or 0)
+                or event.get("build_pass_count") != int(current.get("build_pass_count") or 0)
+                or event.get("review_pass_count") != int(current.get("review_pass_count") or 0)
+                or event.get("repair_round") != int(current.get("repair_round") or 0)
+            ):
+                raise integrity.TamperingDetected(
+                    "PROGRAM counter mirrors changed after validation-infrastructure retry"
+                )
+            return {
+                "ok": True,
+                "idempotent": True,
+                "state": "REVIEWING",
+                "checkpoint_id": checkpoint_id,
+                "candidate_sha": candidate_sha,
+                "build_pass_count": int(current.get("build_pass_count") or 0),
+                "review_pass_count": int(current.get("review_pass_count") or 0),
+                "repair_round": int(current.get("repair_round") or 0),
+            }
+        if current.get("state") != "BLOCKED":
+            raise transitions.InvalidTransitionError(
+                "validation-infrastructure retry requires BLOCKED or its matching REVIEWING replay"
+            )
+        if matching_events:
+            raise integrity.TamperingDetected(
+                "infrastructure-retry event exists while STATE.json is still BLOCKED"
+            )
+        if actual_cp_counts != requested_cp_counts:
+            raise transitions.InvalidTransitionError(
+                "checkpoint counters changed before validation-infrastructure retry"
+            )
+        program_counters = program_state.get("cumulative_counters") or {}
+        if (
+            int(current.get("build_pass_count") or 0)
+            != int(program_counters.get("build_pass_count") or 0)
+            or int(current.get("review_pass_count") or 0)
+            != int(program_counters.get("review_pass_count") or 0)
+            or int(current.get("repair_round") or 0)
+            != int(program_counters.get("repair_round_count") or 0)
+        ):
+            raise integrity.TamperingDetected(
+                "PROGRAM counter mirrors disagree before validation-infrastructure retry"
+            )
+        if is_stop_requested(canonical_repo, run_id):
+            raise transitions.InvalidTransitionError(
+                "stop request prevents validation-infrastructure retry"
+            )
+
+        now = utc_now_iso()
+        new = dict(current)
+        new["state"] = "REVIEWING"
+        new["transitions_count"] = int(current.get("transitions_count", 0)) + 1
+        new["updated_at"] = now
+        new["last_actor"] = "ofloop-validation-infrastructure-recovery"
+        new["terminal_reason"] = ""
+        history = list(current.get("state_history", []))
+        history.append({
+            "from": "BLOCKED",
+            "to": "REVIEWING",
+            "at": now,
+            "actor": "ofloop-validation-infrastructure-recovery",
+            "reason": "replay exact accepted reviewer assessment after validator infrastructure repair",
+        })
+        new["state_history"] = history
+        _commit_state_event_locked(
+            canonical_repo,
+            run_id,
+            new,
+            event_type="program_review_infrastructure_retry",
+            old_state="BLOCKED",
+            new_state="REVIEWING",
+            actor="ofloop-validation-infrastructure-recovery",
+            commit_sha=candidate_sha,
+            reason="replay exact accepted reviewer assessment after validator infrastructure repair",
+            extras={
+                "recovery_id": recovery_id,
+                "checkpoint_id": checkpoint_id,
+                "candidate_sha": candidate_sha,
+                "review_attempt_id": review_attempt_id,
+                "semantic_sha256": semantic_sha256,
+                "prior_verdict_sha256": prior_verdict_sha256,
+                "prior_runtime_generation": prior_runtime_generation,
+                "runtime_generation": runtime_generation,
+                "recovery_packet_sha256": packet_sha256,
+                "recovery_approval_sha256": approval_sha256,
+                "recovery_build_receipt_sha256": build_receipt_sha256,
+                "prior_capability_binding_sha256": prior_capability_binding_sha256,
+                "capability_binding_sha256": capability_binding_sha256,
+                "preflight_sha256": preflight_sha256,
+                "accounting_sha256": accounting_sha256,
+                "build_pass_count": int(current.get("build_pass_count") or 0),
+                "review_pass_count": int(current.get("review_pass_count") or 0),
+                "repair_round": int(current.get("repair_round") or 0),
+                "checkpoint_build_pass_count": actual_cp_counts[0],
+                "checkpoint_review_pass_count": actual_cp_counts[1],
+                "checkpoint_repair_round_count": actual_cp_counts[2],
+            },
+        )
+    try:
+        fsync_dir(sp.parent)
+    except OSError:
+        pass
+    return {
+        "ok": True,
+        "idempotent": False,
+        "state": "REVIEWING",
+        "checkpoint_id": checkpoint_id,
+        "candidate_sha": candidate_sha,
+        "build_pass_count": int(current.get("build_pass_count") or 0),
+        "review_pass_count": int(current.get("review_pass_count") or 0),
+        "repair_round": int(current.get("repair_round") or 0),
+    }
+
+
 def continue_blocked_program(
     canonical_repo: Path,
     run_id: str,

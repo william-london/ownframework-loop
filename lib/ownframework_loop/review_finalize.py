@@ -116,6 +116,21 @@ def _must_fix_fingerprint(must_fix: list[dict[str, Any]]) -> str:
     return util.sha256_text(":".join(parts))
 
 
+def _validation_failure_verdict(
+    *, infra_failure_count: int,
+    candidate_invalid_count: int,
+    validation_pass: bool,
+) -> tuple[str, str] | None:
+    """Route validation outcomes without charging product repair for host failure."""
+    if infra_failure_count > 0:
+        return "BLOCKED", "infra_failure"
+    if candidate_invalid_count > 0:
+        return "CHANGES_REQUESTED", "candidate_environment_invalid"
+    if not validation_pass:
+        return "CHANGES_REQUESTED", "validation_failed"
+    return None
+
+
 def _assessment_schema_ok(assessment: dict[str, Any]) -> tuple[bool, list[str]]:
     errors = assessment_mod.validate_assessment_contract(assessment)
     return (not errors), errors
@@ -557,25 +572,18 @@ def finalize_review(
     }
 
     # 17. Compute final verdict.
-    if infra_failure_count > 0:
+    validation_failure = _validation_failure_verdict(
+        infra_failure_count=infra_failure_count,
+        candidate_invalid_count=candidate_invalid_count,
+        validation_pass=validation_pass,
+    )
+    if validation_failure is not None:
         # Validation infrastructure failure (uv sync timeout / missing
         # uv executable / runtime-cache filesystem refused / etc).
         # The candidate author cannot fix this; the validator owner
         # must. Terminalize the run WITHOUT burning a semantic repair
         # round and WITHOUT attempting CHANGES_REQUESTED.
-        verdict = "BLOCKED"
-        failure_reason = "infra_failure"
-    elif candidate_invalid_count > 0:
-        # Candidate environment cannot be reconstructed from the
-        # candidate's own metadata (stale uv.lock / malformed
-        # pyproject.toml / declared-but-unresolvable dependency).
-        # The validator's outcome classifier flagged this as a
-        # candidate-repairable defect, NOT an infra failure. The next
-        # builder pass can regenerate uv.lock or fix the metadata.
-        # Route to CHANGES_REQUESTED with a normal repair entitlement
-        # — the same envelope as validation_failed.
-        verdict = "CHANGES_REQUESTED"
-        failure_reason = "candidate_environment_invalid"
+        verdict, failure_reason = validation_failure
     elif hard_secret_blocks:
         verdict = "BLOCKED"
         failure_reason = "hard_secret_detected"
@@ -594,9 +602,6 @@ def finalize_review(
     elif not integrity_check["candidate_sha_present"]:
         verdict = "BLOCKED"
         failure_reason = "candidate_sha_missing"
-    elif not validation_pass:
-        verdict = "CHANGES_REQUESTED"
-        failure_reason = "validation_failed"
     elif not ac_coverage_ok or not ng_coverage_ok:
         verdict = "CHANGES_REQUESTED"
         failure_reason = "semantic_coverage_incomplete"

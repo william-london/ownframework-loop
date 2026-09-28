@@ -597,6 +597,237 @@ def is_uv_command(command: str) -> bool:
     return classify_uv_command(command) == "uv"
 
 
+def _strip_shell_comments(source: str) -> str:
+    """Remove shell comments without changing quoted ``#`` characters."""
+    out: list[str] = []
+    quote: str | None = None
+    escaped = False
+    word_boundary = True
+    skipping = False
+    for char in source:
+        if skipping:
+            if char == "\n":
+                skipping = False
+                out.append(char)
+                word_boundary = True
+            continue
+        if escaped:
+            out.append(char)
+            escaped = False
+            word_boundary = False
+            continue
+        if quote == "'":
+            out.append(char)
+            if char == "'":
+                quote = None
+            word_boundary = False
+            continue
+        if quote == '"':
+            out.append(char)
+            if char == "\\":
+                escaped = True
+            elif char == '"':
+                quote = None
+            word_boundary = False
+            continue
+        if char == "\\":
+            out.append(char)
+            escaped = True
+            word_boundary = False
+        elif char in "'\"":
+            out.append(char)
+            quote = char
+            word_boundary = False
+        elif char == "#" and word_boundary:
+            skipping = True
+        else:
+            out.append(char)
+            word_boundary = char.isspace() or char in ";|&(){}<>"
+    return "".join(out)
+
+
+def classify_uv_shell_script(source: str) -> str:
+    """Classify literal ``uv`` use in a static shell validation wrapper.
+
+    This is deliberately not a shell interpreter. It recognizes direct,
+    literal uv command heads across ordinary shell command boundaries and
+    ignores comments and ``command -v uv`` capability probes. If a literal uv
+    token appears in any other position, or the wrapper changes PATH / uses
+    shell code generation, the result is ambiguous and package-network
+    authority is withheld.
+    """
+    clean = _strip_shell_comments(source)
+    try:
+        tokens = _shell_words(clean)
+    except ValidationCommandError:
+        return "ambiguous"
+    boundaries = {
+        ";", "|", "&", "&&", "||", "(", ")", "{", "}", "<", ">", "\n",
+    }
+    segments: list[list[str]] = [[]]
+    for value, _start, _end, punctuation in tokens:
+        if punctuation and value in boundaries:
+            segments.append([])
+        else:
+            segments[-1].append(value)
+
+    found_uv = False
+    for values in segments:
+        if not values:
+            continue
+        if any(value.startswith("PATH=") for value in values) or any(
+            values[index] in {"export", "unset", "alias"}
+            and any(
+                item == "PATH" or item.startswith(("PATH=", "uv="))
+                for item in values[index + 1:]
+            )
+            for index in range(len(values))
+        ):
+            return "ambiguous"
+        if any(Path(value).name == "eval" for value in values):
+            return "ambiguous"
+
+        head = 0
+        while head < len(values) and (
+            values[head] in _SHELL_COMMAND_PREFIXES
+            or _ASSIGNMENT_RE.match(values[head])
+        ):
+            head += 1
+        if head >= len(values):
+            continue
+        command_values = values[head:]
+        # Redirections were split above. A capability probe is not a package
+        # operation and must not acquire registry network authority.
+        if (
+            len(command_values) == 3
+            and command_values[0] in {"command", "builtin"}
+            and command_values[1] in {"-v", "-V"}
+            and command_values[2] == "uv"
+        ):
+            continue
+        uv_mentions = [
+            value for value in command_values
+            if Path(value).name in {"uv", "uvx"}
+            or re.search(r"(?<![A-Za-z0-9_])uvx?(?![A-Za-z0-9_])", value)
+        ]
+        if not uv_mentions:
+            continue
+        classification = classify_uv_command(shlex.join(command_values))
+        if classification != "uv":
+            return "ambiguous"
+        # Wrapper scripts are executed with a protected snapshot directory at
+        # the front of PATH. Absolute/relative uv paths would bypass it.
+        if any(value != "uv" for value in uv_mentions):
+            return "ambiguous"
+        found_uv = True
+    return "wrapped-uv" if found_uv else "none"
+
+
+def _shell_wrapper_script_path(command: str, cwd: Path) -> Path | None:
+    """Return a literal shell script argument for a simple shell invocation."""
+    try:
+        words = shlex.split(command, posix=True)
+    except ValueError:
+        return None
+    if not words:
+        return None
+    executable = Path(words[0]).name
+    cursor = 1
+    if executable in _SHELL_INTERPRETERS:
+        while cursor < len(words):
+            option = words[cursor]
+            if option == "--":
+                cursor += 1
+                break
+            if option in {"-c", "-s", "--command", "--stdin"}:
+                return None
+            if option in {"-o", "+o", "-O", "+O"}:
+                cursor += 2
+                continue
+            if option.startswith("-") and all(char in "eufvxnprl" for char in option[1:]):
+                cursor += 1
+                continue
+            if option.startswith("+") and all(char in "eufvxnprl" for char in option[1:]):
+                cursor += 1
+                continue
+            break
+        if cursor >= len(words):
+            return None
+        raw_path = words[cursor]
+    else:
+        raw_path = words[0]
+        if not raw_path.endswith(".sh"):
+            return None
+    if any(char in raw_path for char in ("$", "`", "*", "?", "[", ";", "|", "&")):
+        return None
+    path = Path(raw_path)
+    if not path.is_absolute():
+        path = Path(cwd) / path
+    try:
+        resolved = path.resolve(strict=True)
+        root = Path(cwd).resolve(strict=True)
+    except OSError:
+        return None
+    if resolved == root or root not in resolved.parents or path.is_symlink():
+        return None
+    if not resolved.is_file():
+        return None
+    return resolved
+
+
+def _candidate_script_text(cwd: Path, candidate_sha: str, path: Path) -> str:
+    """Read a tracked script from the exact candidate after proving checkout equality."""
+    root = Path(cwd).resolve(strict=True)
+    try:
+        relative = path.resolve(strict=True).relative_to(root).as_posix()
+    except (OSError, ValueError) as exc:
+        raise ValidationCommandError("shell validation script escapes candidate worktree") from exc
+    tree = util.run_subprocess(
+        ["git", "-C", str(root), "ls-tree", candidate_sha, "--", relative],
+        timeout=10,
+    )
+    if tree.returncode != 0:
+        raise ValidationCommandError("cannot prove shell validation script in candidate tree")
+    rows = [line for line in tree.stdout.splitlines() if line]
+    if len(rows) != 1 or not rows[0].startswith(("100644 blob ", "100755 blob ")):
+        raise ValidationCommandError("shell validation script is not one regular tracked candidate file")
+    compare = util.run_subprocess(
+        ["git", "-C", str(root), "diff", "--quiet", candidate_sha, "--", relative],
+        timeout=10,
+    )
+    if compare.returncode != 0:
+        raise ValidationCommandError("shell validation script differs from frozen candidate SHA")
+    result = util.run_subprocess(
+        ["git", "-C", str(root), "show", f"{candidate_sha}:{relative}"],
+        timeout=10,
+    )
+    if result.returncode != 0 or len(result.stdout.encode("utf-8")) > 1024 * 1024:
+        raise ValidationCommandError("cannot safely read bounded candidate validation script")
+    return result.stdout
+
+
+def classify_validation_uv_command(
+    command: str,
+    *,
+    cwd: Path,
+    candidate_sha: str | None,
+) -> str:
+    """Classify direct uv, a tracked static shell wrapper, or no uv authority."""
+    direct = classify_uv_command(command)
+    if direct != "none":
+        return direct
+    script_path = _shell_wrapper_script_path(command, cwd)
+    if script_path is None:
+        return "none"
+    if not candidate_sha or not re.fullmatch(r"[0-9a-f]{40}", str(candidate_sha)):
+        return "ambiguous"
+    try:
+        source = _candidate_script_text(cwd, str(candidate_sha), script_path)
+    except (OSError, ValidationCommandError):
+        return "ambiguous"
+    return classify_uv_shell_script(source)
+
+
 def bound_uv_snapshot_dir(
     canonical_repo: Path, run_id: str, bound: BoundUvIdentity,
 ) -> Path:

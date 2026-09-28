@@ -248,10 +248,11 @@ def hermetic_subprocess_env(
     if prepend:
         existing_path = env.get("PATH", "")
         env["PATH"] = os.pathsep.join(prepend + ([existing_path] if existing_path else []))
-    # Ensure the OwnFramework Loop library dir is on PYTHONPATH so our
-    # pytest plugin (of_disable_cache) can be imported when the env is
-    # passed to a subprocess whose parent did not already include it
-    # (e.g. launchd-managed services, sandboxed shells).
+    # Ensure the OwnFramework Loop library dir is on PYTHONPATH for core
+    # helpers that a validation command imports. Candidate wrappers may
+    # intentionally replace PYTHONPATH (for example, to bind a src-layout
+    # project); core validation hygiene must not depend on that mutable
+    # variable remaining present in the child process.
     lib_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     existing_pp = env.get("PYTHONPATH", "").strip()
     if existing_pp:
@@ -268,8 +269,8 @@ def hermetic_subprocess_env(
     # Belt-and-braces pytest cache protection:
     # - -p no:cacheprovider disables the cacheplugin via PYTEST_ADDOPTS
     # - --override-ini=cache_dir=... redirects the cache directory if plugin still loads
-    # - PYTEST_PLUGINS auto-loads our of_disable_cache plugin that unregisters
-    #   the cacheprovider entirely (most robust layer).
+    # - The authoritative -p option disables pytest's cache provider without
+    #   importing a Loop plugin through candidate-controlled PYTHONPATH.
     # IMPORTANT: do NOT set --rootdir or --confcutdir; that would redirect
     # pytest's rootdir away from the caller's cwd, breaking test collection
     # and import resolution for the caller's project layout.
@@ -284,11 +285,15 @@ def hermetic_subprocess_env(
     )
     existing_plugins = env.get("PYTEST_PLUGINS", "").strip()
     of_plugin = "ownframework_loop._pytest_plugins.of_disable_cache"
-    if existing_plugins:
-        if of_plugin not in existing_plugins.split(","):
-            env["PYTEST_PLUGINS"] = existing_plugins + "," + of_plugin
+    retained_plugins = [
+        item.strip()
+        for item in existing_plugins.split(",")
+        if item.strip() and item.strip() != of_plugin
+    ]
+    if retained_plugins:
+        env["PYTEST_PLUGINS"] = ",".join(retained_plugins)
     else:
-        env["PYTEST_PLUGINS"] = of_plugin
+        env.pop("PYTEST_PLUGINS", None)
 
     # v0.6.1 execution-context markers. The Loop supervisor is the
     # PROVENANCE SOURCE for semantic-worker context. Setting these env
@@ -393,6 +398,8 @@ def commissioned_validation_env(
     canonical_repo: Path,
     run_id: str,
     packet: dict[str, Any],
+    *,
+    resolution: dict[str, Any] | None = None,
 ) -> dict[str, str]:
     """Build the deterministic validation environment from the sealed run binding.
 
@@ -403,7 +410,8 @@ def commissioned_validation_env(
     run binding, verifies the current host resolution against that binding,
     and uses one role-neutral validation cache for both finalizers.
     """
-    resolution = commissioned_validation_resolution(canonical_repo, run_id, packet)
+    if resolution is None:
+        resolution = commissioned_validation_resolution(canonical_repo, run_id, packet)
     return hermetic_subprocess_env(
         canonical_repo,
         run_id,

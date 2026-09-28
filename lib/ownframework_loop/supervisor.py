@@ -2774,6 +2774,33 @@ def _migrate_quarantined_run_capabilities(
     )
 
 
+@_serialize_run_lifecycle
+def retry_validation_infrastructure_review(
+    *,
+    canonical_repo: Path,
+    run_id: str,
+    expected_candidate_sha: str,
+    expected_review_attempt_id: str,
+    db_path: Path | None = None,
+) -> dict[str, Any]:
+    """Replay one accepted review after a proven validator-infrastructure fix.
+
+    This recovery neither consumes repair/build/review counters nor launches a
+    semantic worker. The ordinary supervisor later replays the accepted review, proves
+    the exact accepted attempt, and finalizes through its normal zero-cost
+    replay path.
+    """
+    from . import supervisor_validation_recovery as _validation_recovery_mod
+    return _validation_recovery_mod.retry_blocked_review_after_validation_infrastructure(
+        canonical_repo=canonical_repo,
+        run_id=run_id,
+        expected_candidate_sha=expected_candidate_sha,
+        expected_review_attempt_id=expected_review_attempt_id,
+        db_path=db_path or default_db_path(),
+        supervisor_mod=sys.modules[__name__],
+    )
+
+
 __all__ = [
     "SCHEMA",
     "ClaudeCodeRunner",
@@ -2790,6 +2817,7 @@ __all__ = [
     "fleet_status",
     "enqueue",
     "continue_program",
+    "retry_validation_infrastructure_review",
     "register_runner",
     "resume",
     "run_one",

@@ -149,3 +149,5 @@ tests/integration/test_v120_genuine_infra_failure.sh
 tests/integration/test_v120_tool_swap_regression.sh
 tests/integration/test_v120_network_authority.sh
 tests/integration/test_v121_validation_authority_closure.sh
+tests/integration/test_v122_package_network_infra_propagation.sh
+tests/integration/test_v123_validation_infrastructure_recovery.sh

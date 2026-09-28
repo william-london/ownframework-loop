@@ -18,7 +18,7 @@ import sys
 import tempfile
 import threading
 from pathlib import Path
-from typing import BinaryIO, Mapping, Sequence
+from typing import BinaryIO, Callable, Mapping, Sequence
 from urllib.parse import urlsplit
 
 from . import process_runner
@@ -30,6 +30,30 @@ class ValidationNetworkError(RuntimeError):
 
 _MAX_PROXY_HEADER = 16 * 1024
 _PROXY_CONNECT_TIMEOUT = 20.0
+
+
+class PackageRegistryUnavailable(OSError):
+    """A permitted package host could not be reached by the host broker.
+
+    This signal is emitted only after the CONNECT request has passed the
+    frozen-host/port allowlist.  It is deliberately distinct from policy
+    denials and from child-process output, so candidate text cannot forge an
+    infrastructure classification.
+    """
+
+    def __init__(self, kind: str, host: str, port: int):
+        super().__init__(kind)
+        self.kind = kind
+        self.host = host
+        self.port = int(port)
+
+    def to_event(self, *, broker: str) -> dict[str, object]:
+        return {
+            "kind": self.kind,
+            "host": self.host,
+            "port": self.port,
+            "broker": broker,
+        }
 
 
 def _domain(value: str) -> str:
@@ -49,8 +73,11 @@ def _allowed_upstream(host: str, port: int, allowed: frozenset[str]) -> socket.s
             normalized, port, type=socket.SOCK_STREAM
         )
     except OSError as exc:
-        raise OSError("package registry DNS resolution failed") from exc
+        raise PackageRegistryUnavailable(
+            "dns_resolution_failed", normalized, port
+        ) from exc
     last_error: OSError | None = None
+    public_address_seen = False
     for family, socktype, proto, _canonname, sockaddr in addresses:
         try:
             address = ipaddress.ip_address(str(sockaddr[0]).split("%", 1)[0])
@@ -58,6 +85,7 @@ def _allowed_upstream(host: str, port: int, allowed: frozenset[str]) -> socket.s
             continue
         if not address.is_global:
             continue
+        public_address_seen = True
         upstream = socket.socket(family, socktype, proto)
         upstream.settimeout(_PROXY_CONNECT_TIMEOUT)
         try:
@@ -67,7 +95,13 @@ def _allowed_upstream(host: str, port: int, allowed: frozenset[str]) -> socket.s
         except OSError as exc:
             last_error = exc
             upstream.close()
-    raise OSError("no public package-registry address was reachable") from last_error
+    if not public_address_seen:
+        raise PackageRegistryUnavailable(
+            "no_public_package_registry_address", normalized, port
+        ) from last_error
+    raise PackageRegistryUnavailable(
+        "package_registry_connect_failed", normalized, port
+    ) from last_error
 
 
 def _parse_connect_header(raw: bytes) -> tuple[str, int]:
@@ -136,6 +170,17 @@ class _ConnectProxyHandler(socketserver.BaseRequestHandler):
             upstream = _allowed_upstream(
                 host, port, self.server.allowed_domains  # type: ignore[attr-defined]
             )
+        except PackageRegistryUnavailable as exc:
+            sink = getattr(
+                self.server, "package_network_failure_sink", None  # type: ignore[attr-defined]
+            )
+            if callable(sink):
+                sink(exc.to_event(broker="connect_proxy"))
+            try:
+                client.sendall(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n")
+            except OSError:
+                pass
+            return
         except (OSError, ValueError, ValidationNetworkError):
             try:
                 client.sendall(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n")
@@ -156,14 +201,23 @@ class _PackageProxyServer(socketserver.ThreadingTCPServer):
     allow_reuse_address = False
     daemon_threads = True
 
-    def __init__(self, domains: Sequence[str]) -> None:
+    def __init__(
+        self,
+        domains: Sequence[str],
+        failure_sink: Callable[[dict[str, object]], None] | None = None,
+    ) -> None:
         self.allowed_domains = frozenset(_domain(item) for item in domains)
+        self.package_network_failure_sink = failure_sink
         super().__init__(("127.0.0.1", 0), _ConnectProxyHandler)
 
 
 class _PackageProxy:
-    def __init__(self, domains: Sequence[str]) -> None:
-        self.server = _PackageProxyServer(domains)
+    def __init__(
+        self,
+        domains: Sequence[str],
+        failure_sink: Callable[[dict[str, object]], None] | None = None,
+    ) -> None:
+        self.server = _PackageProxyServer(domains, failure_sink)
         self.thread = threading.Thread(
             target=self.server.serve_forever,
             name="ofloop-validation-package-proxy",
@@ -206,6 +260,17 @@ class _UnixPackageBrokerHandler(socketserver.BaseRequestHandler):
             upstream = _allowed_upstream(
                 host, port, self.server.allowed_domains  # type: ignore[attr-defined]
             )
+        except PackageRegistryUnavailable as exc:
+            sink = getattr(
+                self.server, "package_network_failure_sink", None  # type: ignore[attr-defined]
+            )
+            if callable(sink):
+                sink(exc.to_event(broker="unix_package_broker"))
+            try:
+                client.sendall(b"DENY\n")
+            except OSError:
+                pass
+            return
         except (KeyError, TypeError, ValueError, OSError, ValidationNetworkError):
             try:
                 client.sendall(b"DENY\n")
@@ -225,19 +290,29 @@ class _UnixPackageBrokerHandler(socketserver.BaseRequestHandler):
 class _UnixPackageBroker(socketserver.ThreadingUnixStreamServer):
     daemon_threads = True
 
-    def __init__(self, path: str, domains: Sequence[str]) -> None:
+    def __init__(
+        self,
+        path: str,
+        domains: Sequence[str],
+        failure_sink: Callable[[dict[str, object]], None] | None = None,
+    ) -> None:
         self.allowed_domains = frozenset(_domain(item) for item in domains)
+        self.package_network_failure_sink = failure_sink
         super().__init__(path, _UnixPackageBrokerHandler)
 
 
 class _PackageBroker:
     """Host-side allowlist broker reachable from a private Linux netns."""
 
-    def __init__(self, domains: Sequence[str]) -> None:
+    def __init__(
+        self,
+        domains: Sequence[str],
+        failure_sink: Callable[[dict[str, object]], None] | None = None,
+    ) -> None:
         self.directory = tempfile.mkdtemp(prefix="ofl-b-")
         os.chmod(self.directory, 0o700)
         self.socket_path = str(Path(self.directory) / "b")
-        self.server = _UnixPackageBroker(self.socket_path, domains)
+        self.server = _UnixPackageBroker(self.socket_path, domains, failure_sink)
         os.chmod(self.socket_path, 0o600)
         self.thread = threading.Thread(
             target=self.server.serve_forever,
@@ -543,9 +618,21 @@ def run_isolated_to_files(
     stdout_fh: BinaryIO, stderr_fh: BinaryIO, env: Mapping[str, str],
     protected_paths: Sequence[Path] = (),
     package_network_domains: Sequence[str] = (),
+    package_network_failures: list[dict[str, object]] | None = None,
 ) -> process_runner.CommandResult:
     """Run a validator with local-only egress or bounded package CONNECT access."""
     domains = tuple(sorted({_domain(item) for item in package_network_domains}))
+    failure_lock = threading.Lock()
+
+    def record_package_network_failure(event: dict[str, object]) -> None:
+        if package_network_failures is None:
+            return
+        with failure_lock:
+            # A hostile validation can issue many denied connects. Keep the
+            # durable diagnostic bounded while preserving the fact that the
+            # broker observed at least one failure.
+            if len(package_network_failures) < 32:
+                package_network_failures.append(dict(event))
     if not domains:
         argv = isolated_argv(command, protected_paths=protected_paths)
         if sys.platform.startswith("linux"):
@@ -557,7 +644,7 @@ def run_isolated_to_files(
         )
 
     if sys.platform == "darwin":
-        with _PackageProxy(domains) as proxy:
+        with _PackageProxy(domains, record_package_network_failure) as proxy:
             sandboxed = _isolated_argv(
                 command, proxy_port=proxy.port, protected_paths=protected_paths
             )
@@ -567,7 +654,7 @@ def run_isolated_to_files(
                 env=_with_proxy_environment(env, proxy.port),
             )
     if sys.platform.startswith("linux"):
-        with _PackageBroker(domains) as broker:
+        with _PackageBroker(domains, record_package_network_failure) as broker:
             _probe_linux_namespace(
                 protected_paths=protected_paths,
                 package_broker_socket=broker.socket_path,

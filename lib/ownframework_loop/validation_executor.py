@@ -178,108 +178,118 @@ def run_required_validation(
     candidate_invalid_excerpt = ""
     env_id = ""
     env_dir = None
+    resolution: dict[str, Any] | None = None
     bound_uv: validation_environment.BoundUvIdentity | None = None
     uv_snapshot: Path | None = None
     uv_snapshot_dir: Path | None = None
-    classification = validation_environment.classify_uv_command(command)
-    needs_uv = classification == "uv"
+    classification = validation_environment.classify_validation_uv_command(
+        command,
+        cwd=cwd,
+        candidate_sha=candidate_sha,
+    )
+    uses_uv_capability = classification in {"uv", "wrapped-uv"}
+    needs_project_environment = classification == "uv"
     if classification == "ambiguous":
         infra_failure = True
         infra_failure_reason = "unsupported_or_ambiguous_uv_command"
-    if needs_uv and not infra_failure:
-        if not candidate_sha:
-            infra_failure = True
-            infra_failure_reason = (
-                "uv-mediated validation command requires candidate_sha; "
-                "the finalizer did not pass it through"
+    if uses_uv_capability and not candidate_sha and not infra_failure:
+        infra_failure = True
+        infra_failure_reason = (
+            "uv-mediated validation requires candidate_sha; "
+            "the finalizer did not pass it through"
+        )
+
+    # A packet capability is not blanket network authority for every gate.
+    # Bind the exact tool and registry broker only when this direct command or
+    # its exact, tracked shell wrapper is proven to invoke literal uv.
+    if uses_uv_capability and not infra_failure:
+        try:
+            resolution = runtime_env.commissioned_validation_resolution(
+                canonical_repo, run_id, packet
             )
-        else:
+        except Exception as exc:  # noqa: BLE001 — boundary
+            infra_failure = True
+            infra_failure_reason = f"bound_uv_resolution_failed:{exc}"
+        if resolution is not None:
+            resolution_names = _resolution_names(resolution)
             try:
-                resolution = runtime_env.commissioned_validation_resolution(
-                    canonical_repo, run_id, packet
-                )
-            except Exception as exc:  # noqa: BLE001 — boundary
+                bound_uv = _extract_bound_uv_from_resolution(resolution)
+            except validation_environment.ValidationEnvironmentError as exc:
                 infra_failure = True
-                infra_failure_reason = f"bound_uv_resolution_failed:{exc}"
+                infra_failure_reason = (
+                    "bound_uv_resolution_missing_fields: package.uv "
+                    f"resolution is incomplete: {exc}"
+                )
             else:
-                resolution_names = _resolution_names(resolution)
-                try:
-                    bound_uv = _extract_bound_uv_from_resolution(resolution)
-                except validation_environment.ValidationEnvironmentError as exc:
+                if bound_uv is None:
                     infra_failure = True
-                    infra_failure_reason = (
-                        "bound_uv_resolution_missing_fields: package.uv "
-                        f"resolution is incomplete: {exc}"
-                    )
-                else:
-                    if bound_uv is None:
-                        infra_failure = True
-                        if "package.uv" in resolution_names:
-                            infra_failure_reason = (
-                                "bound_uv_resolution_missing_fields: package.uv "
-                                "resolved but executable/version/sha256 absent"
-                            )
-                        else:
-                            infra_failure_reason = (
-                                "bound_uv_capability_not_bound: uv-mediated validation "
-                                "requires frozen package.uv authority"
-                            )
+                    if "package.uv" in resolution_names:
+                        infra_failure_reason = (
+                            "bound_uv_resolution_missing_fields: package.uv "
+                            "resolved but executable/version/sha256 absent"
+                        )
                     else:
-                        try:
-                            uv_snapshot, uv_snapshot_dir = (
-                                validation_environment.snapshot_bound_uv(
-                                    canonical_repo, run_id, bound_uv
-                                )
+                        infra_failure_reason = (
+                            "bound_uv_capability_not_bound: uv-mediated validation "
+                            "requires frozen package.uv authority"
+                        )
+                else:
+                    try:
+                        uv_snapshot, uv_snapshot_dir = (
+                            validation_environment.snapshot_bound_uv(
+                                canonical_repo, run_id, bound_uv
                             )
-                        except (
-                            OSError,
-                            validation_environment.ValidationEnvironmentError,
-                        ) as exc:
+                        )
+                    except (
+                        OSError,
+                        validation_environment.ValidationEnvironmentError,
+                    ) as exc:
+                        infra_failure = True
+                        infra_failure_reason = f"bound_uv_snapshot_failed:{exc}"
+                    if needs_project_environment and not infra_failure:
+                        env_id = validation_environment.candidate_bound_environment_id(
+                            str(candidate_sha), cwd
+                        )
+                        env_dir = validation_environment.project_environment_dir(
+                            canonical_repo, run_id, role, env_id
+                        )
+                        existing = validation_environment.project_environment_status(env_dir)
+                        if existing.get("provisioned") and not _cached_environment_matches_bound_uv(
+                            existing, bound_uv
+                        ):
                             infra_failure = True
-                            infra_failure_reason = f"bound_uv_snapshot_failed:{exc}"
-                        if not infra_failure:
-                            env_id = validation_environment.candidate_bound_environment_id(
-                                str(candidate_sha), cwd
+                            infra_failure_reason = (
+                                "bound_uv_cached_environment_mismatch: existing project "
+                                "environment was not provisioned under the full frozen "
+                                "package.uv binding"
                             )
-                            env_dir = validation_environment.project_environment_dir(
-                                canonical_repo, run_id, role, env_id
-                            )
-                            existing = validation_environment.project_environment_status(env_dir)
-                            if existing.get("provisioned") and not _cached_environment_matches_bound_uv(
-                                existing, bound_uv
-                            ):
-                                infra_failure = True
-                                infra_failure_reason = (
-                                    "bound_uv_cached_environment_mismatch: existing project "
-                                    "environment was not provisioned under the full frozen "
-                                    "package.uv binding"
-                                )
-            if needs_uv and not infra_failure:
-                try:
-                    outcome = validation_environment.provision_project_environment(
-                        canonical_repo=canonical_repo,
-                        run_id=run_id,
-                        role=role,
-                        candidate_sha=str(candidate_sha),
-                        candidate_worktree=cwd,
-                        bound_uv=bound_uv,
-                    )
-                except validation_environment.ValidationEnvironmentError as exc:
-                    infra_failure = True
-                    infra_failure_reason = str(exc)
-                else:
-                    env_id = str(outcome.get("identity") or "")
-                    env_dir = Path(str(outcome.get("marker_path") or "")).expanduser().resolve(strict=False)
-                    outcome_class = str(outcome.get("outcome") or "")
-                    if outcome_class == validation_environment.OUTCOME_PROVISIONED:
-                        env_overrides = validation_environment.env_overrides(env_dir)
-                    elif outcome_class == validation_environment.OUTCOME_CANDIDATE_INVALID:
-                        candidate_invalid = True
-                        candidate_invalid_reason = str(outcome.get("reason") or "")
-                        candidate_invalid_excerpt = str(outcome.get("stderr_excerpt") or "")
-                    else:
-                        infra_failure = True
-                        infra_failure_reason = str(outcome.get("reason") or "")
+
+    if needs_project_environment and not infra_failure:
+        try:
+            outcome = validation_environment.provision_project_environment(
+                canonical_repo=canonical_repo,
+                run_id=run_id,
+                role=role,
+                candidate_sha=str(candidate_sha),
+                candidate_worktree=cwd,
+                bound_uv=bound_uv,
+            )
+        except validation_environment.ValidationEnvironmentError as exc:
+            infra_failure = True
+            infra_failure_reason = str(exc)
+        else:
+            env_id = str(outcome.get("identity") or "")
+            env_dir = Path(str(outcome.get("marker_path") or "")).expanduser().resolve(strict=False)
+            outcome_class = str(outcome.get("outcome") or "")
+            if outcome_class == validation_environment.OUTCOME_PROVISIONED:
+                env_overrides = validation_environment.env_overrides(env_dir)
+            elif outcome_class == validation_environment.OUTCOME_CANDIDATE_INVALID:
+                candidate_invalid = True
+                candidate_invalid_reason = str(outcome.get("reason") or "")
+                candidate_invalid_excerpt = str(outcome.get("stderr_excerpt") or "")
+            else:
+                infra_failure = True
+                infra_failure_reason = str(outcome.get("reason") or "")
 
     if infra_failure and infra_failure_path is not None:
         _write_infra_failure_marker(infra_failure_path, {
@@ -357,10 +367,11 @@ def run_required_validation(
     start = time.monotonic()
     timed_out = False
     network_failure_reason = ""
+    package_network_failures: list[dict[str, object]] = []
     with stdout_path.open("wb") as stdout_fh, stderr_path.open("wb") as stderr_fh:
         os.chmod(stdout_path, 0o600)
         os.chmod(stderr_path, 0o600)
-        if needs_uv and bound_uv is not None:
+        if bound_uv is not None:
             try:
                 validation_environment.verify_bound_uv_identity(bound_uv)
                 if uv_snapshot is None or uv_snapshot_dir is None:
@@ -420,26 +431,27 @@ def run_required_validation(
                     "validation_env_path": str(env_dir) if env_dir is not None else "",
                 }
         env = runtime_env.commissioned_validation_env(
-            canonical_repo, run_id, packet
+            canonical_repo, run_id, packet, resolution=resolution
         )
         for key, value in env_overrides.items():
             env[key] = value
         try:
             effective_command = command
             protected_paths: tuple[Path, ...] = ()
-            if needs_uv and bound_uv is not None:
+            if bound_uv is not None:
                 if uv_snapshot is None or uv_snapshot_dir is None:
                     raise validation_environment.ValidationEnvironmentError(
                         "bound package.uv snapshot is missing before validation"
                     )
                 env["PATH"] = str(uv_snapshot_dir) + os.pathsep + env.get("PATH", "")
+                protected_paths = (uv_snapshot_dir,)
+            if classification == "uv" and bound_uv is not None:
                 effective_command = validation_environment.rewrite_bound_uv_tokens(
                     command,
                     expected_executable=bound_uv.executable,
                     snapshot_executable=uv_snapshot,
                     cwd=cwd,
                 )
-                protected_paths = (uv_snapshot_dir,)
             result = validation_network.run_isolated_to_files(
                 ["/bin/sh", "-c", effective_command],
                 cwd=cwd,
@@ -448,6 +460,10 @@ def run_required_validation(
                 stderr_fh=stderr_fh,
                 env=env,
                 protected_paths=protected_paths,
+                package_network_domains=(
+                    bound_uv.network_domains if bound_uv is not None else ()
+                ),
+                package_network_failures=package_network_failures,
             )
             returncode = result.returncode
             timed_out = result.timed_out
@@ -491,6 +507,24 @@ def run_required_validation(
         and int(returncode) == expected_exit
         and marker_match
     )
+    if package_network_failures and not passed:
+        first = package_network_failures[0]
+        network_failure_reason = (
+            "package_registry_"
+            + str(first.get("kind") or "connect_failed")
+            + ":"
+            + str(first.get("host") or "unknown")
+        )
+        if infra_failure_path is not None:
+            _write_infra_failure_marker(infra_failure_path, {
+                "name": name,
+                "command": command,
+                "reason": network_failure_reason,
+                "package_network_failures": package_network_failures,
+                "validation_env_id": env_id,
+                "validation_env_path": str(env_dir) if env_dir is not None else "",
+                "recorded_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            })
     return {
         "name": name,
         "command": command,

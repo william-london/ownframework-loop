@@ -1976,6 +1976,17 @@ def _build_parser() -> argparse.ArgumentParser:
         )
         _emit(out, exit_code=0 if out.get("ok") else 2)
 
+    def cmd_supervisor_retry_validation_infrastructure_review(args: argparse.Namespace) -> None:
+        repo = _repo_path(args.repo)
+        out = supervisor_mod.retry_validation_infrastructure_review(
+            canonical_repo=repo,
+            run_id=args.run_id,
+            expected_candidate_sha=args.expected_candidate_sha,
+            expected_review_attempt_id=args.expected_review_attempt_id,
+            db_path=Path(args.db).expanduser() if args.db else None,
+        )
+        _emit(out, exit_code=0 if out.get("ok") else 2)
+
     def cmd_supervisor_retire(args: argparse.Namespace) -> None:
         # Historical disposable repositories may already have been removed.
         # Retirement changes only the exact supervisor enrollment identified
@@ -2136,6 +2147,16 @@ def _build_parser() -> argparse.ArgumentParser:
     s_cont.add_argument("--expected-candidate-sha", required=True)
     s_cont.add_argument("--db", default=None)
     s_cont.set_defaults(func=cmd_supervisor_continue_program)
+    s_retry_review = sup_sub.add_parser(
+        "retry-validation-infrastructure-review",
+        help="replay one exact accepted review after deterministic validation infrastructure is repaired",
+    )
+    s_retry_review.add_argument("repo")
+    s_retry_review.add_argument("run_id")
+    s_retry_review.add_argument("--expected-candidate-sha", required=True)
+    s_retry_review.add_argument("--expected-review-attempt-id", required=True)
+    s_retry_review.add_argument("--db", default=None)
+    s_retry_review.set_defaults(func=cmd_supervisor_retry_validation_infrastructure_review)
     # v0.8.3: enrollments can be retired — a SUPERVISOR-LEDGER lifecycle
     # transition that preserves engineering evidence and excludes the row
     # from runtime-generation dependency checks at install/refresh time.
