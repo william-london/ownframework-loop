@@ -227,6 +227,25 @@ resolved. If the process dies before the migration record is published, the
 next identical supported retry validates and completes the durable directory
 prefix; operators must not delete partial evidence manually.
 
+### Exceptional linked rollover of a terminal blocked PROGRAM candidate
+
+Rollover is not a general retry, reset, or continuation path. It is available
+only after the parent is terminal (`BLOCKED` in engineering state and `DONE` in
+the supervisor), with no live or unaccounted semantic attempt, and the durable
+evidence proves the narrowly supported accepted-review/failed-required-
+validation case for the exact candidate. The parent remains immutable.
+
+The supported rollover creates one linked child with the exact parent packet
+bytes, baseline, and accepted candidate, plus an immutable provenance record.
+It imports existing counters and carries forward only the remaining operational
+and absolute wall-clock envelope; it does not add or reset BUILD, REVIEW, or
+repair entitlement. The child has a distinct run identity and capability
+binding. Its copied packet is not implicitly approved: a human must explicitly
+approve that exact child packet through the normal TTY approval path. Only then
+may fresh deterministic validation and candidate-origin evidence admit the
+inherited candidate to REVIEW. Parent history, packet, candidate, and
+accounting are never rewritten by this procedure.
+
 ## 11. Foreground/debug operation
 
 ```bash

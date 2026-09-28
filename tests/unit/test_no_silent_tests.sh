@@ -15,9 +15,59 @@ ROOT="$(cd "$TESTS_DIR/.." && pwd)"
 CANONICAL="$ROOT/tests/canonical.txt"
 NONCANONICAL="$ROOT/tests/non_canonical.txt"
 
-# Build the set of declared paths. Use awk to strip blanks/comments inline
-# so the join is robust to a missing $NONCANONICAL.
-declared="$(awk 'NR==FNR || 1' "$CANONICAL" "$NONCANONICAL" 2>/dev/null | awk '/^tests\//' | sort -u)"
+# Manifest entries are paths only; blanks and comments are not declarations.
+manifest_entries() {
+  awk 'NF && $1 !~ /^#/ && $1 ~ /^tests\// { print $1 }' "$1"
+}
+
+manifest_duplicates() {
+  manifest_entries "$1" | sort | uniq -d
+}
+
+manifest_overlap() {
+  comm -12 \
+    <(manifest_entries "$1" | sort -u) \
+    <(manifest_entries "$2" | sort -u)
+}
+
+for manifest_spec in "$CANONICAL:canonical" "$NONCANONICAL:non-canonical"; do
+  manifest="${manifest_spec%%:*}"
+  label="${manifest_spec#*:}"
+  duplicates="$(manifest_duplicates "$manifest")"
+  if [[ -n "$duplicates" ]]; then
+    echo "FAIL: duplicate entries in $label test manifest:"
+    while IFS= read -r path; do echo "  - $path"; done <<< "$duplicates"
+    exit 1
+  fi
+done
+
+overlap="$(manifest_overlap "$CANONICAL" "$NONCANONICAL")"
+if [[ -n "$overlap" ]]; then
+  echo "FAIL: tests cannot be both canonical and non-canonical:"
+  while IFS= read -r path; do echo "  - $path"; done <<< "$overlap"
+  exit 1
+fi
+
+# Behavioral regression: the same duplicate/overlap detectors used above
+# reject duplicate canonical declarations and cross-manifest declarations.
+manifest_fixture="$(mktemp -d -t ofloop-manifest-contract.XXXXXX)"
+trap 'rm -rf "$manifest_fixture"' EXIT
+printf 'tests/example.sh\ntests/example.sh\n' > "$manifest_fixture/canonical-duplicate.txt"
+if [[ "$(manifest_duplicates "$manifest_fixture/canonical-duplicate.txt")" != "tests/example.sh" ]]; then
+  echo "FAIL: duplicate canonical fixture was not detected"
+  exit 1
+fi
+printf 'tests/example.sh\n' > "$manifest_fixture/canonical.txt"
+printf 'tests/example.sh\n' > "$manifest_fixture/non-canonical.txt"
+if [[ "$(manifest_overlap "$manifest_fixture/canonical.txt" "$manifest_fixture/non-canonical.txt")" != "tests/example.sh" ]]; then
+  echo "FAIL: cross-manifest fixture was not detected"
+  exit 1
+fi
+echo "CANONICAL_MANIFEST_DUPLICATE_GUARD=PASS"
+echo "CANONICAL_NONCANONICAL_OVERLAP_GUARD=PASS"
+
+# Build the set of declared paths after proving each manifest's unique ownership.
+declared="$( { manifest_entries "$CANONICAL"; manifest_entries "$NONCANONICAL"; } | sort -u)"
 
 # All test_*.sh scripts that exist on disk.
 on_disk="$(find tests -name 'test_*.sh' -type f 2>/dev/null | sort -u)"
@@ -42,11 +92,12 @@ fi
 
 # Also: every entry in non_canonical.txt must reference an existing file.
 undeclared=""
-for f in $(cat "$NONCANONICAL" 2>/dev/null | grep -E '^tests/' || true); do
+while IFS= read -r f; do
+  [[ -n "$f" ]] || continue
   if [[ ! -f "$f" ]]; then
     undeclared="$undeclared $f"
   fi
-done
+done < <(manifest_entries "$NONCANONICAL")
 if [[ -n "$undeclared" ]]; then
   echo "FAIL: non_canonical.txt references missing files:"
   for u in $undeclared; do

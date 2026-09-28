@@ -11,8 +11,9 @@ run several capabilities — `toolchain.*`, `package.*`, `container.docker` (onl
 through a commissioned broker), `local.http-service` (only through
 `claude_native_safe_local_binding`), `browser.playwright.chromium` (only when
 the operator-commissioned shared asset root is runtime-proven by the real
-browser canary) — and otherwise confines Bash to the packet's exact
-`network_read_allowlist` through the Claude sandbox with `strictAllowlist: true`.
+browser canary) — and confines Bash network access to the bounded union of the
+packet's exact `network_read_allowlist` and exact domains supplied by resolved
+capabilities, with `strictAllowlist: true`.
 
 That authority is correct for the things it was built for: deterministic
 compilation, package installation against known registries, host-canary-proven
@@ -66,9 +67,12 @@ remain authoritative for any research-addition:
    * `--no-chrome` and `--no-session-persistence` are mandatory.
    * `--strict-mcp-config` with the explicit empty `{"mcpServers":{}}`
      payload means the worker cannot inherit MCP servers and cannot add any.
-   * `sandbox.network.allowedDomains` is the **intersection** of the
-     packet-supplied `network_read_allowlist` and the resolved capability
-     `network_domains`. `strictAllowlist: true` is permanent.
+   * `sandbox.network.allowedDomains` is the **union** of the exact
+     packet-supplied `network_read_allowlist` and the exact domains supplied
+     by resolved capabilities. `strictAllowlist: true` is permanent. The
+     `research.public` capability supplies no worker Bash network domains;
+     its governed destinations are reachable only through the supervisor and
+     broker path below.
    * `sandbox.network.credentials` denies common credential env vars
      (`GITHUB_TOKEN`, `NPM_TOKEN`, `GH_TOKEN`, `NODE_AUTH_TOKEN`,
      `PYPI_TOKEN`, `TWINE_PASSWORD`, `DOCKER_AUTH_CONFIG`); the
@@ -222,12 +226,13 @@ The broker is the smallest mechanism that:
 > `allowedDomains` widening to let the broker reach public hosts. That
 > draft shipped temporarily as commits `442901e`+`ef04f4d`. It is now
 > rejected: Claude's Bash sandbox applies its network filter to
-> subprocesses too, so widening the worker's `allowedDomains` to
-> wikipedia.org also widens every other Bash command's reach to those
-> domains. The corrected architecture below moves the network effect
-> **outside the worker's Bash sandbox** entirely. The worker ends
-> with `sandbox.network.allowedDomains = []` and
-> `sandbox.network.strictAllowlist = true` unchanged.
+> subprocesses too, so adding research destinations to the worker's
+> `allowedDomains` would also widen every other Bash command's reach to those
+> domains. The corrected architecture below moves research transport
+> **outside the worker's Bash sandbox** entirely. `research.public` contributes
+> no domains to the worker; its effective `allowedDomains` remains the bounded
+> union of packet-frozen exact hosts and independently resolved capability
+> domains. `sandbox.network.strictAllowlist = true` remains unchanged.
 
 ### 5.a Corrected trusted transport
 
@@ -244,7 +249,7 @@ commissioned broker as a child of the supervisor process, NOT a child
 of Claude's Bash.
 
 ```text
-semantic worker (Bash sandbox: allowedDomains=[]; strictAllowlist: true)
+semantic worker (strict allowlist; research.public adds no Bash domains)
     |
     |  ofloop-research-call --op read --url https://...
     |                            --run-id <id> --attempt <id>
@@ -318,34 +323,24 @@ supervisor (launchd; user-level network authority; NOT Claude sandbox):
            schema/request identity and emits the response on stdout.
 
 Search posture (current, authoritative):
-    SEARCH_DISCOVERY_BACKEND=bing-rss   (general public-web discovery,
+    SEARCH_DISCOVERY_BACKEND=bing-rss   (default general public-web discovery,
                                         GET-only, _browse() only)
-    NARROW_SEARCH_BACKEND=wikipedia    (encyclopedia alternate)
-    GENERAL_WEB_DISCOVERY=SUPPORTED    (both backends commissioned;
-                                        ddg-lite remains removed)
+    NARROW_SEARCH_BACKEND=wikipedia    (narrow encyclopedia alternate)
+    GENERAL_WEB_DISCOVERY=SUPPORTED    (bing-rss and wikipedia are supported;
+                                        ddg-lite is removed)
     (search orphan claims deliberately refuse auto-retry;
      read / asset-read orphan claims are recoverable)
 ```
 
-### 5.b Why this is necessary — Claude sandbox subprocess inheritance
+### 5.b Why transport is supervisor-mediated
 
-Claude's Bash sandbox applies network filtering to **all** subprocesses
-spawned through Bash, not just to the worker's Bash commands
-themselves. A worker that runs
-
-```bash
-ofloop-research-broker --op read --url https://...
-```
-
-will fail at the broker's `getaddrinfo` step in the broker subprocess,
-because the spawned broker inherits the worker's empty
-`allowedDomains` + `strictAllowlist: true`. The architectural
-intuitive fix would be to widen the worker's `allowedDomains` to
-add wikipedia.org + wikimedia.org — but that widening ALSO lets
-the worker's own `curl https://en.wikipedia.org/...` succeed, which
-collapses the separation between trusted governed transport and
-ordinary Bash. The architecturally correct fix is to remove the
-broker from the worker's subprocess tree entirely.
+The broker must not be launched from the worker's Bash process tree: doing so
+would inherit the worker sandbox and either block the broker's network request
+or tempt a widening of Bash egress. Instead, the worker can submit only a
+run-bound request through `ofloop-research-call`; the supervisor proves live
+attempt authority and invokes the broker with its bounded process runner. This
+keeps public research transport outside worker Bash while preserving strict,
+exact-domain network policy for ordinary worker commands.
 
 ### 5.c Old (rejected) bash-widening concession — audit log
 
@@ -354,11 +349,10 @@ The post-v1 commits `442901e` and `ef04f4d` widened the worker's
 `upload.wikimedia.org`). The motivation was: "the broker cannot
 reach its backend underneath Claude's sandbox; therefore widen the
 sandbox." That logic is structurally wrong against the ADR's
-governing principle. The corrected design instead moves the
-broker's network effect into the supervisor, which has no
-sandbox inheritance. Old commits remain in git history because
-they document the failure mode; the live source reverts the
-widening.
+governing principle. The corrected design instead moves the broker's network
+effect into the supervisor, which has no worker-sandbox inheritance. Old
+commits remain in git history because they document the failure mode; the live
+source does not grant their research-host widening.
 
 ### 5.d Capability semantics (corrected)
 
@@ -645,10 +639,10 @@ rejected temporary widening)
   unchanged.
 * `--restricted` native isolation: unchanged.
 * Bash `strictAllowlist: true`: unchanged. **The new capability does
-  NOT widen `allowedDomains` at all** — the worker's
-  `sandbox.network.allowedDomains` is `[]` when `research.public`
-  is committed (verified by `tests/unit/test_v200_research_authority.sh`'s
-  worker-sandbox assertion).
+  NOT widen `allowedDomains` at all.** In a research-only packet with no
+  packet network hosts or other network-bearing capabilities, the effective
+  worker `sandbox.network.allowedDomains` is `[]` (verified by
+  `tests/unit/test_v200_research_authority.sh`'s worker-sandbox assertion).
 * `sandbox.network.credentials` deny list: unchanged. The worker
   helper inherits the scrubbed subprocess env (the same
   `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1` and the same deny list).
@@ -665,11 +659,12 @@ rejected temporary widening)
   `package.pip` / `package.npm` / `package.uv` / Playwright CDN
   domains — those continue to be the only Bash sub-network
   authority granted to capability resolution.
-* Direct worker Bash public egress: explicitly forbidden. The
-  worker's `curl`, `wget`, `python -c 'import requests'`,
-  `node-fetch`, `python -c 'import socket, ssl'` are all refused
-  by `strictAllowlist: true` with empty `allowedDomains`, including
-  any of the research destinations (wikipedia.org, etc.).
+* Direct worker Bash public egress beyond the exact packet and resolved
+  capability domains is forbidden. `research.public` does not grant the
+  worker network access to discovered destinations such as Wikipedia; a
+  request to those destinations must use the governed helper and supervisor
+  broker. Ordinary Bash network access remains subject to the same strict
+  allowlist as other capabilities.
 
 ## 8. Security-test surface
 

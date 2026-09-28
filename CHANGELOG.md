@@ -19,6 +19,31 @@ canonical install root for v1.0.0 (`~/.local/share/ownframework-loop/1.0.0/`)
 is preserved. New dev installs land under the 1.1.0 identity
 (`~/.local/share/ownframework-loop/1.1.0.dev0/`).
 
+## Unreleased - Research and PROGRAM recovery closure (2026-09-28)
+
+- Research posture: `bing-rss` is the default general public-web discovery
+  backend; `wikipedia` remains the narrow alternate; `GENERAL_WEB_DISCOVERY`
+  is supported; the historical `ddg-lite` backend is removed. The worker
+  calls `ofloop-research-call`; the supervisor admits the immutable request
+  against live run authority, invokes the commissioned broker through its
+  bounded process runner, and publishes the durable receipt/artifact and
+  response. `research.public` contributes no research destination to worker
+  Bash network authority.
+- Validation recovery: package/registry transport failures are distinguished
+  from candidate defects, validation-infrastructure evidence is durable, and
+  an accepted review can be recovered after an infrastructure-only validation
+  failure without buying another semantic review or changing candidate
+  authority.
+- PROGRAM recovery: a narrow linked candidate rollover supports the specific
+  terminal blocked-validation case. It preserves the parent, copies the exact
+  packet, binds the existing candidate and its origin, imports existing
+  counters, and carries forward only the remaining operational and absolute
+  wall-clock envelope. The child remains a distinct authority: its exact copied
+  packet requires explicit approval before fresh deterministic validation can
+  admit it to review. Rollover run identities are accepted by the governed
+  research path, and Loop-owned control-plane files do not count as product
+  checkout dirt.
+
 ## Unreleased - Post-v1 Candidate-Bound Validation Environment Parity (2026-09-22)
 
 - New: `lib/ownframework_loop/validation_environment.py` — deterministic

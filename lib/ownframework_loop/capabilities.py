@@ -111,8 +111,9 @@ BUILTIN_CAPABILITIES: dict[str, CapabilityDefinition] = {
         # (bin/ofloop-research-call) which queues a request and blocks
         # for a response. The supervisor's serve() loop consumes the queue,
         # validates the request against the run's frozen capability binding,
-        # and invokes the broker (subprocess.run, NOT under Claude's Bash
-        # sandbox). The broker has the operator's full DNS/TCP egress;
+        # and invokes the broker through the bounded supervisor process
+        # runner, NOT under Claude's Bash sandbox. The broker has the
+        # operator's full DNS/TCP egress;
         # its own SSRF primitives validate destinations.
         #
         # Authoritative invariants on the worker side:
