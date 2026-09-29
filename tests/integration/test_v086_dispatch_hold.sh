@@ -278,10 +278,22 @@ watch_job = supervisor.enqueue(
     dispatch_hold_kind=supervisor.DISPATCH_HOLD_KIND,
     dispatch_hold_previous_checkpoint_id="CP-1", dispatch_hold_next_checkpoint_id="CP-2",
 )
+subprocess.run(
+    [
+        sys.executable,
+        str(root / "tests" / "canary" / "commissioned_program_restart_watcher.py"),
+        "update-control",
+        str(watch_root / "control.json"),
+        "status=STARTED",
+        f"dispatch_hold_id={watch_job['dispatch_hold']['hold_id']}",
+        f"dispatch_hold_kind={supervisor.DISPATCH_HOLD_KIND}",
+        "dispatch_hold_state=ARMED",
+    ],
+    check=True,
+)
 control = json.loads((watch_root / "control.json").read_text())
-control.update({"status": "STARTED", "dispatch_hold_id": watch_job["dispatch_hold"]["hold_id"],
-                "dispatch_hold_kind": supervisor.DISPATCH_HOLD_KIND, "dispatch_hold_state": "ARMED"})
-(watch_root / "control.json").write_text(json.dumps(control, indent=2) + "\n")
+assert control["dispatch_hold_id"] == watch_job["dispatch_hold"]["hold_id"]
+assert control["dispatch_hold_state"] == "ARMED"
 make_boundary(watch_repo, watch_id)
 with supervisor._connect(watch_db) as conn:
     got = supervisor._take_next_job(conn)

@@ -92,6 +92,31 @@ def update_control(control: Path, **changes: Any) -> dict[str, Any]:
         return value
 
 
+def update_control_from_cli(control: Path, updates: list[str]) -> int:
+    """Apply launcher fields through the same lock used by the watcher."""
+    control = Path(control).expanduser().resolve(strict=False)
+    if control.name != "control.json":
+        raise ValueError("control_update_requires_control_json")
+    allowed = {
+        "status",
+        "started_at",
+        "runtime_generation_started",
+        "dispatch_hold_id",
+        "dispatch_hold_kind",
+        "dispatch_hold_state",
+    }
+    changes: dict[str, str] = {}
+    for item in updates:
+        key, separator, value = item.partition("=")
+        if not separator or key not in allowed:
+            raise ValueError(f"unsupported_control_update:{item.split('=', 1)[0]}")
+        changes[key] = value
+    if not changes:
+        raise ValueError("control_update_requires_fields")
+    update_control(control, **changes)
+    return 0
+
+
 def manager(c: dict[str, Any]) -> str:
     if os.environ.get("OFLOOP_CANARY_TEST_MANAGER") == "1":
         return "test"
@@ -670,9 +695,12 @@ def check(root: Path) -> int:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("action", choices=["arm", "watch", "check", "cleanup"])
+    parser.add_argument("action", choices=["arm", "watch", "check", "cleanup", "update-control"])
     parser.add_argument("root")
+    parser.add_argument("updates", nargs="*")
     args = parser.parse_args()
+    if args.action == "update-control":
+        return update_control_from_cli(Path(args.root), args.updates)
     root = Path(args.root).expanduser().resolve(strict=False)
     helper = Path(__file__).resolve()
     if args.action == "arm":

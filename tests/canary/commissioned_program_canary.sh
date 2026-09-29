@@ -23,14 +23,7 @@ PY
 
 update_control(){
   local control="$1"; shift
-  python3 - "$control" "$@" <<'PY'
-import json,sys
-from pathlib import Path
-p=Path(sys.argv[1]); d=json.loads(p.read_text())
-for item in sys.argv[2:]:
-    k,v=item.split("=",1); d[k]=v
-p.write_text(json.dumps(d,indent=2,sort_keys=True)+"\n")
-PY
+  python3 "$WATCHER_HELPER" update-control "$control" "$@"
 }
 
 discover(){
