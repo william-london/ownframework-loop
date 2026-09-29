@@ -36,7 +36,8 @@
         "CHANGES_REQUESTED",
         "APPROVED",
         "BLOCKED",
-        "STOPPED"
+        "STOPPED",
+        "SEGMENT_BOUNDARY"
       ]
     },
     "state_history": {
@@ -187,6 +188,32 @@
         "review_scope": {
           "type": ["string", "null"],
           "enum": ["checkpoint", "program_final", null]
+        },
+        "mission_segment": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "schema",
+            "mission_id",
+            "segment_number",
+            "predecessor_run_id",
+            "mission_authority_sha256",
+            "segment_authority_sha256",
+            "mission_original_baseline_sha",
+            "segment_baseline_sha",
+            "mission_source_lines_at_start"
+          ],
+          "properties": {
+            "schema": { "const": "ownframework-loop-mission-segment-state/v1" },
+            "mission_id": { "type": "string", "pattern": "^mission-[a-f0-9]{24}$" },
+            "segment_number": { "type": "integer", "minimum": 1, "maximum": 16 },
+            "predecessor_run_id": { "type": ["string", "null"] },
+            "mission_authority_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+            "segment_authority_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+            "mission_original_baseline_sha": { "type": "string", "pattern": "^[a-f0-9]{40}$" },
+            "segment_baseline_sha": { "type": "string", "pattern": "^[a-f0-9]{40}$" },
+            "mission_source_lines_at_start": { "type": "integer", "minimum": 0 }
+          }
         },
         "promotion_policy": {
           "type": "string",

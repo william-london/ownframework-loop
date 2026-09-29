@@ -40,7 +40,7 @@ SCHEMA_VERSION = "ownframework-loop-approval/v1"
 # human-only command. There is no non-interactive core override.
 # v0.5.0: build_start is the normal auto-seal method;
 # tty_confirmation remains for legacy / optional strict pre-seal.
-ALLOWED_APPROVAL_METHODS = {"tty_confirmation", "build_start"}
+ALLOWED_APPROVAL_METHODS = {"tty_confirmation", "build_start", "mission_segment"}
 
 CONFIRMATION_PREFIX = "CONFIRM-OF-LOOP"
 
@@ -199,6 +199,16 @@ def validate_approval_shape(approval: dict[str, Any]) -> list[str]:
         errors.append("canonical_repo must be non-empty")
     if not approval.get("baseline_branch"):
         errors.append("baseline_branch must be non-empty")
+    if am == "mission_segment":
+        if approval.get("binding_kind") != "mission_derived_seal":
+            errors.append("mission_segment approval requires binding_kind=mission_derived_seal")
+        if not re.fullmatch(r"[a-f0-9]{64}", str(approval.get("mission_origin_approval_sha256") or "")):
+            errors.append("mission_segment approval requires mission_origin_approval_sha256")
+        identity = approval.get("mission_segment")
+        if not isinstance(identity, dict) or identity.get("schema") != "ownframework-loop-mission-segment-approval/v1":
+            errors.append("mission_segment approval identity is missing or invalid")
+    elif "mission_segment" in approval or "mission_origin_approval_sha256" in approval:
+        errors.append("mission-derived identity fields are only valid for mission_segment approval")
     return errors
 
 
@@ -292,6 +302,19 @@ def validate_approval_binding(
     expected_token = derive_confirmation_token(approval["packet_sha256"])
     if approval["confirmation_token"] != expected_token:
         return False, "approval confirmation_token does not match derived token"
+    if packet.get("schema") == packet_mod.MISSION_PROGRAM_SCHEMA_VERSION:
+        from . import program_mission
+
+        try:
+            loaded = program_mission.load_segment(canonical_repo, run_id)
+        except Exception as exc:
+            return False, f"v4 mission segment binding invalid: {type(exc).__name__}: {exc}"
+        if loaded is None:
+            return False, "v4 mission segment binding is missing"
+        if approval.get("approval_method") == "mission_segment":
+            return program_mission.verify_segment_approval(
+                canonical_repo, run_id, approval_doc=approval,
+            )
     return True, "ok"
 
 

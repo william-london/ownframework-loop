@@ -145,19 +145,48 @@ assert rc == 23, f"append_event failed to detect tampering after lock acquisitio
 assert state.events_path(repo, rid).read_bytes() == events_before, "tampering was laundered into event chain"
 PY
 
-# === Fault 9: ALLOWED_APPROVAL_METHODS is restricted ===
+# === Fault 9: approval methods are restricted and mission seals are typed ===
 python3 -B -c "
 import sys
 sys.path.insert(0, '$LIB')
 from ownframework_loop import approval
 m = approval.ALLOWED_APPROVAL_METHODS
-# v0.5.0: ALLOWED_APPROVAL_METHODS now contains both tty_confirmation (legacy)
-# and build_start (auto-seal at first build start). Whichever wins the
-# first-write race is immutable.
-expected = {'tty_confirmation', 'build_start'}
+# Mission-derived seals are a third method, but they are valid only when the
+# core-bound derived-seal identity and origin approval are present.
+expected = {'tty_confirmation', 'build_start', 'mission_segment'}
 assert m == expected, f'approval methods not aligned with v0.5.0: got={m} expected={expected}'
+base = {
+    'schema': approval.SCHEMA_VERSION,
+    'run_id': 'run-derived',
+    'packet_sha256': 'a' * 64,
+    'approved_at': '2026-09-29T12:00:00Z',
+    'approved_actor': 'OwnFramework Loop',
+    'canonical_repo': '/tmp/repo',
+    'baseline_branch': 'master',
+    'baseline_sha': 'b' * 40,
+    'packet_schema': 'ownframework-work-packet/v4',
+    'approval_method': 'mission_segment',
+    'binding_kind': 'mission_derived_seal',
+    'confirmation_token': 'MISSION-SEGMENT',
+    'candidate_branch': 'factory/candidate/run-derived',
+    'mission_origin_approval_sha256': 'c' * 64,
+    'mission_segment': {
+        'schema': 'ownframework-loop-mission-segment-approval/v1',
+        'mission_id': 'mission-' + 'd' * 24,
+        'segment_number': 2,
+        'predecessor_run_id': 'run-parent',
+        'mission_authority_sha256': 'e' * 64,
+        'segment_authority_sha256': 'f' * 64,
+    },
+}
+missing_origin = dict(base)
+missing_origin.pop('mission_origin_approval_sha256')
+assert approval.validate_approval_shape(missing_origin), 'mission seal without origin approval was accepted'
+wrong_kind = dict(base, binding_kind='execution_seal')
+assert approval.validate_approval_shape(wrong_kind), 'mission seal with ordinary binding kind was accepted'
+assert approval.validate_approval_shape(base) == [], 'complete typed mission seal was rejected'
 print('OK')
-" >/dev/null 2>&1 && pass "fault 9: approval methods restricted to tty_confirmation + build_start" || fail "fault 9: approval methods not restricted"
+" >/dev/null 2>&1 && pass "fault 9: mission_segment is the only additional typed approval method" || fail "fault 9: approval methods not restricted"
 
 if [[ "$FAIL" -gt 0 ]]; then
   echo "OF_LOOP_GATE_FAULT_INJECTION=FAIL count=$FAIL"

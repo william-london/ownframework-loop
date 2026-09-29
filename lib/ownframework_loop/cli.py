@@ -381,6 +381,55 @@ def cmd_program_status(args: argparse.Namespace) -> None:
     })
 
 
+def cmd_program_mission_status(args: argparse.Namespace) -> None:
+    """Emit a read-only projection of one immutable segmented mission."""
+    from . import program_mission
+
+    repo = _repo_path(args.repo)
+    try:
+        result = program_mission.mission_status(
+            repo,
+            args.mission_id,
+            db_path=Path(args.db).expanduser().resolve(strict=False) if args.db else None,
+        )
+    except Exception as exc:
+        _emit_error(f"mission status unavailable: {type(exc).__name__}: {exc}", exit_code=2)
+    _emit(result)
+
+
+def cmd_program_admit_legacy_continuation(args: argparse.Namespace) -> None:
+    """Create a typed, immutable v4 successor from a verified legacy run."""
+    from . import program_mission
+
+    repo = _repo_path(args.repo)
+    remaining = [part.strip() for part in args.remaining_checkpoints.split(",") if part.strip()]
+    try:
+        result = program_mission.admit_legacy_continuation(
+            repo,
+            args.predecessor_run_id,
+            expected_packet_sha256=args.expected_packet_sha256,
+            expected_baseline_sha=args.expected_baseline_sha,
+            approved_checkpoint_id=args.approved_checkpoint_id,
+            approved_candidate_sha=args.approved_candidate_sha,
+            crossing_candidate_sha=args.crossing_candidate_sha,
+            expected_remaining_checkpoints=remaining,
+            authorized_scope_paths=list(args.add_allowed_path or []),
+            segment_max_diff_lines=args.segment_max_diff_lines,
+            mission_max_diff_lines=args.mission_max_diff_lines,
+            max_segments=args.max_segments,
+            expected_approved_source_lines=args.expected_approved_source_lines,
+            confirmation=args.confirm,
+            db_path=Path(args.db).expanduser().resolve(strict=False) if args.db else None,
+        )
+    except (program_mission.MissionAuthorityError, RuntimeError, ValueError) as exc:
+        _emit_error(
+            str(exc),
+            exit_code=4,
+            classification="OF_LOOP_LEGACY_MISSION_ADMISSION_REFUSED",
+        )
+    _emit(result)
+
+
 def cmd_spec_rollover_program(args: argparse.Namespace) -> None:
     """Create one immutable child linked to an exhausted blocked PROGRAM."""
     from . import program_rollover as program_rollover_mod
@@ -661,7 +710,7 @@ def cmd_spec_stop(args: argparse.Namespace) -> None:
     repo = _repo_path(args.repo)
     state_mod.request_stop(repo, args.run_id, reason=args.reason, actor="human")
     cur = state_mod.load(repo, args.run_id)
-    if cur and cur.get("state") not in ("APPROVED", "BLOCKED", "STOPPED"):
+    if cur and cur.get("state") not in ("APPROVED", "BLOCKED", "STOPPED", "SEGMENT_BOUNDARY"):
         state_mod.transition(
             repo, args.run_id, to_state="STOPPED",
             actor="human", reason=args.reason or "human stop",
@@ -673,7 +722,7 @@ def cmd_spec_abandon(args: argparse.Namespace) -> None:
     repo = _repo_path(args.repo)
     state_mod.request_stop(repo, args.run_id, reason="abandoned", actor="human")
     cur = state_mod.load(repo, args.run_id)
-    if cur and cur.get("state") not in ("STOPPED",):
+    if cur and cur.get("state") not in ("APPROVED", "BLOCKED", "STOPPED", "SEGMENT_BOUNDARY"):
         state_mod.transition(
             repo, args.run_id, to_state="STOPPED",
             actor="human", reason="abandoned",
@@ -721,7 +770,7 @@ def _seal_blocked_on_cap_exhaustion(
     """
     cur = state_mod.load(repo, run_id)
     if not isinstance(cur, dict) or cur.get("state") in (
-        "APPROVED", "BLOCKED", "STOPPED",
+        "APPROVED", "BLOCKED", "STOPPED", "SEGMENT_BOUNDARY",
     ):
         return
     try:
@@ -1575,6 +1624,36 @@ def _build_parser() -> argparse.ArgumentParser:
     p_stat.add_argument("repo")
     p_stat.add_argument("run_id")
     p_stat.set_defaults(func=cmd_program_status)
+    p_mission = program_sub.add_parser(
+        "mission-status", help="show immutable mission and current segment projection",
+    )
+    p_mission.add_argument("repo")
+    p_mission.add_argument("mission_id")
+    p_mission.add_argument("--db", default=None)
+    p_mission.set_defaults(func=cmd_program_mission_status)
+    p_legacy = program_sub.add_parser(
+        "admit-legacy-continuation",
+        help="create one immutable, explicitly fenced v4 successor from a verified legacy PROGRAM",
+    )
+    p_legacy.add_argument("repo")
+    p_legacy.add_argument("predecessor_run_id")
+    p_legacy.add_argument("--expected-packet-sha256", required=True)
+    p_legacy.add_argument("--expected-baseline-sha", required=True)
+    p_legacy.add_argument("--approved-checkpoint-id", required=True)
+    p_legacy.add_argument("--approved-candidate-sha", required=True)
+    p_legacy.add_argument("--crossing-candidate-sha", required=True)
+    p_legacy.add_argument("--remaining-checkpoints", required=True,
+                          help="comma-separated exact frozen graph suffix")
+    p_legacy.add_argument("--add-allowed-path", action="append", required=True,
+                          help="exact repository-relative path proved by the blocked scope receipt")
+    p_legacy.add_argument("--segment-max-diff-lines", type=int, required=True)
+    p_legacy.add_argument("--mission-max-diff-lines", type=int, required=True)
+    p_legacy.add_argument("--max-segments", type=int, required=True)
+    p_legacy.add_argument("--expected-approved-source-lines", type=int, default=None)
+    p_legacy.add_argument("--confirm", required=True,
+                          help="type LEGACY-CONTINUE:<predecessor-run-id>")
+    p_legacy.add_argument("--db", default=None)
+    p_legacy.set_defaults(func=cmd_program_admit_legacy_continuation)
     p_rollover_review = program_sub.add_parser(
         "prepare-rollover-review",
         help="freshly validate an inherited rollover candidate and admit it to REVIEW",

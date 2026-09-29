@@ -25,7 +25,11 @@ from . import validation_environment
 SCHEMA_VERSION = "ownframework-work-packet/v2"
 LEGACY_SCHEMA_VERSION = "ownframework-work-packet/v1"
 PROGRAM_SCHEMA_VERSION = "ownframework-work-packet/v3"
-SUPPORTED_SCHEMA_VERSIONS = (LEGACY_SCHEMA_VERSION, SCHEMA_VERSION, PROGRAM_SCHEMA_VERSION)
+MISSION_PROGRAM_SCHEMA_VERSION = "ownframework-work-packet/v4"
+PROGRAM_SCHEMA_VERSIONS = (PROGRAM_SCHEMA_VERSION, MISSION_PROGRAM_SCHEMA_VERSION)
+SUPPORTED_SCHEMA_VERSIONS = (
+    LEGACY_SCHEMA_VERSION, SCHEMA_VERSION, *PROGRAM_SCHEMA_VERSIONS,
+)
 
 WORK_CLASSES = {
     "NEW_REPOSITORY", "FEATURE", "BUG", "DEBUG", "HARDENING",
@@ -112,7 +116,7 @@ def _validate_risk_budget_envelope(meta: dict[str, Any]) -> list[str]:
         return errors
     if not isinstance(rb, dict):
         return ["risk_budget must be an object"]
-    v3 = meta.get("schema") == PROGRAM_SCHEMA_VERSION
+    v3 = meta.get("schema") in PROGRAM_SCHEMA_VERSIONS
     # Runtime envelopes: a sealed PROGRAM must be able to fund the work it
     # describes. max_runtime_seconds is the whole-run wall-clock envelope
     # (consumed by `supervisor enqueue`); max_pass_runtime_seconds is one
@@ -168,13 +172,13 @@ def validate_packet_metadata(meta: dict[str, Any]) -> list[str]:
     # schema default; only invalidate when execution_mode is present but
     # invalid. Audit v0.3.0-F2: previous hard-reject diverged from the
     # schema and rejected schema-valid packets.
-    if schema == PROGRAM_SCHEMA_VERSION and "execution_mode" in meta and meta["execution_mode"] not in ("single", "program"):
+    if schema in PROGRAM_SCHEMA_VERSIONS and "execution_mode" in meta and meta["execution_mode"] not in ("single", "program"):
         errors.append(f"execution_mode must be single|program, got {meta['execution_mode']!r}")
     errors.extend(_validate_risk_budget_envelope(meta))
     errors.extend(capabilities_mod.validate_capability_names(meta.get("capabilities")))
     errors.extend(runner_profiles_mod.validate_profile_name(meta.get("runner_profile")))
 
-    if schema == PROGRAM_SCHEMA_VERSION:
+    if schema in PROGRAM_SCHEMA_VERSIONS:
         em = meta.get("execution_mode")
         # Schema default is "single"; only validate when present.
         if em is not None and em not in ("single", "program"):
@@ -185,6 +189,10 @@ def validate_packet_metadata(meta: dict[str, Any]) -> list[str]:
         if em == "program":
             from .program import validate_checkpoint_graph as _validate_cg
             errors.extend(_validate_cg(meta))
+    if schema == MISSION_PROGRAM_SCHEMA_VERSION:
+        errors.extend(validate_mission_budget(meta))
+    elif "mission_budget" in meta:
+        errors.append("mission_budget is supported only by ownframework-work-packet/v4")
 
     for f in REQUIRED_FIELDS:
         if f not in meta:
@@ -348,8 +356,6 @@ def validate_packet_self_consistency(meta: dict[str, Any]) -> list[str]:
     if not isinstance(allowed, list):
         return errors  # covered by validate_packet_metadata
     referenced = _extract_root_file_references(meta)
-    if not referenced:
-        return errors
     allowed_norm = {p.rstrip("/") for p in allowed if isinstance(p, str)}
     protected_norm = {p.rstrip("/") for p in protected if isinstance(p, str)}
     missing = sorted(t for t in referenced if t not in allowed_norm and t not in protected_norm)
@@ -360,6 +366,97 @@ def validate_packet_self_consistency(meta: dict[str, Any]) -> list[str]:
             f"or protected_paths: {names}. Either include them in allowed_paths "
             "or remove the reference from work_units prose."
         )
+    if meta.get("schema") == MISSION_PROGRAM_SCHEMA_VERSION:
+        declared: list[tuple[str, str]] = []
+        for unit in meta.get("work_units") or []:
+            if isinstance(unit, dict):
+                unit_id = str(unit.get("id") or "work unit")
+                for value in unit.get("required_paths") or []:
+                    declared.append((unit_id, value))
+        graph = meta.get("checkpoint_graph")
+        if isinstance(graph, dict):
+            for cp in graph.get("checkpoints") or []:
+                if not isinstance(cp, dict):
+                    continue
+                cp_id = str(cp.get("id") or "checkpoint")
+                for value in cp.get("required_paths") or []:
+                    declared.append((cp_id, value))
+        for owner, value in declared:
+            path_error = _scope_path_error(value)
+            if path_error:
+                errors.append(f"{owner}.required_paths contains invalid path {value!r}: {path_error}")
+                continue
+            if is_protected_path(meta, value):
+                errors.append(
+                    f"{owner}.required_paths path {value!r} is protected and cannot be a required output"
+                )
+            elif not is_allowed_path(meta, value):
+                errors.append(
+                    f"{owner}.required_paths path {value!r} is not covered by packet allowed_paths"
+                )
+    return errors
+
+
+def validate_mission_budget(meta: dict[str, Any]) -> list[str]:
+    """Validate the explicit v4 mission/segment source-budget contract.
+
+    This does not reinterpret v3. A v4 PROGRAM must bind its per-run source
+    ceiling to mission_budget.segment_max_diff_lines; its larger mission
+    ceiling is separately bounded by the number of authorized segments.
+    """
+    errors: list[str] = []
+    if meta.get("schema") != MISSION_PROGRAM_SCHEMA_VERSION:
+        return errors
+    raw = meta.get("mission_budget")
+    if not isinstance(raw, dict):
+        return ["v4 PROGRAM requires a mission_budget object"]
+    if str(meta.get("execution_mode") or "single").lower() != "program":
+        return ["mission_budget is valid only for execution_mode=program"]
+    required = (
+        "auto_segment", "segment_max_diff_lines", "mission_max_diff_lines",
+        "max_segments", "segment_boundary_policy",
+    )
+    if raw.get("schema") != "ownframework-loop-mission-budget/v1":
+        errors.append("mission_budget.schema must be ownframework-loop-mission-budget/v1")
+    if not isinstance(raw.get("auto_segment"), bool):
+        errors.append("mission_budget.auto_segment must be boolean")
+    values: dict[str, int] = {}
+    for key in ("segment_max_diff_lines", "mission_max_diff_lines", "max_segments"):
+        value = raw.get(key)
+        if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+            errors.append(f"mission_budget.{key} must be a positive integer")
+        else:
+            values[key] = value
+    if raw.get("segment_boundary_policy") != "last_approved_checkpoint":
+        errors.append("mission_budget.segment_boundary_policy must be last_approved_checkpoint")
+    segment = values.get("segment_max_diff_lines")
+    mission = values.get("mission_max_diff_lines")
+    max_segments = values.get("max_segments")
+    if segment is not None and segment > 30000:
+        errors.append("mission_budget.segment_max_diff_lines exceeds the per-run ceiling 30000")
+    if segment is not None and mission is not None and mission < segment:
+        errors.append("mission_budget.mission_max_diff_lines must be >= segment_max_diff_lines")
+    if max_segments is not None and max_segments > 16:
+        errors.append("mission_budget.max_segments exceeds executable ceiling 16")
+    if raw.get("auto_segment") is False and max_segments not in (None, 1):
+        errors.append("mission_budget.auto_segment=false requires max_segments=1")
+    risk_lines = ((meta.get("risk_budget") or {}).get("max_diff_lines"))
+    if segment is not None and risk_lines != segment:
+        errors.append(
+            "risk_budget.max_diff_lines must equal mission_budget.segment_max_diff_lines"
+        )
+    graph_ceiling = (((meta.get("checkpoint_graph") or {}).get("global_source_ceilings") or {})
+                     .get("max_baseline_to_final_diff_lines"))
+    if segment is not None and graph_ceiling != segment:
+        errors.append(
+            "checkpoint_graph.global_source_ceilings.max_baseline_to_final_diff_lines "
+            "must equal mission_budget.segment_max_diff_lines"
+        )
+    if "mission_id" in raw or "current_segment" in raw:
+        errors.append("mission_budget contains core-owned derived identity fields")
+    for key in required:
+        if key not in raw:
+            errors.append(f"mission_budget missing {key}")
     return errors
 
 
@@ -490,7 +587,7 @@ def validate_packet_for_approval(meta: dict[str, Any]) -> list[str]:
     execution seal without the surrounding compatibility rules.
     """
     schema = meta.get("schema")
-    if schema in (SCHEMA_VERSION, PROGRAM_SCHEMA_VERSION):
+    if schema in (SCHEMA_VERSION, *PROGRAM_SCHEMA_VERSIONS):
         structural = schema_validate.validate_packet(meta)
         if structural:
             return [f"schema: {err}" for err in structural]
@@ -611,7 +708,7 @@ def is_allowed_path(packet: dict[str, Any], file_path: str) -> bool:
 def packet_is_program(meta: dict[str, Any]) -> bool:
     """True iff the packet is a v3 PROGRAM-mode packet."""
     return (
-        meta.get("schema") == PROGRAM_SCHEMA_VERSION
+        meta.get("schema") in PROGRAM_SCHEMA_VERSIONS
         and meta.get("execution_mode") == "program"
     )
 

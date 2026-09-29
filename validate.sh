@@ -124,6 +124,7 @@ for f in \
   lib/ownframework_loop/adapters.py \
   schemas/work-packet.schema.json \
   schemas/work-packet-v3.schema.json \
+  schemas/work-packet-v4.schema.json \
   schemas/approval.schema.json \
   schemas/state.schema.json \
   schemas/state-v2.schema.json \

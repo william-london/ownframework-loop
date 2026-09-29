@@ -64,6 +64,54 @@ from . import supervisor_runner_registry as _runner_registry_mod
 from . import supervisor_runtime as _runtime_mod
 
 
+def _preseal_packet_refusal(
+    canonical_repo: Path,
+    run_id: str,
+    db_path: Path,
+) -> dict[str, Any] | None:
+    """Return a bounded refusal for a missing/invalid pre-enqueue packet.
+
+    This guard runs before linked rollover/mission authority is inspected, so
+    malformed packet bytes cannot escape through a secondary parser with raw
+    exception text. The authoritative check is repeated inside the enrollment
+    transaction to close the packet-change race before any ledger write.
+    """
+    repo = Path(canonical_repo).resolve(strict=False)
+    packet_path = state_mod.run_dir(repo, run_id) / "WORK_PACKET.md"
+    base = {
+        "schema": _db_mod.SCHEMA,
+        "ok": False,
+        "db_path": str(db_path),
+        "repo": str(repo),
+        "run_id": run_id,
+        "enqueue_refused": True,
+    }
+    if not packet_path.is_file():
+        return {
+            **base,
+            "reason": "pre_seal_packet_missing",
+            "packet_path": str(packet_path),
+        }
+    try:
+        packet_meta, _ = packet_mod.parse_packet_file(packet_path)
+    except Exception:
+        return {
+            **base,
+            "reason": "pre_seal_packet_invalid",
+            "packet_path": str(packet_path),
+            "packet_errors": ["packet: WORK_PACKET.md could not be parsed"],
+        }
+    errors = packet_mod.validate_packet_for_approval(packet_meta)
+    if errors:
+        return {
+            **base,
+            "reason": "pre_seal_packet_invalid",
+            "packet_path": str(packet_path),
+            "packet_errors": list(errors),
+        }
+    return None
+
+
 
 
 def enqueue(
@@ -130,14 +178,25 @@ def enqueue(
             "runner": runner,
             "live_runners": list(live_runners),
         }
-    # A linked candidate rollover is not a new budget allocation.  Its exact
-    # inherited operational envelope is enforced before any ledger write.
-    # Ordinary jobs return None and continue through the unchanged path.
+    # Reject malformed/unstartable packets before rollover or mission helpers
+    # inspect packet authority. The in-transaction check below repeats this
+    # validation immediately before durable admission.
+    packet_refusal = _preseal_packet_refusal(
+        Path(canonical_repo), run_id, db,
+    )
+    if packet_refusal is not None:
+        return packet_refusal
+    # Linked rollover and v4 mission-segment execution are not new budget
+    # allocations. Their inherited operational envelope is enforced before
+    # any ledger write. Ordinary jobs return None and retain the v3 path.
     from . import program_rollover as _program_rollover_mod
+    from . import program_mission as _program_mission_mod
     inherited_execution_started_at: float | None = None
     inherited_parent_deadline: float | None = None
+    inherited_envelope: dict[str, Any] | None = None
+    inherited_authority_kind: str | None = None
     try:
-        inherited_envelope = _program_rollover_mod.enqueue_envelope_for_child(
+        rollover_envelope = _program_rollover_mod.enqueue_envelope_for_child(
             Path(canonical_repo),
             run_id,
             runner=runner,
@@ -150,14 +209,41 @@ def enqueue(
                 "max_wall_seconds": max_wall_seconds,
             },
         )
+        mission_envelope = _program_mission_mod.enqueue_envelope_for_child(
+            Path(canonical_repo),
+            run_id,
+            runner=runner,
+            requested={
+                "max_infra_failures": max_infra_failures,
+                "max_transient_failures": max_transient_failures,
+                "max_transient_recovery_cycles": max_transient_recovery_cycles,
+                "max_total_cost_usd": max_total_cost_usd,
+                "max_total_tokens": max_total_tokens,
+                "max_wall_seconds": max_wall_seconds,
+            },
+            db_path=db,
+        )
+        if rollover_envelope is not None and mission_envelope is not None:
+            raise _program_mission_mod.MissionAuthorityError(
+                "run cannot carry both rollover and mission-segment authority"
+            )
+        inherited_envelope = rollover_envelope or mission_envelope
+        if rollover_envelope is not None:
+            inherited_authority_kind = "rollover"
+        elif mission_envelope is not None:
+            inherited_authority_kind = "mission"
         if inherited_envelope is not None:
             if any(value is not None for value in (
                 dispatch_hold_kind,
                 dispatch_hold_previous_checkpoint_id,
                 dispatch_hold_next_checkpoint_id,
             )):
-                raise _program_rollover_mod.ProgramRolloverRefused(
-                    "rollover child cannot add an unparented dispatch hold"
+                if inherited_authority_kind == "rollover":
+                    raise _program_rollover_mod.ProgramRolloverRefused(
+                        "rollover child cannot add an unparented dispatch hold"
+                    )
+                raise _program_mission_mod.MissionAuthorityError(
+                    "mission segment cannot add an unparented dispatch hold"
                 )
             max_infra_failures = int(inherited_envelope["max_infra_failures"])
             max_transient_failures = int(inherited_envelope["max_transient_failures"])
@@ -173,6 +259,13 @@ def enqueue(
             inherited_parent_deadline = (
                 float(raw_deadline) if raw_deadline is not None else None
             )
+            inherited_generation = inherited_envelope.get("runtime_generation")
+            if inherited_generation is not None:
+                if runtime_generation is not None and runtime_generation != inherited_generation:
+                    raise _program_mission_mod.MissionAuthorityError(
+                        "enqueue request runtime generation differs from frozen mission authority"
+                    )
+                runtime_generation = str(inherited_generation)
     except _program_rollover_mod.ProgramRolloverRefused as exc:
         return {
             "schema": _db_mod.SCHEMA,
@@ -182,6 +275,17 @@ def enqueue(
             "run_id": run_id,
             "enqueue_refused": True,
             "reason": "linked_program_rollover_envelope_refused",
+            "detail": str(exc),
+        }
+    except _program_mission_mod.MissionAuthorityError as exc:
+        return {
+            "schema": _db_mod.SCHEMA,
+            "ok": False,
+            "db_path": str(db),
+            "repo": str(Path(canonical_repo).resolve(strict=False)),
+            "run_id": run_id,
+            "enqueue_refused": True,
+            "reason": "linked_program_mission_envelope_refused",
             "detail": str(exc),
         }
     _holds_mod._validate_dispatch_hold_request(
@@ -288,47 +392,9 @@ def enqueue(
         # Parse-failure classifications (branch B) are emitted as a bounded,
         # non-sensitive diagnostic (``packet_errors`` is a single short string
         # describing the parse class, never raw exception text or file bytes).
-        packet_path_for_admission = state_mod.run_dir(Path(repo), run_id) / "WORK_PACKET.md"
-        if not packet_path_for_admission.is_file():
-            return {
-                "schema": _db_mod.SCHEMA,
-                "ok": False,
-                "db_path": str(db),
-                "repo": repo,
-                "run_id": run_id,
-                "enqueue_refused": True,
-                "reason": "pre_seal_packet_missing",
-                "packet_path": str(packet_path_for_admission),
-            }
-        try:
-            packet_meta_for_admission, _ = packet_mod.parse_packet_file(packet_path_for_admission)
-        except Exception:
-            # Bounded diagnostic: classify the parse failure without exposing
-            # arbitrary exception text or file contents to durable state.
-            return {
-                "schema": _db_mod.SCHEMA,
-                "ok": False,
-                "db_path": str(db),
-                "repo": repo,
-                "run_id": run_id,
-                "enqueue_refused": True,
-                "reason": "pre_seal_packet_invalid",
-                "packet_path": str(packet_path_for_admission),
-                "packet_errors": ["packet: WORK_PACKET.md could not be parsed"],
-            }
-        admission_errors = packet_mod.validate_packet_for_approval(packet_meta_for_admission)
-        if admission_errors:
-            return {
-                "schema": _db_mod.SCHEMA,
-                "ok": False,
-                "db_path": str(db),
-                "repo": repo,
-                "run_id": run_id,
-                "enqueue_refused": True,
-                "reason": "pre_seal_packet_invalid",
-                "packet_path": str(packet_path_for_admission),
-                "packet_errors": list(admission_errors),
-            }
+        packet_refusal = _preseal_packet_refusal(Path(repo), run_id, db)
+        if packet_refusal is not None:
+            return packet_refusal
 
         existing = conn.execute(
             "SELECT * FROM jobs WHERE repo=? AND run_id=?", (repo, run_id)

@@ -90,7 +90,7 @@ def _builder_decision(state: str) -> tuple[str, int]:
         return "RESCHEDULE", 0
     if state == "REVIEWING":
         return "RESCHEDULE", 5
-    if state in ("APPROVED", "BLOCKED", "STOPPED"):
+    if state in ("APPROVED", "BLOCKED", "STOPPED", "SEGMENT_BOUNDARY"):
         return "STOP", 0
     return "STOP", 0
 
@@ -109,13 +109,13 @@ def _reviewer_decision(state: str) -> tuple[str, int]:
         return "RESCHEDULE", 5
     if state in ("BUILDING", "REVIEWING"):
         return "RESCHEDULE", 5
-    if state in ("APPROVED", "BLOCKED", "STOPPED"):
+    if state in ("APPROVED", "BLOCKED", "STOPPED", "SEGMENT_BOUNDARY"):
         return "STOP", 0
     return "STOP", 0
 
 
 def decide_action_after_pass(state: str) -> str:
     """Return STOP if state is terminal; RESCHEDULE otherwise."""
-    if state in ("APPROVED", "BLOCKED", "STOPPED"):
+    if state in ("APPROVED", "BLOCKED", "STOPPED", "SEGMENT_BOUNDARY"):
         return "STOP"
     return "RESCHEDULE"

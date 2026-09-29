@@ -1817,10 +1817,71 @@ def _retryable_failed_attempt_for_ready_artifact(
 def run_one(*, db_path: Path | None = None, timeout_seconds: int = 0) -> dict[str, Any]:
     """Execute at most one semantic BUILD/REVIEW action."""
     db = db_path or default_db_path()
+    # A terminal v4 segment boundary is a durable replay point.  Reconcile it
+    # before opening the scheduler write connection because successor
+    # enrollment uses the ordinary supervisor API and its own SQLite
+    # transaction.  Replays are identity-checked and idempotent.
+    from . import program_mission as _mission_mod
+
+    boundary_reconciliation = _mission_mod.reconcile_pending_boundaries(db_path=db)
+    initial_segment_setup = _mission_mod.initialize_queued_initial_segments(db_path=db)
+    if not initial_segment_setup.get("ok", True):
+        quarantined: list[dict[str, Any]] = []
+        with _managed_connect(db) as setup_conn:
+            for failure in initial_segment_setup.get("errors") or []:
+                row = setup_conn.execute(
+                    "SELECT * FROM jobs WHERE id=?", (int(failure["job_id"]),),
+                ).fetchone()
+                if (
+                    row is None
+                    or str(row["status"] or "") != "QUEUED"
+                    or any(row[key] is not None for key in (
+                        "worker_pid", "worker_pgid", "worker_attempt_id", "worker_role",
+                    ))
+                ):
+                    quarantined.append({
+                        "job_id": int(failure["job_id"]),
+                        "run_id": str(failure["run_id"]),
+                        "result": "ownership_changed_during_setup",
+                    })
+                    continue
+                _update_job(
+                    setup_conn,
+                    int(row["id"]),
+                    status_value="QUARANTINED",
+                    last_error=(
+                        "v4 mission initial-segment authority could not be proven; "
+                        "no semantic pass was claimed"
+                    ),
+                    last_failure_class="mission_authority",
+                    last_failure_reason="initial_segment_authority_refused",
+                    next_attempt_at=0,
+                )
+                quarantined.append({
+                    "job_id": int(row["id"]),
+                    "run_id": str(failure["run_id"]),
+                    "result": "quarantined_before_semantic_claim",
+                    "error_class": str(failure.get("error_class") or "unknown"),
+                })
+        return {
+            "schema": SCHEMA,
+            "ok": False,
+            "action": "MISSION_INITIAL_SEGMENT_SETUP_REFUSED",
+            "db_path": str(db),
+            "results": quarantined,
+        }
     with _managed_connect(db) as conn:
         from . import supervisor_claims as _claims_mod
         job = _claims_mod._take_next_job(conn)
         if job is None:
+            if not boundary_reconciliation.get("ok", True):
+                return {
+                    "schema": SCHEMA,
+                    "ok": False,
+                    "action": "MISSION_BOUNDARY_RECONCILIATION_FAILED",
+                    "db_path": str(db),
+                    "reconciliation": boundary_reconciliation,
+                }
             return {"schema": SCHEMA, "ok": True, "action": "IDLE", "db_path": str(db)}
 
         _register_local_execution(int(job["id"]))

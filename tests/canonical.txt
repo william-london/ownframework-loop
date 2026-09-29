@@ -154,3 +154,4 @@ tests/integration/test_v123_validation_infrastructure_recovery.sh
 tests/integration/test_v124_blocked_program_candidate_rollover.sh
 tests/integration/test_v125_rollover_wall_clock_replay.sh
 tests/integration/test_v126_failed_unaccepted_ready_artifact_reseed.sh
+tests/integration/test_v127_program_budget_segmentation.sh

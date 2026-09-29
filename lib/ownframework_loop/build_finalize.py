@@ -148,6 +148,22 @@ def _strict_ceiling(top: int, program_ceiling: int) -> int:
     return int(top or program_ceiling or 0)
 
 
+def _mission_budget_status(budget: dict[str, Any] | None) -> tuple[str, list[str]]:
+    """Check mission-wide source ceilings measured from the original baseline."""
+    if budget is None:
+        return "pass", []
+    failures: list[str] = []
+    source_lines = int(budget["mission_source_lines_total"])
+    source_line_cap = int(budget["mission_max_diff_lines"])
+    if source_lines > source_line_cap:
+        failures.append(f"mission source ceiling exceeded: {source_lines}/{source_line_cap}")
+    unique_files = int(budget["mission_unique_files_total"])
+    unique_file_cap = int(budget["mission_max_unique_changed_files"])
+    if unique_files > unique_file_cap:
+        failures.append(f"mission unique-file ceiling exceeded: {unique_files}/{unique_file_cap}")
+    return ("fail" if failures else "pass"), failures
+
+
 def _ancestor_of(canonical_repo: Path, candidate_sha: str, baseline_sha: str) -> bool:
     """Return True iff candidate_sha is a descendant of baseline_sha."""
     r = util.run_subprocess(
@@ -450,6 +466,7 @@ def finalize_build(
     # BLOCKED (a legitimate engineered stop, like cap exhaustion) and is
     # recorded in the receipt and the program counters.
     program_source_check: dict[str, Any] | None = None
+    mission_source_budget: dict[str, Any] | None = None
     if state_mod.is_program_state(state):
         prog = state.get("program") or {}
         ceilings = prog.get("cumulative_ceilings") or {}
@@ -461,6 +478,16 @@ def finalize_build(
         # value stands alone and the effective value mirrors it.
         effective_max_files = _strict_ceiling(max_files_top, program_max_files)
         effective_max_lines = _strict_ceiling(max_lines_top, program_max_lines)
+        if meta.get("schema") == packet_mod.MISSION_PROGRAM_SCHEMA_VERSION:
+            from . import program_mission
+
+            mission_source_budget = program_mission.source_budget_for_candidate(
+                canonical_repo, run_id, candidate_sha,
+            )
+            effective_max_lines = _strict_ceiling(
+                effective_max_lines,
+                int(mission_source_budget["segment_max_diff_lines"]),
+            )
 
         unique_files = int(stats["files_changed"])
         diff_line_total = int(stats["added_lines"]) + int(stats["removed_lines"])
@@ -487,6 +514,8 @@ def finalize_build(
             breach_messages.append(
                 f"effective diff-lines cap exceeded: {diff_line_total}/{effective_max_lines}"
             )
+        mission_budget_result, mission_budget_failures = _mission_budget_status(mission_source_budget)
+        breach_messages.extend(mission_budget_failures)
 
         program_source_check = {
             "result": "fail" if breach_messages else "pass",
@@ -501,6 +530,17 @@ def finalize_build(
             "effective_max_diff_lines": effective_max_lines,
             "breach": "; ".join(breach_messages),
         }
+        if mission_source_budget is not None:
+            program_source_check.update({
+                "mission_budget_result": mission_budget_result,
+                "mission_source_lines_total": int(mission_source_budget["mission_source_lines_total"]),
+                "mission_source_ceiling": int(mission_source_budget["mission_max_diff_lines"]),
+                "mission_unique_files_total": int(mission_source_budget["mission_unique_files_total"]),
+                "mission_unique_files_ceiling": int(mission_source_budget["mission_max_unique_changed_files"]),
+                "segment_source_ceiling": int(mission_source_budget["segment_max_diff_lines"]),
+                "mission_id": str(mission_source_budget["mission_id"]),
+                "segment_number": int(mission_source_budget["segment_number"]),
+            })
 
     # 12. Scope & 13. protected/elevated path checks.
     scope_findings: list[dict[str, Any]] = []
@@ -648,6 +688,17 @@ def finalize_build(
                     program_max_lines = int(ceilings.get("max_baseline_to_final_diff_lines") or 0)
                     effective_max_files = _strict_ceiling(max_files_top, program_max_files)
                     effective_max_lines = _strict_ceiling(max_lines_top, program_max_lines)
+                    mission_source_budget = None
+                    if meta.get("schema") == packet_mod.MISSION_PROGRAM_SCHEMA_VERSION:
+                        from . import program_mission
+
+                        mission_source_budget = program_mission.source_budget_for_candidate(
+                            canonical_repo, run_id, candidate_sha,
+                        )
+                        effective_max_lines = _strict_ceiling(
+                            effective_max_lines,
+                            int(mission_source_budget["segment_max_diff_lines"]),
+                        )
                     unique_files = int(stats["files_changed"])
                     diff_line_total = int(stats["added_lines"]) + int(stats["removed_lines"])
                     try:
@@ -672,6 +723,8 @@ def finalize_build(
                         breach_messages.append(
                             f"effective diff-lines cap exceeded: {diff_line_total}/{effective_max_lines}"
                         )
+                    mission_budget_result, mission_budget_failures = _mission_budget_status(mission_source_budget)
+                    breach_messages.extend(mission_budget_failures)
                     program_source_check = {
                         "result": "fail" if breach_messages else "pass",
                         "accounting": "absolute_baseline_to_candidate",
@@ -685,6 +738,17 @@ def finalize_build(
                         "effective_max_diff_lines": effective_max_lines,
                         "breach": "; ".join(breach_messages),
                     }
+                    if mission_source_budget is not None:
+                        program_source_check.update({
+                            "mission_budget_result": mission_budget_result,
+                            "mission_source_lines_total": int(mission_source_budget["mission_source_lines_total"]),
+                            "mission_source_ceiling": int(mission_source_budget["mission_max_diff_lines"]),
+                            "mission_unique_files_total": int(mission_source_budget["mission_unique_files_total"]),
+                            "mission_unique_files_ceiling": int(mission_source_budget["mission_max_unique_changed_files"]),
+                            "segment_source_ceiling": int(mission_source_budget["segment_max_diff_lines"]),
+                            "mission_id": str(mission_source_budget["mission_id"]),
+                            "segment_number": int(mission_source_budget["segment_number"]),
+                        })
             except protected_recovery.ProtectedDriftRecoveryError as exc:
                 # The original protected finding remains authoritative.  A
                 # refusal here is recorded and follows the existing terminal
@@ -855,6 +919,32 @@ def finalize_build(
         program_source_check is not None
         and program_source_check["result"] != "pass"
     )
+    segment_boundary_proof: dict[str, Any] | None = None
+    segment_boundary_authorized = False
+    if (
+        program_source_breach
+        and meta.get("schema") == packet_mod.MISSION_PROGRAM_SCHEMA_VERSION
+    ):
+        from . import program_mission
+
+        segment_boundary_authorized, segment_boundary_proof = (
+            program_mission.segment_boundary_eligibility(
+                canonical_repo,
+                run_id,
+                meta=meta,
+                current_state=state,
+                candidate_sha=candidate_sha,
+                source_check=program_source_check or {},
+                validation_pass=validation_pass,
+                infra_failure_count=infra_failure_count,
+                identity_reproof=identity_reproof,
+                scope_findings=scope_findings,
+                protected_findings=protected_findings,
+                hard_secret_blocks=hard_secret_blocks,
+                outcome_requested=str(outcome_requested or "") or None,
+                candidate_invalid_count=candidate_invalid_count,
+            )
+        )
     if program_source_breach:
         repair_causes.append("source_budget_breach")
     no_progress_cap_reached = _repair_blocked_by_no_progress(
@@ -884,6 +974,20 @@ def finalize_build(
         # identical-candidate fuse is exhausted, block before the atomic repair
         # owner can consume another entitlement or launch another provider.
         next_state = "BLOCKED"
+    elif (
+        program_source_check is not None
+        and program_source_check.get("mission_budget_result") == "fail"
+    ):
+        # Mission-wide source authority is separate from a bounded segment.
+        # Exhausting it is a hard authority stop and may never be converted to
+        # another segment or an ordinary candidate repair.
+        next_state = "BLOCKED"
+    elif segment_boundary_authorized:
+        # The semantic candidate exceeded only this bounded segment's source
+        # envelope. Preserve it as historical BUILD evidence; the supervisor
+        # derives a successor from the last approved candidate, never from the
+        # crossing candidate itself.
+        next_state = "SEGMENT_BOUNDARY"
     elif program_source_breach:
         # v0.9.9-i: repairable source-budget breach is autonomous. When
         # scope/protected/secret/identity are clean, validation_status is
@@ -1076,11 +1180,14 @@ def finalize_build(
         "timestamp": util.utc_now_iso(),
         "builder_agent": "of-builder",
         "next_state": next_state,
+        "outcome_requested": outcome_requested,
         "agent_summary": (agent_result.get("summary") if agent_result else None),
         "blocker_reason": (agent_result.get("blocker_reason") if agent_result else None),
         "escalation_recommended": agent_result.get("escalation_recommended") is True,
         "escalation_reason": (agent_result.get("escalation_reason") if agent_result else None),
     }
+    if segment_boundary_proof is not None:
+        receipt["segment_boundary"] = segment_boundary_proof
 
     # Validate the complete authoritative artifact before either persistence
     # path. The identity-reproof breach path intentionally bypasses the clean

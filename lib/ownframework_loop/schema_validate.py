@@ -32,6 +32,7 @@ CURRENT_SCHEMA_FILES = (
     "state-v2.schema.json",
     "work-packet.schema.json",
     "work-packet-v3.schema.json",
+    "work-packet-v4.schema.json",
 )
 
 _ANNOTATION_KEYWORDS = frozenset(
@@ -67,6 +68,8 @@ def _load_schema(name: str) -> dict[str, Any] | None:
 
 
 def _select_packet_schema(meta: dict[str, Any]) -> dict[str, Any] | None:
+    if meta.get("schema") == "ownframework-work-packet/v4":
+        return _load_schema("work-packet-v4.schema.json")
     if meta.get("schema") == "ownframework-work-packet/v3":
         return _load_schema("work-packet-v3.schema.json")
     return _load_schema("work-packet.schema.json")

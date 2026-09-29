@@ -57,21 +57,24 @@
       "enum": [
         "ownframework-work-packet/v1",
         "ownframework-work-packet/v2",
-        "ownframework-work-packet/v3"
+        "ownframework-work-packet/v3",
+        "ownframework-work-packet/v4"
       ]
     },
     "approval_method": {
       "type": "string",
       "enum": [
         "build_start",
-        "tty_confirmation"
+        "tty_confirmation",
+        "mission_segment"
       ]
     },
     "binding_kind": {
       "type": "string",
       "enum": [
         "execution_seal",
-        "legacy_preseal"
+        "legacy_preseal",
+        "mission_derived_seal"
       ]
     },
     "confirmation_token": {
@@ -119,6 +122,30 @@
     "candidate_branch": {
       "type": "string",
       "minLength": 1
+    },
+    "mission_origin_approval_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "mission_segment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "mission_id",
+        "segment_number",
+        "predecessor_run_id",
+        "mission_authority_sha256",
+        "segment_authority_sha256"
+      ],
+      "properties": {
+        "schema": { "const": "ownframework-loop-mission-segment-approval/v1" },
+        "mission_id": { "type": "string", "pattern": "^mission-[a-f0-9]{24}$" },
+        "segment_number": { "type": "integer", "minimum": 1, "maximum": 16 },
+        "predecessor_run_id": { "type": ["string", "null"] },
+        "mission_authority_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "segment_authority_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+      }
     },
     "spec_baseline_branch": {
       "type": "string",

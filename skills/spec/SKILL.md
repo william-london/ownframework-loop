@@ -155,7 +155,7 @@ Current core execution already fails closed when a `local_only` packet has confi
 
 ## PROGRAM autonomy preflight
 
-Before a v3 PROGRAM is considered ready:
+Before a v3 or v4 PROGRAM is considered ready:
 
 - use `acceptance_criterion_ids` on checkpoints; never emit checkpoint
   `acceptance_criteria`;
@@ -200,6 +200,22 @@ Before a v3 PROGRAM is considered ready:
   configuration, documentation, and build metadata when relevant; artificial
   path minimization that prevents legitimate engineering is itself a packet
   defect.
+- when a required output path is known, declare it as `required_paths` on the
+  owning v4 work unit or checkpoint. The deterministic packet check requires
+  that path to be covered by `allowed_paths` and not be protected. Do not
+  treat this structural check as an inference engine for undeclared paths;
+  SPEC must still inspect the complete mission and grant complete ordinary
+  repository scope before sealing.
+- v4 `mission_budget` distinguishes the bounded source ceiling for one run
+  segment from the total source ceiling measured from the mission's original
+  baseline. Keep `risk_budget.max_diff_lines` and the PROGRAM global source
+  ceiling equal to `segment_max_diff_lines`; do not raise the per-run 30,000
+  line ceiling to represent a larger mission. Automatic successors are
+  allowed only when the sealed mission explicitly sets `auto_segment=true`,
+  and can project only already-approved authority. The mission source limit
+  is an upper bound, not a promise that all of it is consumable in the
+  configured number of segments. Segment and mission exhaustion both remain
+  fail-closed authority boundaries.
 - choose `max_pass_runtime_seconds` for the complexity of one semantic pass
   (up to 28800 per pass; the undeclared fallback fuse is 3600, so any pass
   that legitimately needs longer than one hour must declare its budget). For

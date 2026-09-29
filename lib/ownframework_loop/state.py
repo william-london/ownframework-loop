@@ -1311,6 +1311,191 @@ def _locked_state(canonical_repo: Path, run_id: str):
     return _ctx()
 
 
+def bind_mission_segment(
+    canonical_repo: Path,
+    run_id: str,
+    *,
+    mission_segment: dict[str, Any],
+) -> dict[str, Any]:
+    """Attach immutable core-derived mission identity to a v4 PROGRAM state.
+
+    The mission module verifies the create-once mission/segment records before
+    calling this typed owner. This state transaction makes the binding visible
+    to ordinary PROGRAM verification without allowing a generic state write.
+    Replays are accepted only when the exact same binding is already present.
+    """
+    validate_run_id(run_id)
+    if not isinstance(mission_segment, dict):
+        raise ValueError("mission_segment must be an object")
+    from . import packet as packet_mod, schema_validate
+    run_root = run_dir(canonical_repo, run_id)
+    meta, _ = packet_mod.parse_packet_file(run_root / "WORK_PACKET.md")
+    if (
+        meta.get("schema") != packet_mod.MISSION_PROGRAM_SCHEMA_VERSION
+        or not packet_mod.packet_is_program(meta)
+    ):
+        raise ValueError("mission segment binding requires a v4 PROGRAM packet")
+    with _locked_state(canonical_repo, run_id) as cur:
+        if not isinstance(cur, dict) or cur.get("run_id") != run_id:
+            raise FileNotFoundError(f"STATE.json missing for {run_id}")
+        prog = cur.get("program")
+        if not isinstance(prog, dict):
+            raise ValueError("mission segment binding requires materialized PROGRAM state")
+        existing = prog.get("mission_segment")
+        if existing is not None:
+            if existing != mission_segment:
+                raise RuntimeError("mission segment state binding conflicts with durable authority")
+            return cur
+        if cur.get("state") not in ("AWAITING_APPROVAL", "READY_TO_BUILD"):
+            raise RuntimeError("mission segment identity must be bound before semantic execution")
+        new = dict(cur)
+        new_prog = json.loads(integrity.canonical_json_dumps(prog))
+        new_prog["mission_segment"] = json.loads(integrity.canonical_json_dumps(mission_segment))
+        new["program"] = new_prog
+        new["updated_at"] = utc_now_iso()
+        new["last_actor"] = "ofloop-mission"
+        errors = schema_validate.validate_state(new)
+        if errors:
+            raise ValueError("mission segment state invalid: " + "; ".join(errors[:20]))
+        _commit_state_event_locked(
+            canonical_repo, run_id, new,
+            event_type="mission_segment_bound",
+            old_state=cur.get("state"), new_state=cur.get("state"),
+            actor="ofloop-mission", commit_sha=cur.get("last_candidate_sha"),
+            reason="bound v4 PROGRAM state to sealed mission segment",
+            extras={
+                "mission_id": mission_segment.get("mission_id"),
+                "segment_number": mission_segment.get("segment_number"),
+                "segment_authority_sha256": mission_segment.get("segment_authority_sha256"),
+            },
+        )
+    try:
+        fsync_dir(run_root)
+    except OSError:
+        pass
+    return load_verified(canonical_repo, run_id)
+
+
+def initialize_program_mission_segment(
+    canonical_repo: Path,
+    run_id: str,
+    *,
+    program_block: dict[str, Any],
+    build_pass_count: int,
+    review_pass_count: int,
+    repair_round: int,
+    no_progress_streak: int,
+    candidate_sha: str,
+    baseline_sha: str,
+    baseline_branch: str,
+    candidate_branch: str,
+    mission_segment: dict[str, Any],
+) -> dict[str, Any]:
+    """Creation-only typed import of authorized checkpoint progress.
+
+    Used only for a deterministic mission successor (including the explicit
+    legacy-admission path). It preserves semantic/checkpoint counters and
+    approved history, resets only segment-local source measurements, and
+    cannot reopen or mutate an existing run.
+    """
+    validate_run_id(run_id)
+    if not re.fullmatch(r"[0-9a-f]{40}", str(candidate_sha or "")):
+        raise ValueError("mission segment baseline candidate must be a full Git SHA")
+    if not re.fullmatch(r"[0-9a-f]{40}", str(baseline_sha or "")):
+        raise ValueError("mission segment baseline must be a full Git SHA")
+    if not isinstance(program_block, dict) or not isinstance(mission_segment, dict):
+        raise ValueError("mission segment PROGRAM authority must be objects")
+    if program_block.get("mission_segment") != mission_segment:
+        raise ValueError("PROGRAM block mission identity does not match typed segment authority")
+    from . import git_checks, packet as packet_mod, program as program_mod, schema_validate
+    run_root = run_dir(canonical_repo, run_id)
+    packet_path = run_root / "WORK_PACKET.md"
+    if not packet_path.is_file():
+        raise FileNotFoundError("mission successor WORK_PACKET.md is missing")
+    meta, _ = packet_mod.parse_packet_file(packet_path)
+    errors = packet_mod.validate_packet_for_approval(meta)
+    if errors or meta.get("schema") != packet_mod.MISSION_PROGRAM_SCHEMA_VERSION:
+        raise ValueError("mission successor packet invalid: " + "; ".join(errors[:20]))
+    graph_ok, graph_reason = program_mod.verify_frozen_graph(meta, program_block)
+    if not graph_ok:
+        raise ValueError(f"mission successor frozen graph mismatch: {graph_reason}")
+    if (meta.get("target") or {}).get("branch") != baseline_branch:
+        raise ValueError("mission successor baseline branch differs from packet")
+    target_head = git_checks.branch_head(canonical_repo, baseline_branch)
+    if target_head != baseline_sha:
+        raise ValueError("mission successor baseline branch does not resolve to exact baseline")
+    current_checkpoints = program_block.get("current_checkpoints") or []
+    if (
+        not current_checkpoints
+        or len(current_checkpoints) != len(set(current_checkpoints))
+        or any(not isinstance(value, str) or not value for value in current_checkpoints)
+    ):
+        raise ValueError("mission successor must have a non-empty unique current-checkpoint set")
+    counters = {
+        "build_pass_count": _owner_int("build_pass_count", build_pass_count),
+        "review_pass_count": _owner_int("review_pass_count", review_pass_count),
+        "repair_round_count": _owner_int("repair_round", repair_round),
+    }
+    mirrors = program_block.get("cumulative_counters") or {}
+    if any(int(mirrors.get(key, -1)) != value for key, value in counters.items()):
+        raise ValueError("mission successor cumulative semantic counters do not reconcile")
+    source = program_block.get("source_sha_provenance") or {}
+    if source.get("baseline_sha") != baseline_sha or source.get("candidate_branch") != candidate_branch:
+        raise ValueError("mission successor source provenance differs from segment identity")
+    source_stats = program_mod.source_tree_accounting(
+        canonical_repo=canonical_repo, baseline_sha=baseline_sha, candidate_sha=candidate_sha,
+    )
+    expected_lines = int(source_stats["diff_lines"])
+    if int(mirrors.get("files_changed_unique", -1)) != int(source_stats["files_changed_unique"]) or int(mirrors.get("diff_lines_total", -1)) != expected_lines:
+        raise ValueError("mission successor segment-local source accounting is inconsistent")
+
+    sp = state_path(canonical_repo, run_id)
+    with flock_exclusive(lock_path(canonical_repo, run_id)):
+        _verify_mutation_integrity_locked(canonical_repo, run_id)
+        cur = read_json(sp)
+        if not isinstance(cur, dict) or cur.get("run_id") != run_id:
+            raise FileNotFoundError(f"new mission segment STATE.json missing for {run_id}")
+        if cur.get("state") != "AWAITING_APPROVAL" or cur.get("schema") != SCHEMA_VERSION:
+            raise RuntimeError("mission segment import requires pristine AWAITING_APPROVAL state")
+        if "program" in cur or any(int(cur.get(key) or 0) != 0 for key in (
+            "build_pass_count", "review_pass_count", "repair_round",
+        )):
+            raise RuntimeError("mission segment import refuses already-used state")
+        if cur.get("spec_baseline_sha") != baseline_sha or cur.get("spec_baseline_branch") != baseline_branch:
+            raise RuntimeError("mission segment state snapshot differs from frozen baseline")
+        new = dict(cur)
+        new["schema"] = PROGRAM_STATE_SCHEMA_VERSION
+        new["program"] = json.loads(integrity.canonical_json_dumps(program_block))
+        new["build_pass_count"] = counters["build_pass_count"]
+        new["review_pass_count"] = counters["review_pass_count"]
+        new["repair_round"] = counters["repair_round_count"]
+        new["no_progress_streak"] = _owner_int("no_progress_streak", no_progress_streak)
+        new["last_candidate_sha"] = candidate_sha
+        new["updated_at"] = utc_now_iso()
+        new["last_actor"] = "ofloop-mission"
+        state_errors = schema_validate.validate_state(new)
+        if state_errors:
+            raise ValueError("mission segment imported state invalid: " + "; ".join(state_errors[:20]))
+        _commit_state_event_locked(
+            canonical_repo, run_id, new,
+            event_type="mission_segment_materialized",
+            old_state="AWAITING_APPROVAL", new_state="AWAITING_APPROVAL",
+            actor="ofloop-mission", commit_sha=candidate_sha,
+            reason="imported immutable approved checkpoint history into mission segment",
+            extras={
+                "mission_id": mission_segment.get("mission_id"),
+                "segment_number": mission_segment.get("segment_number"),
+                "predecessor_run_id": mission_segment.get("predecessor_run_id"),
+                "segment_baseline_sha": baseline_sha,
+            },
+        )
+    try:
+        fsync_dir(sp.parent)
+    except OSError:
+        pass
+    return load_verified(canonical_repo, run_id)
+
+
 def _write_state_locked(
     canonical_repo: Path,
     run_id: str,
@@ -1479,6 +1664,127 @@ def transition(
         if current is None or current == {}:
             raise FileNotFoundError(f"STATE.json missing for run {run_id}")
         from_state = current["state"]
+        if to_state == "SEGMENT_BOUNDARY":
+            # This terminal state is reserved for a clean, source-cap-only
+            # v4 mission boundary. Ordinary callers, v1-v3 packets, and
+            # non-PROGRAM runs cannot manufacture it through the generic FSM.
+            from . import packet as _packet_mod, receipts as _receipts_mod
+
+            packet_path = run_dir(canonical_repo, run_id) / "WORK_PACKET.md"
+            try:
+                boundary_meta, _ = _packet_mod.parse_packet_file(packet_path)
+            except Exception as exc:
+                raise transitions.InvalidTransitionError(
+                    "SEGMENT_BOUNDARY requires a readable sealed v4 PROGRAM packet"
+                ) from exc
+            receipt = _receipts_mod.load_receipt(canonical_repo, run_id)
+            proof = (receipt or {}).get("segment_boundary") if isinstance(receipt, dict) else None
+            source = (receipt or {}).get("program_source_ceiling_check") if isinstance(receipt, dict) else None
+            if (
+                from_state != "BUILDING"
+                or boundary_meta.get("schema") != _packet_mod.MISSION_PROGRAM_SCHEMA_VERSION
+                or not _packet_mod.packet_is_program(boundary_meta)
+                or not is_program_state(current)
+                or not isinstance((current.get("program") or {}).get("mission_segment"), dict)
+                or not isinstance(receipt, dict)
+                or receipt.get("next_state") != "SEGMENT_BOUNDARY"
+                or receipt.get("candidate_sha") != commit_sha
+                or receipt.get("validation_status") != "PASS"
+                or not isinstance(proof, dict)
+                or proof.get("result") != "authorized"
+                or proof.get("source_candidate_sha") != commit_sha
+                or not isinstance(source, dict)
+                or source.get("result") != "fail"
+                or source.get("mission_budget_result") != "pass"
+                or (receipt.get("scope_check") or {}).get("result") != "pass"
+                or (receipt.get("protected_path_check") or {}).get("result") != "pass"
+                or (receipt.get("secret_scan_check") or {}).get("result") != "pass"
+                or (receipt.get("candidate_identity_reproof") or {}).get("result") != "pass"
+            ):
+                raise transitions.InvalidTransitionError(
+                    "SEGMENT_BOUNDARY lacks exact v4 source-cap-only finalizer evidence"
+                )
+            # The finalizer's proof is evidence, not authority by itself. Re-run
+            # the deterministic boundary adjudication against the state held
+            # under this lock, the sealed mission records, the event chain, and
+            # the exact candidate/source measurements before making the state
+            # terminal. This prevents a structurally valid but fabricated
+            # receipt from manufacturing successor authority.
+            from . import program as _program_mod, program_mission as _mission_mod
+            from . import schema_validate as _schema_validate
+
+            receipt_errors = _schema_validate.validate_receipt(receipt)
+            if receipt_errors:
+                raise transitions.InvalidTransitionError(
+                    "SEGMENT_BOUNDARY receipt is schema-invalid: " + "; ".join(receipt_errors[:5])
+                )
+            validation_rows = receipt.get("validation")
+            expected_validations = _program_mod.resolve_effective_required_validation(
+                boundary_meta, current,
+            )
+            validation_rows_match = (
+                isinstance(validation_rows, list)
+                and len(validation_rows) == len(expected_validations)
+                and all(
+                    isinstance(row, dict)
+                    and row.get("name") == expected.get("name")
+                    and row.get("command") == expected.get("command")
+                    and row.get("kind") == expected.get("kind")
+                    and row.get("expected_exit_code") == int(expected.get("expected_exit_code", 0))
+                    and row.get("expected_marker") == expected.get("expected_marker")
+                    and row.get("passed") is True
+                    and row.get("timed_out") is not True
+                    and row.get("infra_failure") is not True
+                    and row.get("candidate_invalid") is not True
+                    for row, expected in zip(validation_rows, expected_validations)
+                )
+            )
+            if (
+                receipt.get("outcome_requested") != "candidate_ready"
+                or not validation_rows_match
+                or receipt.get("validation_status") != "PASS"
+                or int((receipt.get("infra_failure") or {}).get("count") or 0) != 0
+                or int((receipt.get("candidate_environment_invalid") or {}).get("count") or 0) != 0
+            ):
+                raise transitions.InvalidTransitionError(
+                    "SEGMENT_BOUNDARY requires candidate-ready semantic output and exact passing validation evidence"
+                )
+            try:
+                segment_context = _mission_mod.load_segment(
+                    canonical_repo, run_id, state_snapshot=current,
+                )
+                if segment_context is None:
+                    raise _mission_mod.MissionAuthorityError("v4 segment authority is missing")
+                authorized, recomputed_proof = _mission_mod.segment_boundary_eligibility(
+                    canonical_repo,
+                    run_id,
+                    meta=boundary_meta,
+                    current_state=current,
+                    candidate_sha=str(commit_sha or ""),
+                    source_check=source,
+                    validation_pass=True,
+                    infra_failure_count=0,
+                    identity_reproof=receipt.get("candidate_identity_reproof") or {},
+                    scope_findings=(receipt.get("scope_check") or {}).get("findings") or [],
+                    protected_findings=(receipt.get("protected_path_check") or {}).get("offending_paths") or [],
+                    hard_secret_blocks=[
+                        item for item in ((receipt.get("secret_scan_check") or {}).get("findings") or [])
+                        if isinstance(item, dict) and item.get("severity") == "hard"
+                    ],
+                    outcome_requested=receipt.get("outcome_requested"),
+                    candidate_invalid_count=int(
+                        (receipt.get("candidate_environment_invalid") or {}).get("count") or 0
+                    ),
+                    segment_context=segment_context,
+                )
+            except Exception as exc:
+                raise transitions.InvalidTransitionError(
+                    f"SEGMENT_BOUNDARY authority recomputation failed: {type(exc).__name__}"
+                ) from exc
+            if not authorized or recomputed_proof != proof:
+                raise transitions.InvalidTransitionError(
+                    "SEGMENT_BOUNDARY recomputed authority differs from the finalizer receipt"
+                )
         transitions.assert_valid(from_state, to_state)
 
         now = utc_now_iso()
@@ -1489,7 +1795,7 @@ def transition(
         new["last_actor"] = actor
         if commit_sha:
             new["last_candidate_sha"] = commit_sha
-        if to_state in ("APPROVED", "BLOCKED", "STOPPED"):
+        if to_state in ("APPROVED", "BLOCKED", "STOPPED", "SEGMENT_BOUNDARY"):
             new["terminal_reason"] = reason
         history = list(current.get("state_history", []))
         history.append({"from": from_state, "to": to_state, "at": now, "actor": actor, "reason": reason})
@@ -2040,6 +2346,10 @@ def program_transition(
     Returns the new state document.
     """
     _validate_state_extras(extras, owner="program_transition")
+    if to_state == "SEGMENT_BOUNDARY":
+        raise transitions.InvalidTransitionError(
+            "SEGMENT_BOUNDARY is a build-finalizer-only v4 boundary, not a PROGRAM review transition"
+        )
     sp = state_path(canonical_repo, run_id)
     ep = events_path(canonical_repo, run_id)
     lp = lock_path(canonical_repo, run_id)
@@ -2118,7 +2428,7 @@ def program_transition(
         new["last_actor"] = actor
         if commit_sha:
             new["last_candidate_sha"] = commit_sha
-        if to_state in ("APPROVED", "BLOCKED", "STOPPED"):
+        if to_state in ("APPROVED", "BLOCKED", "STOPPED", "SEGMENT_BOUNDARY"):
             new["terminal_reason"] = reason
         elif from_state in ("APPROVED", "BLOCKED", "STOPPED"):
             # Leaving a terminal state through a PROGRAM continuation

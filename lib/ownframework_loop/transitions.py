@@ -33,13 +33,14 @@ STATES: FrozenSet[str] = frozenset({
     "APPROVED",
     "BLOCKED",
     "STOPPED",
+    "SEGMENT_BOUNDARY",
 })
 
 # Allowed transitions. Any transition not listed is rejected.
 ALLOWED: Mapping[str, FrozenSet[str]] = {
     "AWAITING_APPROVAL": frozenset({"READY_TO_BUILD", "BLOCKED", "STOPPED"}),
     "READY_TO_BUILD":    frozenset({"BUILDING", "BLOCKED", "STOPPED"}),
-    "BUILDING":          frozenset({"READY_FOR_REVIEW", "CHANGES_REQUESTED", "BLOCKED", "STOPPED"}),
+    "BUILDING":          frozenset({"READY_FOR_REVIEW", "CHANGES_REQUESTED", "BLOCKED", "STOPPED", "SEGMENT_BOUNDARY"}),
     "READY_FOR_REVIEW":  frozenset({"REVIEWING", "BLOCKED", "STOPPED"}),
     "REVIEWING":         frozenset({
         "APPROVED", "CHANGES_REQUESTED", "BLOCKED", "STOPPED",
@@ -53,10 +54,13 @@ ALLOWED: Mapping[str, FrozenSet[str]] = {
     "APPROVED":          frozenset(),
     "BLOCKED":           frozenset(),  # v0.3.7 F-2-02: BLOCKED cannot become APPROVED
     "STOPPED":           frozenset(),  # v0.3.7 F-2-01: STOPPED absorbing
+    # A v4 mission segment ended at its sealed per-run source ceiling. This is
+    # terminal for this run; only the mission owner may derive a successor.
+    "SEGMENT_BOUNDARY":  frozenset(),
 }
 
 
-TERMINAL_STATES: FrozenSet[str] = frozenset({"APPROVED", "BLOCKED", "STOPPED"})
+TERMINAL_STATES: FrozenSet[str] = frozenset({"APPROVED", "BLOCKED", "STOPPED", "SEGMENT_BOUNDARY"})
 
 
 class InvalidTransitionError(ValueError):

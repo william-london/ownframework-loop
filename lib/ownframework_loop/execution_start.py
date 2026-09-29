@@ -27,7 +27,7 @@ from . import (
 )
 from .locking import LockBusyError, flock_exclusive
 
-EXECUTION_BINDING_METHODS = {"build_start", "tty_confirmation"}
+EXECUTION_BINDING_METHODS = {"build_start", "tty_confirmation", "mission_segment"}
 EXECUTION_BINDING_KIND_DEFAULT = "execution_seal"
 EXECUTION_BINDING_KIND_LEGACY = "legacy_preseal"
 EXECUTION_SEAL_FILENAME = "APPROVAL.json"
@@ -333,11 +333,18 @@ def ensure_executable(
                         _ensure_program_for_sealed(
                             canonical_repo, run_id, packet, existing
                         )
+                        _ensure_mission_segment(
+                            canonical_repo, run_id, packet, existing,
+                        )
                         _activate_sealed_run(
                             canonical_repo,
                             run_id,
                             actor or "operator",
                             "resume sealed execution start",
+                        )
+                    else:
+                        _ensure_mission_segment(
+                            canonical_repo, run_id, packet, existing,
                         )
                     return existing
 
@@ -404,6 +411,7 @@ def ensure_executable(
                 )
                 util.atomic_write_json(seal_path, seal, mode=0o600)
                 _ensure_program_for_sealed(canonical_repo, run_id, packet, seal)
+                _ensure_mission_segment(canonical_repo, run_id, packet, seal)
                 _activate_sealed_run(
                     canonical_repo,
                     run_id,
@@ -413,6 +421,38 @@ def ensure_executable(
                 return seal
     except LockBusyError as e:
         raise RuntimeError(f"could not acquire execution-start lock: {e}") from e
+
+
+def _ensure_mission_segment(canonical_repo, run_id, packet, seal):
+    if packet.get("schema") != packet_mod.MISSION_PROGRAM_SCHEMA_VERSION:
+        return None
+    from . import program_mission
+
+    current = state_mod.load_verified(canonical_repo, run_id)
+    binding = ((current or {}).get("program") or {}).get("mission_segment")
+    if isinstance(binding, dict):
+        loaded = program_mission.load_segment(canonical_repo, run_id)
+        if loaded is None:
+            raise RuntimeError("v4 mission segment authority is missing")
+        if seal.get("approval_method") == "mission_segment":
+            ok, reason = program_mission.verify_segment_approval(
+                canonical_repo, run_id, approval_doc=seal,
+            )
+            if not ok:
+                raise RuntimeError("mission-derived execution seal invalid: " + reason)
+        return loaded
+    if seal.get("approval_method") == "mission_segment":
+        raise RuntimeError("mission-derived seal has no bound segment state")
+    if program_mission.initial_segment_waiting_for_enrollment(
+        Path(canonical_repo), run_id, seal=seal,
+    ):
+        # Ordinary approval/sealing precedes supervisor enrollment. The first
+        # segment freezes the operational envelope only after that enrollment
+        # exists; the first BUILD claim retries this same idempotent owner.
+        return {"ok": True, "mission": True, "deferred_until_enrollment": True}
+    return program_mission.ensure_initial_segment(
+        Path(canonical_repo), run_id, meta=packet, seal=seal,
+    )
 
 
 def is_sealed(canonical_repo, run_id):

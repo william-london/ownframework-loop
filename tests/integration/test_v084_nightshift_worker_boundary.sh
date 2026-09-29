@@ -58,10 +58,10 @@ class FakePopen:
     def __init__(self, cmd, **kw):
         if (
             (
-                len(cmd) >= 5
+                len(cmd) >= 4
                 and cmd[0] == "git"
                 and cmd[1] == "-C"
-                and cmd[-2:] == ["rev-parse", "--git-common-dir"]
+                and cmd[3] in {"rev-parse", "status", "diff", "ls-files"}
             )
             or (
                 len(cmd) == 2

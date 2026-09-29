@@ -399,6 +399,19 @@ class ClaudeCodeRunner:
             runner_profile,
             allow_create=bool(work_order.get("allow_capability_binding_create", True)),
         )
+        # v4 PROGRAM segments share one immutable mission runner/capability
+        # identity. The first real supervised preflight publishes it before
+        # provider launch; every later segment must reproduce that exact
+        # stable binding rather than silently inheriting changed host policy.
+        from . import program_mission, supervisor_runtime
+
+        program_mission.bind_runtime_identity(
+            canonical_repo,
+            str(work_order.get("run_id") or ""),
+            run_binding=run_binding,
+            runner_profile=runner_profile,
+            runtime_generation=supervisor_runtime.runtime_generation(),
+        )
         capability_receipt = capabilities_mod.write_resolution_receipt(
             canonical_repo,
             str(work_order.get("run_id") or ""),

@@ -79,7 +79,7 @@ for spec_path in spec_contracts:
     text = spec_path.read_text(encoding="utf-8")
     normalized_text = " ".join(text.split())
     required = (
-        "Before a v3 PROGRAM is considered ready:",
+        "Before a v3 or v4 PROGRAM is considered ready:",
         "top-level `required_validation` is a global gate",
         "MUST be satisfiable from the first checkpoint onward",
         "belongs in that checkpoint's",

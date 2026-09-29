@@ -577,9 +577,70 @@
           "type": "integer",
           "minimum": 0
         },
+        "mission_budget_result": {
+          "type": "string",
+          "enum": ["pass", "fail"]
+        },
+        "mission_source_lines_total": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "mission_source_ceiling": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "mission_unique_files_total": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "mission_unique_files_ceiling": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "segment_source_ceiling": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 30000
+        },
+        "mission_id": {
+          "type": "string",
+          "pattern": "^mission-[a-f0-9]{24}$"
+        },
+        "segment_number": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 16
+        },
         "breach": {
           "type": "string"
         }
+      }
+    },
+    "segment_boundary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["result"],
+      "properties": {
+        "result": { "type": "string", "enum": ["authorized", "refused"] },
+        "mission_id": { "type": "string", "pattern": "^mission-[a-f0-9]{24}$" },
+        "segment_number": { "type": "integer", "minimum": 1, "maximum": 16 },
+        "mission_authority_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "source_candidate_sha": { "type": "string", "pattern": "^[a-f0-9]{40}$" },
+        "source_candidate_diff_lines_from_mission_baseline": { "type": "integer", "minimum": 0 },
+        "last_approved_candidate_sha": { "type": "string", "pattern": "^[a-f0-9]{40}$" },
+        "last_approved_checkpoint_id": { "type": "string" },
+        "last_approved_verdict_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "mission_source_lines_at_last_approval": { "type": "integer", "minimum": 0 },
+        "segment_source_lines": { "type": "integer", "minimum": 0 },
+        "segment_source_ceiling": { "type": "integer", "minimum": 1, "maximum": 30000 },
+        "mission_source_lines_total": { "type": "integer", "minimum": 0 },
+        "mission_source_ceiling": { "type": "integer", "minimum": 1 },
+        "mission_unique_files_total": { "type": "integer", "minimum": 0 },
+        "mission_unique_files_ceiling": { "type": "integer", "minimum": 1 },
+        "reexecute_checkpoint": { "type": "string", "pattern": "^CP-[0-9]+$" },
+        "reasons": { "type": "array", "items": { "type": "string" } },
+        "reason": { "type": "string" },
+        "detail": { "type": "string" }
       }
     },
     "additional_review_required": {
@@ -598,7 +659,16 @@
         "READY_FOR_REVIEW",
         "BLOCKED",
         "STOPPED",
-        "CHANGES_REQUESTED"
+        "CHANGES_REQUESTED",
+        "SEGMENT_BOUNDARY"
+      ]
+    },
+    "outcome_requested": {
+      "type": "string",
+      "enum": [
+        "candidate_ready",
+        "blocked",
+        "stopped"
       ]
     },
     "agent_summary": {

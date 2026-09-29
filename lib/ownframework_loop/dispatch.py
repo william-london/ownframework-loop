@@ -34,7 +34,7 @@ from . import (
 from .locking import LockBusyError, flock_exclusive
 
 SCHEMA = "ownframework-loop-dispatch/v1"
-TERMINAL_STATES = {"APPROVED", "BLOCKED", "STOPPED"}
+TERMINAL_STATES = {"APPROVED", "BLOCKED", "STOPPED", "SEGMENT_BOUNDARY"}
 BUILD_STATES = {
     "AWAITING_APPROVAL",
     "READY_TO_BUILD",
