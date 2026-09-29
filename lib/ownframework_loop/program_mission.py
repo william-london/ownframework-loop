@@ -2083,6 +2083,25 @@ def enqueue_envelope_for_child(
     return envelope
 
 
+def _finalized_checkpoint_evidence_sha256(
+    program_state: dict[str, Any], checkpoint_id: str,
+) -> str | None:
+    """Return the unique finalized-evidence digest for one checkpoint.
+
+    Legacy PROGRAM state stores this binding in ``finalized_checkpoints``;
+    the per-checkpoint progress row intentionally does not contain it.
+    """
+    rows = program_state.get("finalized_checkpoints") or []
+    matches = [
+        row for row in rows
+        if isinstance(row, dict) and row.get("id") == checkpoint_id
+    ]
+    if len(matches) != 1:
+        return None
+    digest = str(matches[0].get("evidence_sha256") or "")
+    return digest if _SHA256_RE.fullmatch(digest) else None
+
+
 def _validate_legacy_source(
     repo: Path,
     predecessor_run_id: str,
@@ -2197,11 +2216,10 @@ def _validate_legacy_source(
         or not _SHA256_RE.fullmatch(str(approved_event.get("verdict_sha256") or ""))
     ):
         raise MissionAuthorityError("last approved checkpoint event does not bind the explicit candidate")
-    cp_state = checkpoint_by_id.get(approved_checkpoint_id) or {}
     entry_state = checkpoint_by_id.get(expected_remaining_checkpoints[0]) or {}
     if entry_state.get("checkpoint_entry_candidate_sha") != approved_candidate_sha:
         raise MissionAuthorityError("next checkpoint entry does not bind the last approved candidate")
-    if cp_state.get("evidence_sha256") in (None, ""):
+    if _finalized_checkpoint_evidence_sha256(program_state, approved_checkpoint_id) is None:
         raise MissionAuthorityError("last approved checkpoint lacks finalized evidence binding")
 
     review_verdict_path = root / "REVIEW_VERDICT.json"

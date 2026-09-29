@@ -31,6 +31,30 @@ from ownframework_loop import (
     supervisor_claims, supervisor_runtime, util, verdicts, worktrees,
 )
 
+# Legacy v3 stores finalized evidence on the finalized-checkpoint projection,
+# not on the mutable per-checkpoint progress row.
+legacy_evidence_state = {
+    "checkpoints": [{"id": "CP-09", "terminal": "APPROVED"}],
+    "finalized_checkpoints": [{
+        "id": "CP-09", "terminal_state": "APPROVED",
+        "evidence_sha256": "a" * 64,
+    }],
+}
+assert program_mission._finalized_checkpoint_evidence_sha256(
+    legacy_evidence_state, "CP-09",
+) == "a" * 64
+assert program_mission._finalized_checkpoint_evidence_sha256(
+    {**legacy_evidence_state, "finalized_checkpoints": [{
+        "id": "CP-09", "terminal_state": "APPROVED", "evidence_sha256": "z" * 64,
+    }]},
+    "CP-09",
+) is None
+assert program_mission._finalized_checkpoint_evidence_sha256(
+    {**legacy_evidence_state, "finalized_checkpoints": legacy_evidence_state["finalized_checkpoints"] * 2},
+    "CP-09",
+) is None
+print("LEGACY_FINALIZED_EVIDENCE_BINDING_LOCATION_AND_SHAPE=PASS")
+
 
 class MissionFixtureRunner:
     runner_id = "v127-mission-fixture"
