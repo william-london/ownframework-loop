@@ -106,6 +106,7 @@ tests/integration/test_v091_pass_budget_profile.sh
 tests/integration/test_single_mode_repair_continuity.sh
 tests/integration/test_final_source_closure_hostsafe.sh
 tests/integration/test_source_authority_final.sh
+tests/integration/test_browser_assets_cold_cache.sh
 tests/integration/test_single_claim_atomicity.sh
 tests/integration/test_v091_terminal_source_closure.sh
 tests/integration/test_v091_final_frontier_seams.sh

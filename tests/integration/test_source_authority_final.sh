@@ -317,7 +317,7 @@ with tempfile.TemporaryDirectory() as td:
     assert not proven and "asset root" in reason, (proven, reason)
     moved.rename(asset_root)
 
-    # Directory symlinks are part of the authority tree and must be refused.
+    # An external directory symlink is outside the authority tree and refused.
     link_target = root / "link-target"; link_target.mkdir()
     linkdir = chromium_dir / "linked-dir"; os.symlink(link_target, linkdir)
     try:

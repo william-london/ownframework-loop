@@ -37,15 +37,26 @@ artifacts. Cross-repository writable caches are intentionally forbidden:
 a compromised client repository must not be able to poison another client's
 future executable/package cache.
 
-Browser binaries are NOT a cache. They live in one shared immutable asset
-root (`default_browser_asset_dir()`), provisioned exactly once by the
-operator and runtime-proven by the real browser canary. Every role consumes
-that root READ-ONLY (PLAYWRIGHT_BROWSERS_PATH bound to it, browser GC
-disabled for workers), so Chromium is never re-downloaded per pass and no
-worker write can touch the proven binaries. The runtime proof is private and
-freshness-bound to the current platform/runtime fingerprint and the exact
-asset bytes (Merkle digest); any drift stales it automatically until the
-canary re-proves it.
+Browser binaries are a `REGENERABLE_CACHE` and commissioned host asset. They
+live in one shared asset root (`default_browser_asset_dir()`), provisioned by
+the documented Playwright installer and empirically runtime-proven by the real
+browser canary. Every role consumes that root READ-ONLY
+(`PLAYWRIGHT_BROWSERS_PATH` is bound to it and browser GC is disabled for
+workers). The cache may be removed when no worker is using it, but the browser
+capability is unavailable until the supported installer, canary, and
+capability preflight succeed again. The private runtime proof binds the
+platform/runtime fingerprint and the complete asset-tree identity, including
+safe internal relative symlinks; missing or changed assets stale the proof.
+
+Loop-owned filesystem material uses these operational classifications:
+
+| Classification | Examples | Treatment |
+| --- | --- | --- |
+| `REGENERABLE_CACHE` | `runtime-cache/`, `tool-cache/`, `browser-assets/` | Rebuildable or re-downloadable; do not remove while a worker uses it. Browser assets require re-provisioning/proof before execution. |
+| `DURABLE_STATE` | `supervisor.sqlite3`, run `STATE.json`/`EVENTS.log`, packets, approvals, receipts, attempt/resource history, commissioning and migration evidence, worker logs | Preserve as authority or audit evidence; not cleanup cache. |
+| `SOURCE` | Repository files, Git objects/refs/index, candidate branches and registered worktrees | Preserve; never classify Git internals or candidate history as cache. |
+| `ACTIVE_RUNTIME` | The installed versioned Loop payload, loaded supervisor, and live semantic workers | Do not remove or replace while active; use supported installation/refresh lifecycle. |
+| `UNKNOWN` | Any Loop-adjacent path not proven to fit a class above | Retain and investigate before cleanup. |
 
 A host manifest may point a capability at a trusted global asset store. Those
 assets are read-only to semantic workers.

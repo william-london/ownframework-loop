@@ -966,45 +966,267 @@ def _browser_asset_root(value: Path, *, require_exists: bool = True) -> Path:
 def browser_asset_merkle_sha256(asset_root: Path) -> str:
     """Deterministic identity of the exact browser asset tree.
 
-    Identity covers relative path, entry type, POSIX mode and file bytes.
-    Root/file/directory symlinks are refused before they can disappear through
-    path resolution or os.walk(followlinks=False).
+    Identity covers relative path, entry type, POSIX mode, file bytes, and
+    internal relative symlink structure. Symlinks are resolved component by
+    component without following them during traversal; absolute, broken,
+    escaping, cyclic, and special-file targets fail closed. Link entries bind
+    both their raw target and canonical in-root target, so dereferenced bytes
+    alone can never erase authority-relevant tree structure.
     """
     root = _browser_asset_root(asset_root, require_exists=True)
     entries: list[tuple[str, str, int, str]] = []
-    root_mode = stat.S_IMODE(root.stat().st_mode)
-    entries.append(("d", ".", root_mode, ""))
-    for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
-        base = Path(dirpath)
-        dirnames.sort()
-        filenames.sort()
-        for name in list(dirnames):
-            p = base / name
-            if p.is_symlink():
-                raise CapabilityResolutionError(
-                    f"browser asset tree contains directory symlink: {p.relative_to(root)}"
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    directory_flag = getattr(os, "O_DIRECTORY", 0)
+    if (
+        not nofollow or not directory_flag
+        or os.open not in getattr(os, "supports_dir_fd", set())
+        or os.stat not in getattr(os, "supports_dir_fd", set())
+        or os.readlink not in getattr(os, "supports_dir_fd", set())
+        or os.scandir not in getattr(os, "supports_fd", set())
+    ):
+        raise CapabilityResolutionError(
+            "platform lacks no-follow directory-relative browser asset inspection"
+        )
+
+    def signature(st: os.stat_result) -> tuple[int, int, int, int, int, int]:
+        return (
+            st.st_dev, st.st_ino, st.st_mode, st.st_size,
+            st.st_mtime_ns, st.st_ctime_ns,
+        )
+
+    def relative(parts: tuple[str, ...] | list[str]) -> str:
+        return "/".join(parts) if parts else "."
+
+    root_flags = os.O_RDONLY | directory_flag | nofollow | getattr(os, "O_CLOEXEC", 0)
+    file_flags = os.O_RDONLY | nofollow | getattr(os, "O_CLOEXEC", 0)
+
+    try:
+        root_fd = os.open(os.fspath(root), root_flags)
+    except OSError as exc:
+        raise CapabilityResolutionError(
+            f"browser asset root cannot be opened without following links: {exc}"
+        ) from exc
+
+    def open_directory(root_fd: int, parts: tuple[str, ...] | list[str]) -> int:
+        fd = os.dup(root_fd)
+        try:
+            for part in parts:
+                child = os.open(
+                    part, root_flags, dir_fd=fd
                 )
-            st = p.stat()
-            entries.append(("d", p.relative_to(root).as_posix(), stat.S_IMODE(st.st_mode), ""))
-        for name in filenames:
-            p = base / name
-            if p.is_symlink():
+                os.close(fd)
+                fd = child
+            return fd
+        except BaseException:
+            os.close(fd)
+            raise
+
+    def lstat_relative(root_fd: int, parts: tuple[str, ...] | list[str]) -> os.stat_result:
+        if not parts:
+            return os.fstat(root_fd)
+        parent_fd = open_directory(root_fd, parts[:-1])
+        try:
+            return os.stat(parts[-1], dir_fd=parent_fd, follow_symlinks=False)
+        finally:
+            os.close(parent_fd)
+
+    def readlink_relative(root_fd: int, parts: tuple[str, ...]) -> str:
+        before = lstat_relative(root_fd, parts)
+        if not stat.S_ISLNK(before.st_mode):
+            raise CapabilityResolutionError(
+                f"browser asset link changed during inspection: {relative(parts)}"
+            )
+        parent_fd = open_directory(root_fd, parts[:-1])
+        try:
+            target = os.readlink(parts[-1], dir_fd=parent_fd)
+        finally:
+            os.close(parent_fd)
+        after = lstat_relative(root_fd, parts)
+        if signature(before) != signature(after):
+            raise CapabilityResolutionError(
+                f"browser asset link changed during inspection: {relative(parts)}"
+            )
+        return target
+
+    def resolve_link_target(
+        root_fd: int,
+        parent: tuple[str, ...],
+        target: str,
+        active: frozenset[tuple[str, ...]],
+    ) -> tuple[str, ...]:
+        if not target or os.path.isabs(target):
+            raise CapabilityResolutionError(
+                "browser asset symlink target must be non-empty and relative"
+            )
+        stack = list(parent)
+        components = target.split(os.sep)
+        for index, component in enumerate(components):
+            if component == "":
+                if index == len(components) - 1:
+                    current = lstat_relative(root_fd, stack)
+                    if not stat.S_ISDIR(current.st_mode):
+                        raise CapabilityResolutionError(
+                            "browser asset symlink target has a trailing separator after a non-directory"
+                        )
+                continue
+            if component == ".":
+                current = lstat_relative(root_fd, stack)
+                if not stat.S_ISDIR(current.st_mode):
+                    raise CapabilityResolutionError(
+                        "browser asset symlink target traverses a non-directory"
+                    )
+                continue
+            if component == "..":
+                if not stack:
+                    raise CapabilityResolutionError(
+                        "browser asset symlink escapes its commissioned root"
+                    )
+                current = lstat_relative(root_fd, stack)
+                if not stat.S_ISDIR(current.st_mode):
+                    raise CapabilityResolutionError(
+                        "browser asset symlink target traverses a non-directory"
+                    )
+                stack.pop()
+                continue
+
+            candidate = tuple((*stack, component))
+            try:
+                st = lstat_relative(root_fd, candidate)
+            except OSError as exc:
                 raise CapabilityResolutionError(
-                    f"browser asset tree contains file symlink: {p.relative_to(root)}"
-                )
-            st = p.stat()
-            if not stat.S_ISREG(st.st_mode):
+                    f"browser asset symlink is broken or unreadable: {relative(candidate)}"
+                ) from exc
+            remaining = index < len(components) - 1
+            if stat.S_ISLNK(st.st_mode):
+                if candidate in active:
+                    raise CapabilityResolutionError(
+                        f"browser asset symlink loop at {relative(candidate)}"
+                    )
+                nested = readlink_relative(root_fd, candidate)
+                stack = list(resolve_link_target(
+                    root_fd, candidate[:-1], nested, active | {candidate}
+                ))
+                continue
+            if remaining and not stat.S_ISDIR(st.st_mode):
                 raise CapabilityResolutionError(
-                    f"browser asset tree contains non-regular entry: {p.relative_to(root)}"
+                    f"browser asset symlink traverses a non-directory: {relative(candidate)}"
                 )
-            fh = hashlib.sha256()
-            with p.open("rb") as f:
-                for chunk in iter(lambda: f.read(1 << 20), b""):
-                    fh.update(chunk)
-            entries.append((
-                "f", p.relative_to(root).as_posix(),
-                stat.S_IMODE(st.st_mode), fh.hexdigest(),
-            ))
+            stack.append(component)
+
+        resolved = tuple(stack)
+        try:
+            resolved_stat = lstat_relative(root_fd, resolved)
+        except OSError as exc:
+            raise CapabilityResolutionError(
+                f"browser asset symlink target is broken: {relative(resolved)}"
+            ) from exc
+        if not (stat.S_ISDIR(resolved_stat.st_mode) or stat.S_ISREG(resolved_stat.st_mode)):
+            raise CapabilityResolutionError(
+                f"browser asset symlink target is not a regular file or directory: {relative(resolved)}"
+            )
+        return resolved
+
+    def walk_directory(
+        root_fd: int,
+        directory_fd: int,
+        parts: tuple[str, ...],
+    ) -> None:
+        before_directory = os.fstat(directory_fd)
+        with os.scandir(directory_fd) as iterator:
+            names = sorted(entry.name for entry in iterator)
+        for name in names:
+            child_parts = (*parts, name)
+            rel = relative(child_parts)
+            st = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+            mode = stat.S_IMODE(st.st_mode)
+            if stat.S_ISDIR(st.st_mode):
+                entries.append(("d", rel, mode, ""))
+                child_fd = os.open(name, root_flags, dir_fd=directory_fd)
+                try:
+                    opened = os.fstat(child_fd)
+                    if signature(st) != signature(opened):
+                        raise CapabilityResolutionError(
+                            f"browser asset directory changed during inspection: {rel}"
+                        )
+                    walk_directory(root_fd, child_fd, child_parts)
+                finally:
+                    os.close(child_fd)
+            elif stat.S_ISREG(st.st_mode):
+                file_fd = os.open(name, file_flags, dir_fd=directory_fd)
+                try:
+                    opened = os.fstat(file_fd)
+                    if signature(st) != signature(opened):
+                        raise CapabilityResolutionError(
+                            f"browser asset file changed during inspection: {rel}"
+                        )
+                    digest = hashlib.sha256()
+                    while True:
+                        chunk = os.read(file_fd, 1 << 20)
+                        if not chunk:
+                            break
+                        digest.update(chunk)
+                    after_file = os.fstat(file_fd)
+                    if signature(opened) != signature(after_file):
+                        raise CapabilityResolutionError(
+                            f"browser asset file changed while hashing: {rel}"
+                        )
+                finally:
+                    os.close(file_fd)
+                entries.append(("f", rel, mode, digest.hexdigest()))
+            elif stat.S_ISLNK(st.st_mode):
+                target = os.readlink(name, dir_fd=directory_fd)
+                resolved = resolve_link_target(
+                    root_fd, parts, target, frozenset({child_parts})
+                )
+                target_mode = lstat_relative(root_fd, resolved).st_mode
+                link_parent = parts
+                if (
+                    stat.S_ISDIR(target_mode)
+                    and len(resolved) <= len(link_parent)
+                    and link_parent[:len(resolved)] == resolved
+                ):
+                    raise CapabilityResolutionError(
+                        f"browser asset directory symlink creates an ancestor cycle: {rel}"
+                    )
+                after_link = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+                if signature(st) != signature(after_link) or target != os.readlink(
+                    name, dir_fd=directory_fd
+                ):
+                    raise CapabilityResolutionError(
+                        f"browser asset link changed during inspection: {rel}"
+                    )
+                target_identity = b"\0".join((
+                    b"raw-target", os.fsencode(target),
+                    b"resolved-target", os.fsencode(relative(resolved)),
+                    b"target-kind", b"directory" if stat.S_ISDIR(target_mode) else b"file",
+                ))
+                entries.append(("l", rel, mode, hashlib.sha256(target_identity).hexdigest()))
+            else:
+                raise CapabilityResolutionError(
+                    f"browser asset tree contains a non-regular entry: {rel}"
+                )
+
+        after_directory = os.fstat(directory_fd)
+        if signature(before_directory) != signature(after_directory):
+            raise CapabilityResolutionError(
+                f"browser asset directory changed during inspection: {relative(parts)}"
+            )
+
+    try:
+        root_stat = os.fstat(root_fd)
+        if not stat.S_ISDIR(root_stat.st_mode):
+            raise CapabilityResolutionError("browser asset root is not a directory")
+        entries.append(("d", ".", stat.S_IMODE(root_stat.st_mode), ""))
+        walk_directory(root_fd, root_fd, ())
+        if signature(root_stat) != signature(os.fstat(root_fd)):
+            raise CapabilityResolutionError("browser asset root changed during inspection")
+    except CapabilityResolutionError:
+        raise
+    except OSError as exc:
+        raise CapabilityResolutionError(f"browser asset tree unreadable: {exc}") from exc
+    finally:
+        os.close(root_fd)
+
     h = hashlib.sha256()
     for kind, rel, mode, digest in sorted(entries):
         h.update(
