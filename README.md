@@ -24,6 +24,14 @@ durable supervisor can drive bounded BUILD, REVIEW, repair, and PROGRAM
 checkpoint advancement without routine permission prompts or terminal
 babysitting.
 
+PROGRAM packet versions v1–v3 execute as one sealed run. A v4 PROGRAM may
+project one immutable mission across a bounded sequence of run segments. When
+only the per-segment source ceiling is reached, a valid crossing BUILD can end
+its parent at `SEGMENT_BOUNDARY`; the parent and crossing candidate remain
+historical evidence. The successor starts from the exact last APPROVED
+candidate, not the unreviewed crossing candidate, and receives no authority
+beyond the frozen mission. Whole-product final acceptance remains mandatory.
+
 The deterministic core owns packet authority, source identity, worktrees,
 state, exact candidate SHA, evidence, retry/repair budgets, runtime-generation
 binding, and promotion boundaries. Agent hosts are adapters.

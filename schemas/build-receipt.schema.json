@@ -638,6 +638,24 @@
         "mission_unique_files_total": { "type": "integer", "minimum": 0 },
         "mission_unique_files_ceiling": { "type": "integer", "minimum": 1 },
         "reexecute_checkpoint": { "type": "string", "pattern": "^CP-[0-9]+$" },
+        "required_build_entitlement": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "eligible", "cp_id", "checkpoint_used", "checkpoint_cap",
+            "cumulative_used", "cumulative_cap", "reason_codes", "reason"
+          ],
+          "properties": {
+            "eligible": { "type": "boolean" },
+            "cp_id": { "type": "string", "pattern": "^CP-[0-9]+$" },
+            "checkpoint_used": { "type": "integer", "minimum": 0 },
+            "checkpoint_cap": { "type": "integer", "minimum": 0 },
+            "cumulative_used": { "type": "integer", "minimum": 0 },
+            "cumulative_cap": { "type": "integer", "minimum": 0 },
+            "reason_codes": { "type": "array", "items": { "type": "string" } },
+            "reason": { "type": "string" }
+          }
+        },
         "reasons": { "type": "array", "items": { "type": "string" } },
         "reason": { "type": "string" },
         "detail": { "type": "string" }

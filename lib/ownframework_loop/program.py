@@ -1157,6 +1157,10 @@ def increment_cp_counter(
     }[counter]
     cap = int(packet_cp["risk_budget"][cap_key])
     cum_cap = new["cumulative_ceilings"][cap_key]
+    if counter == "build_pass_count":
+        entitlement = build_pass_entitlement(new, cp_id=cp_id, packet_cp=packet_cp)
+        if not entitlement["eligible"]:
+            raise ProgramStateError(entitlement["reason"])
     # Check BEFORE incrementing (same contract as _bump_counter_one): a
     # raised exception must never leave the returned state over-cap, so an
     # error handler persisting the returned dict cannot breach a ceiling.
@@ -1171,6 +1175,45 @@ def increment_cp_counter(
     cp[counter] += 1
     new["cumulative_counters"][counter] += 1
     return new
+
+
+def build_pass_entitlement(
+    program_state: dict[str, Any],
+    *,
+    cp_id: str,
+    packet_cp: dict[str, Any],
+) -> dict[str, Any]:
+    """Read-only proof that one more BUILD claim fits both frozen ceilings.
+
+    The ordinary claim owner and v4 segment-boundary authority use this same
+    calculation. A segment successor must be able to re-execute its crossing
+    checkpoint, so checkpoint-local capacity alone is not sufficient.
+    """
+    cp = _find_cp(program_state, cp_id)
+    checkpoint_used = int(cp.get("build_pass_count") or 0)
+    checkpoint_cap = int(
+        (packet_cp.get("risk_budget") or {}).get("max_build_passes") or 0
+    )
+    cumulative = program_state.get("cumulative_counters") or {}
+    ceilings = program_state.get("cumulative_ceilings") or {}
+    cumulative_used = int(cumulative.get("build_pass_count") or 0)
+    cumulative_cap = int(ceilings.get("max_build_passes") or 0)
+    reason_codes: list[str] = []
+    if checkpoint_used >= checkpoint_cap:
+        reason_codes.append("checkpoint_build_authority_exhausted")
+    if cumulative_used >= cumulative_cap:
+        reason_codes.append("mission_cumulative_build_authority_exhausted")
+    reason = "; ".join(reason_codes)
+    return {
+        "eligible": not reason_codes,
+        "cp_id": cp_id,
+        "checkpoint_used": checkpoint_used,
+        "checkpoint_cap": checkpoint_cap,
+        "cumulative_used": cumulative_used,
+        "cumulative_cap": cumulative_cap,
+        "reason_codes": reason_codes,
+        "reason": reason,
+    }
 
 
 def _bump_counter_one(
@@ -1191,11 +1234,15 @@ def _bump_counter_one(
     cum_cap = int(program_state["cumulative_ceilings"][cap_key])
     new = _deepcopy_program(program_state)
     cp = _find_cp(new, cp_id)
-    if cp[counter] >= cp_cap:
+    if counter == "build_pass_count":
+        entitlement = build_pass_entitlement(new, cp_id=cp_id, packet_cp=packet_cp)
+        if not entitlement["eligible"]:
+            raise ProgramStateError(entitlement["reason"])
+    elif cp[counter] >= cp_cap:
         raise ProgramStateError(
             f"per-checkpoint cap reached for {counter} on {cp_id}: {cp[counter]}/{cp_cap}"
         )
-    if new["cumulative_counters"][counter] >= cum_cap:
+    if counter != "build_pass_count" and new["cumulative_counters"][counter] >= cum_cap:
         raise ProgramStateError(
             f"cumulative cap reached for {counter}: {new['cumulative_counters'][counter]}/{cum_cap}"
         )

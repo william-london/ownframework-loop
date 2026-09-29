@@ -953,6 +953,7 @@ def finalize_build(
 
     # 19. Derive next_state. (Approval binding was proven at step 1; there is
     # no path back to AWAITING_APPROVAL from BUILDING.)
+    next_state_reason: str | None = None
     if state_mod.is_stop_requested(canonical_repo, run_id):
         next_state = "STOPPED"
     elif infra_failure_count > 0:
@@ -982,6 +983,23 @@ def finalize_build(
         # Exhausting it is a hard authority stop and may never be converted to
         # another segment or an ordinary candidate repair.
         next_state = "BLOCKED"
+    elif (
+        segment_boundary_proof is not None
+        and set(segment_boundary_proof.get("reasons") or []).intersection({
+            "checkpoint_build_authority_exhausted",
+            "mission_cumulative_build_authority_exhausted",
+        })
+    ):
+        # The crossing candidate is valid historical evidence, but a derived
+        # segment would have to claim another BUILD for this same checkpoint.
+        # Do not create a successor that the frozen semantic ceilings cannot
+        # execute. Preserve the typed exhaustion reason in STATE/EVENTS.
+        exhausted = sorted(set(segment_boundary_proof["reasons"]).intersection({
+            "checkpoint_build_authority_exhausted",
+            "mission_cumulative_build_authority_exhausted",
+        }))
+        next_state = "BLOCKED"
+        next_state_reason = "segment_boundary_refused:" + "+".join(exhausted)
     elif segment_boundary_authorized:
         # The semantic candidate exceeded only this bounded segment's source
         # envelope. Preserve it as historical BUILD evidence; the supervisor
@@ -1257,7 +1275,7 @@ def finalize_build(
                 canonical_repo, run_id,
                 to_state=next_state,
                 actor=actor,
-                reason=f"finalizer next_state={next_state}",
+                reason=next_state_reason or f"finalizer next_state={next_state}",
                 commit_sha=candidate_sha,
                 no_progress_streak=no_progress_streak,
                 build_pass_count=int(new_build_pass_count),
@@ -1277,7 +1295,7 @@ def finalize_build(
         new_state=next_state,
         actor=actor,
         commit_sha=candidate_sha,
-        reason=f"deterministic finalizer -> {next_state}",
+        reason=next_state_reason or f"deterministic finalizer -> {next_state}",
         extras={
             "files_changed": receipt["files_changed"],
             "added_lines": receipt["added_lines"],

@@ -9,9 +9,13 @@ segments. The 30,000-line per-run limit remains unchanged.
 
 The mission envelope is authority, not a resource hint. It binds the complete
 approved product contract, original baseline, allowed/protected paths,
-checkpoint graph, capabilities, profile, effect authority, mission source
-ceiling, segment ceiling, and maximum segment count. A successor is a
-deterministic projection of that envelope; it cannot add any of those powers.
+checkpoint graph, runner, runtime generation, capability binding/projection,
+runner profile/model/effort, effect authority, cost and token ceilings,
+transient/infrastructure envelope, wall-clock origin/deadline, mission source
+ceiling, segment ceiling, and maximum segment count. These execution identities
+and limits remain frozen across segments. A successor is a deterministic
+projection of that envelope; it cannot add any of those powers. Runtime
+migration is not performed by segmentation.
 
 ## Durable records and lineage
 
@@ -41,10 +45,18 @@ reconstructs the same child rather than creating another segment.
 Only a clean, otherwise-valid BUILD whose sole terminal cause is the segment
 source ceiling can produce `SEGMENT_BOUNDARY`. The core also proves there is a
 last approved candidate, at least one unfinished checkpoint, remaining
-mission-wide source authority, and an unused segment slot. Scope/protected
-path findings, hard secrets, validation failures, identity failures, STOPPED,
-and any other failure retain their existing terminal behavior. Exhausted
-mission budget or segment count is a hard BLOCKED authority boundary.
+mission-wide source authority, an unused segment slot, and authority for at
+least one further BUILD claim on the checkpoint being re-executed. The BUILD
+proof checks both that checkpoint's local pass ceiling and the cumulative
+PROGRAM pass ceiling; counters carry across segments, so both must have room.
+If either BUILD ceiling is exhausted, the parent is blocked with a typed
+semantic/build-authority reason and no successor run, branch, packet, seal, or
+segment record is created. Eligibility checking itself consumes no counters
+or resource accounting. The crossing candidate remains terminal history and
+is not adopted. Scope/protected-path findings, hard secrets, validation
+failures, identity failures, STOPPED, and any other failure retain their
+existing terminal behavior. Exhausted mission budget or segment count is a
+hard BLOCKED authority boundary.
 
 The supervisor recognizes `SEGMENT_BOUNDARY` as terminal for that run and
 reconciles its deterministic successor before completing the parent job. A

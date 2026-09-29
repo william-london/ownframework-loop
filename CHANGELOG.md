@@ -11,6 +11,21 @@ immutable historical baseline of the previous published line.
 The complete historical changelog through 0.5.2 is preserved at
 [`docs/history/CHANGELOG-through-0.5.2.md`](docs/history/CHANGELOG-through-0.5.2.md).
 
+## Unreleased - v4 PROGRAM segmentation and recovery closure (2026-09-29)
+
+- Recovery authority: failed/unaccepted ready semantic artifacts are reseeded
+  idempotently without replacing accepted evidence; research capability
+  migration is scoped to the run and preserves prior binding history.
+- Commissioning: the supported browser-assets path accepts only provenance-
+  bound internal framework symlinks, rejects escaping or ambiguous links, and
+  is verified from a cold cache. Commissioned-canary control operations are
+  serialized so certification cannot race another lifecycle owner.
+- PROGRAM v4: one immutable mission may project bounded run segments while
+  preserving the last-approved baseline, cumulative counters, frozen runtime
+  and capability identity, and whole-product final acceptance. A source-ceiling
+  boundary is refused before successor creation when either the checkpoint or
+  cumulative PROGRAM BUILD ceiling cannot fund the required re-execution.
+
 ## 1.1.0.dev0 - Post-v1 Bounded Closure (2026-09-21)
 
 Post-v1 development on master. The published **v1.0.0** Git tag at

@@ -25,7 +25,7 @@ os.environ["XDG_STATE_HOME"] = str(root / "state")
 
 from ownframework_loop import (
     approval, assessment, build_agent, build_finalize, build_prepare,
-    capabilities, capability_binding, execution_start, integrity, packet,
+    capabilities, capability_binding, execution_start, git_checks, integrity, packet,
     program, program_mission, review_finalize, review_prepare,
     runner_profiles, runtime_env, state, supervisor, supervisor_db,
     supervisor_claims, supervisor_runtime, util, verdicts, worktrees,
@@ -96,7 +96,9 @@ def make_repo(name: str) -> tuple[Path, str]:
 
 def v4_packet(repo: Path, baseline: str, *, auto_segment: bool = True,
               segment_lines: int = 10, mission_lines: int = 100,
-              max_segments: int = 2, checkpoint_count: int = 3) -> dict:
+              max_segments: int = 2, checkpoint_count: int = 3,
+              checkpoint_risk_budgets: list[dict] | None = None,
+              global_risk_budget: dict | None = None) -> dict:
     order = [f"CP-{index:02d}" for index in range(checkpoint_count)]
     checkpoints = []
     acceptance = []
@@ -106,6 +108,15 @@ def v4_packet(repo: Path, baseline: str, *, auto_segment: bool = True,
         unit_id = f"UNIT-{index:02d}"
         acceptance.append({"id": ac_id, "text": f"fixture acceptance {index}"})
         units.append({"id": unit_id, "title": f"fixture unit {index}", "scope": "src/"})
+        checkpoint_budget = (
+            dict(checkpoint_risk_budgets[index])
+            if checkpoint_risk_budgets is not None
+            else {
+                "max_build_passes": 3,
+                "max_review_passes": 3,
+                "max_repair_rounds": 1,
+            }
+        )
         checkpoints.append({
             "id": cp_id,
             "title": f"fixture checkpoint {index}",
@@ -113,12 +124,17 @@ def v4_packet(repo: Path, baseline: str, *, auto_segment: bool = True,
             "depends_on": [] if index == 0 else [order[index - 1]],
             "acceptance_criterion_ids": [ac_id],
             "work_units": [unit_id],
-            "risk_budget": {
-                "max_build_passes": 3,
-                "max_review_passes": 3,
-                "max_repair_rounds": 1,
-            },
+            "risk_budget": checkpoint_budget,
         })
+    global_budget = {
+        "max_build_passes": checkpoint_count * 3,
+        "max_review_passes": checkpoint_count * 4 + 1,
+        "max_repair_rounds": checkpoint_count,
+        "max_files_changed": 10,
+        "max_diff_lines": segment_lines,
+    }
+    if global_risk_budget is not None:
+        global_budget.update(global_risk_budget)
     return {
         "schema": "ownframework-work-packet/v4",
         "packet_id": "v127-segmented-mission",
@@ -161,13 +177,7 @@ def v4_packet(repo: Path, baseline: str, *, auto_segment: bool = True,
         "deploy_authority": "human_only",
         "push_authority": "human_only",
         "external_action_authority": "none",
-        "risk_budget": {
-            "max_build_passes": checkpoint_count * 3,
-            "max_review_passes": checkpoint_count * 4 + 1,
-            "max_repair_rounds": checkpoint_count,
-            "max_files_changed": 10,
-            "max_diff_lines": segment_lines,
-        },
+        "risk_budget": global_budget,
     }
 
 
@@ -266,7 +276,8 @@ def set_binding_for_child(fixture: dict, child_run_id: str) -> None:
 
 def finish_build(fixture: dict, *, content: list[str], path: str = "src/app.py",
                  expected_state: str = "READY_FOR_REVIEW",
-                 pre_finalize_state_out: list[dict] | None = None) -> tuple[str, dict]:
+                 pre_finalize_state_out: list[dict] | None = None,
+                 pre_finalize_job_out: list[dict] | None = None) -> tuple[str, dict]:
     repo = fixture["repo"]
     run_id = fixture["run_id"]
     meta = fixture["meta"]
@@ -299,6 +310,16 @@ def finish_build(fixture: dict, *, content: list[str], path: str = "src/app.py",
     result_path.write_text(json.dumps(result, sort_keys=True, indent=2) + "\n", encoding="utf-8")
     if pre_finalize_state_out is not None:
         pre_finalize_state_out.append(state.load_verified(repo, run_id))
+    if pre_finalize_job_out is not None:
+        with supervisor_db._managed_connect_readonly(db_path) as conn:
+            job_row = conn.execute(
+                """SELECT total_cost_usd, total_input_tokens, total_output_tokens,
+                          total_cache_read_tokens, total_cache_creation_tokens
+                   FROM jobs WHERE repo=? AND run_id=?""",
+                (str(repo.resolve()), run_id),
+            ).fetchone()
+        assert job_row is not None, f"missing supervisor job for {run_id}"
+        pre_finalize_job_out.append(dict(job_row))
     receipt = build_finalize.finalize_build(
         canonical_repo=repo, run_id=run_id, agent_result_path=result_path,
         actor="v127-fixture-builder",
@@ -310,7 +331,9 @@ def finish_build(fixture: dict, *, content: list[str], path: str = "src/app.py",
     return candidate, receipt
 
 
-def finish_review(fixture: dict, *, final: bool = False) -> dict:
+def finish_review(
+    fixture: dict, *, final: bool = False, must_fix: list[dict] | None = None,
+) -> dict:
     repo = fixture["repo"]
     run_id = fixture["run_id"]
     meta = fixture["meta"]
@@ -329,9 +352,9 @@ def finish_review(fixture: dict, *, final: bool = False) -> dict:
         for ac_id in expected
     ]
     assess["non_goal_results"] = []
-    assess["findings"] = []
+    assess["findings"] = must_fix or []
     assess["validation_results"] = []
-    assess["recommended_verdict"] = "APPROVED"
+    assess["recommended_verdict"] = "CHANGES_REQUESTED" if must_fix else "APPROVED"
     assess["timestamp"] = util.utc_now_iso()
     assess_path.write_text(json.dumps(assess, sort_keys=True, indent=2) + "\n", encoding="utf-8")
     verdict = review_finalize.finalize_review(
@@ -340,7 +363,7 @@ def finish_review(fixture: dict, *, final: bool = False) -> dict:
     )
     assert verdict["candidate_sha_reviewed"] == candidate, verdict
     assert verdict["review_pass_number"] == claim["claimed_pass_number"], verdict
-    assert verdict["verdict"] == "APPROVED", verdict
+    assert verdict["verdict"] == ("CHANGES_REQUESTED" if must_fix else "APPROVED"), verdict
     if final:
         assert verdict["review_scope"] == program.REVIEW_SCOPE_PROGRAM_FINAL, verdict
         assert verdict["expected_acceptance_criterion_ids"] == expected, verdict
@@ -548,8 +571,68 @@ base_args = dict(
     hard_secret_blocks=[], outcome_requested="candidate_ready", candidate_invalid_count=0,
     segment_context=loaded_parent,
 )
+budget_packet_cp = {"risk_budget": {"max_build_passes": 3}}
+def build_entitlement(local_used: int, cumulative_used: int) -> dict:
+    return program.build_pass_entitlement(
+        {
+            "checkpoints": [{"id": "CP-BUDGET", "build_pass_count": local_used}],
+            "cumulative_counters": {"build_pass_count": cumulative_used},
+            "cumulative_ceilings": {"max_build_passes": 4},
+        },
+        cp_id="CP-BUDGET", packet_cp=budget_packet_cp,
+    )
+
+assert build_entitlement(1, 2)["eligible"] is True
+local_exhaustion = build_entitlement(3, 3)
+assert local_exhaustion["eligible"] is False
+assert local_exhaustion["reason_codes"] == ["checkpoint_build_authority_exhausted"]
+global_exhaustion = build_entitlement(1, 4)
+assert global_exhaustion["eligible"] is False
+assert global_exhaustion["reason_codes"] == ["mission_cumulative_build_authority_exhausted"]
+both_exhausted = build_entitlement(3, 4)
+assert both_exhausted["eligible"] is False
+assert set(both_exhausted["reason_codes"]) == {
+    "checkpoint_build_authority_exhausted",
+    "mission_cumulative_build_authority_exhausted",
+}
+print("LOCAL_GLOBAL_AND_COMBINED_BUILD_ENTITLEMENT=PASS")
 ok, proof = program_mission.segment_boundary_eligibility(repo, parent, **base_args)
 assert ok, proof
+# Exercise an independently exhausted checkpoint BUILD entitlement while the
+# mission still has budget and a segment slot. A successor must be refused.
+local_build_exhausted = copy.deepcopy(boundary_state)
+local_program = local_build_exhausted["program"]
+local_cp_id = local_program["current_checkpoints"][0]
+local_cp = next(cp for cp in local_program["checkpoints"] if cp["id"] == local_cp_id)
+local_cap = next(
+    cp["risk_budget"]["max_build_passes"]
+    for cp in fixture["meta"]["checkpoint_graph"]["checkpoints"]
+    if cp["id"] == local_cp_id
+)
+local_cp["build_pass_count"] = local_cap
+local_total = sum(int(cp.get("build_pass_count") or 0) for cp in local_program["checkpoints"])
+local_program["cumulative_counters"]["build_pass_count"] = local_total
+local_build_exhausted["build_pass_count"] = local_total
+ok, proof = program_mission.segment_boundary_eligibility(
+    repo, parent, **{**base_args, "current_state": local_build_exhausted},
+)
+assert not ok, f"BUG REPRODUCED: segment boundary authorized without a successor BUILD claim: {proof}"
+assert "checkpoint_build_authority_exhausted" in proof["reasons"]
+global_build_exhausted = copy.deepcopy(boundary_state)
+global_program = global_build_exhausted["program"]
+global_cap = int(global_program["cumulative_ceilings"]["max_build_passes"])
+global_program["cumulative_counters"]["build_pass_count"] = global_cap
+global_build_exhausted["build_pass_count"] = global_cap
+ok, proof = program_mission.segment_boundary_eligibility(
+    repo, parent, **{**base_args, "current_state": global_build_exhausted},
+)
+assert not ok, f"BUG REPRODUCED: segment boundary ignored cumulative BUILD exhaustion: {proof}"
+assert "mission_cumulative_build_authority_exhausted" in proof["reasons"]
+assert proof["required_build_entitlement"]["reason_codes"] == [
+    "mission_cumulative_build_authority_exhausted",
+]
+assert boundary_state["program"]["cumulative_counters"]["build_pass_count"] != global_cap
+print("SEGMENT_BOUNDARY_REQUIRES_REEXECUTABLE_BUILD=PASS")
 mission_exhausted = dict(source_check, mission_budget_result="fail")
 ok, proof = program_mission.segment_boundary_eligibility(
     repo, parent, **{**base_args, "source_check": mission_exhausted},
@@ -583,6 +666,102 @@ try:
 finally:
     stop_path.unlink()
 print("MISSION_EXHAUSTION_MAX_SEGMENTS_STOP_AND_NONBUDGET_FAILURES_FAIL_CLOSED=PASS")
+
+# End-to-end finalization: CP-01's second and final BUILD produces an otherwise
+# valid source-only segment overrun. The next segment could not re-execute the
+# checkpoint, so deterministic finalization must BLOCK the parent and create
+# no successor-side authority or ledger row.
+local_repo, local_baseline = make_repo("v127-local-build-exhaustion")
+local_run = "run-20260929T000000Z-v127localcap"
+local_budgets = [
+    {"max_build_passes": 2, "max_review_passes": 2, "max_repair_rounds": 1},
+    {"max_build_passes": 2, "max_review_passes": 2, "max_repair_rounds": 1},
+]
+local_meta = v4_packet(
+    local_repo, local_baseline, segment_lines=10, mission_lines=100,
+    max_segments=2, checkpoint_count=2,
+    checkpoint_risk_budgets=local_budgets,
+    global_risk_budget={
+        "max_build_passes": 6, "max_review_passes": 5,
+        "max_repair_rounds": 2,
+    },
+)
+local_fixture = start_v4(local_repo, local_baseline, local_run, meta=local_meta)
+finish_build(local_fixture, content=["BASE = 1\n", "BASE_TWO = 2\n"])
+finish_review(local_fixture)
+finish_build(
+    local_fixture, content=["CP1 = 1\n", "CP1_TWO = 2\n"],
+    path="src/checkpoint1.py",
+)
+requested_repair = finish_review(local_fixture, must_fix=[{
+    "finding_id": "F-V127_LOCAL-CAP-1",
+    "severity": "high",
+    "classification": "must_fix",
+    "title": "Fixture repair before source boundary",
+    "description": "The fixture requires one bounded repair before the crossing build.",
+    "file": "src/checkpoint1.py",
+    "line": 1,
+}])
+assert requested_repair["verdict"] == "CHANGES_REQUESTED"
+pre_finalize_local: list[dict] = []
+pre_finalize_local_job: list[dict] = []
+local_crossing, local_receipt = finish_build(
+    local_fixture,
+    content=[f"CROSSING_{index} = {index}\n" for index in range(15)],
+    path="src/crossing.py",
+    expected_state="BLOCKED",
+    pre_finalize_state_out=pre_finalize_local,
+    pre_finalize_job_out=pre_finalize_local_job,
+)
+local_terminal = state.load_verified(local_repo, local_run)
+local_proof = local_receipt["segment_boundary"]
+assert local_proof["result"] == "refused", local_proof
+assert local_proof["reasons"] == ["checkpoint_build_authority_exhausted"], local_proof
+assert local_proof["required_build_entitlement"]["eligible"] is False
+assert local_terminal["state"] == "BLOCKED"
+assert local_terminal["terminal_reason"] == (
+    "segment_boundary_refused:checkpoint_build_authority_exhausted"
+)
+assert local_terminal["last_candidate_sha"] == local_crossing
+pre_program = pre_finalize_local[0]["program"]
+post_program = local_terminal["program"]
+assert local_terminal["build_pass_count"] == pre_finalize_local[0]["build_pass_count"]
+assert post_program["cumulative_counters"]["build_pass_count"] == (
+    pre_program["cumulative_counters"]["build_pass_count"]
+)
+assert local_terminal["repair_round"] == pre_finalize_local[0]["repair_round"]
+assert post_program["cumulative_counters"]["repair_round_count"] == (
+    pre_program["cumulative_counters"]["repair_round_count"]
+)
+for counter in ("build_pass_count", "review_pass_count", "repair_round_count"):
+    assert post_program["cumulative_counters"][counter] == pre_program["cumulative_counters"][counter]
+assert post_program["cumulative_ceilings"] == pre_program["cumulative_ceilings"]
+assert post_program["cumulative_counters"]["diff_lines_total"] == (
+    local_receipt["program_source_ceiling_check"]["mission_source_lines_total"]
+)
+assert local_terminal["review_pass_count"] == pre_finalize_local[0]["review_pass_count"]
+with supervisor_db._managed_connect_readonly(db_path) as conn:
+    local_job_after = conn.execute(
+        """SELECT total_cost_usd, total_input_tokens, total_output_tokens,
+                  total_cache_read_tokens, total_cache_creation_tokens
+           FROM jobs WHERE repo=? AND run_id=?""",
+        (str(local_repo.resolve()), local_run),
+    ).fetchone()
+assert local_job_after is not None
+assert dict(local_job_after) == pre_finalize_local_job[0]
+local_segment, _, local_mission, _ = program_mission.load_segment(local_repo, local_run)
+local_child = program_mission._segment_run_id(local_segment["mission_id"], 2)
+assert not program_mission._segment_path(local_repo.resolve(), local_segment["mission_id"], 2).exists()
+assert not state.run_dir(local_repo, local_child).exists()
+assert git_checks.branch_head(local_repo, f"factory/candidate/{local_child}") is None
+assert git_checks.branch_head(local_repo, local_segment["candidate_branch"]) == local_crossing
+with supervisor_db._managed_connect_readonly(db_path) as conn:
+    assert conn.execute(
+        "SELECT 1 FROM jobs WHERE repo=? AND run_id=?",
+        (str(local_repo.resolve()), local_child),
+    ).fetchone() is None
+assert local_mission["max_segments"] == 2
+print("LOCAL_CAP_FINALIZATION_BLOCKS_WITHOUT_SUCCESSOR_SIDE_EFFECTS=PASS")
 
 # A single-segment v4 packet remains valid and does not authorize successors.
 single = v4_packet(repo_probe, baseline_probe, auto_segment=False, max_segments=1)

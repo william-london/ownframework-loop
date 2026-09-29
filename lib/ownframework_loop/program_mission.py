@@ -1112,6 +1112,22 @@ def segment_boundary_eligibility(
         cp_state = next((cp for cp in (prog.get("checkpoints") or []) if cp.get("id") == cp_id), None)
         if not cp_id or not isinstance(cp_state, dict) or cp_state.get("terminal"):
             reasons.append("no_reexecutable_current_checkpoint")
+        build_entitlement: dict[str, Any] | None = None
+        if cp_id and isinstance(cp_state, dict) and not cp_state.get("terminal"):
+            packet_cp = next(
+                (
+                    cp for cp in (meta.get("checkpoint_graph") or {}).get("checkpoints", [])
+                    if isinstance(cp, dict) and cp.get("id") == cp_id
+                ),
+                None,
+            )
+            if not isinstance(packet_cp, dict):
+                reasons.append("current_checkpoint_build_budget_missing")
+            else:
+                build_entitlement = program.build_pass_entitlement(
+                    prog, cp_id=cp_id, packet_cp=packet_cp,
+                )
+                reasons.extend(build_entitlement["reason_codes"])
         order = (meta.get("checkpoint_graph") or {}).get("execution_order") or []
         finalized = {str(item.get("id")) for item in (prog.get("finalized_checkpoints") or []) if isinstance(item, dict)}
         if cp_id not in order or cp_id in finalized or not any(cid not in finalized for cid in order):
@@ -1122,7 +1138,23 @@ def segment_boundary_eligibility(
             meta, current_state.get("program") or {}, events,
             canonical_repo=Path(canonical_repo), segment_doc=segment,
         )
-        if current_state.get("last_candidate_sha") not in (None, "", candidate_sha, last_approved):
+        prior_candidate = str(current_state.get("last_candidate_sha") or "")
+        prior_candidate_lineage_valid = prior_candidate in ("", candidate_sha, last_approved)
+        if prior_candidate and not prior_candidate_lineage_valid:
+            # A crossing BUILD may itself be a funded repair of an earlier
+            # candidate. In that case the state still names the previous
+            # candidate until this finalization commits the new one. Accept
+            # only a proven ancestor on the same sealed candidate branch;
+            # never treat a different or rewritten tip as equivalent.
+            prior_candidate_lineage_valid = (
+                bool(_FULL_SHA_RE.fullmatch(prior_candidate))
+                and build_finalize._candidate_branch_contains(
+                    canonical_repo, str(segment.get("candidate_branch") or ""), prior_candidate,
+                )
+                and build_finalize._ancestor_of(canonical_repo, prior_candidate, last_approved)
+                and build_finalize._ancestor_of(canonical_repo, candidate_sha, prior_candidate)
+            )
+        if not prior_candidate_lineage_valid:
             reasons.append("candidate_differs_from_current_or_last_approved_state")
         if cp_state and cp_state.get("checkpoint_entry_candidate_sha") != last_approved:
             reasons.append("last_approved_candidate_does_not_match_checkpoint_entry")
@@ -1196,6 +1228,8 @@ def segment_boundary_eligibility(
             "reexecute_checkpoint": cp_id,
             "reasons": reasons,
         }
+        if build_entitlement is not None:
+            proof["required_build_entitlement"] = build_entitlement
         return not reasons, proof
     except Exception as exc:
         return False, {
