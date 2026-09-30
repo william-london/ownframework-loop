@@ -465,25 +465,8 @@ assert child_job["runtime_generation"] == runtime_generation
 # Exercise the real counter claim, including durable allocation/event binding,
 # then deterministic BUILD finalization and a normal REVIEW claim. No provider
 # call is made; only the semantic body is a deterministic fixture.
-child_resolution = capabilities.resolve_capabilities(
-    [], canonical_repo=repo, role="builder",
-    repo_cache_root=runtime_env.repo_tool_cache_dir(repo),
-    ephemeral_cache_root=runtime_env.runtime_cache_dir(repo, child_run, "builder") / "capability-cache",
-    evidence_run_key=child_run,
-)
-child_binding = capability_binding.ensure_run_binding(
-    repo, child_run, child_resolution, profile, allow_create=True,
-)
-program_mission.bind_runtime_identity(
-    repo, child_run, run_binding=child_binding, runner_profile=profile,
-    runtime_generation=runtime_generation,
-)
-identity = program_mission.verify_runtime_identity(
-    repo, mission_id, run_binding=child_binding, runner_profile=profile,
-    runtime_generation=runtime_generation,
-    segment_number=int(child_segment["segment_number"]),
-)
-assert identity["capability_binding_sha256"] == child_binding["binding_sha256"]
+child_binding_path = capability_binding.binding_path(repo, child_run)
+assert not child_binding_path.exists(), "fresh typed successor starts without a provider binding"
 before_builds = child_state["program"]["cumulative_counters"]["build_pass_count"]
 before_repairs = child_state["program"]["cumulative_counters"]["repair_round_count"]
 sealed_cumulative_ceilings = dict(child_state["program"]["cumulative_ceilings"])
@@ -554,15 +537,27 @@ assert pristine_attempt_count == 0
 pristine_snapshot = dict(pristine_row)
 assert pristine_snapshot["status"] == "QUARANTINED", pristine_snapshot
 assert git_checks.branch_head(repo, child_candidate_branch) is None
-pristine_migration = program_mission.prepare_runtime_generation_resume(
-    repo, child_run, job_snapshot=pristine_snapshot,
-    target_runtime_generation=first_resumed_generation, db_path=db_path,
-)
-assert pristine_migration["sequence"] == 2, pristine_migration
-assert program_mission.prepare_runtime_generation_resume(
-    repo, child_run, job_snapshot=pristine_snapshot,
-    target_runtime_generation=first_resumed_generation, db_path=db_path,
-) == pristine_migration
+assert not child_binding_path.exists(), "quarantined fresh successor still has no provider binding"
+real_resolve_capabilities = capabilities.resolve_capabilities
+def drifted_capability_resolution(*args, **kwargs):
+    resolution = real_resolve_capabilities(*args, **kwargs)
+    resolution["network_domains"] = ["unsealed.example"]
+    return resolution
+capabilities.resolve_capabilities = drifted_capability_resolution
+try:
+    try:
+        program_mission.prepare_runtime_generation_resume(
+            repo, child_run, job_snapshot=pristine_snapshot,
+            target_runtime_generation=first_resumed_generation, db_path=db_path,
+        )
+    except program_mission.MissionAuthorityError as exc:
+        assert "projection differs from frozen mission authority" in str(exc), exc
+    else:
+        raise AssertionError("runtime migration accepted a drifted fresh capability projection")
+finally:
+    capabilities.resolve_capabilities = real_resolve_capabilities
+assert not child_binding_path.exists(), "rejected projection must not publish a run binding"
+assert not program_mission._mission_runtime_migration_path(repo, mission_id, 2).exists()
 pristine_resume_output = io.StringIO()
 with contextlib.redirect_stdout(pristine_resume_output):
     try:
@@ -577,7 +572,22 @@ pristine_resumed = json.loads(pristine_resume_output.getvalue())
 assert pristine_resumed["ok"] is True and pristine_resumed["resumed"] is True, pristine_resumed
 assert pristine_resumed["runtime_generation_previous"] == successor_generation, pristine_resumed
 assert pristine_resumed["runtime_generation"] == first_resumed_generation, pristine_resumed
-assert pristine_resumed["runtime_migration"] == pristine_migration, pristine_resumed
+pristine_migration = pristine_resumed["runtime_migration"]
+assert pristine_migration["sequence"] == 2, pristine_migration
+assert child_binding_path.is_file(), "supported resume creates the initial run binding"
+child_binding = capability_binding._read(child_binding_path)
+assert child_binding["projection"]["requested"] == (child_meta.get("capabilities") or [])
+assert child_binding["projection"]["requested_runner_profile"]["identity_sha256"] == profile["identity_sha256"]
+# Replaying the exact quarantined snapshot models a crash after append-only
+# migration publication but before the supervisor ledger transition.
+assert program_mission.prepare_runtime_generation_resume(
+    repo, child_run, job_snapshot=pristine_snapshot,
+    target_runtime_generation=first_resumed_generation, db_path=db_path,
+) == pristine_migration
+assert program_mission.prepare_runtime_generation_resume(
+    repo, child_run, job_snapshot=pristine_snapshot,
+    target_runtime_generation=first_resumed_generation, db_path=db_path,
+) == pristine_migration
 assert util.sha256_file(child_packet_path) == child_packet_sha
 assert util.sha256_file(state.state_path(repo, child_run)) == pre_pristine_state_sha
 assert integrity.compute_event_chain_hash(state.events_path(repo, child_run)) == pre_pristine_event_sha

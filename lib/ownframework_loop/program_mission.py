@@ -1216,6 +1216,162 @@ def _runtime_migration_candidate_lineage_valid(
     )
 
 
+def _create_pristine_continuation_binding(
+    repo: Path,
+    run_id: str,
+    *,
+    mission_id: str,
+    segment: dict[str, Any],
+    mission_doc: dict[str, Any],
+    packet_meta: dict[str, Any],
+    current_state: dict[str, Any],
+    job_snapshot: dict[str, Any],
+    attempts: list[dict[str, Any]],
+    active_runtime: dict[str, Any],
+    active_sequence: int,
+    runner_profile: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Create the first run binding only for an untouched typed continuation.
+
+    Normal semantic dispatch creates a run binding during provider preflight.
+    An explicit runtime-generation resume happens earlier, so a fresh typed
+    continuation can legitimately have no binding yet. Reproduce the ordinary
+    resolver, compare its complete stable projection to the mission's original
+    sealed projection (normalizing only the per-run research evidence path),
+    then publish through capability_binding's create-once authority.
+    """
+    from . import capabilities, capability_binding, runtime_env
+
+    run_binding_path = capability_binding.binding_path(repo, run_id)
+    migration_root = capability_binding.migration_root(repo, run_id)
+    if run_binding_path.exists() or run_binding_path.is_symlink():
+        raise MissionAuthorityError(
+            "pristine continuation binding creation was requested after a binding appeared"
+        )
+    if (
+        attempts
+        or active_sequence <= 0
+        or str(current_state.get("last_candidate_sha") or "")
+        != str(segment.get("baseline_sha") or "")
+        or git_checks.branch_head(repo, str(segment.get("candidate_branch") or "")) is not None
+        or migration_root.exists()
+        or migration_root.is_symlink()
+    ):
+        raise MissionAuthorityError(
+            "missing run binding is not an untouched typed-continuation boundary"
+        )
+
+    engineering_state = str(current_state.get("state") or "")
+    if engineering_state in {"READY_TO_BUILD", "CHANGES_REQUESTED", "BUILDING"}:
+        role = "builder"
+    elif engineering_state in {"READY_FOR_REVIEW", "REVIEWING"}:
+        role = "reviewer"
+    else:
+        raise MissionAuthorityError(
+            "missing run binding cannot be created outside an executable semantic state"
+        )
+
+    expected_capabilities = sorted(
+        str(value) for value in (active_runtime.get("capabilities") or [])
+    )
+    requested = packet_meta.get("capabilities") or []
+    if (
+        not isinstance(requested, list)
+        or not all(isinstance(value, str) for value in requested)
+        or sorted(requested) != expected_capabilities
+    ):
+        raise MissionAuthorityError(
+            "fresh continuation capability request differs from frozen mission identity"
+        )
+
+    runner = str((mission_doc.get("operational_budget") or {}).get("runner") or "")
+    if not runner or runner != str(job_snapshot.get("runner") or ""):
+        raise MissionAuthorityError("runtime migration runner differs from frozen mission identity")
+    profile_identity = {
+        key: runner_profile.get(key)
+        for key in ("name", "provider", "model", "effort", "identity_sha256")
+    }
+    if profile_identity != active_runtime.get("runner_profile"):
+        raise MissionAuthorityError(
+            "fresh continuation profile/model/effort differs from frozen mission identity"
+        )
+
+    source_segment, _ = _read_record(
+        _segment_path(repo, mission_id, 1), expected_schema=SEGMENT_SCHEMA,
+    )
+    source_run_id = str(source_segment.get("run_id") or "")
+    if (
+        source_segment.get("mission_id") != mission_id
+        or source_segment.get("segment_number") != 1
+        or not source_run_id
+        or source_run_id == run_id
+    ):
+        raise MissionAuthorityError("original mission capability-binding source is invalid")
+    initial_runtime, _ = _read_record(
+        _mission_runtime_path(repo, mission_id), expected_schema=MISSION_RUNTIME_SCHEMA,
+    )
+    original_binding = capability_binding._read(
+        capability_binding.binding_path(repo, source_run_id),
+    )
+    capability_binding._validate_document(original_binding, run_id=source_run_id)
+    original_projection = original_binding.get("projection")
+    if (
+        not isinstance(original_projection, dict)
+        or original_binding.get("binding_sha256")
+        != initial_runtime.get("capability_binding_sha256")
+        or _digest(original_projection)
+        != initial_runtime.get("capability_projection_sha256")
+    ):
+        raise MissionAuthorityError(
+            "original mission capability binding does not match its frozen runtime identity"
+        )
+
+    # A prior sequence binding receipt would mean this migration boundary has
+    # already published a different per-run capability identity. Do not
+    # overwrite or reinterpret that evidence.
+    receipt_path = _mission_runtime_binding_path(repo, mission_id, active_sequence)
+    if receipt_path.exists() or receipt_path.is_symlink():
+        raise MissionAuthorityError(
+            "mission runtime sequence already has a binding receipt for another boundary"
+        )
+
+    resolution = capabilities.resolve_capabilities(
+        [str(value) for value in requested],
+        canonical_repo=repo,
+        role=role,
+        repo_cache_root=runtime_env.repo_tool_cache_dir(repo),
+        ephemeral_cache_root=(
+            runtime_env.runtime_cache_dir(repo, run_id, role) / "capability-cache"
+        ),
+        packet_network_allowlist=[
+            str(value) for value in (packet_meta.get("network_read_allowlist") or [])
+        ],
+        evidence_run_key=run_id,
+    )
+    capability_binding._assert_runtime_ready_resolution(resolution, requested)
+    projection = capability_binding.stable_projection(resolution, runner_profile)
+    expected_projection = copy.deepcopy(original_projection)
+    original_evidence_dir = str(runtime_env.research_evidence_dir(source_run_id))
+    continuation_evidence_dir = str(runtime_env.research_evidence_dir(run_id))
+    stable_filesystem = expected_projection.get("stable_filesystem") or {}
+    stable_filesystem["allowRead"] = sorted(
+        continuation_evidence_dir if value == original_evidence_dir else value
+        for value in (stable_filesystem.get("allowRead") or [])
+    )
+    expected_projection["stable_filesystem"] = stable_filesystem
+    if projection != expected_projection:
+        raise MissionAuthorityError(
+            "fresh continuation capability projection differs from frozen mission authority"
+        )
+
+    binding = capability_binding.ensure_run_binding(
+        repo, run_id, resolution, runner_profile, allow_create=True,
+    )
+    if binding.get("projection") != projection:
+        raise MissionAuthorityError("created continuation capability binding is contradictory")
+    return binding, runner_profile
+
+
 def prepare_runtime_generation_resume(
     canonical_repo: Path,
     run_id: str,
@@ -1409,7 +1565,6 @@ def prepare_runtime_generation_resume(
     # binding, packet, state, counters, or supervisor ledger.
     from . import capability_binding
 
-    binding = capability_binding._read(capability_binding.binding_path(repo, run_id))
     runner = str((mission_doc.get("operational_budget") or {}).get("runner") or "")
     if runner != str(job_snapshot.get("runner") or ""):
         raise MissionAuthorityError("runtime migration runner differs from frozen mission identity")
@@ -1421,6 +1576,24 @@ def prepare_runtime_generation_resume(
     if attestation is not None:
         profile = dict(profile)
         profile["effort_attestation"] = attestation
+    binding_path = capability_binding.binding_path(repo, run_id)
+    if binding_path.exists():
+        binding = capability_binding._read(binding_path)
+    else:
+        binding, profile = _create_pristine_continuation_binding(
+            repo,
+            run_id,
+            mission_id=mission_id,
+            segment=segment,
+            mission_doc=mission_doc,
+            packet_meta=meta,
+            current_state=current,
+            job_snapshot=job_snapshot,
+            attempts=attempts,
+            active_runtime=active_runtime,
+            active_sequence=active_sequence,
+            runner_profile=profile,
+        )
     bound_identity = bind_runtime_identity(
         repo, run_id, run_binding=binding, runner_profile=profile,
         runtime_generation=previous_generation,
