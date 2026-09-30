@@ -246,6 +246,7 @@
               "cumulative_used_before": { "type": "integer", "minimum": 0 },
               "cumulative_cap": { "type": "integer", "minimum": 1 },
               "reserved_remaining_authority": { "type": "integer", "minimum": 0 },
+              "final_acceptance_reserve": { "type": "integer", "minimum": 0 },
               "reclaimable_pool_before": { "type": "integer", "minimum": 1 },
               "amount_borrowed": { "const": 1 },
               "reclaimable_pool_after": { "type": "integer", "minimum": 0 },

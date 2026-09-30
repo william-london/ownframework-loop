@@ -103,6 +103,12 @@ assert any(
 print("V4_POLICY_MUST_BE_EXPLICIT_TYPED_AND_NONEMPTY=PASS")
 ps = program_state(meta)
 state_doc = {"state": "READY_TO_BUILD", "run_id": "fixture-run", "no_progress_streak": 0}
+assert program.minimum_one_repair_final_acceptance_reserve("build_pass_count") == 1
+assert program.minimum_one_repair_final_acceptance_reserve("repair_round_count") == 1
+assert program.minimum_one_repair_final_acceptance_reserve("review_pass_count") == 2
+print("FINAL_REVIEW_BUILD_RESERVE=1 PASS")
+print("FINAL_REVIEW_REPAIR_RESERVE=1 PASS")
+print("FINAL_REVIEW_REVIEW_RESERVE=2 PASS")
 plan = program.semantic_budget_allocation_plan(
     ps, packet=meta, cp_id="CP-02", counter="build_pass_count", state_doc=state_doc,
     run_id="fixture-run",
@@ -112,6 +118,7 @@ assert plan["allocation"]["amount_borrowed"] == 1
 assert plan["allocation"]["source_kind"] == "approved_checkpoint_capacity"
 assert plan["allocation"]["source_checkpoint_id"] == "CP-01"
 assert plan["allocation"]["reclaimable_pool_after"] == plan["allocation"]["reclaimable_pool_before"] - 1
+assert plan["allocation"]["final_acceptance_reserve"] == 1
 claimed = program._bump_counter_one(
     ps, cp_id="CP-02", counter="build_pass_count",
     packet_cp=meta["checkpoint_graph"]["checkpoints"][1], packet=meta,
@@ -135,6 +142,21 @@ blocked = program.semantic_budget_allocation_plan(
 assert blocked["eligible"] is False
 assert blocked["reason"] == "allocation_would_consume_future_or_final_acceptance_reserve", blocked
 print("FUTURE_CHECKPOINT_AND_FINAL_ACCEPTANCE_FLOOR_PRESERVED=PASS")
+
+# REVIEW borrowing must preserve two whole-product final-review attempts, not
+# merely one. CP-03 still requires its declared review, so a claim that would
+# leave only one additional review is refused before allocation.
+review_near_ceiling = copy.deepcopy(ps)
+review_near_ceiling["cumulative_counters"]["review_pass_count"] = 4
+review_blocked = program.semantic_budget_allocation_plan(
+    review_near_ceiling, packet=meta, cp_id="CP-02",
+    counter="review_pass_count",
+    state_doc={**state_doc, "state": "READY_FOR_REVIEW"}, run_id="fixture-run",
+)
+assert review_blocked["eligible"] is False, review_blocked
+assert review_blocked["reason"] == "allocation_would_consume_future_or_final_acceptance_reserve"
+assert review_blocked["reserved_remaining_authority"] == 3
+print("ADAPTIVE_REVIEW_PRESERVES_TWO_FINAL_REVIEW_CLAIMS=PASS")
 
 global_exhausted = copy.deepcopy(ps)
 global_exhausted["cumulative_counters"]["build_pass_count"] = 7
@@ -162,6 +184,9 @@ for counter, phase in (("review_pass_count", "READY_FOR_REVIEW"),
         run_id="fixture-run",
     )
     assert proof["eligible"] is True, (counter, proof)
+    assert proof["allocation"]["final_acceptance_reserve"] == (
+        2 if counter == "review_pass_count" else 1
+    )
     claimed = program._bump_counter_one(
         trial, cp_id="CP-02", counter=counter,
         packet_cp=meta["checkpoint_graph"]["checkpoints"][1], packet=meta,

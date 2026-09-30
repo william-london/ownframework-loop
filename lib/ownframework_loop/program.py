@@ -1303,6 +1303,21 @@ _SEMANTIC_COUNTER_CAPS = {
 }
 
 
+def minimum_one_repair_final_acceptance_reserve(counter: str) -> int:
+    """Return the cumulative claims reserved for a final-review repair lane.
+
+    Whole-product final acceptance can request one bounded repair. The lane
+    therefore needs one BUILD, one REPAIR, and two REVIEW claims (the initial
+    final review plus the post-repair review). Earlier adaptive allocations
+    must leave these claims available without increasing sealed ceilings.
+    """
+    return {
+        "build_pass_count": 1,
+        "repair_round_count": 1,
+        "review_pass_count": 2,
+    }.get(counter, 0)
+
+
 def _is_full_sha256(value: str) -> bool:
     return isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value) is not None
 
@@ -1465,9 +1480,12 @@ def semantic_budget_allocation_plan(
             return {"eligible": False, "reason": "future_checkpoint_state_missing"}
         future_cap = int((packet_cps[future_id].get("risk_budget") or {}).get(risk_key) or 0)
         reserved += max(0, future_cap - int(future_state.get(counter) or 0))
-    # Preserve the minimum executable whole-product final acceptance lane;
-    # a final-review repair needs one BUILD, one REVIEW, and one REPAIR.
-    reserved += 1
+    # Preserve a complete minimum whole-product final acceptance lane. A
+    # final-review must-fix requires an initial REVIEW, one REPAIR + BUILD,
+    # then a second REVIEW. The reserve is counter-specific and is consumed
+    # only by the final-review lifecycle itself, never by earlier borrowing.
+    final_acceptance_reserve = minimum_one_repair_final_acceptance_reserve(counter)
+    reserved += final_acceptance_reserve
     remaining_after = cumulative_cap - cumulative_used - 1
     if remaining_after < reserved:
         return {
@@ -1511,6 +1529,7 @@ def semantic_budget_allocation_plan(
         "cumulative_used_before": cumulative_used,
         "cumulative_cap": cumulative_cap,
         "reserved_remaining_authority": reserved,
+        "final_acceptance_reserve": final_acceptance_reserve,
         "reclaimable_pool_before": pool_before,
         "amount_borrowed": 1,
         "reclaimable_pool_after": pool_before - 1,
@@ -2169,6 +2188,16 @@ def verify_frozen_graph(packet: dict[str, Any], program_state: dict[str, Any]) -
                 return False, "semantic_budget_allocation_source_proof_invalid"
             if (
                 allocation.get("reserved_remaining_authority", -1) < 0
+                or (
+                    "final_acceptance_reserve" in allocation
+                    and allocation.get("final_acceptance_reserve")
+                    != minimum_one_repair_final_acceptance_reserve(counter)
+                )
+                or (
+                    "final_acceptance_reserve" in allocation
+                    and allocation.get("reserved_remaining_authority", 0)
+                    < allocation.get("final_acceptance_reserve", 0)
+                )
                 or allocation.get("reclaimable_pool_before", 0) < 1
                 or allocation.get("reclaimable_pool_after") != allocation.get("reclaimable_pool_before") - 1
                 or not isinstance(allocation.get("reason"), str)

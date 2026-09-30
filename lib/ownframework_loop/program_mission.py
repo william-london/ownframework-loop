@@ -2889,7 +2889,7 @@ def _historical_repair_reconciliation_allocations(
             )
             for future_id in order[current_index + 1:]
             if future_id not in approved
-        ) + 1
+        ) + program.minimum_one_repair_final_acceptance_reserve(counter)
         if cumulative_cap - cumulative_before - 1 < future_reserved:
             raise MissionAuthorityError("historical repair reclassification would consume future/final acceptance reserve")
 
@@ -2941,6 +2941,7 @@ def _historical_repair_reconciliation_allocations(
             "cumulative_used_before": cumulative_before,
             "cumulative_cap": cumulative_cap,
             "reserved_remaining_authority": future_reserved,
+            "final_acceptance_reserve": program.minimum_one_repair_final_acceptance_reserve(counter),
             "reclaimable_pool_before": pool_before,
             "amount_borrowed": 1,
             "reclaimable_pool_after": pool_before - 1,

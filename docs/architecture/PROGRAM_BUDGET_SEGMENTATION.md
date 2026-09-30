@@ -13,9 +13,13 @@ checkpoint graph, runner, runtime generation, capability binding/projection,
 runner profile/model/effort, effect authority, cost and token ceilings,
 transient/infrastructure envelope, wall-clock origin/deadline, mission source
 ceiling, segment ceiling, and maximum segment count. These execution identities
-and limits remain frozen across segments. A successor is a deterministic
-projection of that envelope; it cannot add any of those powers. Runtime
-migration is not performed by segmentation.
+and limits remain frozen across ordinary automatic segments. A successor is a
+deterministic projection of that envelope; it cannot add any of those powers.
+Automatic source-ceiling segmentation does not migrate runtime identity. The
+separately typed blocked semantic-budget continuation may append a narrowly
+bound runtime-generation migration when the currently installed commissioned
+generation differs; it preserves the mission's runner profile, model, effort,
+capability request, and all semantic and operational ceilings.
 
 ## Durable records and lineage
 
@@ -63,6 +67,35 @@ reconciles its deterministic successor before completing the parent job. A
 restarted supervisor repeats the same reconciliation safely. The mission
 observer resolves the latest segment from immutable mission records and
 supervisor rows rather than requiring a per-run observer retarget.
+
+## Adaptive semantic allocation
+
+Adaptive semantic redistribution is opt-in for v4 only. At a checkpoint-local
+BUILD, REVIEW, or REPAIR limit, the claim owner may allocate exactly one
+additional claim from either unused capacity of an already APPROVED checkpoint
+or explicitly authorized cumulative slack. A claim allocation and its claim
+are durably bound in the same state/event lifecycle and replay idempotently.
+The allocator never increases mission cumulative ceilings, and it refuses
+allocation after STOP, at no-progress/repeated-finding fuses, or when the
+remaining authority is needed by unfinished checkpoints. Earlier borrowing
+also preserves a minimum one-repair whole-product final-review lane: one BUILD,
+one REPAIR, and two REVIEW claims. v1–v3 and v4 without the sealed policy keep
+their historical hard local-cap behavior.
+
+## Explicit blocked semantic-budget continuation
+
+`ofloop program continue-blocked-semantic-budget` is a separate, explicit
+authority path, not automatic source-ceiling segmentation. It accepts only an
+intact, terminal BLOCKED v4 segment whose exact reason is local BUILD-cap
+exhaustion, whose supervisor job is DONE and workerless, and whose mission
+still has a segment slot and verified cumulative authority. It creates a
+policy-overlay successor from the recursively verified last APPROVED
+checkpoint candidate. The blocked crossing candidate remains historical and
+is explicitly not adopted. The derived packet, segment authority, execution
+seal, and supervisor enrollment are deterministic and replay-safe. If the
+commissioned runtime generation changed, a source-bound append-only migration
+may be attached to this typed continuation; it cannot change the existing
+capability set, profile/model/effort, or mission ceilings.
 
 ## Legacy admission
 

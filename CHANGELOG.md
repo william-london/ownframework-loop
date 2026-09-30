@@ -11,6 +11,20 @@ immutable historical baseline of the previous published line.
 The complete historical changelog through 0.5.2 is preserved at
 [`docs/history/CHANGELOG-through-0.5.2.md`](docs/history/CHANGELOG-through-0.5.2.md).
 
+## Unreleased - Adaptive semantic budgets and typed continuation (2026-09-30)
+
+- Opted-in v4 missions may redistribute only already-sealed cumulative
+  BUILD/REVIEW/REPAIR authority one claim at a time, with durable allocation
+  evidence, safe approved-capacity/slack accounting, future-checkpoint
+  reservations, no-progress refusal, and a final-review reserve of one BUILD,
+  one REPAIR, and two REVIEW claims. Cumulative ceilings do not increase.
+- Added the explicit blocked semantic-budget continuation path: it preserves
+  the terminal source segment, packet and mission authority, begins at the
+  exact last-approved candidate, records crossing-candidate non-adoption, and
+  may append only a typed runtime-generation migration when required.
+- Historical packet semantics remain unchanged. Added claim-crash/import
+  evidence and a production-path blocked-continuation lifecycle regression.
+
 ## Unreleased - v4 PROGRAM segmentation and recovery closure (2026-09-29)
 
 - Recovery authority: failed/unaccepted ready semantic artifacts are reseeded

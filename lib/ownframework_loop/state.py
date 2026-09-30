@@ -523,17 +523,33 @@ def _verify_semantic_budget_allocation_bindings(
         return
     if not isinstance(allocations, list):
         raise integrity.TamperingDetected("semantic budget allocation ledger is malformed")
-    imported_hashes = {
-        str(event.get("semantic_budget_import_sha256") or "")
-        for event in events
-        if event.get("event_type") == "mission_segment_materialized"
-    }
     canonical_allocations = json.loads(integrity.canonical_json_dumps(allocations))
-    import_sha = hashlib.sha256(
-        integrity.canonical_json_dumps(canonical_allocations).encode("utf-8")
-    ).hexdigest()
-    import_bound = import_sha in imported_hashes
-    for item in allocations:
+    imported_prefix_lengths: set[int] = set()
+    for event in events:
+        if event.get("event_type") != "mission_segment_materialized":
+            continue
+        import_sha = str(event.get("semantic_budget_import_sha256") or "")
+        if not import_sha:
+            continue
+        recorded_count = event.get("semantic_budget_import_count")
+        if isinstance(recorded_count, int) and not isinstance(recorded_count, bool):
+            candidate_counts = (recorded_count,)
+        else:
+            # Older materialization events bound the imported ledger by digest
+            # only. Find the exact imported prefix so later claim-bound
+            # allocations may be appended without invalidating that evidence.
+            candidate_counts = range(1, len(canonical_allocations) + 1)
+        for count in candidate_counts:
+            if count < 1 or count > len(canonical_allocations):
+                continue
+            prefix = canonical_allocations[:count]
+            prefix_sha = hashlib.sha256(
+                integrity.canonical_json_dumps(prefix).encode("utf-8")
+            ).hexdigest()
+            if prefix_sha == import_sha:
+                imported_prefix_lengths.add(count)
+                break
+    for index, item in enumerate(allocations):
         if not isinstance(item, dict):
             raise integrity.TamperingDetected("semantic budget allocation entry is malformed")
         body = dict(item)
@@ -551,6 +567,7 @@ def _verify_semantic_budget_allocation_bindings(
             and event.get("semantic_budget_allocation_sha256") == allocation_sha
             for event in events
         )
+        import_bound = any(index < count for count in imported_prefix_lengths)
         if not directly_bound and not import_bound:
             raise integrity.TamperingDetected(
                 "semantic budget allocation has no durable claim or segment-import binding"
@@ -1542,6 +1559,7 @@ def initialize_program_mission_segment(
         }
         if allocation_import_sha:
             event_extras["semantic_budget_import_sha256"] = allocation_import_sha
+            event_extras["semantic_budget_import_count"] = len(allocations)
         _commit_state_event_locked(
             canonical_repo, run_id, new,
             event_type="mission_segment_materialized",

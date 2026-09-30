@@ -32,6 +32,19 @@ historical evidence. The successor starts from the exact last APPROVED
 candidate, not the unreviewed crossing candidate, and receives no authority
 beyond the frozen mission. Whole-product final acceptance remains mandatory.
 
+An opted-in v4 semantic-budget policy may reallocate existing mission BUILD,
+REVIEW, or REPAIR authority one claim at a time after a checkpoint's initial
+allocation is exhausted. It can draw only from unused APPROVED-checkpoint
+capacity or explicitly sealed cumulative slack; cumulative ceilings never
+increase. Durable allocation evidence, future-checkpoint reservations,
+no-progress fuses, and a minimum final-review repair lane (one BUILD, one
+REPAIR, and two REVIEW claims) bound the redistribution. v1–v3 and v4 packets
+without that explicit policy retain hard checkpoint-local caps. A distinct
+`ofloop program continue-blocked-semantic-budget` operation can create a typed
+successor from an exactly verified last-approved candidate after local
+semantic-budget exhaustion; it preserves the blocked segment and does not
+adopt its unreviewed crossing candidate.
+
 The deterministic core owns packet authority, source identity, worktrees,
 state, exact candidate SHA, evidence, retry/repair budgets, runtime-generation
 binding, and promotion boundaries. Agent hosts are adapters.

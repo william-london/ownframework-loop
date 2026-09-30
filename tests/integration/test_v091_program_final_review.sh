@@ -1291,7 +1291,15 @@ assert verdict_n_final.get("review_scope") == "program_final", verdict_n_final
 state_n_terminal = state_mod.load(repo, "run-N")
 assert state_n_terminal.get("state") == "APPROVED", \
     f"N: terminal state should be APPROVED, got {state_n_terminal.get('state')!r}"
+program_n_terminal = state_n_terminal.get("program") or {}
+assert state_n_terminal.get("build_pass_count") == 3, state_n_terminal.get("build_pass_count")
+assert state_n_terminal.get("review_pass_count") == 4, state_n_terminal.get("review_pass_count")
+assert state_n_terminal.get("repair_round") == 1, state_n_terminal.get("repair_round")
+assert program_n_terminal.get("cumulative_counters", {}).get("build_pass_count") == 3
+assert program_n_terminal.get("cumulative_counters", {}).get("review_pass_count") == 4
+assert program_n_terminal.get("cumulative_counters", {}).get("repair_round_count") == 1
 print("TEST_N_REAL_PROGRAM_FINAL_REPAIR=PASS")
+print("PROGRAM_FINAL_TWO_REVIEW_ONE_REPAIR_ONE_BUILD_LANE=PASS")
 
 # ============================================================
 # TEST O: final review validation set includes the previously-completed
