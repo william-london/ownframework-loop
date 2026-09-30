@@ -1231,26 +1231,30 @@ def _create_pristine_continuation_binding(
     active_sequence: int,
     runner_profile: dict[str, Any],
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Create the first run binding only for an untouched typed continuation.
+    """Create or re-prove the first binding for an untouched typed continuation.
 
     Normal semantic dispatch creates a run binding during provider preflight.
     An explicit runtime-generation resume happens earlier, so a fresh typed
     continuation can legitimately have no binding yet. Reproduce the ordinary
     resolver, compare its complete stable projection to the mission's original
     sealed projection (normalizing only the per-run research evidence path),
-    then publish through capability_binding's create-once authority.
+    then publish/reuse through capability_binding's create-once authority.
     """
     from . import capabilities, capability_binding, runtime_env
 
     run_binding_path = capability_binding.binding_path(repo, run_id)
     migration_root = capability_binding.migration_root(repo, run_id)
-    if run_binding_path.exists() or run_binding_path.is_symlink():
+    binding_exists = run_binding_path.exists()
+    if run_binding_path.is_symlink():
         raise MissionAuthorityError(
-            "pristine continuation binding creation was requested after a binding appeared"
+            "pristine continuation binding path is a symlink"
         )
     if (
         attempts
-        or active_sequence <= 0
+        or not isinstance(active_sequence, int)
+        or isinstance(active_sequence, bool)
+        or active_sequence < 0
+        or (binding_exists and active_sequence != 0)
         or str(current_state.get("last_candidate_sha") or "")
         != str(segment.get("baseline_sha") or "")
         or git_checks.branch_head(repo, str(segment.get("candidate_branch") or "")) is not None
@@ -1329,11 +1333,12 @@ def _create_pristine_continuation_binding(
     # A prior sequence binding receipt would mean this migration boundary has
     # already published a different per-run capability identity. Do not
     # overwrite or reinterpret that evidence.
-    receipt_path = _mission_runtime_binding_path(repo, mission_id, active_sequence)
-    if receipt_path.exists() or receipt_path.is_symlink():
-        raise MissionAuthorityError(
-            "mission runtime sequence already has a binding receipt for another boundary"
-        )
+    if active_sequence > 0:
+        receipt_path = _mission_runtime_binding_path(repo, mission_id, active_sequence)
+        if receipt_path.exists() or receipt_path.is_symlink():
+            raise MissionAuthorityError(
+                "mission runtime sequence already has a binding receipt for another boundary"
+            )
 
     resolution = capabilities.resolve_capabilities(
         [str(value) for value in requested],
@@ -1364,6 +1369,10 @@ def _create_pristine_continuation_binding(
             "fresh continuation capability projection differs from frozen mission authority"
         )
 
+    # At sequence zero a child binding may already have been create-once
+    # published before a crash interrupted migration publication. Re-resolve
+    # and compare the complete normalized projection above, then let the
+    # canonical binding owner prove that the existing bytes are identical.
     binding = capability_binding.ensure_run_binding(
         repo, run_id, resolution, runner_profile, allow_create=True,
     )
@@ -1577,7 +1586,28 @@ def prepare_runtime_generation_resume(
         profile = dict(profile)
         profile["effort_attestation"] = attestation
     binding_path = capability_binding.binding_path(repo, run_id)
-    if binding_path.exists():
+    if active_sequence == 0:
+        # The immutable base MISSION-RUNTIME belongs to the original segment.
+        # A pristine continuation's run-scoped research path makes its binding
+        # digest differ, so calling bind_runtime_identity here would attempt to
+        # overwrite that base record. Re-resolve and compare against the
+        # original sealed projection instead; the first child-specific
+        # runtime-binding receipt is published for migration sequence 1.
+        binding, profile = _create_pristine_continuation_binding(
+            repo,
+            run_id,
+            mission_id=mission_id,
+            segment=segment,
+            mission_doc=mission_doc,
+            packet_meta=meta,
+            current_state=current,
+            job_snapshot=job_snapshot,
+            attempts=attempts,
+            active_runtime=active_runtime,
+            active_sequence=active_sequence,
+            runner_profile=profile,
+        )
+    elif binding_path.exists():
         binding = capability_binding._read(binding_path)
     else:
         binding, profile = _create_pristine_continuation_binding(
@@ -1594,12 +1624,13 @@ def prepare_runtime_generation_resume(
             active_sequence=active_sequence,
             runner_profile=profile,
         )
-    bound_identity = bind_runtime_identity(
-        repo, run_id, run_binding=binding, runner_profile=profile,
-        runtime_generation=previous_generation,
-    )
-    if not isinstance(bound_identity, dict) or bound_identity.get("runtime_generation") != previous_generation:
-        raise MissionAuthorityError("prior runtime binding could not be proven before migration")
+    if active_sequence > 0:
+        bound_identity = bind_runtime_identity(
+            repo, run_id, run_binding=binding, runner_profile=profile,
+            runtime_generation=previous_generation,
+        )
+        if not isinstance(bound_identity, dict) or bound_identity.get("runtime_generation") != previous_generation:
+            raise MissionAuthorityError("prior runtime binding could not be proven before migration")
     previous, previous_sha, previous_sequence = _active_mission_runtime(repo, mission_doc)
     if (
         previous.get("runtime_generation") != previous_generation
@@ -3107,6 +3138,16 @@ def _verified_mission_spend(
     for job in segment_rows:
         expected_generation = segment_runtime_generations.get(str(job.get("run_id") or ""))
         if (
+            str(job.get("run_id") or "") == current_run_id
+            and runtime_migration_from_generation is not None
+        ):
+            # Same-segment runtime migrations are append-only and do not
+            # rewrite the segment's original admission record. At a supported
+            # resume boundary, the current job must therefore be checked
+            # against the already-verified active migration source, while all
+            # predecessor segments remain bound to their admission generation.
+            expected_generation = str(runtime_migration_from_generation)
+        if (
             str(job.get("runner") or "") != runner
             or str(job.get("runtime_generation") or "") != expected_generation
         ):
@@ -3119,6 +3160,8 @@ def _verified_mission_spend(
             raise MissionAuthorityError("historical source runtime provenance differs from legacy admission")
 
     current_segment_generation = segment_runtime_generations.get(str(current_run_id))
+    if runtime_migration_from_generation is not None:
+        current_segment_generation = str(runtime_migration_from_generation)
     if target_runtime_generation is not None:
         if (
             str(target_runtime_generation) != installed_generation

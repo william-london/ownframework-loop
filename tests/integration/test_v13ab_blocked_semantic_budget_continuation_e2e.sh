@@ -12,6 +12,7 @@ python3 -B - "$TMP" "$ROOT_DIR" <<'PY'
 from __future__ import annotations
 
 import contextlib
+import copy
 import io
 import json
 import os
@@ -19,7 +20,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-root = Path(sys.argv[1])
+root = Path(sys.argv[1]).resolve()
 source_root = Path(sys.argv[2])
 repo = root / "unrelated-v4-mission"
 repo.mkdir()
@@ -175,6 +176,8 @@ assert mission_binding
 segment, _, _, _ = program_mission.load_segment(repo, source_run)
 mission_id = str(segment["mission_id"])
 mission_sha = str(segment["mission_authority_sha256"])
+mission_runtime_path = program_mission._mission_runtime_path(repo, mission_id)
+mission_runtime_sha = util.sha256_file(mission_runtime_path)
 
 
 def packet_for(run_id: str) -> dict:
@@ -388,14 +391,12 @@ source_hashes = {
     "state": util.sha256_file(state.state_path(repo, source_run)),
     "events": integrity.compute_event_chain_hash(state.events_path(repo, source_run)),
 }
-# Model the existing typed successor being created after an ordinary exact
-# runtime commission. Its migration is sequence 1; the recovery under test
-# below must append a distinct sequence 2 for the same sealed child.
-successor_generation = "ofloop-v13ab-successor-generation"
-runtime_generation = successor_generation
-supervisor_runtime.runtime_generation = lambda: successor_generation
-supervisor._current_runtime_generation = lambda: successor_generation
-supervisor_claims._current_runtime_generation = lambda: successor_generation
+# Create the typed child while the original mission runtime is still current.
+# This is the pristine sequence-zero topology: child admission must not invent
+# a migration, and a later supported resume must publish the first migration
+# as sequence 1.
+successor_generation = runtime_generation
+assert program_mission._active_mission_runtime(repo, program_mission.load_segment(repo, source_run)[2])[2] == 0
 args = [
     "program", "continue-blocked-semantic-budget", str(repo), source_run,
     "--expected-mission-id", mission_id,
@@ -449,6 +450,9 @@ child_segment, _, _, _ = program_mission.load_segment(repo, child_run)
 assert child_segment["mission_id"] == mission_id
 assert child_segment["source_admission"]["crossing_candidate_not_adopted"] is True
 assert child_segment["source_admission"]["crossing_candidate_sha"] == crossing_candidate
+assert child_segment["source_admission"].get("runtime_migration") is None
+assert program_mission._active_mission_runtime(repo, program_mission.load_segment(repo, child_run)[2])[2] == 0
+assert not program_mission._mission_runtime_migration_path(repo, mission_id, 1).exists()
 assert child_segment["predecessor_run_id"] == source_run
 assert child_segment["baseline_sha"] == approved_candidate
 assert approval.load_approval(repo, child_run)["binding_kind"] == "mission_derived_seal"
@@ -461,6 +465,7 @@ assert approval_valid, approval_reason
 child_job = supervisor.status(canonical_repo=repo, run_id=child_run, db_path=db_path)
 assert child_job["status"] == "QUEUED", child_job
 assert child_job["runtime_generation"] == runtime_generation
+assert util.sha256_file(mission_runtime_path) == mission_runtime_sha
 
 # Exercise the real counter claim, including durable allocation/event binding,
 # then deterministic BUILD finalization and a normal REVIEW claim. No provider
@@ -538,6 +543,152 @@ pristine_snapshot = dict(pristine_row)
 assert pristine_snapshot["status"] == "QUARANTINED", pristine_snapshot
 assert git_checks.branch_head(repo, child_candidate_branch) is None
 assert not child_binding_path.exists(), "quarantined fresh successor still has no provider binding"
+assert program_mission._active_mission_runtime(repo, program_mission.load_segment(repo, child_run)[2])[2] == 0
+
+def require_resume_refusal(label: str, **kwargs) -> None:
+    try:
+        program_mission.prepare_runtime_generation_resume(
+            repo, child_run, job_snapshot=pristine_snapshot,
+            target_runtime_generation=first_resumed_generation, db_path=db_path,
+            **kwargs,
+        )
+    except (program_mission.MissionAuthorityError, integrity.TamperingDetected,
+            capability_binding.CapabilityBindingError, runner_profiles.RunnerProfileError,
+            ValueError, OSError):
+        return
+    raise AssertionError(f"sequence-zero resume accepted adversarial case: {label}")
+
+first_migration_path = program_mission._mission_runtime_migration_path(repo, mission_id, 1)
+first_migration_path.write_text('{"schema":"contradictory-migration"}\n', encoding="utf-8")
+try:
+    require_resume_refusal("conflicting sequence-one migration record")
+finally:
+    first_migration_path.unlink()
+
+# Sequence-zero is still limited to a workerless, untouched, typed child.
+worker_owned_pristine = dict(pristine_snapshot)
+worker_owned_pristine["worker_pid"] = 987654321
+try:
+    program_mission.prepare_runtime_generation_resume(
+        repo, child_run, job_snapshot=worker_owned_pristine,
+        target_runtime_generation=first_resumed_generation, db_path=db_path,
+    )
+except program_mission.MissionAuthorityError:
+    pass
+else:
+    raise AssertionError("sequence-zero resume accepted an owned worker")
+
+real_load_segment = program_mission.load_segment
+def altered_admission(kind: str, *, crossing_not_adopted: bool = True):
+    loaded = real_load_segment(repo, child_run)
+    altered = copy.deepcopy(loaded[0])
+    altered["source_admission"]["kind"] = kind
+    altered["source_admission"]["crossing_candidate_not_adopted"] = crossing_not_adopted
+    program_mission.load_segment = lambda *args, **kwargs: (altered, *loaded[1:])
+    try:
+        require_resume_refusal(f"admission={kind},not_adopted={crossing_not_adopted}")
+    finally:
+        program_mission.load_segment = real_load_segment
+
+altered_admission("sealed_v4_initial")
+altered_admission("blocked_semantic_budget_continuation", crossing_not_adopted=False)
+
+# Candidate movement without a candidate branch is not the pristine baseline.
+real_load_verified = state.load_verified
+def moved_candidate(run_repo, run_id):
+    snapshot = real_load_verified(run_repo, run_id)
+    if run_id == child_run:
+        snapshot = copy.deepcopy(snapshot)
+        snapshot["last_candidate_sha"] = crossing_candidate
+    return snapshot
+state.load_verified = moved_candidate
+try:
+    require_resume_refusal("candidate differs from baseline without branch")
+finally:
+    state.load_verified = real_load_verified
+
+# An existing named branch is contradictory evidence even if it points at the
+# baseline; the continuation has not yet materialized candidate authority.
+git("branch", child_candidate_branch, approved_candidate)
+try:
+    require_resume_refusal("candidate branch already exists")
+finally:
+    git("branch", "-D", child_candidate_branch)
+
+# The no-binding state is essential to first binding publication. A malformed
+# or identity-drifted binding must not be overwritten or accepted.
+child_binding_path.write_text('{"schema":"contradictory"}\n', encoding="utf-8")
+try:
+    require_resume_refusal("inconsistent existing run binding")
+finally:
+    child_binding_path.unlink()
+
+real_resolve_profile = runner_profiles.resolve_profile
+def drifted_profile(*args, **kwargs):
+    result = copy.deepcopy(real_resolve_profile(*args, **kwargs))
+    result["effort"] = "different-effort"
+    return result
+runner_profiles.resolve_profile = drifted_profile
+try:
+    require_resume_refusal("runner identity drift")
+finally:
+    runner_profiles.resolve_profile = real_resolve_profile
+
+# Packet, state, and event evidence are independently fail-closed. Restore the
+# exact bytes after each disposable corruption probe.
+packet_bytes = child_packet_path.read_bytes()
+try:
+    child_packet_path.write_bytes(packet_bytes + b"\n")
+    require_resume_refusal("packet bytes changed")
+finally:
+    child_packet_path.write_bytes(packet_bytes)
+state_path = state.state_path(repo, child_run)
+state_bytes = state_path.read_bytes()
+try:
+    state_path.write_bytes(state_bytes.replace(b'"last_candidate_sha"', b'"last_candidate_shA"', 1))
+    require_resume_refusal("state bytes changed")
+finally:
+    state_path.write_bytes(state_bytes)
+events_path = state.events_path(repo, child_run)
+events_bytes = events_path.read_bytes()
+try:
+    events_path.write_bytes(events_bytes + b"{malformed event}\n")
+    require_resume_refusal("event chain changed")
+finally:
+    events_path.write_bytes(events_bytes)
+
+# A terminal engineering state cannot be reopened by runtime migration.
+def terminal_snapshot(run_repo, run_id):
+    snapshot = copy.deepcopy(real_load_verified(run_repo, run_id))
+    if run_id == child_run:
+        snapshot["state"] = "APPROVED"
+    return snapshot
+state.load_verified = terminal_snapshot
+try:
+    require_resume_refusal("terminal engineering state")
+finally:
+    state.load_verified = real_load_verified
+
+# A terminal attempt is still evidence that semantic work began; sequence-zero
+# creation is limited to zero attempts. Use a zero-cost disposable row so the
+# spend ledger itself remains numerically unchanged.
+with supervisor_db._managed_connect(db_path) as conn:
+    conn.execute(
+        """INSERT INTO semantic_attempts
+           (attempt_id,job_id,role,status,started_at,completed_at,stdout_path,stderr_path)
+           VALUES (?,?,?,?,?,?,?,?)""",
+        ("sequence-zero-adversarial-attempt", int(pristine_snapshot["id"]),
+         "builder", "FAILED", 1.0, 2.0, "/dev/null", "/dev/null"),
+    )
+try:
+    require_resume_refusal("semantic attempt already exists")
+finally:
+    with supervisor_db._managed_connect(db_path) as conn:
+        conn.execute(
+            "DELETE FROM semantic_attempts WHERE attempt_id=?",
+            ("sequence-zero-adversarial-attempt",),
+        )
+
 real_resolve_capabilities = capabilities.resolve_capabilities
 def drifted_capability_resolution(*args, **kwargs):
     resolution = real_resolve_capabilities(*args, **kwargs)
@@ -557,7 +708,57 @@ try:
 finally:
     capabilities.resolve_capabilities = real_resolve_capabilities
 assert not child_binding_path.exists(), "rejected projection must not publish a run binding"
+assert not first_migration_path.exists()
 assert not program_mission._mission_runtime_migration_path(repo, mission_id, 2).exists()
+
+# Spend reconciliation remains a precondition, not something rebinding can
+# normalize. Restore the exact supervisor aggregate immediately afterward.
+with supervisor_db._managed_connect(db_path) as conn:
+    original_cost = conn.execute(
+        "SELECT total_cost_usd FROM jobs WHERE id=?", (int(pristine_snapshot["id"]),),
+    ).fetchone()[0]
+    conn.execute(
+        "UPDATE jobs SET total_cost_usd=? WHERE id=?",
+        (float(original_cost) + 1.0, int(pristine_snapshot["id"])),
+    )
+try:
+    require_resume_refusal("spend/accounting mismatch")
+finally:
+    with supervisor_db._managed_connect(db_path) as conn:
+        conn.execute(
+            "UPDATE jobs SET total_cost_usd=? WHERE id=?",
+            (original_cost, int(pristine_snapshot["id"])),
+        )
+assert child_binding_path.is_file(), "rejected spend must preserve only the create-once binding"
+assert not first_migration_path.exists()
+assert util.sha256_file(mission_runtime_path) == mission_runtime_sha
+
+# A crash after the child capability binding is create-once published but
+# before its first migration is published must be replay-safe. The restart
+# re-proves the existing binding and emits exactly sequence 1.
+real_write_once = program_mission._write_once
+def crash_before_first_migration(path, value):
+    if Path(path) == first_migration_path:
+        raise OSError("simulated crash before sequence-one migration publication")
+    return real_write_once(path, value)
+program_mission._write_once = crash_before_first_migration
+try:
+    try:
+        program_mission.prepare_runtime_generation_resume(
+            repo, child_run, job_snapshot=pristine_snapshot,
+            target_runtime_generation=first_resumed_generation, db_path=db_path,
+        )
+    except OSError as exc:
+        assert "simulated crash" in str(exc), exc
+    else:
+        raise AssertionError("fixture did not reach the migration-publication crash window")
+finally:
+    program_mission._write_once = real_write_once
+assert child_binding_path.is_file(), "pre-migration crash must preserve the create-once child binding"
+assert not first_migration_path.exists(), "simulated pre-publication crash must leave no partial migration"
+assert util.sha256_file(mission_runtime_path) == mission_runtime_sha
+assert not (mission_runtime_path.parent / "MISSION-RUNTIME-BINDING-00.json").exists()
+
 pristine_resume_output = io.StringIO()
 with contextlib.redirect_stdout(pristine_resume_output):
     try:
@@ -573,7 +774,7 @@ assert pristine_resumed["ok"] is True and pristine_resumed["resumed"] is True, p
 assert pristine_resumed["runtime_generation_previous"] == successor_generation, pristine_resumed
 assert pristine_resumed["runtime_generation"] == first_resumed_generation, pristine_resumed
 pristine_migration = pristine_resumed["runtime_migration"]
-assert pristine_migration["sequence"] == 2, pristine_migration
+assert pristine_migration["sequence"] == 1, pristine_migration
 assert child_binding_path.is_file(), "supported resume creates the initial run binding"
 child_binding = capability_binding._read(child_binding_path)
 assert child_binding["projection"]["requested"] == (child_meta.get("capabilities") or [])
@@ -584,6 +785,9 @@ assert program_mission.prepare_runtime_generation_resume(
     repo, child_run, job_snapshot=pristine_snapshot,
     target_runtime_generation=first_resumed_generation, db_path=db_path,
 ) == pristine_migration
+assert not program_mission._mission_runtime_migration_path(repo, mission_id, 2).exists()
+assert not (mission_runtime_path.parent / "MISSION-RUNTIME-BINDING-00.json").exists()
+assert util.sha256_file(mission_runtime_path) == mission_runtime_sha
 assert program_mission.prepare_runtime_generation_resume(
     repo, child_run, job_snapshot=pristine_snapshot,
     target_runtime_generation=first_resumed_generation, db_path=db_path,
@@ -604,7 +808,7 @@ runtime_binding = program_mission.bind_runtime_identity(
     repo, child_run, run_binding=child_binding, runner_profile=profile,
     runtime_generation=first_resumed_generation,
 )
-assert runtime_binding["runtime_migration_sequence"] == 2, runtime_binding
+assert runtime_binding["runtime_migration_sequence"] == 1, runtime_binding
 pristine_identity = program_mission.verify_runtime_identity(
     repo, mission_id, run_binding=child_binding, runner_profile=profile,
     runtime_generation=first_resumed_generation,
@@ -673,7 +877,7 @@ except program_mission.MissionAuthorityError:
     pass
 else:
     raise AssertionError("same-segment runtime migration accepted an owned worker")
-assert not program_mission._mission_runtime_migration_path(repo, mission_id, 3).exists()
+assert not program_mission._mission_runtime_migration_path(repo, mission_id, 2).exists()
 migration_first = program_mission.prepare_runtime_generation_resume(
     repo, child_run, job_snapshot=resume_snapshot,
     target_runtime_generation=candidate_resumed_generation, db_path=db_path,
@@ -683,7 +887,7 @@ migration_replay = program_mission.prepare_runtime_generation_resume(
     target_runtime_generation=candidate_resumed_generation, db_path=db_path,
 )
 assert migration_first == migration_replay, (migration_first, migration_replay)
-assert migration_first["sequence"] == 3, migration_first
+assert migration_first["sequence"] == 2, migration_first
 resume_output = io.StringIO()
 with contextlib.redirect_stdout(resume_output):
     try:
@@ -711,7 +915,7 @@ runtime_binding = program_mission.bind_runtime_identity(
     repo, child_run, run_binding=child_binding, runner_profile=profile,
     runtime_generation=candidate_resumed_generation,
 )
-assert runtime_binding["runtime_migration_sequence"] == 3, runtime_binding
+assert runtime_binding["runtime_migration_sequence"] == 2, runtime_binding
 resumed_identity = program_mission.verify_runtime_identity(
     repo, mission_id, run_binding=child_binding, runner_profile=profile,
     runtime_generation=candidate_resumed_generation,
@@ -792,4 +996,6 @@ print("SUCCESSOR_BUILD_FINALIZED_AND_REVIEW_CLAIMED=PASS")
 print("ADAPTIVE_REVIEW_CANNOT_STARVE_REREVIEW=PASS")
 print("FINAL_REVIEW_REPAIR_CYCLE_REGRESSION=PASS")
 print("SAME_SEGMENT_RUNTIME_MIGRATION_CRASH_REPLAY_AND_SUPPORTED_RESUME=PASS")
+print("PRISTINE_SEQUENCE_ZERO_RESUME_FIRST_MIGRATION_AND_CRASH_REPLAY=PASS")
+print("SEQUENCE_ZERO_ADVERSARIAL_REFUSALS=PASS")
 PY
