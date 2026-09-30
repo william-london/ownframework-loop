@@ -474,6 +474,7 @@ def load_verified(canonical_repo: Path, run_id: str) -> dict[str, Any]:
     ep = events_path(canonical_repo, run_id)
     with flock_exclusive(lock_path(canonical_repo, run_id)):
         _recover_pending_state_txn_locked(canonical_repo, run_id)
+        events: list[dict[str, Any]] = []
         if ep.exists():
             events = integrity.read_event_chain(ep)
             if events:
@@ -500,9 +501,60 @@ def load_verified(canonical_repo: Path, run_id: str) -> dict[str, Any]:
                         "STATE.json is unreadable/torn; "
                         f"pending journal did not produce a recoverable state: {msg}"
                     )
+                recovered_events = integrity.read_event_chain(ep) if ep.exists() else []
+                _verify_semantic_budget_allocation_bindings(recovered, recovered_events)
                 return recovered
             raise integrity.TamperingDetected(msg)
-        return read_json(sp, default={}) or {}
+        payload = read_json(sp, default={}) or {}
+        _verify_semantic_budget_allocation_bindings(payload, events if ep.exists() else [])
+        return payload
+
+
+def _verify_semantic_budget_allocation_bindings(
+    payload: dict[str, Any], events: list[dict[str, Any]],
+) -> None:
+    """Require adaptive allocations to be digest-bound by claim/import events."""
+    program = payload.get("program") if isinstance(payload, dict) else None
+    allocations = (
+        program.get("semantic_budget_allocations") or []
+        if isinstance(program, dict) else []
+    )
+    if not allocations:
+        return
+    if not isinstance(allocations, list):
+        raise integrity.TamperingDetected("semantic budget allocation ledger is malformed")
+    imported_hashes = {
+        str(event.get("semantic_budget_import_sha256") or "")
+        for event in events
+        if event.get("event_type") == "mission_segment_materialized"
+    }
+    canonical_allocations = json.loads(integrity.canonical_json_dumps(allocations))
+    import_sha = hashlib.sha256(
+        integrity.canonical_json_dumps(canonical_allocations).encode("utf-8")
+    ).hexdigest()
+    import_bound = import_sha in imported_hashes
+    for item in allocations:
+        if not isinstance(item, dict):
+            raise integrity.TamperingDetected("semantic budget allocation entry is malformed")
+        body = dict(item)
+        allocation_id = str(body.pop("allocation_id", ""))
+        expected_id = hashlib.sha256(
+            integrity.canonical_json_dumps(body).encode("utf-8")
+        ).hexdigest()
+        if allocation_id != expected_id:
+            raise integrity.TamperingDetected("semantic budget allocation digest mismatch")
+        allocation_sha = hashlib.sha256(
+            integrity.canonical_json_dumps(item).encode("utf-8")
+        ).hexdigest()
+        directly_bound = any(
+            event.get("semantic_budget_allocation_id") == allocation_id
+            and event.get("semantic_budget_allocation_sha256") == allocation_sha
+            for event in events
+        )
+        if not directly_bound and not import_bound:
+            raise integrity.TamperingDetected(
+                "semantic budget allocation has no durable claim or segment-import binding"
+            )
 
 
 def _verify_mutation_integrity_locked(canonical_repo: Path, run_id: str) -> None:
@@ -1476,18 +1528,27 @@ def initialize_program_mission_segment(
         state_errors = schema_validate.validate_state(new)
         if state_errors:
             raise ValueError("mission segment imported state invalid: " + "; ".join(state_errors[:20]))
+        allocation_import_sha = None
+        allocations = (program_block.get("semantic_budget_allocations") or [])
+        if allocations:
+            allocation_import_sha = hashlib.sha256(
+                integrity.canonical_json_dumps(allocations).encode("utf-8")
+            ).hexdigest()
+        event_extras = {
+            "mission_id": mission_segment.get("mission_id"),
+            "segment_number": mission_segment.get("segment_number"),
+            "predecessor_run_id": mission_segment.get("predecessor_run_id"),
+            "segment_baseline_sha": baseline_sha,
+        }
+        if allocation_import_sha:
+            event_extras["semantic_budget_import_sha256"] = allocation_import_sha
         _commit_state_event_locked(
             canonical_repo, run_id, new,
             event_type="mission_segment_materialized",
             old_state="AWAITING_APPROVAL", new_state="AWAITING_APPROVAL",
             actor="ofloop-mission", commit_sha=candidate_sha,
             reason="imported immutable approved checkpoint history into mission segment",
-            extras={
-                "mission_id": mission_segment.get("mission_id"),
-                "segment_number": mission_segment.get("segment_number"),
-                "predecessor_run_id": mission_segment.get("predecessor_run_id"),
-                "segment_baseline_sha": baseline_sha,
-            },
+            extras=event_extras,
         )
     try:
         fsync_dir(sp.parent)
@@ -1500,6 +1561,8 @@ def _write_state_locked(
     canonical_repo: Path,
     run_id: str,
     payload: dict[str, Any],
+    *,
+    extras: dict[str, Any] | None = None,
 ) -> None:
     """Persist STATE.json and append a state_saved event under flock.
 
@@ -1519,6 +1582,7 @@ def _write_state_locked(
         actor=actor,
         commit_sha=payload.get("last_candidate_sha"),
         reason="program_claim_unified_save",
+        extras=extras,
     )
 
 
@@ -1932,6 +1996,9 @@ def transition_funded_repair(
                         cp_id=cp_id,
                         counter="repair_round_count",
                         packet_cp=packet_cp,
+                        packet=packet,
+                        state_doc=current,
+                        run_id=run_id,
                     )
                 except program_mod.ProgramStateError as exc:
                     target = "BLOCKED"
@@ -1986,26 +2053,16 @@ def transition_funded_repair(
                 raise ValueError("typed owner field 'program_block' must be a non-empty dict")
             if not is_program_state(current):
                 raise ValueError("program_block supplied for a non-PROGRAM run")
-            # Atomic merge: caller-supplied program_block carries absolute
-            # PROGRAM source-accounting updates (files_changed_unique,
-            # diff_lines_total).  This funding owner owns the repair
-            # counter mutation; merging the caller's source-accounting
-            # updates without erasing the just-incremented repair counter
-            # keeps the top-level <-> cumulative mirror invariant intact.
-            # A blind overwrite would leave top-level repair_round = N+1
-            # while program.cumulative_counters.repair_round_count = N
-            # and break the next claim's mirror-drift refusal.
-            merged = dict(program_block)
-            if "cumulative_counters" in new.get("program", {}) and "cumulative_counters" in merged:
-                owner_cum = new["program"]["cumulative_counters"]
-                merged_cum = dict(merged["cumulative_counters"])
-                # Owner-owned: repair_round_count is the only field this
-                # owner authoritatively mutates; caller-owned source
-                # accounting wins for every other key.
-                if "repair_round_count" in owner_cum:
-                    merged_cum["repair_round_count"] = owner_cum["repair_round_count"]
-                merged["cumulative_counters"] = merged_cum
-            new["program"] = merged
+            # The finalizer supplies a pre-transition snapshot with only
+            # absolute source-accounting fields updated. Start with this
+            # atomic owner's post-funding state so checkpoint-local repair
+            # counts and last-evidence bindings survive as well as the
+            # cumulative mirror. Copy only the two caller-owned source stats.
+            new["program"] = _merge_funded_repair_program_block(
+                current_program=current.get("program") or {},
+                funded_program=new.get("program") or {},
+                source_program=program_block,
+            )
         # Owner-owned: preserve the finalizer's candidate-convergence result
         # inside the same atomic funding mutation. A missing value retains the
         # historical fresh-context default for callers without a candidate
@@ -2022,6 +2079,18 @@ def transition_funded_repair(
         if last_must_fix_fingerprint is not None:
             new["last_must_fix_fingerprint"] = str(last_must_fix_fingerprint)
 
+        extras = {}
+        old_allocations = (current.get("program") or {}).get("semantic_budget_allocations") or []
+        new_allocations = (new.get("program") or {}).get("semantic_budget_allocations") or []
+        if repair_claimed and len(new_allocations) > len(old_allocations):
+            allocation = new_allocations[-1]
+            extras = {
+                "semantic_budget_allocation_id": allocation["allocation_id"],
+                "semantic_budget_allocation_sha256": hashlib.sha256(
+                    integrity.canonical_json_dumps(allocation).encode("utf-8")
+                ).hexdigest(),
+                "semantic_budget_counter_kind": "repair_round_count",
+            }
         _commit_state_event_locked(
             canonical_repo,
             run_id,
@@ -2032,6 +2101,7 @@ def transition_funded_repair(
             actor=actor,
             commit_sha=commit_sha,
             reason=reason,
+            extras=extras,
         )
     try:
         fsync_dir(sp.parent)
@@ -2043,6 +2113,44 @@ def transition_funded_repair(
         "repair_round": int(new.get("repair_round", 0) or 0),
         "reason": reason,
     }
+
+
+def _merge_funded_repair_program_block(
+    *,
+    current_program: dict[str, Any],
+    funded_program: dict[str, Any],
+    source_program: dict[str, Any],
+) -> dict[str, Any]:
+    """Preserve repair-owner mutations while accepting source stats only."""
+    if not all(isinstance(item, dict) and item for item in (
+        current_program, funded_program, source_program,
+    )):
+        raise ValueError("funded repair PROGRAM merge requires three non-empty objects")
+    source_keys = ("files_changed_unique", "diff_lines_total")
+
+    def without_source_stats(value: dict[str, Any]) -> dict[str, Any]:
+        result = json.loads(integrity.canonical_json_dumps(value))
+        counters = result.get("cumulative_counters")
+        if isinstance(counters, dict):
+            for key in source_keys:
+                counters.pop(key, None)
+        return result
+
+    if without_source_stats(current_program) != without_source_stats(source_program):
+        raise ValueError(
+            "funded repair PROGRAM snapshot contains changes beyond source accounting"
+        )
+    merged = json.loads(integrity.canonical_json_dumps(funded_program))
+    merged_counters = merged.get("cumulative_counters")
+    source_counters = source_program.get("cumulative_counters")
+    if not isinstance(merged_counters, dict) or not isinstance(source_counters, dict):
+        raise ValueError("funded repair PROGRAM cumulative counters are malformed")
+    for key in source_keys:
+        value = source_counters.get(key)
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            raise ValueError(f"funded repair source accounting {key} is invalid")
+        merged_counters[key] = value
+    return merged
 
 
 def transition_review_rejection_with_repair(

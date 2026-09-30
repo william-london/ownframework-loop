@@ -665,7 +665,7 @@ def materialise_initial_program_state(
     if not current and remaining:
         current = [remaining[0]]
 
-    return {
+    result = {
         "execution_mode": "program",
         "checkpoint_graph_sha256": checkpoint_graph_sha256(packet),
         "promotion_policy": resolve_promotion_policy(packet),
@@ -706,6 +706,11 @@ def materialise_initial_program_state(
             },
         },
     }
+    policy = (packet.get("mission_budget") or {}).get("semantic_budget_policy")
+    if isinstance(policy, dict):
+        result["semantic_budget_policy_sha256"] = semantic_budget_policy_sha256(packet)
+        result["semantic_budget_allocations"] = []
+    return result
 
 
 def select_next_checkpoint(packet: dict[str, Any], program_state: dict[str, Any]) -> str | None:
@@ -1182,6 +1187,8 @@ def build_pass_entitlement(
     *,
     cp_id: str,
     packet_cp: dict[str, Any],
+    packet: dict[str, Any] | None = None,
+    state_doc: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Read-only proof that one more BUILD claim fits both frozen ceilings.
 
@@ -1200,7 +1207,26 @@ def build_pass_entitlement(
     cumulative_cap = int(ceilings.get("max_build_passes") or 0)
     reason_codes: list[str] = []
     if checkpoint_used >= checkpoint_cap:
-        reason_codes.append("checkpoint_build_authority_exhausted")
+        already_allocated = sum(
+            int(item.get("amount_borrowed") or 0)
+            for item in program_state.get("semantic_budget_allocations") or []
+            if item.get("checkpoint_id") == cp_id
+            and item.get("counter_kind") == "build_pass_count"
+        )
+        plan = (
+            semantic_budget_allocation_plan(
+                program_state,
+                packet=packet,
+                cp_id=cp_id,
+                counter="build_pass_count",
+                state_doc=state_doc,
+            )
+            if packet is not None else None
+        )
+        if checkpoint_used < checkpoint_cap + already_allocated:
+            pass
+        elif not (plan and plan.get("eligible")):
+            reason_codes.append("checkpoint_build_authority_exhausted")
     if cumulative_used >= cumulative_cap:
         reason_codes.append("mission_cumulative_build_authority_exhausted")
     reason = "; ".join(reason_codes)
@@ -1222,6 +1248,9 @@ def _bump_counter_one(
     cp_id: str,
     counter: str,
     packet_cp: dict[str, Any],
+    packet: dict[str, Any] | None = None,
+    state_doc: dict[str, Any] | None = None,
+    run_id: str | None = None,
 ) -> dict[str, Any]:
     if counter not in ("build_pass_count", "review_pass_count", "repair_round_count"):
         raise ProgramStateError(f"unknown counter {counter!r}")
@@ -1234,15 +1263,31 @@ def _bump_counter_one(
     cum_cap = int(program_state["cumulative_ceilings"][cap_key])
     new = _deepcopy_program(program_state)
     cp = _find_cp(new, cp_id)
-    if counter == "build_pass_count":
-        entitlement = build_pass_entitlement(new, cp_id=cp_id, packet_cp=packet_cp)
-        if not entitlement["eligible"]:
-            raise ProgramStateError(entitlement["reason"])
-    elif cp[counter] >= cp_cap:
-        raise ProgramStateError(
-            f"per-checkpoint cap reached for {counter} on {cp_id}: {cp[counter]}/{cp_cap}"
-        )
-    if counter != "build_pass_count" and new["cumulative_counters"][counter] >= cum_cap:
+    borrowed = sum(
+        int(item.get("amount_borrowed") or 0)
+        for item in new.get("semantic_budget_allocations") or []
+        if item.get("checkpoint_id") == cp_id and item.get("counter_kind") == counter
+    )
+    if cp[counter] >= cp_cap + borrowed:
+        allocation = semantic_budget_allocation_plan(
+            new,
+            packet=packet,
+            cp_id=cp_id,
+            counter=counter,
+            state_doc=state_doc,
+            run_id=run_id,
+        ) if packet is not None else None
+        if not (allocation and allocation.get("eligible")):
+            reason = (
+                allocation.get("reason") if allocation else "adaptive_policy_not_sealed"
+            )
+            raise ProgramStateError(
+                f"per-checkpoint cap reached for {counter} on {cp_id}: "
+                f"{cp[counter]}/{cp_cap}; {reason}"
+            )
+        new = allocation["program_state"]
+        cp = _find_cp(new, cp_id)
+    if new["cumulative_counters"][counter] >= cum_cap:
         raise ProgramStateError(
             f"cumulative cap reached for {counter}: {new['cumulative_counters'][counter]}/{cum_cap}"
         )
@@ -1251,11 +1296,250 @@ def _bump_counter_one(
     return new
 
 
+_SEMANTIC_COUNTER_CAPS = {
+    "build_pass_count": "max_build_passes",
+    "review_pass_count": "max_review_passes",
+    "repair_round_count": "max_repair_rounds",
+}
+
+
+def _is_full_sha256(value: str) -> bool:
+    return isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value) is not None
+
+
+def semantic_budget_policy_sha256(packet: dict[str, Any]) -> str:
+    """Bind adaptive allocations to the exact opt-in v4 policy and graph."""
+    policy = (packet.get("mission_budget") or {}).get("semantic_budget_policy")
+    if not isinstance(policy, dict):
+        return ""
+    return sha256_text(canonical_json_dumps({
+        "policy": policy,
+        "checkpoint_graph_sha256": checkpoint_graph_sha256(packet),
+        "cumulative_ceilings": {
+            key: int((packet.get("risk_budget") or {}).get(key) or 0)
+            for key in _SEMANTIC_COUNTER_CAPS.values()
+        },
+    }))
+
+
+def semantic_budget_allocation_plan(
+    program_state: dict[str, Any],
+    *,
+    packet: dict[str, Any] | None,
+    cp_id: str,
+    counter: str,
+    state_doc: dict[str, Any] | None,
+    run_id: str | None = None,
+) -> dict[str, Any]:
+    """Compute a one-claim allocation without mutating state.
+
+    Actual publication occurs only inside the run's locked claim transaction.
+    This proof is also used by read-only segment-boundary preflight.
+    """
+    policy = (packet or {}).get("mission_budget", {}).get("semantic_budget_policy")
+    if not isinstance(policy, dict):
+        return {"eligible": False, "reason": "adaptive_policy_not_sealed"}
+    if counter not in _SEMANTIC_COUNTER_CAPS:
+        return {"eligible": False, "reason": "unsupported_semantic_counter"}
+    if not isinstance(state_doc, dict) or state_doc.get("state") not in {
+        "READY_TO_BUILD", "BUILDING", "CHANGES_REQUESTED",
+        "READY_FOR_REVIEW", "REVIEWING",
+    }:
+        return {"eligible": False, "reason": "run_state_not_claimable"}
+    if state_doc.get("state") in {"BLOCKED", "STOPPED", "APPROVED"}:
+        return {"eligible": False, "reason": "terminal_state_refuses_allocation"}
+    cp = next(
+        (item for item in program_state.get("checkpoints", []) if item.get("id") == cp_id),
+        None,
+    )
+    if not isinstance(cp, dict) or cp.get("terminal"):
+        return {"eligible": False, "reason": "checkpoint_not_active"}
+    order = (packet.get("checkpoint_graph") or {}).get("execution_order") or []
+    packet_cps = {
+        str(item.get("id")): item
+        for item in (packet.get("checkpoint_graph") or {}).get("checkpoints") or []
+        if isinstance(item, dict)
+    }
+    if cp_id not in packet_cps:
+        return {"eligible": False, "reason": "checkpoint_authority_missing"}
+    risk_key = _SEMANTIC_COUNTER_CAPS[counter]
+    local_cap = int((packet_cps[cp_id].get("risk_budget") or {}).get(risk_key) or 0)
+    current_local = int(cp.get(counter) or 0)
+    if current_local < local_cap:
+        return {"eligible": False, "reason": "declared_local_authority_remains"}
+    cumulative = program_state.get("cumulative_counters") or {}
+    ceilings = program_state.get("cumulative_ceilings") or {}
+    cumulative_used = int(cumulative.get(counter) or 0)
+    cumulative_cap = int(ceilings.get(risk_key) or 0)
+    if cumulative_used >= cumulative_cap:
+        return {"eligible": False, "reason": "mission_cumulative_authority_exhausted"}
+    threshold = int((packet.get("risk_budget") or {}).get("max_consecutive_no_progress_passes") or 8)
+    no_progress = max(
+        int(state_doc.get("no_progress_streak") or 0),
+        int(cp.get("no_progress_streak") or 0),
+    )
+    if no_progress >= threshold:
+        return {"eligible": False, "reason": "no_progress_fuse_reached"}
+    identical_threshold = int((packet.get("risk_budget") or {}).get("max_identical_finding_repeats") or 8)
+    if int(state_doc.get("identical_finding_streak") or 0) >= identical_threshold:
+        return {"eligible": False, "reason": "identical_finding_fuse_reached"}
+
+    allocations = program_state.get("semantic_budget_allocations") or []
+    if not isinstance(allocations, list):
+        return {"eligible": False, "reason": "allocation_ledger_malformed"}
+    policy_sha = semantic_budget_policy_sha256(packet)
+    if program_state.get("semantic_budget_policy_sha256") != policy_sha:
+        return {"eligible": False, "reason": "adaptive_policy_identity_mismatch"}
+    for item in allocations:
+        if (
+            not isinstance(item, dict)
+            or item.get("counter_kind") not in _SEMANTIC_COUNTER_CAPS
+            or item.get("amount_borrowed") != 1
+            or item.get("source_authority_sha256") != policy_sha
+        ):
+            return {"eligible": False, "reason": "allocation_ledger_identity_invalid"}
+    already_allocated = sum(
+        int(item.get("amount_borrowed") or 0)
+        for item in allocations
+        if item.get("checkpoint_id") == cp_id and item.get("counter_kind") == counter
+    )
+    if current_local < local_cap + already_allocated:
+        return {
+            "eligible": True,
+            "reason": "previously_allocated_claim_remains",
+            "program_state": _deepcopy_program(program_state),
+            "allocation": None,
+        }
+
+    finalized = {
+        str(item.get("id"))
+        for item in program_state.get("finalized_checkpoints") or []
+        if item.get("terminal_state") == "APPROVED"
+    }
+    declared_sum = sum(
+        int((item.get("risk_budget") or {}).get(risk_key) or 0)
+        for item in packet_cps.values()
+    )
+    donor_pool = 0
+    if policy.get("reclaim_approved_checkpoint_capacity") is True:
+        for donor_id in order:
+            if donor_id not in finalized:
+                continue
+            donor_state = next(
+                (item for item in program_state.get("checkpoints", []) if item.get("id") == donor_id),
+                None,
+            )
+            if not isinstance(donor_state, dict):
+                continue
+            donated = sum(
+                int(item.get("amount_borrowed") or 0)
+                for item in allocations
+                if item.get("counter_kind") == counter
+                and item.get("source_checkpoint_id") == donor_id
+            )
+            donor_cap = int((packet_cps[donor_id].get("risk_budget") or {}).get(risk_key) or 0)
+            donor_pool += max(0, donor_cap - int(donor_state.get(counter) or 0) - donated)
+
+    flex_pool = 0
+    if policy.get("use_cumulative_slack") is True:
+        prior_flex = sum(
+            int(item.get("amount_borrowed") or 0)
+            for item in allocations
+            if item.get("counter_kind") == counter
+            and item.get("source_kind") == "mission_cumulative_slack"
+        )
+        flex_pool = max(0, cumulative_cap - declared_sum - prior_flex)
+    pool_before = donor_pool + flex_pool
+    if pool_before < 1:
+        return {"eligible": False, "reason": "no_reclaimable_mission_authority"}
+
+    reserved = 0
+    for future_id in order:
+        if future_id == cp_id or future_id in finalized:
+            continue
+        future_state = next(
+            (item for item in program_state.get("checkpoints", []) if item.get("id") == future_id),
+            None,
+        )
+        if not isinstance(future_state, dict):
+            return {"eligible": False, "reason": "future_checkpoint_state_missing"}
+        future_cap = int((packet_cps[future_id].get("risk_budget") or {}).get(risk_key) or 0)
+        reserved += max(0, future_cap - int(future_state.get(counter) or 0))
+    # Preserve the minimum executable whole-product final acceptance lane;
+    # a final-review repair needs one BUILD, one REVIEW, and one REPAIR.
+    reserved += 1
+    remaining_after = cumulative_cap - cumulative_used - 1
+    if remaining_after < reserved:
+        return {
+            "eligible": False,
+            "reason": "allocation_would_consume_future_or_final_acceptance_reserve",
+            "reserved_remaining_authority": reserved,
+        }
+
+    source_kind = "mission_cumulative_slack"
+    source_checkpoint_id = None
+    if donor_pool:
+        source_kind = "approved_checkpoint_capacity"
+        source_checkpoint_id = next(
+            donor_id for donor_id in order
+            if donor_id in finalized
+            and max(
+                0,
+                int((packet_cps[donor_id].get("risk_budget") or {}).get(risk_key) or 0)
+                - int(next(item for item in program_state.get("checkpoints", []) if item.get("id") == donor_id).get(counter) or 0)
+                - sum(
+                    int(item.get("amount_borrowed") or 0)
+                    for item in allocations
+                    if item.get("counter_kind") == counter
+                    and item.get("source_checkpoint_id") == donor_id
+                ),
+            ) > 0
+        )
+    now = utc_now_iso()
+    used_allocations = sum(
+        1 for item in allocations
+        if item.get("checkpoint_id") == cp_id and item.get("counter_kind") == counter
+    )
+    body = {
+        "schema": "ownframework-loop-semantic-budget-allocation/v1",
+        "mission_id": str((program_state.get("mission_segment") or {}).get("mission_id") or ""),
+        "run_id": str(run_id or state_doc.get("run_id") or ""),
+        "checkpoint_id": cp_id,
+        "counter_kind": counter,
+        "declared_local_cap": local_cap,
+        "local_used_before": current_local,
+        "cumulative_used_before": cumulative_used,
+        "cumulative_cap": cumulative_cap,
+        "reserved_remaining_authority": reserved,
+        "reclaimable_pool_before": pool_before,
+        "amount_borrowed": 1,
+        "reclaimable_pool_after": pool_before - 1,
+        "reason": "checkpoint_local_allocation_exhausted_with_safe_sealed_mission_capacity",
+        "source_kind": source_kind,
+        "source_checkpoint_id": source_checkpoint_id,
+        "source_authority_sha256": policy_sha,
+        "source_event_sha256": None,
+        "allocation_number_for_checkpoint_counter": used_allocations + 1,
+        "created_at": now,
+    }
+    body["allocation_id"] = sha256_text(canonical_json_dumps(body))
+    new_program = _deepcopy_program(program_state)
+    new_program.setdefault("semantic_budget_allocations", []).append(body)
+    return {
+        "eligible": True,
+        "reason": "one_claim_reallocated_within_sealed_mission_ceiling",
+        "program_state": new_program,
+        "allocation": body,
+    }
+
+
 def repair_entitlement(
     program_state: dict[str, Any],
     *,
     cp_id: str,
     packet_cp: dict[str, Any],
+    packet: dict[str, Any] | None = None,
+    state_doc: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Decide whether the current checkpoint holds one repair entitlement.
 
@@ -1298,12 +1582,27 @@ def repair_entitlement(
 
     eligible = True
     reason = ""
-    if checkpoint_used >= cp_cap:
-        eligible = False
-        reason = (
-            f"per-checkpoint repair cap reached on {cp_id}: "
-            f"{checkpoint_used}/{cp_cap}"
-        )
+    borrowed = sum(
+        int(item.get("amount_borrowed") or 0)
+        for item in program_state.get("semantic_budget_allocations") or []
+        if item.get("checkpoint_id") == cp_id
+        and item.get("counter_kind") == counter
+    )
+    if checkpoint_used >= cp_cap + borrowed:
+        plan = semantic_budget_allocation_plan(
+            program_state,
+            packet=packet,
+            cp_id=cp_id,
+            counter=counter,
+            state_doc=state_doc,
+        ) if packet is not None else None
+        if not (plan and plan.get("eligible")):
+            eligible = False
+            reason = (
+                f"per-checkpoint repair cap reached on {cp_id}: "
+                f"{checkpoint_used}/{cp_cap}; "
+                + str(plan.get("reason") if plan else "adaptive_policy_not_sealed")
+            )
     elif cumulative_used >= cumulative_cap:
         eligible = False
         reason = (
@@ -1627,6 +1926,9 @@ def _unified_claim_pass(
                 cp_id=cp_id,
                 counter=counter,
                 packet_cp=packet_cp,
+                packet=packet,
+                state_doc=cur,
+                run_id=run_id,
             )
         except ProgramStateError as exc:
             # _bump_counter_one refuses only on per-checkpoint or cumulative
@@ -1646,7 +1948,21 @@ def _unified_claim_pass(
         new_state["updated_at"] = state_mod.utc_now_iso()
         new_state["last_actor"] = "of-loop-claim"
         new_state["state"] = replay_states[counter]
-        state_mod._write_state_locked(canonical_repo, run_id, new_state)
+        old_allocations = program_state.get("semantic_budget_allocations") or []
+        new_allocations = new_program.get("semantic_budget_allocations") or []
+        extras = {}
+        if len(new_allocations) > len(old_allocations):
+            allocation = new_allocations[-1]
+            extras = {
+                "semantic_budget_allocation_id": allocation["allocation_id"],
+                "semantic_budget_allocation_sha256": sha256_text(
+                    canonical_json_dumps(allocation)
+                ),
+                "semantic_budget_counter_kind": counter,
+            }
+        state_mod._write_state_locked(
+            canonical_repo, run_id, new_state, extras=extras,
+        )
 
         cp_pass = int(_find_cp(new_program, cp_id)[counter])
         cum = int(new_program["cumulative_counters"][counter])
@@ -1776,6 +2092,153 @@ def verify_frozen_graph(packet: dict[str, Any], program_state: dict[str, Any]) -
     want = checkpoint_graph_sha256(packet)
     if cur != want:
         return False, "post-approval_graph_drift"
+    policy_sha = semantic_budget_policy_sha256(packet)
+    stored_policy_sha = program_state.get("semantic_budget_policy_sha256")
+    allocations = program_state.get("semantic_budget_allocations")
+    if policy_sha:
+        if stored_policy_sha != policy_sha or not isinstance(allocations, list):
+            return False, "semantic_budget_policy_drift"
+        packet_cps = {
+            str(item.get("id")): item
+            for item in (packet.get("checkpoint_graph") or {}).get("checkpoints") or []
+            if isinstance(item, dict)
+        }
+        allocation_ids: set[str] = set()
+        donor_use: dict[tuple[str, str], int] = {}
+        flex_use: dict[str, int] = {}
+        per_checkpoint: dict[tuple[str, str], int] = {}
+        approved = {
+            str(item.get("id"))
+            for item in program_state.get("finalized_checkpoints") or []
+            if item.get("terminal_state") == "APPROVED"
+        }
+        for allocation in allocations:
+            if not isinstance(allocation, dict):
+                return False, "semantic_budget_allocation_malformed"
+            allocation_id = str(allocation.get("allocation_id") or "")
+            body = dict(allocation)
+            body.pop("allocation_id", None)
+            if (
+                not _is_full_sha256(allocation_id)
+                or allocation_id != sha256_text(canonical_json_dumps(body))
+                or allocation_id in allocation_ids
+            ):
+                return False, "semantic_budget_allocation_digest_invalid"
+            allocation_ids.add(allocation_id)
+            cp_id = str(allocation.get("checkpoint_id") or "")
+            counter = str(allocation.get("counter_kind") or "")
+            cap_key = _SEMANTIC_COUNTER_CAPS.get(counter)
+            cp_packet = packet_cps.get(cp_id)
+            policy = (packet.get("mission_budget") or {}).get("semantic_budget_policy") or {}
+            declared_cap = int(
+                ((cp_packet or {}).get("risk_budget") or {}).get(cap_key or "") or 0
+            )
+            cumulative_cap = int(
+                (packet.get("risk_budget") or {}).get(cap_key or "") or 0
+            )
+            source_kind = allocation.get("source_kind")
+            source_checkpoint = allocation.get("source_checkpoint_id")
+            amount = allocation.get("amount_borrowed")
+            number = allocation.get("allocation_number_for_checkpoint_counter")
+            expected_number = per_checkpoint.get((cp_id, counter), 0) + 1
+            if cp_packet is None or cap_key is None:
+                return False, "semantic_budget_allocation_checkpoint_invalid"
+            if amount != 1 or number != expected_number:
+                return False, "semantic_budget_allocation_claim_sequence_invalid"
+            if (
+                allocation.get("schema") != "ownframework-loop-semantic-budget-allocation/v1"
+                or allocation.get("mission_id") != (program_state.get("mission_segment") or {}).get("mission_id")
+                or allocation.get("declared_local_cap") != declared_cap
+                or allocation.get("local_used_before") != declared_cap + expected_number - 1
+            ):
+                return False, "semantic_budget_allocation_local_authority_invalid"
+            if (
+                allocation.get("cumulative_cap") != cumulative_cap
+                or allocation.get("cumulative_used_before", -1) < 0
+                or allocation.get("cumulative_used_before", cumulative_cap) >= cumulative_cap
+                or cumulative_cap - allocation.get("cumulative_used_before", cumulative_cap) - 1
+                    < allocation.get("reserved_remaining_authority", 0)
+            ):
+                return False, "semantic_budget_allocation_cumulative_authority_invalid"
+            if (
+                allocation.get("source_authority_sha256") != policy_sha
+                or not _is_full_sha256(str(allocation.get("source_authority_sha256") or ""))
+                or allocation.get("source_event_sha256") is not None
+                    and not _is_full_sha256(str(allocation.get("source_event_sha256")))
+            ):
+                return False, "semantic_budget_allocation_source_proof_invalid"
+            if (
+                allocation.get("reserved_remaining_authority", -1) < 0
+                or allocation.get("reclaimable_pool_before", 0) < 1
+                or allocation.get("reclaimable_pool_after") != allocation.get("reclaimable_pool_before") - 1
+                or not isinstance(allocation.get("reason"), str)
+                or not allocation.get("reason")
+                or not isinstance(allocation.get("created_at"), str)
+                or not allocation.get("created_at")
+            ):
+                return False, "semantic_budget_allocation_reserve_invalid"
+            if source_kind == "approved_checkpoint_capacity":
+                if (
+                    policy.get("reclaim_approved_checkpoint_capacity") is not True
+                    or not isinstance(source_checkpoint, str)
+                    or source_checkpoint == cp_id
+                    or source_checkpoint not in approved
+                    or source_checkpoint not in packet_cps
+                ):
+                    return False, "semantic_budget_allocation_donor_invalid"
+                donor_key = (source_checkpoint, counter)
+                donor_use[donor_key] = donor_use.get(donor_key, 0) + 1
+            elif source_kind == "mission_cumulative_slack":
+                if (
+                    policy.get("use_cumulative_slack") is not True
+                    or source_checkpoint is not None
+                ):
+                    return False, "semantic_budget_allocation_slack_invalid"
+                flex_use[counter] = flex_use.get(counter, 0) + 1
+            else:
+                return False, "semantic_budget_allocation_source_invalid"
+            key = (cp_id, counter)
+            per_checkpoint[key] = expected_number
+
+        for (cp_id, counter), borrowed in per_checkpoint.items():
+            cp_packet = packet_cps[cp_id]
+            cap_key = _SEMANTIC_COUNTER_CAPS[counter]
+            cap = int((cp_packet.get("risk_budget") or {}).get(cap_key) or 0)
+            cp_state = next(
+                (item for item in program_state.get("checkpoints") or [] if item.get("id") == cp_id),
+                None,
+            )
+            if not isinstance(cp_state, dict) or int(cp_state.get(counter) or 0) > cap + borrowed:
+                return False, "semantic_budget_checkpoint_allocation_exceeded"
+        for (donor_id, counter), donated in donor_use.items():
+            donor = next(
+                (item for item in program_state.get("checkpoints") or [] if item.get("id") == donor_id),
+                None,
+            )
+            cap_key = _SEMANTIC_COUNTER_CAPS[counter]
+            cap = int((packet_cps[donor_id].get("risk_budget") or {}).get(cap_key) or 0)
+            if not isinstance(donor, dict) or int(donor.get(counter) or 0) + donated > cap:
+                return False, "semantic_budget_donor_capacity_exceeded"
+        for counter, used in flex_use.items():
+            cap_key = _SEMANTIC_COUNTER_CAPS[counter]
+            cumulative_cap = int((packet.get("risk_budget") or {}).get(cap_key) or 0)
+            declared_total = sum(
+                int((item.get("risk_budget") or {}).get(cap_key) or 0)
+                for item in packet_cps.values()
+            )
+            if used > max(0, cumulative_cap - declared_total):
+                return False, "semantic_budget_cumulative_slack_exceeded"
+        for counter, cap_key in _SEMANTIC_COUNTER_CAPS.items():
+            cumulative_used = int(
+                (program_state.get("cumulative_counters") or {}).get(counter) or 0
+            )
+            cumulative_cap = int(
+                (program_state.get("cumulative_ceilings") or {}).get(cap_key) or 0
+            )
+            if cumulative_used > cumulative_cap:
+                return False, "semantic_budget_cumulative_ceiling_exceeded"
+    elif stored_policy_sha is not None or allocations:
+        return False, "unsealed_semantic_budget_allocation_state"
     return True, "ok"
 
 

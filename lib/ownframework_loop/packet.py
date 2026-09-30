@@ -457,6 +457,45 @@ def validate_mission_budget(meta: dict[str, Any]) -> list[str]:
     for key in required:
         if key not in raw:
             errors.append(f"mission_budget missing {key}")
+    policy = raw.get("semantic_budget_policy")
+    if policy is not None:
+        policy_keys = {
+            "schema",
+            "reclaim_approved_checkpoint_capacity",
+            "use_cumulative_slack",
+        }
+        if not isinstance(policy, dict):
+            errors.append("mission_budget.semantic_budget_policy must be an object")
+        else:
+            if set(policy) != policy_keys:
+                errors.append(
+                    "mission_budget.semantic_budget_policy must contain exactly "
+                    "schema, reclaim_approved_checkpoint_capacity, and use_cumulative_slack"
+                )
+            if policy.get("schema") != "ownframework-loop-semantic-budget-policy/v1":
+                errors.append(
+                    "mission_budget.semantic_budget_policy.schema must be "
+                    "ownframework-loop-semantic-budget-policy/v1"
+                )
+            for key in (
+                "reclaim_approved_checkpoint_capacity",
+                "use_cumulative_slack",
+            ):
+                if not isinstance(policy.get(key), bool):
+                    errors.append(
+                        f"mission_budget.semantic_budget_policy.{key} must be boolean"
+                    )
+            if not any(
+                policy.get(key) is True
+                for key in (
+                    "reclaim_approved_checkpoint_capacity",
+                    "use_cumulative_slack",
+                )
+            ):
+                errors.append(
+                    "mission_budget.semantic_budget_policy must enable at least one "
+                    "sealed reallocation source"
+                )
     return errors
 
 

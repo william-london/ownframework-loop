@@ -316,7 +316,26 @@
         "segment_max_diff_lines": { "type": "integer", "minimum": 1, "maximum": 30000 },
         "mission_max_diff_lines": { "type": "integer", "minimum": 1, "maximum": 480000 },
         "max_segments": { "type": "integer", "minimum": 1, "maximum": 16 },
-        "segment_boundary_policy": { "const": "last_approved_checkpoint" }
+        "segment_boundary_policy": { "const": "last_approved_checkpoint" },
+        "semantic_budget_policy": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "schema",
+            "reclaim_approved_checkpoint_capacity",
+            "use_cumulative_slack"
+          ],
+          "properties": {
+            "schema": { "const": "ownframework-loop-semantic-budget-policy/v1" },
+            "reclaim_approved_checkpoint_capacity": { "type": "boolean" },
+            "use_cumulative_slack": { "type": "boolean" }
+          },
+          "anyOf": [
+            { "properties": { "reclaim_approved_checkpoint_capacity": { "const": true } } },
+            { "properties": { "use_cumulative_slack": { "const": true } } }
+          ],
+          "description": "Optional, explicitly sealed mission policy for deterministic one-claim-at-a-time reallocation within unchanged cumulative semantic ceilings. Absent preserves hard checkpoint-local caps."
+        }
       },
       "description": "Mission source authority. segment_max_diff_lines remains bounded by the v3 per-run ceiling; mission_max_diff_lines is measured from the mission original baseline across all segments."
     },

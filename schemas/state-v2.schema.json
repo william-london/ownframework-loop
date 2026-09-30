@@ -215,6 +215,50 @@
             "mission_source_lines_at_start": { "type": "integer", "minimum": 0 }
           }
         },
+        "semantic_budget_policy_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "semantic_budget_allocations": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "schema", "allocation_id", "mission_id", "run_id", "checkpoint_id",
+              "counter_kind", "declared_local_cap", "local_used_before",
+              "cumulative_used_before", "cumulative_cap", "reserved_remaining_authority",
+              "reclaimable_pool_before", "amount_borrowed", "reclaimable_pool_after",
+              "reason", "source_kind", "source_checkpoint_id",
+              "source_authority_sha256", "source_event_sha256",
+              "allocation_number_for_checkpoint_counter",
+              "created_at"
+            ],
+            "properties": {
+              "schema": { "const": "ownframework-loop-semantic-budget-allocation/v1" },
+              "allocation_id": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+              "mission_id": { "type": "string", "pattern": "^mission-[a-f0-9]{24}$" },
+              "run_id": { "type": "string", "minLength": 1 },
+              "checkpoint_id": { "type": "string", "pattern": "^CP-[0-9]+$" },
+              "counter_kind": { "enum": ["build_pass_count", "review_pass_count", "repair_round_count"] },
+              "declared_local_cap": { "type": "integer", "minimum": 0 },
+              "local_used_before": { "type": "integer", "minimum": 0 },
+              "cumulative_used_before": { "type": "integer", "minimum": 0 },
+              "cumulative_cap": { "type": "integer", "minimum": 1 },
+              "reserved_remaining_authority": { "type": "integer", "minimum": 0 },
+              "reclaimable_pool_before": { "type": "integer", "minimum": 1 },
+              "amount_borrowed": { "const": 1 },
+              "reclaimable_pool_after": { "type": "integer", "minimum": 0 },
+              "reason": { "type": "string", "minLength": 1 },
+              "source_kind": { "enum": ["approved_checkpoint_capacity", "mission_cumulative_slack"] },
+              "source_checkpoint_id": { "type": ["string", "null"], "pattern": "^CP-[0-9]+$" },
+              "source_authority_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+              "source_event_sha256": { "type": ["string", "null"], "pattern": "^[a-f0-9]{64}$" },
+              "allocation_number_for_checkpoint_counter": { "type": "integer", "minimum": 1 },
+              "created_at": { "type": "string", "format": "date-time" }
+            }
+          }
+        },
         "promotion_policy": {
           "type": "string",
           "enum": [

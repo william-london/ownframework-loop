@@ -39,6 +39,8 @@ MISSION_SCHEMA = "ownframework-loop-program-mission/v1"
 SEGMENT_SCHEMA = "ownframework-loop-program-segment/v1"
 SEGMENT_STATE_SCHEMA = "ownframework-loop-mission-segment-state/v1"
 MISSION_RUNTIME_SCHEMA = "ownframework-loop-program-mission-runtime/v1"
+MISSION_RUNTIME_MIGRATION_SCHEMA = "ownframework-loop-program-mission-runtime-migration/v1"
+MISSION_RUNTIME_BINDING_SCHEMA = "ownframework-loop-program-mission-runtime-binding/v1"
 LEGACY_ADMISSION_SCHEMA = "ownframework-loop-legacy-continuation-admission/v1"
 _FULL_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -70,6 +72,18 @@ def _segment_path(repo: Path, mission_id: str, number: int) -> Path:
 
 def _mission_runtime_path(repo: Path, mission_id: str) -> Path:
     return _mission_dir(repo, mission_id) / "MISSION-RUNTIME.json"
+
+
+def _mission_runtime_migration_path(repo: Path, mission_id: str, sequence: int) -> Path:
+    if not isinstance(sequence, int) or isinstance(sequence, bool) or not 1 <= sequence <= 16:
+        raise MissionAuthorityError("mission runtime migration sequence is outside the envelope")
+    return _mission_dir(repo, mission_id) / f"MISSION-RUNTIME-MIGRATION-{sequence:02d}.json"
+
+
+def _mission_runtime_binding_path(repo: Path, mission_id: str, sequence: int) -> Path:
+    if not isinstance(sequence, int) or isinstance(sequence, bool) or not 1 <= sequence <= 16:
+        raise MissionAuthorityError("mission runtime binding sequence is outside the envelope")
+    return _mission_dir(repo, mission_id) / f"MISSION-RUNTIME-BINDING-{sequence:02d}.json"
 
 
 def _canonical_bytes(value: Any) -> bytes:
@@ -188,6 +202,181 @@ def _read_record(path: Path, *, expected_schema: str) -> tuple[dict[str, Any], s
     return payload, digest
 
 
+def _runtime_migration_ref(segment: dict[str, Any]) -> dict[str, Any] | None:
+    admission = segment.get("source_admission") or {}
+    value = admission.get("runtime_migration")
+    if value is None:
+        return None
+    if (
+        not isinstance(value, dict)
+        or not isinstance(value.get("sequence"), int)
+        or isinstance(value.get("sequence"), bool)
+        or not 1 <= int(value.get("sequence") or 0) <= 16
+        or not _SHA256_RE.fullmatch(str(value.get("sha256") or ""))
+        or not isinstance(value.get("runtime_generation"), str)
+        or not value.get("runtime_generation")
+    ):
+        raise MissionAuthorityError("segment runtime migration reference is malformed")
+    return value
+
+
+def _verify_runtime_migration_source(repo: Path, migration: dict[str, Any]) -> None:
+    """Re-prove immutable source evidence for a typed runtime-generation move."""
+    source = migration.get("source_authority")
+    if not isinstance(source, dict):
+        raise MissionAuthorityError("runtime migration source authority is missing")
+    run_id = str(source.get("run_id") or "")
+    if not run_id:
+        raise MissionAuthorityError("runtime migration source run is missing")
+    root = state.run_dir(repo, run_id)
+    packet_path = root / "WORK_PACKET.md"
+    state_file = state.state_path(repo, run_id)
+    events_file = state.events_path(repo, run_id)
+    if (
+        not packet_path.is_file() or not state_file.is_file() or not events_file.is_file()
+        or util.sha256_file(packet_path) != source.get("packet_sha256")
+        or util.sha256_file(state_file) != source.get("state_sha256")
+        or integrity.compute_event_chain_hash(events_file) != source.get("event_chain_sha256")
+        or integrity.get_event_chain_hash(events_file) != source.get("event_chain_sha256")
+    ):
+        raise MissionAuthorityError("runtime migration source packet/state/event evidence drifted")
+    current = state.load_verified(repo, run_id)
+    if (
+        not isinstance(current, dict)
+        or current.get("state") != "BLOCKED"
+        or current.get("last_candidate_sha") != source.get("crossing_candidate_sha")
+    ):
+        raise MissionAuthorityError("runtime migration source is no longer the sealed blocked boundary")
+
+
+def _runtime_identity_for_segment(
+    repo: Path,
+    mission_id: str,
+    segment: dict[str, Any],
+) -> tuple[dict[str, Any], str]:
+    """Resolve the immutable runtime identity authorized for one segment."""
+    migration_ref = _runtime_migration_ref(segment)
+    if migration_ref is None:
+        return _read_record(
+            _mission_runtime_path(repo, mission_id),
+            expected_schema=MISSION_RUNTIME_SCHEMA,
+        )
+    migration, migration_sha = _read_record(
+        _mission_runtime_migration_path(repo, mission_id, int(migration_ref["sequence"])),
+        expected_schema=MISSION_RUNTIME_MIGRATION_SCHEMA,
+    )
+    if (
+        migration_sha != migration_ref.get("sha256")
+        or migration.get("mission_id") != mission_id
+        or migration.get("sequence") != migration_ref.get("sequence")
+        or migration.get("runtime_generation") != migration_ref.get("runtime_generation")
+    ):
+        raise MissionAuthorityError("segment runtime migration does not bind its immutable record")
+    _verify_runtime_migration_source(repo, migration)
+    receipt_path = _mission_runtime_binding_path(
+        repo, mission_id, int(migration_ref["sequence"]),
+    )
+    if receipt_path.exists():
+        receipt, receipt_sha = _read_record(
+            receipt_path, expected_schema=MISSION_RUNTIME_BINDING_SCHEMA,
+        )
+        identity = receipt.get("runtime_identity")
+        if (
+            receipt.get("mission_id") != mission_id
+            or receipt.get("sequence") != migration_ref.get("sequence")
+            or receipt.get("migration_sha256") != migration_sha
+            or not isinstance(identity, dict)
+            or identity.get("runtime_generation") != migration.get("runtime_generation")
+            or identity.get("capabilities") != migration.get("capabilities")
+            or identity.get("runner_profile") != migration.get("runner_profile")
+        ):
+            raise MissionAuthorityError("runtime-generation binding receipt contradicts migration")
+        return {**identity, "runtime_migration_sequence": int(migration_ref["sequence"])}, receipt_sha
+    # The typed migration authorizes only a runtime generation and the
+    # previously sealed runner/capability request. The real binding digest and
+    # semantic fingerprint are established by supervised preflight before a
+    # provider can launch, then create-once bound in the receipt above.
+    return {
+        "mission_id": mission_id,
+        "runtime_generation": str(migration["runtime_generation"]),
+        "capabilities": copy.deepcopy(migration["capabilities"]),
+        "runner_profile": copy.deepcopy(migration["runner_profile"]),
+        "effort_attestation_sha256": None,
+        "runtime_migration_sequence": int(migration_ref["sequence"]),
+    }, migration_sha
+
+
+def _active_mission_runtime(
+    repo: Path,
+    mission_doc: dict[str, Any],
+) -> tuple[dict[str, Any], str, int]:
+    """Resolve the latest append-only runtime migration, if any."""
+    mission_id = str(mission_doc.get("mission_id") or "")
+    base_path = _mission_runtime_path(repo, mission_id)
+    if base_path.exists():
+        identity, identity_sha = _read_record(
+            base_path, expected_schema=MISSION_RUNTIME_SCHEMA,
+        )
+    else:
+        identity = {
+            "mission_id": mission_id,
+            "runtime_generation": str(
+                (mission_doc.get("operational_budget") or {}).get("runtime_generation") or ""
+            ),
+            "capabilities": None,
+            "runner_profile": None,
+            "effort_attestation_sha256": None,
+        }
+        identity_sha = _digest(identity)
+    sequence = 0
+    while sequence < 16:
+        next_sequence = sequence + 1
+        path = _mission_runtime_migration_path(repo, mission_id, next_sequence)
+        if not path.exists():
+            break
+        migration, migration_sha = _read_record(
+            path, expected_schema=MISSION_RUNTIME_MIGRATION_SCHEMA,
+        )
+        if (
+            migration.get("mission_id") != mission_id
+            or migration.get("sequence") != next_sequence
+            or migration.get("previous_runtime_identity_sha256") != identity_sha
+            or migration.get("previous_runtime_generation") != identity.get("runtime_generation")
+            or migration.get("capabilities") != identity.get("capabilities")
+            or migration.get("runner_profile") != identity.get("runner_profile")
+        ):
+            raise MissionAuthorityError("mission runtime migration chain is discontinuous")
+        _verify_runtime_migration_source(repo, migration)
+        binding_path = _mission_runtime_binding_path(repo, mission_id, next_sequence)
+        if not binding_path.exists():
+            return {
+                "mission_id": mission_id,
+                "runtime_generation": migration["runtime_generation"],
+                "capabilities": copy.deepcopy(migration["capabilities"]),
+                "runner_profile": copy.deepcopy(migration["runner_profile"]),
+                "effort_attestation_sha256": None,
+            }, migration_sha, next_sequence
+        receipt, identity_sha = _read_record(
+            binding_path, expected_schema=MISSION_RUNTIME_BINDING_SCHEMA,
+        )
+        if (
+            receipt.get("mission_id") != mission_id
+            or receipt.get("sequence") != next_sequence
+            or receipt.get("migration_sha256") != migration_sha
+            or not isinstance(receipt.get("runtime_identity"), dict)
+        ):
+            raise MissionAuthorityError("mission runtime binding chain is invalid")
+        identity = receipt["runtime_identity"]
+        if (
+            identity.get("runtime_generation") != migration.get("runtime_generation")
+            or identity.get("capabilities") != migration.get("capabilities")
+            or identity.get("runner_profile") != migration.get("runner_profile")
+        ):
+            raise MissionAuthorityError("mission runtime binding differs from migration authority")
+        sequence = next_sequence
+    return identity, identity_sha, sequence
+
+
 def _authority_projection(meta: dict[str, Any]) -> dict[str, Any]:
     """Remove only run-identity fields that a typed successor must derive."""
     projected = copy.deepcopy(meta)
@@ -197,6 +386,24 @@ def _authority_projection(meta: dict[str, Any]) -> dict[str, Any]:
     if isinstance(target, dict):
         for key in ("branch", "expected_baseline_sha", "candidate_branch_prefix"):
             target.pop(key, None)
+    return projected
+
+
+def _segment_authority_projection(
+    meta: dict[str, Any], source_admission: dict[str, Any],
+) -> dict[str, Any]:
+    """Project immutable mission authority with only its typed policy overlay."""
+    projected = _authority_projection(meta)
+    overlay = source_admission.get("semantic_budget_policy_overlay")
+    if overlay is not None:
+        if source_admission.get("kind") != "blocked_semantic_budget_continuation":
+            raise MissionAuthorityError("unrecognized semantic budget overlay authority")
+        mission_budget = projected.get("mission_budget")
+        if not isinstance(overlay, dict) or not isinstance(mission_budget, dict):
+            raise MissionAuthorityError("semantic budget overlay is malformed")
+        if mission_budget.get("semantic_budget_policy") != overlay:
+            raise MissionAuthorityError("packet semantic budget policy differs from segment admission")
+        mission_budget.pop("semantic_budget_policy", None)
     return projected
 
 
@@ -579,14 +786,16 @@ def load_segment(
     segment, segment_sha = _read_record(_segment_path(repo, mission_id, number), expected_schema=SEGMENT_SCHEMA)
     mission, mission_sha = _read_record(_manifest_path(repo, mission_id), expected_schema=MISSION_SCHEMA)
     expected_binding = _mission_segment_binding(segment, segment_sha)
+    source_admission = segment.get("source_admission") or {}
+    projected_meta = _segment_authority_projection(meta, source_admission)
     if (
         binding != expected_binding
         or segment.get("run_id") != run_id
         or segment.get("mission_authority_sha256") != mission_sha
         or segment.get("packet_sha256") != util.sha256_file(packet_path)
-        or segment.get("authority_projection_sha256") != _digest(_authority_projection(meta))
+        or segment.get("authority_projection_sha256") != _digest(projected_meta)
         or mission.get("mission_id") != mission_id
-        or mission.get("authority_projection_sha256") != _digest(_authority_projection(meta))
+        or mission.get("authority_projection_sha256") != _digest(projected_meta)
         or int(meta.get("mission_budget", {}).get("segment_max_diff_lines") or 0) != int(mission.get("segment_max_diff_lines") or 0)
         or int(meta.get("mission_budget", {}).get("mission_max_diff_lines") or 0) != int(mission.get("mission_max_diff_lines") or 0)
         or int(mission.get("mission_max_unique_changed_files") or 0) <= 0
@@ -594,6 +803,25 @@ def load_segment(
         or bool(meta.get("mission_budget", {}).get("auto_segment")) != bool(mission.get("auto_segment"))
     ):
         raise MissionAuthorityError("v4 packet/state does not match immutable mission segment authority")
+    graph_ok, graph_reason = program.verify_frozen_graph(meta, program_state)
+    if not graph_ok:
+        raise MissionAuthorityError("v4 segment frozen PROGRAM authority is invalid: " + graph_reason)
+    migration_ref = _runtime_migration_ref(segment)
+    if migration_ref is not None:
+        migrated_runtime, _ = _runtime_identity_for_segment(repo, mission_id, segment)
+        if (
+            sorted(str(value) for value in (meta.get("capabilities") or []))
+            != migrated_runtime.get("capabilities")
+            or str(meta.get("runner_profile") or "")
+            != str((migrated_runtime.get("runner_profile") or {}).get("name") or "")
+        ):
+            raise MissionAuthorityError(
+                "migrated segment packet changes the sealed capability/profile request"
+            )
+    if source_admission.get("kind") == "blocked_semantic_budget_continuation":
+        _verify_semantic_budget_reconciliation(
+            repo, segment=segment, program_state=program_state,
+        )
     return segment, segment_sha, mission, mission_sha
 
 
@@ -654,10 +882,6 @@ def bind_runtime_identity(
     if loaded is None:
         return None
     segment, _, mission_doc, _ = loaded
-    if str(runtime_generation or "") != str(
-        (mission_doc.get("operational_budget") or {}).get("runtime_generation") or ""
-    ):
-        raise MissionAuthorityError("semantic worker runtime differs from frozen mission generation")
     try:
         from . import capability_binding
 
@@ -699,9 +923,46 @@ def bind_runtime_identity(
         "runner_profile": expected_profile,
         "effort_attestation_sha256": effort_attestation_sha,
     }
-    path = _mission_runtime_path(repo, str(segment["mission_id"]))
-    runtime_sha = _write_once(path, identity)
-    return {**identity, "mission_runtime_sha256": runtime_sha}
+    migration_ref = _runtime_migration_ref(segment)
+    if migration_ref is None:
+        expected_generation = str(
+            (mission_doc.get("operational_budget") or {}).get("runtime_generation") or ""
+        )
+        if str(runtime_generation or "") != expected_generation:
+            raise MissionAuthorityError("semantic worker runtime differs from frozen mission generation")
+        path = _mission_runtime_path(repo, str(segment["mission_id"]))
+        runtime_sha = _write_once(path, identity)
+        return {**identity, "mission_runtime_sha256": runtime_sha}
+
+    expected, migration_sha = _runtime_identity_for_segment(
+        repo, str(segment["mission_id"]), segment,
+    )
+    if (
+        str(runtime_generation or "") != str(expected.get("runtime_generation") or "")
+        or identity["capabilities"] != expected.get("capabilities")
+        or identity["runner_profile"] != expected.get("runner_profile")
+    ):
+        raise MissionAuthorityError(
+            "semantic worker runtime/profile/capability request differs from typed migration"
+        )
+    sequence = int(migration_ref["sequence"])
+    receipt = {
+        "schema": MISSION_RUNTIME_BINDING_SCHEMA,
+        "mission_id": str(segment["mission_id"]),
+        "sequence": sequence,
+        "migration_sha256": migration_sha,
+        "runtime_identity": identity,
+    }
+    receipt_sha = _write_once(
+        _mission_runtime_binding_path(repo, str(segment["mission_id"]), sequence),
+        receipt,
+    )
+    return {
+        **identity,
+        "mission_runtime_sha256": receipt_sha,
+        "runtime_migration_sequence": sequence,
+        "runtime_migration_sha256": migration_sha,
+    }
 
 
 def verify_runtime_identity(
@@ -711,12 +972,21 @@ def verify_runtime_identity(
     run_binding: dict[str, Any],
     runner_profile: dict[str, Any],
     runtime_generation: str,
+    segment_number: int | None = None,
 ) -> dict[str, Any]:
-    """Require a later segment's real binding to match the first mission binding."""
-    expected, expected_sha = _read_record(
-        _mission_runtime_path(Path(canonical_repo).resolve(strict=False), mission_id),
-        expected_schema=MISSION_RUNTIME_SCHEMA,
-    )
+    """Require a segment binding to match its create-once mission generation."""
+    repo = Path(canonical_repo).resolve(strict=False)
+    if segment_number is None:
+        expected, expected_sha = _read_record(
+            _mission_runtime_path(repo, mission_id),
+            expected_schema=MISSION_RUNTIME_SCHEMA,
+        )
+    else:
+        segment, _ = _read_record(
+            _segment_path(repo, mission_id, segment_number),
+            expected_schema=SEGMENT_SCHEMA,
+        )
+        expected, expected_sha = _runtime_identity_for_segment(repo, mission_id, segment)
     try:
         from . import capability_binding
 
@@ -744,6 +1014,118 @@ def verify_runtime_identity(
     if any(expected.get(key) != value for key, value in actual.items()):
         raise MissionAuthorityError("later segment runtime/capability/profile identity drifted")
     return {**expected, "mission_runtime_sha256": expected_sha}
+
+
+def _publish_runtime_migration(
+    repo: Path,
+    *,
+    mission_doc: dict[str, Any],
+    source_segment: dict[str, Any],
+    source_state: dict[str, Any],
+    source_packet_sha256: str,
+    source_event_chain_sha256: str,
+    approved_checkpoint_id: str,
+    approved_candidate_sha: str,
+    crossing_candidate_sha: str,
+) -> dict[str, Any] | None:
+    """Publish an append-only runtime rebind for a typed successor boundary."""
+    from . import supervisor_runtime
+
+    mission_id = str(mission_doc.get("mission_id") or "")
+    previous, previous_sha, previous_sequence = _active_mission_runtime(repo, mission_doc)
+    target_generation = str(supervisor_runtime.runtime_generation() or "")
+    if not target_generation:
+        raise MissionAuthorityError("installed supervisor runtime generation is unavailable")
+    if target_generation == str(previous.get("runtime_generation") or ""):
+        if previous_sequence == 0:
+            return None
+        # A crash may occur after the append-only migration record is
+        # published but before the child segment is materialized. Reuse that
+        # exact authorization on replay; never append a second migration or
+        # silently fall back to the original generation.
+        migration, migration_sha = _read_record(
+            _mission_runtime_migration_path(repo, mission_id, previous_sequence),
+            expected_schema=MISSION_RUNTIME_MIGRATION_SCHEMA,
+        )
+        if (
+            migration.get("runtime_generation") != target_generation
+            or migration.get("source_authority", {}).get("run_id")
+            != str(source_segment.get("run_id") or "")
+            or migration.get("source_authority", {}).get("approved_checkpoint_id")
+            != approved_checkpoint_id
+            or migration.get("source_authority", {}).get("approved_candidate_sha")
+            != approved_candidate_sha
+            or migration.get("source_authority", {}).get("crossing_candidate_sha")
+            != crossing_candidate_sha
+        ):
+            raise MissionAuthorityError("existing runtime migration does not match this blocked boundary")
+        return {
+            "sequence": previous_sequence,
+            "sha256": migration_sha,
+            "runtime_generation": target_generation,
+        }
+    if previous_sequence and not _mission_runtime_binding_path(
+        repo, mission_id, previous_sequence,
+    ).is_file():
+        raise MissionAuthorityError("prior runtime migration has no real capability binding receipt")
+
+    runner = str((mission_doc.get("operational_budget") or {}).get("runner") or "")
+    previous_profile = previous.get("runner_profile")
+    capabilities = previous.get("capabilities")
+    if not runner or not isinstance(previous_profile, dict) or not isinstance(capabilities, list):
+        raise MissionAuthorityError("previous mission runtime identity is incomplete")
+    meta, _ = packet.parse_packet_file(
+        state.run_dir(repo, str(source_segment.get("run_id") or "")) / "WORK_PACKET.md"
+    )
+    profile = runner_profiles.resolve_profile(
+        str(meta.get("runner_profile") or "default"), provider=runner,
+    )
+    runner_profiles.verify_profile_integrity(profile)
+    actual_profile = {
+        key: profile.get(key)
+        for key in ("name", "provider", "model", "effort", "identity_sha256")
+    }
+    if actual_profile != previous_profile:
+        raise MissionAuthorityError("runtime migration would change the sealed runner/profile/model/effort")
+    if sorted(str(value) for value in (meta.get("capabilities") or [])) != sorted(
+        str(value) for value in capabilities
+    ):
+        raise MissionAuthorityError("runtime migration would change the sealed capability request")
+
+    source_authority = {
+        "run_id": str(source_segment["run_id"]),
+        "packet_sha256": source_packet_sha256,
+        "state_sha256": util.sha256_file(state.state_path(repo, str(source_segment["run_id"]))),
+        "event_chain_sha256": source_event_chain_sha256,
+        "approved_checkpoint_id": approved_checkpoint_id,
+        "approved_candidate_sha": approved_candidate_sha,
+        "crossing_candidate_sha": crossing_candidate_sha,
+    }
+    sequence = previous_sequence + 1
+    payload = {
+        "schema": MISSION_RUNTIME_MIGRATION_SCHEMA,
+        "mission_id": mission_id,
+        "sequence": sequence,
+        "previous_runtime_identity_sha256": previous_sha,
+        "previous_runtime_generation": str(previous.get("runtime_generation") or ""),
+        "runtime_generation": target_generation,
+        "runner": runner,
+        "capabilities": sorted(str(value) for value in capabilities),
+        "runner_profile": actual_profile,
+        "source_authority": source_authority,
+        "reason": "typed blocked semantic-budget successor after exact runtime commissioning",
+        "created_at": str(source_state.get("updated_at") or ""),
+    }
+    if not payload["created_at"] or not _FULL_SHA_RE.fullmatch(approved_candidate_sha):
+        raise MissionAuthorityError("runtime migration source boundary is incomplete")
+    digest = _write_once(
+        _mission_runtime_migration_path(repo, mission_id, sequence), payload,
+    )
+    return {
+        "sequence": sequence,
+        "sha256": digest,
+        "runtime_generation": target_generation,
+    }
 
 
 def _verify_approved_prefix(
@@ -1126,6 +1508,7 @@ def segment_boundary_eligibility(
             else:
                 build_entitlement = program.build_pass_entitlement(
                     prog, cp_id=cp_id, packet_cp=packet_cp,
+                    packet=meta, state_doc=current_state,
                 )
                 reasons.extend(build_entitlement["reason_codes"])
         order = (meta.get("checkpoint_graph") or {}).get("execution_order") or []
@@ -1409,6 +1792,14 @@ def _copy_program_for_segment(
     copied["checkpoint_graph_sha256"] = program.checkpoint_graph_sha256(meta)
     copied["promotion_policy"] = program.resolve_promotion_policy(meta)
     copied["mission_segment"] = copy.deepcopy(mission_segment)
+    policy = (meta.get("mission_budget") or {}).get("semantic_budget_policy")
+    if isinstance(policy, dict):
+        copied["semantic_budget_policy_sha256"] = program.semantic_budget_policy_sha256(meta)
+        copied.setdefault("semantic_budget_allocations", [])
+    elif copied.get("semantic_budget_allocations") or copied.get("semantic_budget_policy_sha256"):
+        raise MissionAuthorityError(
+            "successor cannot discard previously consumed adaptive semantic authority"
+        )
     copied["blocked"] = False
     copied["block_reason"] = ""
     source = copied.get("source_sha_provenance") or {}
@@ -1493,10 +1884,19 @@ def _create_child_segment(
     if not git_checks.is_valid_branch_name(child_branch):
         raise MissionAuthorityError("derived candidate branch name is invalid")
     _create_baseline_ref(repo, baseline_branch, baseline_sha)
+    source_admission = copy.deepcopy(source_admission)
+    overlay = source_admission.get("semantic_budget_policy_overlay")
+    if overlay is not None:
+        if source_admission.get("kind") != "blocked_semantic_budget_continuation":
+            raise MissionAuthorityError(
+                "semantic budget policy overlay requires typed blocked-mission continuation"
+            )
     child_meta = _derived_packet_meta(
         mission_doc, run_id=child_id, number=segment_number,
         baseline_branch=baseline_branch, baseline_sha=baseline_sha,
     )
+    if overlay is not None:
+        child_meta.setdefault("mission_budget", {})["semantic_budget_policy"] = copy.deepcopy(overlay)
     errors = packet.validate_packet_for_approval(child_meta)
     if errors:
         raise MissionAuthorityError("derived successor packet is invalid: " + "; ".join(errors[:20]))
@@ -1507,13 +1907,13 @@ def _create_child_segment(
     _write_packet_once(child_root, child_packet)
 
     projection_sha = str(mission_doc["authority_projection_sha256"])
-    source_admission = copy.deepcopy(source_admission)
     source_admission["mission_original_baseline_sha"] = original_baseline
     source_admission["mission_id"] = mission_id
     source_admission["segment_number"] = segment_number
     source_admission["predecessor_run_id"] = predecessor_run_id
     if source_admission.get("kind") in {
         "automatic_segment_successor", "explicit_legacy_continuation",
+        "blocked_semantic_budget_continuation",
     }:
         crossing_sha = str(source_admission.get("crossing_candidate_sha") or "")
         if not _FULL_SHA_RE.fullmatch(crossing_sha) or crossing_sha == baseline_sha:
@@ -1670,15 +2070,20 @@ def _create_child_segment(
                 + str(enrolled.get("reason") or enrolled)
             )
         child_job = enrolled
-    expected_runtime = str(
-        (mission_doc.get("operational_budget") or {}).get("runtime_generation") or ""
-    )
+    runtime_migration_ref = _runtime_migration_ref(segment_payload)
+    if runtime_migration_ref is None:
+        expected_runtime_generation = str(
+            (mission_doc.get("operational_budget") or {}).get("runtime_generation") or ""
+        )
+    else:
+        expected_runtime, _ = _runtime_identity_for_segment(repo, mission_id, segment_payload)
+        expected_runtime_generation = str(expected_runtime.get("runtime_generation") or "")
     expected_runner = str((mission_doc.get("operational_budget") or {}).get("runner") or "")
     if (
         child_job.get("repo") != str(repo)
         or child_job.get("run_id") != child_id
         or str(child_job.get("candidate_branch") or "") != child_branch
-        or str(child_job.get("runtime_generation") or "") != expected_runtime
+        or str(child_job.get("runtime_generation") or "") != expected_runtime_generation
         or str(child_job.get("runner") or "") != expected_runner
         or str(child_job.get("execution_mode") or "").upper() != "PROGRAM"
         or str(child_job.get("status") or "") not in {
@@ -1705,6 +2110,7 @@ def _create_child_segment(
         "crossing_candidate_not_adopted": not crossing_sha or crossing_sha != baseline_sha,
         "crossing_candidate_sha": crossing_sha or None,
         "mission_source_lines_at_start": mission_used,
+        "runtime_generation": expected_runtime_generation,
     }
 
 
@@ -1828,6 +2234,9 @@ def create_segment_successor(
         "crossing_candidate_sha": str(receipt.get("candidate_sha") or ""),
         "crossing_candidate_not_adopted": str(receipt.get("candidate_sha") or "") != last_approved_sha,
     }
+    runtime_migration = _runtime_migration_ref(parent_segment)
+    if runtime_migration is not None:
+        source_admission["runtime_migration"] = copy.deepcopy(runtime_migration)
     # A previously published child is a replay, not a request for a second
     # operational budget allocation. A new child must first pass the complete
     # mission-wide spend reconciliation before any successor artifacts appear.
@@ -1908,6 +2317,7 @@ def _verified_mission_spend(
     *,
     current_run_id: str,
     db_path: Path | None,
+    target_runtime_generation: str | None = None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     """Reconcile mission-wide operational usage without granting a new envelope."""
     run_ids, external_ids = _mission_job_ids(repo, mission_doc)
@@ -1964,6 +2374,23 @@ def _verified_mission_spend(
     budget = mission_doc.get("operational_budget")
     if not isinstance(budget, dict):
         raise MissionAuthorityError("mission operational budget authority is missing")
+    segment_runtime_generations: dict[str, str] = {}
+    for number in range(1, int(mission_doc.get("max_segments") or 0) + 1):
+        path = _segment_path(repo, str(mission_doc["mission_id"]), number)
+        if not path.is_file():
+            continue
+        segment_authority, _ = _read_record(path, expected_schema=SEGMENT_SCHEMA)
+        migration_ref = _runtime_migration_ref(segment_authority)
+        if migration_ref is None:
+            segment_generation = str(budget.get("runtime_generation") or "")
+        else:
+            runtime_identity, _ = _runtime_identity_for_segment(
+                repo, str(mission_doc["mission_id"]), segment_authority,
+            )
+            segment_generation = str(runtime_identity.get("runtime_generation") or "")
+        if not segment_generation:
+            raise MissionAuthorityError("mission segment runtime identity is incomplete")
+        segment_runtime_generations[str(segment_authority.get("run_id") or "")] = segment_generation
     segment_rows = [job for job in jobs if str(job.get("run_id")) not in external_ids]
     external_rows = [job for job in jobs if str(job.get("run_id")) in external_ids]
     if not segment_rows:
@@ -1998,11 +2425,17 @@ def _verified_mission_spend(
         ):
             raise MissionAuthorityError("mission has no enrolled segment to bind")
     runner = str(budget.get("runner") or "")
-    generation = str(budget.get("runtime_generation") or "")
-    if not runner or not generation:
+    active_runtime, _, _ = _active_mission_runtime(repo, mission_doc)
+    active_generation = str(active_runtime.get("runtime_generation") or "")
+    installed_generation = str(supervisor_runtime.runtime_generation() or "")
+    if not runner or not active_generation or not installed_generation:
         raise MissionAuthorityError("mission runner/runtime identity is incomplete")
     for job in segment_rows:
-        if str(job.get("runner") or "") != runner or str(job.get("runtime_generation") or "") != generation:
+        expected_generation = segment_runtime_generations.get(str(job.get("run_id") or ""))
+        if (
+            str(job.get("runner") or "") != runner
+            or str(job.get("runtime_generation") or "") != expected_generation
+        ):
             raise MissionAuthorityError("mission segment runner or runtime generation drifted")
     for job in external_rows:
         if str(job.get("runner") or "") != runner:
@@ -2011,7 +2444,24 @@ def _verified_mission_spend(
         if expected_generations.get(str(job.get("run_id"))) != str(job.get("runtime_generation") or ""):
             raise MissionAuthorityError("historical source runtime provenance differs from legacy admission")
 
-    if supervisor_runtime.runtime_generation() != generation:
+    current_segment_generation = segment_runtime_generations.get(str(current_run_id))
+    if target_runtime_generation is not None:
+        if (
+            str(target_runtime_generation) != installed_generation
+            or str(current_run_id) not in segment_runtime_generations
+        ):
+            raise MissionAuthorityError("prospective segment runtime differs from commissioned runtime")
+        current_segment_generation = str(target_runtime_generation)
+    if current_segment_generation is None:
+        # Admission runs just before its deterministic segment is created.
+        # In that case the typed migration is already durable in the
+        # source-admission record prepared by the caller; otherwise only the
+        # currently active mission generation is eligible.
+        current_segment_generation = active_generation
+    if (
+        current_segment_generation != (str(target_runtime_generation) if target_runtime_generation else active_generation)
+        or installed_generation != (str(target_runtime_generation) if target_runtime_generation else active_generation)
+    ):
         raise MissionAuthorityError("mission cannot enqueue under a different installed runtime generation")
 
     all_attempts = [item for rows in attempt_rows_by_job.values() for item in rows]
@@ -2072,8 +2522,749 @@ def _verified_mission_spend(
         remaining["execution_started_at"] = None
         remaining["parent_deadline_unix"] = None
     remaining["runner"] = runner
-    remaining["runtime_generation"] = generation
+    remaining["runtime_generation"] = (
+        str(target_runtime_generation) if target_runtime_generation else active_generation
+    )
     return remaining, jobs
+
+
+def _verified_repair_claim_history(
+    repo: Path,
+    *,
+    current_run_id: str,
+    mission_id: str,
+    execution_order: list[str],
+) -> dict[str, Any]:
+    """Reconstruct funded repairs from an immutable predecessor/event chain.
+
+    Checkpoint-local mirrors in older states can be stale after a historical
+    repair-funding state merge. This projection counts only the durable
+    atomic-funding events, recursively verifies every predecessor artifact,
+    and requires each cumulative mirror to reconcile before it can be used to
+    materialize a typed successor.
+    """
+    from . import schema_validate
+
+    seen: set[str] = set()
+    runs: list[dict[str, Any]] = []
+    claims: list[dict[str, Any]] = []
+    counts = {str(value): 0 for value in execution_order}
+    finalized: set[str] = set()
+    current_total = 0
+
+    def visit(run_id: str) -> None:
+        nonlocal current_total
+        if run_id in seen:
+            raise MissionAuthorityError("mission repair-history lineage contains a cycle or duplicate run")
+        seen.add(run_id)
+        root = state.run_dir(repo, run_id)
+        if (root / "STATE_TXN.json").exists():
+            raise MissionAuthorityError(f"repair-history source has an unfinished state transaction: {run_id}")
+        intact, problems = integrity.assert_artifacts_intact(repo, run_id)
+        if not intact:
+            raise MissionAuthorityError(
+                f"repair-history source artifact chain is invalid for {run_id}: "
+                + "; ".join(problems[:8])
+            )
+        snapshot = state.load_verified(repo, run_id)
+        if not isinstance(snapshot, dict) or schema_validate.validate_state(snapshot):
+            raise MissionAuthorityError(f"repair-history source state is invalid: {run_id}")
+        source_packet = root / "WORK_PACKET.md"
+        source_state = state.state_path(repo, run_id)
+        source_events = state.events_path(repo, run_id)
+        source_meta, _ = packet.parse_packet_file(source_packet)
+        source_program = snapshot.get("program") or {}
+        events = integrity.read_event_chain(source_events)
+        if not events or integrity.compute_event_chain_hash(source_events) != integrity.get_event_chain_hash(source_events):
+            raise MissionAuthorityError(f"repair-history source event chain is invalid: {run_id}")
+
+        segment_doc = None
+        admission: dict[str, Any] = {}
+        parent_id = ""
+        if source_meta.get("schema") == packet.MISSION_PROGRAM_SCHEMA_VERSION:
+            loaded = load_segment(repo, run_id, state_snapshot=snapshot)
+            if loaded is None or loaded[0].get("mission_id") != mission_id:
+                raise MissionAuthorityError("repair-history segment is not bound to this mission")
+            segment_doc = loaded[0]
+            admission = segment_doc.get("source_admission") or {}
+            parent_id = str(admission.get("predecessor_run_id") or "")
+        else:
+            rollover = source_program.get("rollover_provenance") or {}
+            parent_id = str(rollover.get("parent_run_id") or "")
+
+        parent_snapshot: dict[str, Any] | None = None
+        if parent_id:
+            if parent_id == run_id:
+                raise MissionAuthorityError("repair-history run names itself as predecessor")
+            visit(parent_id)
+            parent_snapshot = state.load_verified(repo, parent_id)
+            parent_root = state.run_dir(repo, parent_id)
+            parent_packet = parent_root / "WORK_PACKET.md"
+            parent_state = state.state_path(repo, parent_id)
+            parent_events = state.events_path(repo, parent_id)
+            if segment_doc is not None:
+                if (
+                    util.sha256_file(parent_packet) != admission.get("source_packet_sha256")
+                    or util.sha256_file(parent_state) != admission.get("source_state_sha256")
+                    or integrity.compute_event_chain_hash(parent_events)
+                    != admission.get("source_event_chain_sha256")
+                ):
+                    raise MissionAuthorityError("mission segment predecessor identity changed")
+                imported_prefix = admission.get("approved_prefix") or []
+                imported_ids = [str(item.get("checkpoint_id") or "") for item in imported_prefix]
+                expected_prefix = [item for item in execution_order if item in finalized]
+                if imported_ids != expected_prefix:
+                    raise MissionAuthorityError("mission segment approved prefix differs from verified predecessor events")
+            else:
+                rollover = source_program.get("rollover_provenance") or {}
+                if (
+                    util.sha256_file(parent_packet) != rollover.get("source_packet_sha256")
+                    or util.sha256_file(parent_state) != rollover.get("source_state_sha256")
+                    or integrity.compute_event_chain_hash(parent_events)
+                    != rollover.get("source_event_chain_sha256")
+                ):
+                    raise MissionAuthorityError("rollover repair-history predecessor identity changed")
+                imported = rollover.get("imported_counters") or {}
+                parent_program = (parent_snapshot or {}).get("program") or {}
+                if int(imported.get("repair_round_count") or 0) != int(
+                    (parent_program.get("cumulative_counters") or {}).get("repair_round_count") or 0
+                ):
+                    raise MissionAuthorityError("rollover repair total differs from its predecessor")
+
+        source_chain_sha = integrity.compute_event_chain_hash(source_events)
+        if segment_doc is not None:
+            prefix = admission.get("approved_prefix") or []
+            if prefix:
+                current_ids = list(prefix[-1].get("next_checkpoints") or [])
+            else:
+                current_ids = list(execution_order[:1])
+        elif parent_id:
+            rollover = source_program.get("rollover_provenance") or {}
+            current_ids = [str(rollover.get("checkpoint_id") or "")]
+        else:
+            current_ids = list(execution_order[:1])
+        if len(current_ids) != 1 or current_ids[0] not in execution_order:
+            raise MissionAuthorityError(f"repair-history current checkpoint is ambiguous in {run_id}")
+
+        before_run_total = current_total
+        run_claim_count = 0
+        for event in events:
+            if event.get("event_type") == "program_advanced":
+                finalized_id = str(event.get("cp_id_finalized") or "")
+                next_ids = event.get("next_checkpoints")
+                if (
+                    current_ids != [finalized_id]
+                    or finalized_id not in execution_order
+                    or finalized_id in finalized
+                    or not isinstance(next_ids, list)
+                ):
+                    raise MissionAuthorityError("repair-history checkpoint advancement is out of order")
+                finalized.add(finalized_id)
+                current_ids = [str(value) for value in next_ids]
+                if len(current_ids) > 1 or any(value not in execution_order for value in current_ids):
+                    raise MissionAuthorityError("repair-history next-checkpoint set is invalid")
+                expected_next = execution_order[execution_order.index(finalized_id) + 1:
+                                                 execution_order.index(finalized_id) + 1 + len(current_ids)]
+                if current_ids != expected_next:
+                    raise MissionAuthorityError("repair-history advancement skipped or reordered a checkpoint")
+                continue
+            if not (
+                event.get("event_type") == "state_transition"
+                and event.get("new_state") == "CHANGES_REQUESTED"
+                and "repair entitlement claimed atomically" in str(event.get("reason") or "")
+            ):
+                continue
+            if len(current_ids) != 1:
+                raise MissionAuthorityError("funded repair event has no unique current checkpoint")
+            cp_id = current_ids[0]
+            event_sha = str(event.get("event_chain_sha256") or "")
+            candidate_sha = str(event.get("commit_sha") or "")
+            if not _SHA256_RE.fullmatch(event_sha) or not _FULL_SHA_RE.fullmatch(candidate_sha):
+                raise MissionAuthorityError("funded repair event lacks exact event/candidate identity")
+            claims.append({
+                "run_id": run_id,
+                "checkpoint_id": cp_id,
+                "timestamp": str(event.get("ts") or ""),
+                "candidate_sha": candidate_sha,
+                "source_event_sha256": event_sha,
+                "reason": str(event.get("reason") or ""),
+                "checkpoint_used_before": counts[cp_id],
+                "cumulative_used_before": current_total,
+                "approved_checkpoints_before": [value for value in execution_order if value in finalized],
+            })
+            counts[cp_id] += 1
+            current_total += 1
+            run_claim_count += 1
+
+        program_counters = source_program.get("cumulative_counters") or {}
+        state_total = int(snapshot.get("repair_round") or 0)
+        program_total = int(program_counters.get("repair_round_count") or 0)
+        if state_total != current_total or program_total != current_total:
+            raise MissionAuthorityError(
+                f"funded repair event count does not reconcile in {run_id}: "
+                f"events={current_total}, state={state_total}, program={program_total}"
+            )
+        runs.append({
+            "run_id": run_id,
+            "packet_sha256": util.sha256_file(source_packet),
+            "state_sha256": util.sha256_file(source_state),
+            "event_chain_sha256": source_chain_sha,
+            "repair_claims": run_claim_count,
+            "cumulative_repairs": current_total,
+            "cumulative_repairs_before_run": before_run_total,
+        })
+
+    visit(current_run_id)
+    current_loaded = load_segment(repo, current_run_id)
+    if current_loaded is None:
+        raise MissionAuthorityError("current repair-history source lost its mission-segment binding")
+    current_segment = current_loaded[0]
+    external_ids = list(
+        (_read_record(_manifest_path(repo, mission_id), expected_schema=MISSION_SCHEMA)[0]
+         .get("operational_source_run_ids") or [])
+    )
+    if (
+        current_segment.get("run_id") != current_run_id
+        or not (current_segment.get("source_admission") or {}).get("predecessor_run_id")
+        or (current_segment.get("source_admission") or {}).get("predecessor_run_id") not in seen
+        or any(run_id not in seen for run_id in external_ids)
+    ):
+        raise MissionAuthorityError("mission repair-history does not match its sealed legacy source chain")
+    return {
+        "runs": runs,
+        "claims": claims,
+        "counts_by_checkpoint": counts,
+        "total_claims": current_total,
+        "approved_checkpoints": [value for value in execution_order if value in finalized],
+    }
+
+
+def _verify_semantic_budget_reconciliation(
+    repo: Path,
+    *,
+    segment: dict[str, Any],
+    program_state: dict[str, Any],
+) -> None:
+    """Re-prove imported historical repair reallocations against source events."""
+    admission = segment.get("source_admission") or {}
+    record = admission.get("semantic_budget_reconciliation")
+    if (
+        not isinstance(record, dict)
+        or record.get("schema") != "ownframework-loop-semantic-budget-reconciliation/v1"
+        or record.get("mission_id") != segment.get("mission_id")
+        or record.get("mission_authority_sha256") != segment.get("mission_authority_sha256")
+        or record.get("approved_candidate_sha") != segment.get("baseline_sha")
+        or record.get("crossing_candidate_sha") != admission.get("crossing_candidate_sha")
+        or record.get("crossing_candidate_sha") == segment.get("baseline_sha")
+    ):
+        raise MissionAuthorityError("typed semantic-budget reconciliation record is malformed")
+    source_run_id = str(admission.get("predecessor_run_id") or "")
+    source_root = state.run_dir(repo, source_run_id)
+    if (
+        not source_run_id
+        or util.sha256_file(source_root / "WORK_PACKET.md") != admission.get("source_packet_sha256")
+        or util.sha256_file(source_root / "STATE.json") != admission.get("source_state_sha256")
+        or integrity.compute_event_chain_hash(source_root / "EVENTS.log")
+            != admission.get("source_event_chain_sha256")
+    ):
+        raise MissionAuthorityError("typed semantic-budget reconciliation source boundary changed")
+    source_meta, _ = packet.parse_packet_file(source_root / "WORK_PACKET.md")
+    graph = source_meta.get("checkpoint_graph") or {}
+    history = _verified_repair_claim_history(
+        repo,
+        current_run_id=source_run_id,
+        mission_id=str(segment.get("mission_id") or ""),
+        execution_order=[str(value) for value in graph.get("execution_order") or []],
+    )
+    if (
+        record.get("source_runs") != history["runs"]
+        or record.get("source_repair_claim_count") != history["total_claims"]
+        or record.get("source_repair_counts_by_checkpoint") != history["counts_by_checkpoint"]
+        or int((program_state.get("cumulative_counters") or {}).get("repair_round_count") or 0)
+            < history["total_claims"]
+    ):
+        raise MissionAuthorityError("typed semantic-budget repair history no longer reconciles")
+    imported = [
+        item for item in program_state.get("semantic_budget_allocations") or []
+        if isinstance(item, dict) and item.get("source_event_sha256") is not None
+    ]
+    imported_ids = [str(item.get("allocation_id") or "") for item in imported]
+    if imported_ids != record.get("reconciliation_allocation_ids"):
+        raise MissionAuthorityError("typed semantic-budget allocations differ from their segment admission")
+    event_claims = {
+        str(claim["source_event_sha256"]): claim for claim in history["claims"]
+    }
+    for allocation in imported:
+        claim = event_claims.get(str(allocation.get("source_event_sha256") or ""))
+        if (
+            claim is None
+            or claim.get("checkpoint_id") != allocation.get("checkpoint_id")
+            or claim.get("run_id") != allocation.get("run_id")
+            or int(allocation.get("local_used_before") or 0)
+                != int(claim.get("checkpoint_used_before") or 0)
+            or int(allocation.get("cumulative_used_before") or 0)
+                != int(claim.get("cumulative_used_before") or 0)
+            or allocation.get("reason")
+                != "reconciled_pre_policy_funded_repair_from_verified_event_history"
+        ):
+            raise MissionAuthorityError("historical repair allocation is not bound to its exact funding event")
+    source_counts = record.get("source_persisted_local_repair_counts")
+    if not isinstance(source_counts, dict):
+        raise MissionAuthorityError("semantic-budget reconciliation lacks persisted-counter comparison")
+    if set(source_counts) != set(history["counts_by_checkpoint"]):
+        raise MissionAuthorityError("semantic-budget reconciliation checkpoint set changed")
+    source_program = (state.load_verified(repo, source_run_id) or {}).get("program") or {}
+    source_actual = {
+        str(item.get("id")): int(item.get("repair_round_count") or 0)
+        for item in source_program.get("checkpoints") or []
+    }
+    if source_actual != source_counts:
+        raise MissionAuthorityError("recorded source repair mirrors differ from the immutable source state")
+    current_counts = {
+        str(item.get("id")): int(item.get("repair_round_count") or 0)
+        for item in program_state.get("checkpoints") or []
+    }
+    if any(
+        current_counts.get(cp_id, -1) < actual
+        for cp_id, actual in history["counts_by_checkpoint"].items()
+    ):
+        raise MissionAuthorityError("successor repair counters fell below verified historical funding")
+
+
+def _historical_repair_reconciliation_allocations(
+    *,
+    meta: dict[str, Any],
+    program_state: dict[str, Any],
+    history: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Bind historical over-local funded repairs to safe mission capacity."""
+    policy = (meta.get("mission_budget") or {}).get("semantic_budget_policy")
+    if not isinstance(policy, dict):
+        raise MissionAuthorityError("historical repair reconciliation requires the typed policy overlay")
+    order = [str(value) for value in (meta.get("checkpoint_graph") or {}).get("execution_order") or []]
+    packet_cps = {
+        str(item.get("id")): item
+        for item in (meta.get("checkpoint_graph") or {}).get("checkpoints") or []
+        if isinstance(item, dict)
+    }
+    counter = "repair_round_count"
+    cap_key = "max_repair_rounds"
+    cumulative_cap = int((meta.get("risk_budget") or {}).get(cap_key) or 0)
+    declared_sum = sum(
+        int((item.get("risk_budget") or {}).get(cap_key) or 0)
+        for item in packet_cps.values()
+    )
+    if cumulative_cap < declared_sum:
+        raise MissionAuthorityError("sealed mission repair ceiling is below declared checkpoint allocations")
+    if program_state.get("semantic_budget_allocations"):
+        raise MissionAuthorityError("legacy repair ledger already contains adaptive allocations")
+    policy_sha = program.semantic_budget_policy_sha256(meta)
+    allocations: list[dict[str, Any]] = []
+    donor_used: dict[str, int] = {}
+    flex_used = 0
+    target_allocated: dict[str, int] = {}
+
+    for claim in history["claims"]:
+        cp_id = str(claim["checkpoint_id"])
+        if cp_id not in packet_cps:
+            raise MissionAuthorityError("funded repair refers to a checkpoint outside the sealed graph")
+        cp_budget = packet_cps[cp_id].get("risk_budget") or {}
+        local_cap = int(cp_budget.get(cap_key) or 0)
+        local_before = int(claim["checkpoint_used_before"])
+        if local_before < local_cap:
+            continue
+        expected_local = local_cap + target_allocated.get(cp_id, 0)
+        if local_before != expected_local:
+            raise MissionAuthorityError("historical over-local repair count is not sequentially explainable")
+        cumulative_before = int(claim["cumulative_used_before"])
+        if cumulative_before >= cumulative_cap:
+            raise MissionAuthorityError("historical repair claim exceeds the sealed cumulative ceiling")
+        current_index = order.index(cp_id)
+        approved = set(claim["approved_checkpoints_before"])
+        future_reserved = sum(
+            max(
+                0,
+                int(((packet_cps.get(future_id) or {}).get("risk_budget") or {}).get(cap_key) or 0)
+                - int(history["counts_by_checkpoint"].get(future_id) or 0),
+            )
+            for future_id in order[current_index + 1:]
+            if future_id not in approved
+        ) + 1
+        if cumulative_cap - cumulative_before - 1 < future_reserved:
+            raise MissionAuthorityError("historical repair reclassification would consume future/final acceptance reserve")
+
+        donor_remaining: list[tuple[str, int]] = []
+        if policy.get("reclaim_approved_checkpoint_capacity") is True:
+            for donor_id in order:
+                if donor_id not in approved or donor_id == cp_id:
+                    continue
+                donor_cap = int(
+                    ((packet_cps[donor_id].get("risk_budget") or {}).get(cap_key) or 0)
+                )
+                remaining = max(
+                    0,
+                    donor_cap
+                    - int(history["counts_by_checkpoint"].get(donor_id) or 0)
+                    - donor_used.get(donor_id, 0),
+                )
+                if remaining:
+                    donor_remaining.append((donor_id, remaining))
+        flex_remaining = (
+            max(0, cumulative_cap - declared_sum - flex_used)
+            if policy.get("use_cumulative_slack") is True else 0
+        )
+        donor_pool = sum(amount for _, amount in donor_remaining)
+        pool_before = donor_pool + flex_remaining
+        if pool_before < 1:
+            raise MissionAuthorityError("historical over-local repairs have no sealed reclaimable authority")
+
+        if donor_remaining:
+            source_kind = "approved_checkpoint_capacity"
+            source_checkpoint = donor_remaining[0][0]
+            donor_used[source_checkpoint] = donor_used.get(source_checkpoint, 0) + 1
+        elif flex_remaining:
+            source_kind = "mission_cumulative_slack"
+            source_checkpoint = None
+            flex_used += 1
+        else:
+            raise MissionAuthorityError("historical repair overage cannot be safely reclassified")
+
+        prior_for_target = target_allocated.get(cp_id, 0)
+        body = {
+            "schema": "ownframework-loop-semantic-budget-allocation/v1",
+            "mission_id": str((program_state.get("mission_segment") or {}).get("mission_id") or ""),
+            "run_id": str(claim["run_id"]),
+            "checkpoint_id": cp_id,
+            "counter_kind": counter,
+            "declared_local_cap": local_cap,
+            "local_used_before": local_before,
+            "cumulative_used_before": cumulative_before,
+            "cumulative_cap": cumulative_cap,
+            "reserved_remaining_authority": future_reserved,
+            "reclaimable_pool_before": pool_before,
+            "amount_borrowed": 1,
+            "reclaimable_pool_after": pool_before - 1,
+            "reason": "reconciled_pre_policy_funded_repair_from_verified_event_history",
+            "source_kind": source_kind,
+            "source_checkpoint_id": source_checkpoint,
+            "source_authority_sha256": policy_sha,
+            "source_event_sha256": str(claim["source_event_sha256"]),
+            "allocation_number_for_checkpoint_counter": prior_for_target + 1,
+            "created_at": str(claim["timestamp"]),
+        }
+        body["allocation_id"] = program.sha256_text(program.canonical_json_dumps(body))
+        allocations.append(body)
+        target_allocated[cp_id] = prior_for_target + 1
+    return allocations
+
+
+def continue_blocked_semantic_budget(
+    canonical_repo: Path,
+    source_run_id: str,
+    *,
+    expected_mission_id: str,
+    expected_mission_authority_sha256: str,
+    expected_packet_sha256: str,
+    expected_original_baseline_sha: str,
+    expected_crossing_candidate_sha: str,
+    expected_checkpoint_id: str,
+    expected_approved_checkpoint_id: str,
+    expected_approved_candidate_sha: str,
+    expected_remaining_checkpoints: list[str],
+    confirmation: str,
+    db_path: Path | None = None,
+) -> dict[str, Any]:
+    """Derive one explicitly authorized adaptive-budget mission successor.
+
+    The immutable blocked segment is never reopened. The child starts only at
+    the last recursively verified APPROVED candidate, carries a typed
+    opt-in allocation policy, and records every historical over-local repair
+    claim against event-chain evidence before normal supervisor enrollment.
+    """
+    repo = Path(canonical_repo).resolve(strict=False)
+    expected_confirmation = f"CONTINUE-BLOCKED-SEMANTIC-BUDGET:{expected_mission_id}"
+    if confirmation != expected_confirmation:
+        raise MissionAuthorityError("blocked semantic-budget continuation confirmation does not match mission")
+    if (
+        not re.fullmatch(r"mission-[a-f0-9]{24}", expected_mission_id)
+        or not _SHA256_RE.fullmatch(expected_mission_authority_sha256)
+        or not _SHA256_RE.fullmatch(expected_packet_sha256)
+        or not _FULL_SHA_RE.fullmatch(expected_original_baseline_sha)
+        or not _FULL_SHA_RE.fullmatch(expected_crossing_candidate_sha)
+        or not _FULL_SHA_RE.fullmatch(expected_approved_candidate_sha)
+        or not expected_approved_checkpoint_id
+        or not isinstance(expected_checkpoint_id, str) or not expected_checkpoint_id
+        or not isinstance(expected_remaining_checkpoints, list)
+        or not expected_remaining_checkpoints
+        or len(expected_remaining_checkpoints) != len(set(expected_remaining_checkpoints))
+    ):
+        raise MissionAuthorityError("blocked semantic-budget continuation identity is malformed")
+
+    loaded = load_segment(repo, source_run_id)
+    if loaded is None:
+        raise MissionAuthorityError("blocked source is not a sealed mission segment")
+    segment, segment_sha, mission_doc, mission_sha = loaded
+    if (
+        mission_doc.get("mission_id") != expected_mission_id
+        or mission_sha != expected_mission_authority_sha256
+        or int(segment.get("segment_number") or 0) >= int(mission_doc.get("max_segments") or 0)
+    ):
+        raise MissionAuthorityError("blocked mission identity or authorized segment count differs")
+    if segment.get("run_id") != source_run_id:
+        raise MissionAuthorityError("blocked segment authority names a different source run")
+    source_root = state.run_dir(repo, source_run_id)
+    if (source_root / "STATE_TXN.json").exists():
+        raise MissionAuthorityError("blocked source has an unfinished state transaction")
+    intact, problems = integrity.assert_artifacts_intact(repo, source_run_id)
+    if not intact:
+        raise MissionAuthorityError("blocked source artifact chain is invalid: " + "; ".join(problems[:10]))
+    source_state = state.load_verified(repo, source_run_id)
+    if not isinstance(source_state, dict) or source_state.get("state") != "BLOCKED":
+        raise MissionAuthorityError("typed semantic-budget continuation requires the exact BLOCKED source")
+    if state.is_stop_requested(repo, source_run_id):
+        raise MissionAuthorityError("STOPPED/stop-requested authority is absorbing")
+    source_packet_path = source_root / "WORK_PACKET.md"
+    source_packet_sha = util.sha256_file(source_packet_path)
+    if source_packet_sha != expected_packet_sha256 or segment.get("packet_sha256") != source_packet_sha:
+        raise MissionAuthorityError("blocked source packet differs from the explicit sealed identity")
+    meta, _ = packet.parse_packet_file(source_packet_path)
+    errors = packet.validate_packet_for_approval(meta)
+    if errors:
+        raise MissionAuthorityError("blocked source packet is not valid: " + "; ".join(errors[:8]))
+    if (
+        meta.get("schema") != packet.MISSION_PROGRAM_SCHEMA_VERSION
+        or not packet.packet_is_program(meta)
+        or str(meta.get("target", {}).get("expected_baseline_sha") or "")
+            != str(segment.get("baseline_sha") or "")
+        or expected_original_baseline_sha != mission_doc.get("mission_original_baseline_sha")
+    ):
+        raise MissionAuthorityError("blocked source baseline or PROGRAM schema differs from mission authority")
+    seal = approval.load_approval(repo, source_run_id)
+    seal_ok, seal_reason = approval.validate_approval_binding(
+        canonical_repo=repo,
+        run_id=source_run_id,
+        approval=seal,
+        packet=meta,
+        packet_path=source_packet_path,
+    )
+    if not seal_ok:
+        raise MissionAuthorityError("blocked source approval binding is invalid: " + seal_reason)
+
+    source_program = source_state.get("program") or {}
+    graph_ok, graph_reason = program.verify_frozen_graph(meta, source_program)
+    if not graph_ok:
+        raise MissionAuthorityError("blocked source frozen PROGRAM graph is invalid: " + graph_reason)
+    events_path = state.events_path(repo, source_run_id)
+    events = integrity.read_event_chain(events_path)
+    if integrity.compute_event_chain_hash(events_path) != integrity.get_event_chain_hash(events_path):
+        raise MissionAuthorityError("blocked source event chain is invalid")
+    approved_sha, approved_cp, verdict_sha = _verify_approved_prefix(
+        meta, source_program, events,
+        canonical_repo=repo, segment_doc=segment,
+    )
+    current_ids = list(source_program.get("current_checkpoints") or [])
+    if (
+        approved_sha != expected_approved_candidate_sha
+        or approved_cp != expected_approved_checkpoint_id
+        or current_ids != [expected_checkpoint_id]
+        or current_ids[0] in {str(row.get("id")) for row in source_program.get("finalized_checkpoints") or []}
+    ):
+        raise MissionAuthorityError("blocked source does not follow the exact requested approved prefix")
+    if source_state.get("last_candidate_sha") != expected_crossing_candidate_sha:
+        raise MissionAuthorityError("blocked candidate differs from the explicit crossing identity")
+    candidate_exists = util.run_subprocess(
+        ["git", "-C", str(repo), "cat-file", "-e", f"{expected_crossing_candidate_sha}^{{commit}}"],
+        timeout=10,
+    )
+    if candidate_exists.returncode != 0:
+        raise MissionAuthorityError("blocked crossing candidate is absent from Git")
+    if not build_finalize._ancestor_of(repo, expected_crossing_candidate_sha, expected_approved_candidate_sha):
+        raise MissionAuthorityError("blocked candidate is not descended from the approved baseline")
+    if not build_finalize._candidate_branch_contains(
+        repo, str(segment.get("candidate_branch") or ""), expected_crossing_candidate_sha,
+    ):
+        raise MissionAuthorityError("blocked candidate is absent from its sealed candidate branch")
+
+    reason = str(source_state.get("terminal_reason") or "")
+    if "checkpoint_build_authority_exhausted" not in reason:
+        raise MissionAuthorityError("blocked state is not the adjudicated local BUILD-cap exhaustion")
+    packet_cp = next(
+        (item for item in (meta.get("checkpoint_graph") or {}).get("checkpoints") or []
+         if item.get("id") == expected_checkpoint_id),
+        None,
+    )
+    cp_state = next(
+        (item for item in source_program.get("checkpoints") or [] if item.get("id") == expected_checkpoint_id),
+        None,
+    )
+    if (
+        not isinstance(packet_cp, dict) or not isinstance(cp_state, dict)
+        or int(cp_state.get("build_pass_count") or 0)
+            != int((packet_cp.get("risk_budget") or {}).get("max_build_passes") or 0)
+        or int(source_state.get("build_pass_count") or 0)
+            != int((source_program.get("cumulative_counters") or {}).get("build_pass_count") or -1)
+        or int(source_state.get("review_pass_count") or 0)
+            != int((source_program.get("cumulative_counters") or {}).get("review_pass_count") or -1)
+        or int(source_state.get("repair_round") or 0)
+            != int((source_program.get("cumulative_counters") or {}).get("repair_round_count") or -1)
+    ):
+        raise MissionAuthorityError("current checkpoint has not exhausted exactly its sealed local BUILD allocation")
+
+    job = _parent_job_snapshot(repo, source_run_id, db_path=db_path)
+    if (
+        job.get("status") != "DONE"
+        or any(job.get(key) is not None for key in (
+            "worker_pid", "worker_pgid", "worker_attempt_id", "worker_role",
+        ))
+        or job.get("candidate_branch") != segment.get("candidate_branch")
+    ):
+        raise MissionAuthorityError("blocked source supervisor ownership is not safely terminal")
+
+    order = [str(value) for value in (meta.get("checkpoint_graph") or {}).get("execution_order") or []]
+    try:
+        checkpoint_index = order.index(expected_checkpoint_id)
+    except ValueError as exc:
+        raise MissionAuthorityError("requested active checkpoint is absent from the frozen graph") from exc
+    if order[checkpoint_index:checkpoint_index + len(expected_remaining_checkpoints)] != expected_remaining_checkpoints:
+        raise MissionAuthorityError("requested continuation suffix differs from the frozen checkpoint graph")
+    history = _verified_repair_claim_history(
+        repo, current_run_id=source_run_id, mission_id=expected_mission_id,
+        execution_order=order,
+    )
+    if (
+        history["total_claims"] != sum(history["counts_by_checkpoint"].values())
+        or history["total_claims"] != int(source_state.get("repair_round") or 0)
+    ):
+        raise MissionAuthorityError("source cumulative repair authority differs from verified event history")
+
+    policy_overlay = {
+        "schema": "ownframework-loop-semantic-budget-policy/v1",
+        "reclaim_approved_checkpoint_capacity": True,
+        "use_cumulative_slack": True,
+    }
+    next_number = int(segment.get("segment_number") or 0) + 1
+    if next_number > int(mission_doc.get("max_segments") or 0):
+        raise MissionAuthorityError("mission has no remaining segment authority")
+    child_id = _segment_run_id(expected_mission_id, next_number)
+    baseline_branch = f"ofloop/mission/{expected_mission_id[-12:]}/baseline/s{next_number:02d}"
+    child_meta = _derived_packet_meta(
+        mission_doc, run_id=child_id, number=next_number,
+        baseline_branch=baseline_branch, baseline_sha=approved_sha,
+    )
+    child_meta.setdefault("mission_budget", {})["semantic_budget_policy"] = copy.deepcopy(policy_overlay)
+    allocations = _historical_repair_reconciliation_allocations(
+        meta=child_meta, program_state=source_program, history=history,
+    )
+    repaired_program = json.loads(integrity.canonical_json_dumps(source_program))
+    for cp in repaired_program.get("checkpoints") or []:
+        cp_id = str(cp.get("id") or "")
+        cp["repair_round_count"] = int(history["counts_by_checkpoint"].get(cp_id) or 0)
+        events_for_cp = [item for item in history["claims"] if item["checkpoint_id"] == cp_id]
+        if events_for_cp:
+            evidence = dict(cp.get("last_evidence_sha_by_counter") or {})
+            evidence["repair_round_count"] = events_for_cp[-1]["candidate_sha"]
+            cp["last_evidence_sha_by_counter"] = evidence
+    repaired_program["semantic_budget_policy_sha256"] = program.semantic_budget_policy_sha256(child_meta)
+    repaired_program["semantic_budget_allocations"] = allocations
+    graph_ok, graph_reason = program.verify_frozen_graph(child_meta, repaired_program)
+    if not graph_ok:
+        raise MissionAuthorityError("reconciled successor semantic authority is invalid: " + graph_reason)
+
+    # Validate the complete extant operational envelope before publishing an
+    # append-only runtime migration. The second check below proves the new
+    # generation after that typed migration is durable.
+    target_runtime = str(supervisor_runtime.runtime_generation() or "")
+    if not target_runtime:
+        raise MissionAuthorityError("commissioned runtime generation is unavailable")
+    _verified_mission_spend(
+        repo, mission_doc, current_run_id=source_run_id, db_path=db_path,
+        target_runtime_generation=target_runtime,
+    )
+    runtime_migration = _publish_runtime_migration(
+        repo,
+        mission_doc=mission_doc,
+        source_segment=segment,
+        source_state=source_state,
+        source_packet_sha256=source_packet_sha,
+        source_event_chain_sha256=integrity.compute_event_chain_hash(events_path),
+        approved_checkpoint_id=approved_cp,
+        approved_candidate_sha=approved_sha,
+        crossing_candidate_sha=expected_crossing_candidate_sha,
+    )
+    if runtime_migration is not None:
+        _verified_mission_spend(
+            repo, mission_doc, current_run_id=source_run_id, db_path=db_path,
+            target_runtime_generation=str(runtime_migration["runtime_generation"]),
+        )
+
+    source_admission = {
+        "kind": "blocked_semantic_budget_continuation",
+        "mission_original_baseline_sha": expected_original_baseline_sha,
+        "parent_run_id": source_run_id,
+        "predecessor_run_id": source_run_id,
+        "mission_id": expected_mission_id,
+        "segment_number": next_number,
+        "parent_segment_authority_sha256": segment_sha,
+        "source_authority_sha256": segment_sha,
+        "source_packet_sha256": source_packet_sha,
+        "source_state_sha256": util.sha256_file(state.state_path(repo, source_run_id)),
+        "source_event_chain_sha256": integrity.compute_event_chain_hash(events_path),
+        "approved_prefix": _capture_approved_prefix(
+            repo, source_meta=meta, source_program=source_program,
+            source_events=events, source_segment=segment,
+        ),
+        "last_approved_checkpoint_id": approved_cp,
+        "last_approved_candidate_sha": approved_sha,
+        "last_approved_verdict_sha256": verdict_sha,
+        "crossing_candidate_sha": expected_crossing_candidate_sha,
+        "crossing_candidate_not_adopted": True,
+        "semantic_budget_policy_overlay": policy_overlay,
+        "semantic_budget_reconciliation": {
+            "schema": "ownframework-loop-semantic-budget-reconciliation/v1",
+            "mission_id": expected_mission_id,
+            "mission_authority_sha256": mission_sha,
+            "source_runs": history["runs"],
+            "source_repair_claim_count": history["total_claims"],
+            "source_repair_counts_by_checkpoint": history["counts_by_checkpoint"],
+            "source_persisted_local_repair_counts": {
+                str(item.get("id")): int(item.get("repair_round_count") or 0)
+                for item in source_program.get("checkpoints") or []
+            },
+            "reconciliation_allocation_ids": [item["allocation_id"] for item in allocations],
+            "approved_candidate_sha": approved_sha,
+            "crossing_candidate_sha": expected_crossing_candidate_sha,
+        },
+    }
+    if runtime_migration is not None:
+        source_admission["runtime_migration"] = runtime_migration
+
+    # This is the typed mission continuation, not mutation/reopening of the
+    # blocked segment. Existing exact child authority is replayed idempotently.
+    result = _create_child_segment(
+        repo,
+        mission_doc=mission_doc,
+        mission_sha=mission_sha,
+        segment_number=next_number,
+        predecessor_run_id=source_run_id,
+        baseline_sha=approved_sha,
+        source_program=repaired_program,
+        source_state=source_state,
+        source_admission=source_admission,
+        db_path=db_path,
+    )
+    result.update({
+        "source_run_id": source_run_id,
+        "source_run_unchanged": True,
+        "crossing_candidate_not_adopted": True,
+        "crossing_candidate_sha": expected_crossing_candidate_sha,
+        "approved_checkpoint_id": approved_cp,
+        "approved_candidate_sha": approved_sha,
+        "approved_verdict_sha256": verdict_sha,
+        "historical_repair_claims_reconciled": history["total_claims"],
+        "historical_reconciliation_allocations": [item["allocation_id"] for item in allocations],
+        "runtime_migration": runtime_migration,
+    })
+    return result
 
 
 def enqueue_envelope_for_child(

@@ -94,6 +94,11 @@ tests/integration/test_v085_commissioned_canary_restart_watcher.sh
 tests/integration/test_v086_dispatch_hold.sh
 tests/integration/test_v085_program_routing_semantics.sh
 tests/integration/test_v111_src_layout_validation_contract.sh
+tests/integration/test_v13v_mission_runtime_migration_replay.sh
+tests/integration/test_v13w_historical_repair_budget_reconciliation.sh
+tests/integration/test_v13x_funded_repair_checkpoint_counter_merge.sh
+tests/integration/test_v13y_adaptive_semantic_budget.sh
+tests/integration/test_v13z_semantic_budget_claim_crash_idempotency.sh
 
 # Capability and terminal authority
 tests/integration/test_v091_capability_runtime.sh

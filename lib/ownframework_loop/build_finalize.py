@@ -662,6 +662,8 @@ def finalize_build(
                 state.get("program") or {},
                 cp_id=cp_id,
                 packet_cp=cp_meta,
+                packet=meta,
+                state_doc=state,
             )
         if entitlement["eligible"]:
             try:
@@ -1041,6 +1043,7 @@ def finalize_build(
                     raise RuntimeError(f"current checkpoint {cp_id!r} missing from packet")
                 entitlement = program_mod.repair_entitlement(
                     program_state, cp_id=cp_id, packet_cp=cp_meta,
+                    packet=meta, state_doc=state,
                 )
             if entitlement["eligible"]:
                 next_state = "CHANGES_REQUESTED"
@@ -1083,6 +1086,8 @@ def finalize_build(
                     program_state,
                     cp_id=cp_id,
                     packet_cp=cp_meta,
+                    packet=meta,
+                    state_doc=state,
                 )
             if not entitlement["eligible"]:
                 next_state = "BLOCKED"
@@ -1118,6 +1123,8 @@ def finalize_build(
                     program_state,
                     cp_id=cp_id,
                     packet_cp=cp_meta,
+                    packet=meta,
+                    state_doc=state,
                 )
             if not entitlement["eligible"]:
                 next_state = "BLOCKED"
