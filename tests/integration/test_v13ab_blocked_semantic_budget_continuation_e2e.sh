@@ -27,7 +27,7 @@ os.environ["XDG_STATE_HOME"] = str(root / "state")
 
 from ownframework_loop import (
     approval, assessment, build_agent, build_finalize, build_prepare,
-    capabilities, capability_binding, cli, execution_start, integrity,
+    capabilities, capability_binding, cli, execution_start, git_checks, integrity,
     packet, program, program_mission, review_finalize, review_prepare,
     runner_profiles, runtime_env, state, supervisor, supervisor_claims,
     supervisor_db, supervisor_runtime, util,
@@ -509,6 +509,99 @@ assert claim_event.get("semantic_budget_allocation_id") == allocation["allocatio
 assert claim_event.get("semantic_budget_counter_kind") == "build_pass_count"
 assert program.verify_frozen_graph(child_meta, claimed_state["program"]) == (True, "ok")
 
+# A typed successor can be quarantined after its first BUILD claim but before
+# build preparation materializes the candidate branch. The sealed baseline is
+# still authoritative only while no semantic attempt exists.
+child_candidate_branch = str(child_segment["candidate_branch"])
+assert git_checks.branch_head(repo, child_candidate_branch) is None
+assert claimed_state["last_candidate_sha"] == child_segment["baseline_sha"]
+assert program_mission._runtime_migration_candidate_lineage_valid(
+    repo, approved_candidate, approved_candidate, child_candidate_branch,
+    semantic_attempt_count=0,
+)
+assert not program_mission._runtime_migration_candidate_lineage_valid(
+    repo, approved_candidate, approved_candidate, child_candidate_branch,
+    semantic_attempt_count=1,
+)
+assert not program_mission._runtime_migration_candidate_lineage_valid(
+    repo, crossing_candidate, approved_candidate, child_candidate_branch,
+    semantic_attempt_count=0,
+)
+
+first_resumed_generation = "ofloop-v13ab-pristine-resumed-generation"
+supervisor_runtime.runtime_generation = lambda: first_resumed_generation
+supervisor._current_runtime_generation = lambda: first_resumed_generation
+supervisor_claims._current_runtime_generation = lambda: first_resumed_generation
+pre_pristine_resume_state = state.load_verified(repo, child_run)
+pre_pristine_state_sha = util.sha256_file(state.state_path(repo, child_run))
+pre_pristine_event_sha = integrity.compute_event_chain_hash(state.events_path(repo, child_run))
+pre_pristine_counts = (
+    pre_pristine_resume_state["build_pass_count"],
+    pre_pristine_resume_state["review_pass_count"],
+    pre_pristine_resume_state["repair_round"],
+)
+quarantined_pristine = supervisor.run_one(db_path=db_path)
+assert quarantined_pristine["action"] == "QUARANTINED", quarantined_pristine
+with supervisor_db._managed_connect_readonly(db_path) as conn:
+    pristine_row = conn.execute(
+        "SELECT * FROM jobs WHERE run_id=?", (child_run,),
+    ).fetchone()
+    assert pristine_row is not None
+    pristine_attempt_count = conn.execute(
+        "SELECT count(*) FROM semantic_attempts WHERE job_id=?", (int(pristine_row["id"]),),
+    ).fetchone()[0]
+assert pristine_attempt_count == 0
+pristine_snapshot = dict(pristine_row)
+assert pristine_snapshot["status"] == "QUARANTINED", pristine_snapshot
+assert git_checks.branch_head(repo, child_candidate_branch) is None
+pristine_migration = program_mission.prepare_runtime_generation_resume(
+    repo, child_run, job_snapshot=pristine_snapshot,
+    target_runtime_generation=first_resumed_generation, db_path=db_path,
+)
+assert pristine_migration["sequence"] == 2, pristine_migration
+assert program_mission.prepare_runtime_generation_resume(
+    repo, child_run, job_snapshot=pristine_snapshot,
+    target_runtime_generation=first_resumed_generation, db_path=db_path,
+) == pristine_migration
+pristine_resume_output = io.StringIO()
+with contextlib.redirect_stdout(pristine_resume_output):
+    try:
+        assert cli.main([
+            "supervisor", "resume", str(repo), child_run, "--db", str(db_path),
+        ]) == 0
+    except SystemExit as exc:
+        raise AssertionError(
+            f"pristine supported resume exited {exc.code}: {pristine_resume_output.getvalue()}"
+        ) from exc
+pristine_resumed = json.loads(pristine_resume_output.getvalue())
+assert pristine_resumed["ok"] is True and pristine_resumed["resumed"] is True, pristine_resumed
+assert pristine_resumed["runtime_generation_previous"] == successor_generation, pristine_resumed
+assert pristine_resumed["runtime_generation"] == first_resumed_generation, pristine_resumed
+assert pristine_resumed["runtime_migration"] == pristine_migration, pristine_resumed
+assert util.sha256_file(child_packet_path) == child_packet_sha
+assert util.sha256_file(state.state_path(repo, child_run)) == pre_pristine_state_sha
+assert integrity.compute_event_chain_hash(state.events_path(repo, child_run)) == pre_pristine_event_sha
+assert state.load_verified(repo, child_run)["last_candidate_sha"] == approved_candidate
+assert (
+    state.load_verified(repo, child_run)["build_pass_count"],
+    state.load_verified(repo, child_run)["review_pass_count"],
+    state.load_verified(repo, child_run)["repair_round"],
+) == pre_pristine_counts
+pristine_resumed_job = supervisor.status(canonical_repo=repo, run_id=child_run, db_path=db_path)
+assert pristine_resumed_job["status"] == "QUEUED", pristine_resumed_job
+assert pristine_resumed_job["runtime_generation"] == first_resumed_generation, pristine_resumed_job
+runtime_binding = program_mission.bind_runtime_identity(
+    repo, child_run, run_binding=child_binding, runner_profile=profile,
+    runtime_generation=first_resumed_generation,
+)
+assert runtime_binding["runtime_migration_sequence"] == 2, runtime_binding
+pristine_identity = program_mission.verify_runtime_identity(
+    repo, mission_id, run_binding=child_binding, runner_profile=profile,
+    runtime_generation=first_resumed_generation,
+    segment_number=int(child_segment["segment_number"]),
+)
+assert pristine_identity["capability_binding_sha256"] == child_binding["binding_sha256"]
+
 prepared = build_prepare.prepare(canonical_repo=repo, run_id=child_run)
 builder = Path(prepared["builder_worktree"])
 (builder / "src" / "continued.py").parent.mkdir(parents=True, exist_ok=True)
@@ -535,15 +628,13 @@ assert build_receipt["candidate_sha"] == candidate
 assert build_receipt["validation_status"] == "PASS"
 assert build_receipt["next_state"] == "READY_FOR_REVIEW"
 
-# Simulate a later runtime installation. The ordinary scheduler quarantines
-# the old-generation job before any new semantic claim. The supported resume
-# must append a same-segment migration, preserving the sealed candidate and
-# engineering counters. Replaying preparation after a crash must reuse the
-# exact same record.
-resumed_generation = "ofloop-v13ab-resumed-generation"
-supervisor_runtime.runtime_generation = lambda: resumed_generation
-supervisor._current_runtime_generation = lambda: resumed_generation
-supervisor_claims._current_runtime_generation = lambda: resumed_generation
+# Simulate another runtime installation after the candidate branch has been
+# materialized. This complements the pristine-baseline case above and proves
+# a progressed candidate still requires its branch to prove containment.
+candidate_resumed_generation = "ofloop-v13ab-candidate-resumed-generation"
+supervisor_runtime.runtime_generation = lambda: candidate_resumed_generation
+supervisor._current_runtime_generation = lambda: candidate_resumed_generation
+supervisor_claims._current_runtime_generation = lambda: candidate_resumed_generation
 pre_resume_state = state.load_verified(repo, child_run)
 pre_resume_state_sha = util.sha256_file(state.state_path(repo, child_run))
 pre_resume_event_sha = integrity.compute_event_chain_hash(state.events_path(repo, child_run))
@@ -566,23 +657,23 @@ worker_owned_snapshot["worker_pid"] = 987654321
 try:
     program_mission.prepare_runtime_generation_resume(
         repo, child_run, job_snapshot=worker_owned_snapshot,
-        target_runtime_generation=resumed_generation, db_path=db_path,
+        target_runtime_generation=candidate_resumed_generation, db_path=db_path,
     )
 except program_mission.MissionAuthorityError:
     pass
 else:
     raise AssertionError("same-segment runtime migration accepted an owned worker")
-assert not program_mission._mission_runtime_migration_path(repo, mission_id, 2).exists()
+assert not program_mission._mission_runtime_migration_path(repo, mission_id, 3).exists()
 migration_first = program_mission.prepare_runtime_generation_resume(
     repo, child_run, job_snapshot=resume_snapshot,
-    target_runtime_generation=resumed_generation, db_path=db_path,
+    target_runtime_generation=candidate_resumed_generation, db_path=db_path,
 )
 migration_replay = program_mission.prepare_runtime_generation_resume(
     repo, child_run, job_snapshot=resume_snapshot,
-    target_runtime_generation=resumed_generation, db_path=db_path,
+    target_runtime_generation=candidate_resumed_generation, db_path=db_path,
 )
 assert migration_first == migration_replay, (migration_first, migration_replay)
-assert migration_first["sequence"] == 2, migration_first
+assert migration_first["sequence"] == 3, migration_first
 resume_output = io.StringIO()
 with contextlib.redirect_stdout(resume_output):
     try:
@@ -591,8 +682,8 @@ with contextlib.redirect_stdout(resume_output):
         raise AssertionError(f"supported resume exited {exc.code}: {resume_output.getvalue()}") from exc
 resumed = json.loads(resume_output.getvalue())
 assert resumed["ok"] is True and resumed["resumed"] is True, resumed
-assert resumed["runtime_generation_previous"] == successor_generation, resumed
-assert resumed["runtime_generation"] == resumed_generation, resumed
+assert resumed["runtime_generation_previous"] == first_resumed_generation, resumed
+assert resumed["runtime_generation"] == candidate_resumed_generation, resumed
 assert resumed["runtime_migration"] == migration_first, resumed
 assert util.sha256_file(child_packet_path) == child_packet_sha
 assert util.sha256_file(state.state_path(repo, child_run)) == pre_resume_state_sha
@@ -605,18 +696,18 @@ assert (
 ) == pre_resume_counts
 resumed_job = supervisor.status(canonical_repo=repo, run_id=child_run, db_path=db_path)
 assert resumed_job["status"] == "QUEUED", resumed_job
-assert resumed_job["runtime_generation"] == resumed_generation, resumed_job
+assert resumed_job["runtime_generation"] == candidate_resumed_generation, resumed_job
 runtime_binding = program_mission.bind_runtime_identity(
     repo, child_run, run_binding=child_binding, runner_profile=profile,
-    runtime_generation=resumed_generation,
+    runtime_generation=candidate_resumed_generation,
 )
-assert runtime_binding["runtime_migration_sequence"] == 2, runtime_binding
+assert runtime_binding["runtime_migration_sequence"] == 3, runtime_binding
 resumed_identity = program_mission.verify_runtime_identity(
     repo, mission_id, run_binding=child_binding, runner_profile=profile,
-    runtime_generation=resumed_generation,
+    runtime_generation=candidate_resumed_generation,
     segment_number=int(child_segment["segment_number"]),
 )
-assert resumed_identity["runtime_generation"] == resumed_generation, resumed_identity
+assert resumed_identity["runtime_generation"] == candidate_resumed_generation, resumed_identity
 assert resumed_identity["capability_binding_sha256"] == child_binding["binding_sha256"]
 # Consume the segment's declared CP-01 REVIEW with one genuine must-fix,
 # complete its funded BUILD repair, then require one adaptive REVIEW claim to
@@ -677,7 +768,7 @@ assert program.verify_frozen_graph(child_meta, terminal["program"]) == (True, "o
 # the child state beyond the exact source snapshot it was created from.
 program_mission.verify_runtime_identity(
     repo, mission_id, run_binding=child_binding, runner_profile=profile,
-    runtime_generation=resumed_generation,
+    runtime_generation=candidate_resumed_generation,
     segment_number=int(child_segment["segment_number"]),
 )
 assert supervisor.status(canonical_repo=repo, run_id=source_run, db_path=db_path)["status"] == "DONE"

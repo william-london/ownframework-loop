@@ -298,6 +298,15 @@ def _verify_runtime_migration_source(repo: Path, migration: dict[str, Any]) -> N
             raise MissionAuthorityError("same-segment runtime migration event prefix is invalid")
         current = state.load_verified(repo, run_id)
         source_job = source.get("source_job")
+        candidate_sha = str(source.get("candidate_sha") or "")
+        baseline_sha = str(source.get("baseline_sha") or "")
+        candidate_branch = str(segment.get("candidate_branch") or "")
+        attempt_ledger_sha = str(source.get("semantic_attempt_ledger_sha256") or "")
+        # The source ledger digest is captured before the migration is
+        # published. An empty projection proves the only safe unmaterialized
+        # case: the candidate is still the sealed baseline and no semantic
+        # provider attempt existed when this authority was created.
+        semantic_attempt_count = 0 if attempt_ledger_sha == _digest([]) else 1
         if (
             not isinstance(current, dict)
             or not isinstance(source_job, dict)
@@ -308,15 +317,13 @@ def _verify_runtime_migration_source(repo: Path, migration: dict[str, Any]) -> N
             ))
             or source_job.get("runtime_generation") != migration.get("previous_runtime_generation")
             or source.get("engineering_state") in {"APPROVED", "BLOCKED", "STOPPED", "SEGMENT_BOUNDARY"}
-            or not _FULL_SHA_RE.fullmatch(str(source.get("candidate_sha") or ""))
-            or not _FULL_SHA_RE.fullmatch(str(source.get("baseline_sha") or ""))
             or source.get("baseline_sha") != segment.get("baseline_sha")
-            or not build_finalize._ancestor_of(repo, str(source.get("candidate_sha") or ""), str(source.get("baseline_sha") or ""))
-            or not build_finalize._candidate_branch_contains(
-                repo, str(segment.get("candidate_branch") or ""), str(source.get("candidate_sha") or ""),
+            or not _runtime_migration_candidate_lineage_valid(
+                repo, candidate_sha, baseline_sha, candidate_branch,
+                semantic_attempt_count=semantic_attempt_count,
             )
             or not str(source.get("checkpoint_id") or "")
-            or not _SHA256_RE.fullmatch(str(source.get("semantic_attempt_ledger_sha256") or ""))
+            or not _SHA256_RE.fullmatch(attempt_ledger_sha)
         ):
             raise MissionAuthorityError("same-segment runtime migration state is invalid")
         approval_doc = approval.load_approval(repo, run_id)
@@ -1177,6 +1184,38 @@ def verify_runtime_identity(
     return {**expected, "mission_runtime_sha256": expected_sha}
 
 
+def _runtime_migration_candidate_lineage_valid(
+    repo: Path,
+    candidate_sha: str,
+    baseline_sha: str,
+    branch: str,
+    *,
+    semantic_attempt_count: int,
+) -> bool:
+    """Validate a materialized candidate or a still-unmaterialized baseline.
+
+    A typed continuation may be quarantined after its first BUILD claim but
+    before build preparation creates the candidate branch. In that exact
+    no-attempt state, the sealed baseline remains the candidate authority;
+    accepting it does not infer or create a branch. Any semantic attempt or
+    candidate movement requires the named branch to prove containment.
+    """
+    if (
+        not _FULL_SHA_RE.fullmatch(candidate_sha)
+        or not _FULL_SHA_RE.fullmatch(baseline_sha)
+        or not git_checks.is_valid_branch_name(branch)
+        or not build_finalize._ancestor_of(repo, candidate_sha, baseline_sha)
+    ):
+        return False
+    if build_finalize._candidate_branch_contains(repo, branch, candidate_sha):
+        return True
+    return (
+        candidate_sha == baseline_sha
+        and git_checks.branch_head(repo, branch) is None
+        and semantic_attempt_count == 0
+    )
+
+
 def prepare_runtime_generation_resume(
     canonical_repo: Path,
     run_id: str,
@@ -1261,9 +1300,8 @@ def prepare_runtime_generation_resume(
     if (
         not _FULL_SHA_RE.fullmatch(candidate_sha)
         or not _FULL_SHA_RE.fullmatch(baseline_sha)
-        or not branch
+        or not git_checks.is_valid_branch_name(branch)
         or not build_finalize._ancestor_of(repo, candidate_sha, baseline_sha)
-        or not build_finalize._candidate_branch_contains(repo, branch, candidate_sha)
     ):
         raise MissionAuthorityError("runtime migration candidate lineage is invalid")
 
@@ -1286,6 +1324,11 @@ def prepare_runtime_generation_resume(
     attempts = [dict(row) for row in rows]
     if any(item.get("status") in {"RESERVED", "RUNNING"} or item.get("completed_at") is None for item in attempts):
         raise MissionAuthorityError("runtime migration refuses nonterminal semantic attempts")
+    if not _runtime_migration_candidate_lineage_valid(
+        repo, candidate_sha, baseline_sha, branch,
+        semantic_attempt_count=len(attempts),
+    ):
+        raise MissionAuthorityError("runtime migration candidate lineage is invalid")
     attempt_projection = [
         {
             key: item.get(key)
