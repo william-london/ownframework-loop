@@ -181,6 +181,15 @@ bound runs fail closed on the generation mismatch at serve time, and
 `ofloop supervisor resume` is the operator act that rebinds a run to the
 new generation (previous binding reported).
 
+For a segment admitted by the explicit blocked semantic-budget continuation,
+`resume` may prepare a matching append-only mission runtime migration before
+changing the supervisor row. Ordinary automatic segmentation does not grant
+this authority. The record binds the exact segment, packet, approval, event
+prefix, candidate, workerless quarantine, and terminal attempt/accounting
+snapshot. A crash before the SQLite transition reuses that exact record; it
+never edits the sealed segment or engineering state. Non-v4 runs retain the
+ordinary ledger-only runtime rebind behavior.
+
 Operational budget ceilings (cost/token/wall) are disabled by default for
 fresh/missing schema fields. Existing rows are never silently reinterpreted:
 the historical exact $25 / unlimited-token / 8-hour tuple is ambiguous and is

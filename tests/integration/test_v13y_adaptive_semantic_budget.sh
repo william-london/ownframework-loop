@@ -156,7 +156,7 @@ review_blocked = program.semantic_budget_allocation_plan(
 assert review_blocked["eligible"] is False, review_blocked
 assert review_blocked["reason"] == "allocation_would_consume_future_or_final_acceptance_reserve"
 assert review_blocked["reserved_remaining_authority"] == 3
-print("ADAPTIVE_REVIEW_PRESERVES_TWO_FINAL_REVIEW_CLAIMS=PASS")
+print("ADAPTIVE_REVIEW_CANNOT_STARVE_REREVIEW=PASS")
 
 global_exhausted = copy.deepcopy(ps)
 global_exhausted["cumulative_counters"]["build_pass_count"] = 7

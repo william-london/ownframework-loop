@@ -23,7 +23,10 @@ The complete historical changelog through 0.5.2 is preserved at
   exact last-approved candidate, records crossing-candidate non-adoption, and
   may append only a typed runtime-generation migration when required.
 - Historical packet semantics remain unchanged. Added claim-crash/import
-  evidence and a production-path blocked-continuation lifecycle regression.
+  evidence, a full blocked-continuation lifecycle regression, and an
+  adaptive-REVIEW-to-PROGRAM_FINAL one-repair acceptance regression. Runtime
+  migration on resume is restricted to the explicit blocked-budget successor;
+  ordinary automatic segmentation keeps its runtime identity frozen.
 
 ## Unreleased - v4 PROGRAM segmentation and recovery closure (2026-09-29)
 

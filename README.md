@@ -43,7 +43,9 @@ without that explicit policy retain hard checkpoint-local caps. A distinct
 `ofloop program continue-blocked-semantic-budget` operation can create a typed
 successor from an exactly verified last-approved candidate after local
 semantic-budget exhaustion; it preserves the blocked segment and does not
-adopt its unreviewed crossing candidate.
+adopt its unreviewed crossing candidate. Only this explicit continuation may
+carry a typed append-only runtime-generation migration; automatic segmentation
+keeps the mission's runtime and capability identity frozen.
 
 The deterministic core owns packet authority, source identity, worktrees,
 state, exact candidate SHA, evidence, retry/repair budgets, runtime-generation

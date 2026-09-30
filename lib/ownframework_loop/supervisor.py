@@ -3075,6 +3075,32 @@ def resume(
             })
             return result
 
+    previous_generation = str(existing["runtime_generation"] or "")
+    target_generation = _current_runtime_generation()
+    runtime_migration = None
+    try:
+        from . import program_mission as _mission_mod
+
+        runtime_migration = _mission_mod.prepare_runtime_generation_resume(
+            canonical_repo,
+            run_id,
+            job_snapshot=dict(existing),
+            target_runtime_generation=target_generation,
+            db_path=db,
+        )
+    except Exception as exc:
+        result = _job_dict(existing, db)
+        result.update({
+            "ok": False,
+            "resumed": False,
+            "reason": "runtime_generation_rebind_refused",
+            "error": f"{type(exc).__name__}: {exc}",
+        })
+        if migration is not None:
+            result["capability_migration_completed"] = True
+            result["capability_migration"] = migration
+        return result
+
     sets = [
         "status='QUEUED'",
         "infra_failures=0",
@@ -3122,9 +3148,8 @@ def resume(
         params.append(now)
     # Explicit operator migration: rebind the run to the resuming
     # runtime's generation (recorded; previous binding reported back).
-    previous_generation = str(existing["runtime_generation"] or "")
     sets.append("runtime_generation=?")
-    params.append(_current_runtime_generation())
+    params.append(target_generation)
     params.extend([int(existing["id"]), previous_generation])
     with _managed_connect(db) as conn:
         cur = conn.execute(
@@ -3155,6 +3180,8 @@ def resume(
                     "capability_migration": migration,
                     "safe_retry": "supervisor resume --rebind-capabilities",
                 })
+            if runtime_migration is not None:
+                result["runtime_migration"] = runtime_migration
             return result
     if row is None:
         return {
@@ -3168,6 +3195,9 @@ def resume(
     result = _job_dict(row, db)
     result["resumed"] = True
     result["runtime_generation_previous"] = previous_generation
+    result["runtime_generation"] = target_generation
+    if runtime_migration is not None:
+        result["runtime_migration"] = runtime_migration
     if migration is not None:
         result["capability_migration"] = migration
     return result

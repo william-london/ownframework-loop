@@ -97,6 +97,17 @@ commissioned runtime generation changed, a source-bound append-only migration
 may be attached to this typed continuation; it cannot change the existing
 capability set, profile/model/effort, or mission ceilings.
 
+If that continuation's workerless successor is later quarantined solely by a
+subsequent commissioned runtime-generation change, its explicit supported
+`supervisor resume` may append one further create-once migration only because
+the segment's immutable admission proves it came from this blocked-budget
+continuation and did not adopt the crossing candidate. The migration binds the
+exact segment, packet, approval, state/event prefix, candidate, job snapshot,
+and completed attempt ledger. Ordinary automatic segmentation never
+authorizes a runtime change; live workers, nonterminal attempts, invalid
+lineage, and unreconciled mission spend refuse this continuation-specific
+migration.
+
 ## Legacy admission
 
 A v1–v3 run did not authorize mission segmentation. It can enter this model
