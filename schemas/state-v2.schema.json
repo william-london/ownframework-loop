@@ -373,7 +373,7 @@
             "max_baseline_to_final_diff_lines": {
               "type": "integer",
               "minimum": 1,
-              "maximum": 30000
+              "maximum": 100000
             }
           }
         },

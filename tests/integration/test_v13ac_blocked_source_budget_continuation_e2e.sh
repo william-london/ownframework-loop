@@ -394,8 +394,8 @@ args = [
     "--expected-approved-checkpoint-id", "CP-00",
     "--expected-approved-candidate-sha", approved_candidate,
     "--remaining-checkpoints", "CP-01,CP-02",
-    "--segment-max-diff-lines", "50",
-    "--mission-max-diff-lines", "95",
+    "--segment-max-diff-lines", "50000",
+    "--mission-max-diff-lines", "95000",
     "--max-segments", "3",
     "--confirm", f"CONTINUE-BLOCKED-SOURCE-BUDGET:{source_mission['mission_id']}",
     "--db", str(db_path),
@@ -428,6 +428,31 @@ assert source_hashes == {
     "segment": program_mission.load_segment(repo, source_run)[1],
 }
 print("INVALID_SOURCE_ENVELOPE_PUBLISHES_NO_MIGRATION=PASS")
+# Model a crash after an exact source-bound migration was appended but before
+# its capability-binding receipt or successor artifacts were published. A
+# later supported invocation under another installed generation must bind the
+# prepared migration from the source run's exact existing capability proof,
+# then append one contiguous migration to the new runtime.
+prepared_migration_generation = installed_generation
+prepared_migration = program_mission._publish_runtime_migration(
+    repo,
+    mission_doc=source_mission,
+    source_segment=source_segment,
+    source_state=blocked,
+    source_packet_sha256=source_hashes["packet"],
+    source_event_chain_sha256=source_hashes["events"],
+    approved_checkpoint_id="CP-00",
+    approved_candidate_sha=approved_candidate,
+    crossing_candidate_sha=crossing_candidate,
+)
+assert prepared_migration and prepared_migration["sequence"] == 1, prepared_migration
+assert not program_mission._mission_runtime_binding_path(
+    repo, source_mission["mission_id"], 1,
+).exists(), "crash fixture must begin with a prepared, unbound migration"
+installed_generation = "ofloop-test@payload-" + hashlib.sha256(
+    (prepared_migration_generation + ":source-budget-successor-replay").encode("utf-8")
+).hexdigest()
+supervisor_runtime.runtime_generation = lambda: installed_generation
 output = io.StringIO()
 with contextlib.redirect_stdout(output):
     try:
@@ -445,9 +470,22 @@ assert continuation["predecessor_run_unchanged"] is True
 assert continuation["preserved_cumulative_counters"] == source_counters
 assert continuation["semantic_allocation_import_count"] == len(source_semantic_allocations)
 assert continuation["runtime_generation"] == installed_generation
-assert continuation["runtime_migration"]["sequence"] == 1
+assert continuation["runtime_migration"]["sequence"] == 2
 assert continuation["runtime_migration"]["runtime_generation"] == installed_generation
 assert len(continuation["runtime_migration"]["sha256"]) == 64
+prepared_binding, prepared_binding_sha = program_mission._read_record(
+    program_mission._mission_runtime_binding_path(repo, source_mission["mission_id"], 1),
+    expected_schema=program_mission.MISSION_RUNTIME_BINDING_SCHEMA,
+)
+assert prepared_binding["sequence"] == 1
+assert prepared_binding["migration_sha256"] == prepared_migration["sha256"]
+assert prepared_binding["runtime_identity"]["runtime_generation"] == prepared_migration_generation
+next_migration, next_migration_sha = program_mission._read_runtime_migration_record(
+    program_mission._mission_runtime_migration_path(repo, source_mission["mission_id"], 2),
+)
+assert next_migration_sha == continuation["runtime_migration"]["sha256"]
+assert next_migration["previous_runtime_identity_sha256"] == prepared_binding_sha
+assert next_migration["previous_runtime_generation"] == prepared_migration_generation
 
 child_packet_path = state.run_dir(repo, child_run) / "WORK_PACKET.md"
 child_meta, _ = packet.parse_packet_file(child_packet_path)
@@ -464,11 +502,11 @@ typed_wide["mission_budget"]["mission_max_diff_lines"] = 100001
 typed_wide["risk_budget"]["max_diff_lines"] = 100001
 typed_wide["checkpoint_graph"]["global_source_ceilings"]["max_baseline_to_final_diff_lines"] = 100001
 assert packet.validate_packet_for_approval(typed_wide), "typed continuation must retain its 100000-line ceiling"
-assert child_meta["mission_budget"]["segment_max_diff_lines"] == 50
-assert child_meta["mission_budget"]["mission_max_diff_lines"] == 95
+assert child_meta["mission_budget"]["segment_max_diff_lines"] == 50000
+assert child_meta["mission_budget"]["mission_max_diff_lines"] == 95000
 assert child_meta["mission_budget"]["max_segments"] == 3
-assert child_meta["risk_budget"]["max_diff_lines"] == 50
-assert child_meta["checkpoint_graph"]["global_source_ceilings"]["max_baseline_to_final_diff_lines"] == 95
+assert child_meta["risk_budget"]["max_diff_lines"] == 50000
+assert child_meta["checkpoint_graph"]["global_source_ceilings"]["max_baseline_to_final_diff_lines"] == 95000
 print("SEGMENT_AND_MISSION_SOURCE_CEILINGS_DISTINCT=PASS")
 assert child_meta["mission_budget"]["semantic_budget_policy"] == meta["mission_budget"]["semantic_budget_policy"]
 assert child_meta["risk_budget"]["max_build_passes"] == meta["risk_budget"]["max_build_passes"]
@@ -503,7 +541,7 @@ runtime_migration_record, runtime_migration_sha = program_mission._read_runtime_
     ),
 )
 assert runtime_migration_sha == continuation["runtime_migration"]["sha256"]
-assert runtime_migration_record["previous_runtime_generation"] == runtime_generation
+assert runtime_migration_record["previous_runtime_generation"] == prepared_migration_generation
 assert runtime_migration_record["runtime_generation"] == installed_generation
 assert runtime_migration_record["source_authority"]["run_id"] == source_run
 assert runtime_migration_record["source_authority"]["approved_candidate_sha"] == approved_candidate
@@ -527,13 +565,13 @@ source_ceiling = child_state["program"]["cumulative_ceilings"]
 blocked_ceiling = blocked["program"]["cumulative_ceilings"]
 for key in ("max_build_passes", "max_review_passes", "max_repair_rounds", "max_unique_changed_files"):
     assert source_ceiling[key] == blocked_ceiling[key], (key, source_ceiling, blocked_ceiling)
-assert source_ceiling["max_baseline_to_final_diff_lines"] == 95
-assert child_mission["mission_max_diff_lines"] == 95
+assert source_ceiling["max_baseline_to_final_diff_lines"] == 95000
+assert child_mission["mission_max_diff_lines"] == 95000
 continuation_status = program_mission.mission_status(
     repo, child_mission["mission_id"], db_path=db_path,
 )
 assert continuation_status["mission_source_lines_used"] == approved_source_stats["diff_lines"]
-assert continuation_status["mission_source_lines_remaining"] == 95 - approved_source_stats["diff_lines"]
+assert continuation_status["mission_source_lines_remaining"] == 95000 - approved_source_stats["diff_lines"]
 assert len(child_state["program"]["semantic_budget_allocations"]) == len(source_semantic_allocations)
 imported = child_state["program"]["semantic_budget_allocations"]
 assert all(item["mission_id"] == child_mission["mission_id"] for item in imported), imported

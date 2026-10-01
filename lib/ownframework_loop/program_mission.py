@@ -1168,8 +1168,22 @@ def _verify_source_budget_continuation(
     active_runtime, _active_runtime_sha, active_sequence = _active_mission_runtime(
         repo, source_mission,
     )
+    source_runtime_sequence = int(source_runtime_identity.get("runtime_migration_sequence") or 0)
+    source_prefix_identity, source_prefix_sha, source_prefix_sequence = _active_mission_runtime(
+        repo, source_mission, through_sequence=source_runtime_sequence,
+    )
+    if (
+        source_prefix_sequence != source_runtime_sequence
+        or source_prefix_sha != record.get("predecessor_active_runtime_identity_sha256")
+        or source_prefix_identity.get("runtime_generation") != predecessor_runtime_generation
+    ):
+        raise MissionAuthorityError("source-budget runtime identity is not a complete bound migration prefix")
     if predecessor_runtime_generation == successor_runtime_generation:
-        if runtime_migration is not None or active_runtime.get("runtime_generation") != successor_runtime_generation:
+        if (
+            runtime_migration is not None
+            or active_sequence != source_runtime_sequence
+            or active_runtime.get("runtime_generation") != successor_runtime_generation
+        ):
             raise MissionAuthorityError("source-budget runtime identity has an unnecessary or conflicting migration")
     else:
         if (
@@ -1182,37 +1196,73 @@ def _verify_source_budget_continuation(
             or runtime_migration.get("runtime_generation") != successor_runtime_generation
             or active_runtime.get("runtime_generation") != successor_runtime_generation
             or active_sequence != runtime_migration.get("sequence")
+            or active_sequence <= source_runtime_sequence
         ):
             raise MissionAuthorityError("source-budget runtime migration is absent or not the active predecessor identity")
-        migration, migration_sha = _read_runtime_migration_record(
-            _mission_runtime_migration_path(
-                repo, str(record.get("predecessor_mission_id") or ""),
-                int(runtime_migration["sequence"]),
-            ),
-        )
-        migration_source = migration.get("source_authority") or {}
+        expected_migration_source = {
+            "run_id": source_run_id,
+            "packet_sha256": record.get("predecessor_packet_sha256"),
+            "state_sha256": record.get("predecessor_state_sha256"),
+            "event_chain_sha256": record.get("predecessor_event_chain_sha256"),
+            "approved_checkpoint_id": record.get("approved_checkpoint_id"),
+            "approved_candidate_sha": record.get("approved_candidate_sha"),
+            "crossing_candidate_sha": record.get("crossing_candidate_sha"),
+        }
+        previous_identity = source_prefix_identity
+        previous_sha = source_prefix_sha
+        final_sequence = int(runtime_migration["sequence"])
+        for sequence in range(source_runtime_sequence + 1, final_sequence + 1):
+            migration, migration_sha = _read_runtime_migration_record(
+                _mission_runtime_migration_path(
+                    repo, str(record.get("predecessor_mission_id") or ""), sequence,
+                ),
+            )
+            migration_source = migration.get("source_authority") or {}
+            binding_path = _mission_runtime_binding_path(
+                repo, str(record.get("predecessor_mission_id") or ""), sequence,
+            )
+            final_migration_may_be_unbound = sequence == final_sequence and not binding_path.exists()
+            if (
+                migration.get("schema") != MISSION_RUNTIME_MIGRATION_SCHEMA
+                or migration.get("mission_id") != record.get("predecessor_mission_id")
+                or migration.get("sequence") != sequence
+                or migration.get("previous_runtime_identity_sha256") != previous_sha
+                or migration.get("previous_runtime_generation") != previous_identity.get("runtime_generation")
+                or migration.get("runtime_generation") == previous_identity.get("runtime_generation")
+                or migration.get("runner") != (record.get("predecessor_operational_budget") or {}).get("runner")
+                or migration.get("capabilities") != record.get("capabilities")
+                or migration.get("runner_profile") != record.get("runner_profile_identity")
+                or migration_source != expected_migration_source
+                or (not final_migration_may_be_unbound and not binding_path.is_file())
+            ):
+                raise MissionAuthorityError(
+                    "source-budget runtime migration chain contains an unbound or unrelated transition"
+                )
+            bound_identity, bound_sha, bound_sequence = _active_mission_runtime(
+                repo, source_mission, through_sequence=sequence,
+            )
+            if bound_sequence != sequence or bound_identity.get("runtime_generation") != migration.get("runtime_generation"):
+                raise MissionAuthorityError("source-budget runtime migration binding prefix is incomplete")
+            if binding_path.is_file():
+                binding_receipt, binding_sha = _read_record(
+                    binding_path, expected_schema=MISSION_RUNTIME_BINDING_SCHEMA,
+                )
+                if (
+                    bound_sha != binding_sha
+                    or binding_receipt.get("migration_sha256") != migration_sha
+                ):
+                    raise MissionAuthorityError("source-budget runtime binding receipt is inconsistent")
+            elif bound_sha != migration_sha:
+                raise MissionAuthorityError("unbound source-budget migration is not the active exact record")
+            previous_identity = bound_identity
+            previous_sha = bound_sha
+            if sequence == final_sequence and migration_sha != runtime_migration.get("sha256"):
+                raise MissionAuthorityError("source-budget runtime migration reference digest differs")
         if (
-            migration_sha != runtime_migration.get("sha256")
-            or migration.get("mission_id") != record.get("predecessor_mission_id")
-            or migration.get("sequence") != runtime_migration.get("sequence")
-            or migration.get("previous_runtime_identity_sha256")
-                != record.get("predecessor_active_runtime_identity_sha256")
-            or migration.get("previous_runtime_generation") != predecessor_runtime_generation
-            or migration.get("runtime_generation") != successor_runtime_generation
-            or migration.get("runner") != (record.get("predecessor_operational_budget") or {}).get("runner")
-            or migration.get("capabilities") != record.get("capabilities")
-            or migration.get("runner_profile") != record.get("runner_profile_identity")
-            or migration_source != {
-                "run_id": source_run_id,
-                "packet_sha256": record.get("predecessor_packet_sha256"),
-                "state_sha256": record.get("predecessor_state_sha256"),
-                "event_chain_sha256": record.get("predecessor_event_chain_sha256"),
-                "approved_checkpoint_id": record.get("approved_checkpoint_id"),
-                "approved_candidate_sha": record.get("approved_candidate_sha"),
-                "crossing_candidate_sha": record.get("crossing_candidate_sha"),
-            }
+            previous_identity.get("runtime_generation") != successor_runtime_generation
+            or previous_sha != _active_runtime_sha
         ):
-            raise MissionAuthorityError("source-budget runtime migration does not bind the exact predecessor boundary")
+            raise MissionAuthorityError("source-budget runtime migration does not bind the exact active authority chain")
     if active_runtime.get("runner_profile") not in (None, record.get("runner_profile_identity")) or (
         active_runtime.get("capabilities") not in (None, record.get("capabilities"))
     ):
@@ -2029,6 +2079,159 @@ def _runtime_identity_before_active_migration(
     if resolved_sequence != sequence - 1:
         raise MissionAuthorityError("prior runtime migration prefix is incomplete")
     return identity_sha
+
+
+def _pending_source_budget_runtime_migration(
+    repo: Path,
+    mission_doc: dict[str, Any],
+    *,
+    source_segment: dict[str, Any],
+    source_run_id: str,
+    source_packet_sha256: str,
+    source_state_sha256: str,
+    source_event_chain_sha256: str,
+    approved_checkpoint_id: str,
+    approved_candidate_sha: str,
+    crossing_candidate_sha: str,
+    continuation_mission_id: str,
+) -> tuple[dict[str, Any], str, dict[str, Any], str] | None:
+    """Recognize one exact source-bound migration interrupted before binding.
+
+    A source-budget continuation can crash after publishing its append-only
+    runtime migration and before creating the child mission/segment. If the
+    installed generation changes before replay, the pending migration must be
+    completed from its exact preceding bound identity before another
+    generation can be appended. This accepts only that narrow, childless
+    blocked-source boundary; it never repairs a same-segment resume record.
+    """
+    mission_id = str(mission_doc.get("mission_id") or "")
+    active, _active_sha, sequence = _active_mission_runtime(repo, mission_doc)
+    if sequence <= 0:
+        return None
+    binding_path = _mission_runtime_binding_path(repo, mission_id, sequence)
+    if binding_path.exists() or binding_path.is_symlink():
+        return None
+    migration, migration_sha = _read_runtime_migration_record(
+        _mission_runtime_migration_path(repo, mission_id, sequence),
+    )
+    previous, previous_sha, previous_sequence = _active_mission_runtime(
+        repo, mission_doc, through_sequence=sequence - 1,
+    )
+    expected_source = {
+        "run_id": source_run_id,
+        "packet_sha256": source_packet_sha256,
+        "state_sha256": source_state_sha256,
+        "event_chain_sha256": source_event_chain_sha256,
+        "approved_checkpoint_id": approved_checkpoint_id,
+        "approved_candidate_sha": approved_candidate_sha,
+        "crossing_candidate_sha": crossing_candidate_sha,
+    }
+    source = migration.get("source_authority") or {}
+    if (
+        previous_sequence != sequence - 1
+        or migration.get("schema") != MISSION_RUNTIME_MIGRATION_SCHEMA
+        or migration.get("migration_kind") is not None
+        or migration.get("reason") != "typed blocked mission successor after exact runtime commissioning"
+        or migration.get("mission_id") != mission_id
+        or migration.get("sequence") != sequence
+        or migration.get("previous_runtime_identity_sha256") != previous_sha
+        or migration.get("previous_runtime_generation") != previous.get("runtime_generation")
+        or migration.get("runtime_generation") != active.get("runtime_generation")
+        or migration.get("runtime_generation") == previous.get("runtime_generation")
+        or migration.get("runner") != (mission_doc.get("operational_budget") or {}).get("runner")
+        or migration.get("capabilities") != previous.get("capabilities")
+        or migration.get("runner_profile") != previous.get("runner_profile")
+        or source != expected_source
+        or str(source_segment.get("run_id") or "") != source_run_id
+        or not migration.get("created_at")
+    ):
+        raise MissionAuthorityError(
+            "unbound runtime migration is not the exact interrupted source-budget boundary"
+        )
+
+    child_run_id = _segment_run_id(continuation_mission_id, 1)
+    if (
+        _source_budget_continuation_path(repo, continuation_mission_id).exists()
+        or _manifest_path(repo, continuation_mission_id).exists()
+        or _segment_path(repo, continuation_mission_id, 1).exists()
+        or state.run_dir(repo, child_run_id).exists()
+        or _job_snapshot_if_present(repo, child_run_id) is not None
+    ):
+        raise MissionAuthorityError(
+            "unbound runtime migration cannot be recovered after successor publication began"
+        )
+    return migration, migration_sha, previous, previous_sha
+
+
+def _complete_pending_source_budget_runtime_binding(
+    repo: Path,
+    mission_doc: dict[str, Any],
+    *,
+    sequence: int,
+    migration: dict[str, Any],
+    migration_sha: str,
+    previous_identity: dict[str, Any],
+    source_run_id: str,
+    source_run_binding: dict[str, Any],
+    runner_profile: dict[str, Any],
+) -> None:
+    """Complete a prepared source-budget migration from its preceding proof.
+
+    This is a deterministic create-once binding, not a new capability grant:
+    the source run's verified capability projection and profile must exactly
+    equal the preceding bound mission identity. Only the runtime-generation
+    field changes, as already authorized by the immutable migration record.
+    """
+    from . import capability_binding
+
+    mission_id = str(mission_doc.get("mission_id") or "")
+    verified = capability_binding._validate_document(
+        source_run_binding, run_id=source_run_id,
+    )
+    projection = verified.get("projection") or {}
+    profile_identity = {
+        key: runner_profile.get(key)
+        for key in ("name", "provider", "model", "effort", "identity_sha256")
+    }
+    attestation = runner_profile.get("effort_attestation")
+    identity = copy.deepcopy(previous_identity)
+    if "runtime_migration_sequence" in identity:
+        identity.pop("runtime_migration_sequence")
+    identity["runtime_generation"] = migration.get("runtime_generation")
+    if (
+        verified.get("binding_sha256") != previous_identity.get("capability_binding_sha256")
+        or _digest(projection) != previous_identity.get("capability_projection_sha256")
+        or projection.get("semantic_runtime_fingerprint")
+            != previous_identity.get("semantic_runtime_fingerprint")
+        or sorted(str(value) for value in projection.get("requested") or [])
+            != migration.get("capabilities")
+        or profile_identity != migration.get("runner_profile")
+        or profile_identity != previous_identity.get("runner_profile")
+        or identity.get("effort_attestation_sha256")
+            != (str(attestation.get("attestation_sha256") or "") if isinstance(attestation, dict) else None)
+    ):
+        raise MissionAuthorityError(
+            "prepared source-budget migration cannot inherit a changed capability/profile identity"
+        )
+    receipt = {
+        "schema": MISSION_RUNTIME_BINDING_SCHEMA,
+        "mission_id": mission_id,
+        "sequence": sequence,
+        "migration_sha256": migration_sha,
+        "runtime_identity": identity,
+    }
+    path = _mission_runtime_binding_path(repo, mission_id, sequence)
+    receipt_sha = _write_once(path, receipt)
+    stored, stored_sha = _read_record(path, expected_schema=MISSION_RUNTIME_BINDING_SCHEMA)
+    if stored_sha != receipt_sha or stored != receipt:
+        raise MissionAuthorityError("prepared source-budget runtime binding replay differs")
+    active, active_sha, active_sequence = _active_mission_runtime(repo, mission_doc)
+    if (
+        active_sequence != sequence
+        or active_sha != receipt_sha
+        or active.get("runtime_generation") != migration.get("runtime_generation")
+    ):
+        raise MissionAuthorityError("prepared source-budget runtime binding did not complete its exact chain")
 
 
 def _publish_runtime_migration(
@@ -4647,6 +4850,42 @@ def continue_blocked_source_budget(
         repo, source_meta=source_meta, source_program=source_program,
         source_events=source_events, source_segment=source_segment,
     )
+    new_mission_id_seed = {
+        "predecessor_mission_id": expected_mission_id,
+        "predecessor_run_id": source_run_id,
+        "predecessor_segment_authority_sha256": source_segment_sha,
+        "predecessor_packet_sha256": source_packet_sha,
+        "predecessor_state_sha256": source_state_sha,
+        "approved_checkpoint_id": approved_cp,
+        "approved_candidate_sha": approved_sha,
+        "crossing_candidate_sha": expected_crossing_candidate_sha,
+    }
+    new_mission_id = "mission-" + hashlib.sha256(_canonical_bytes(new_mission_id_seed)).hexdigest()[:24]
+    source_neutral_sha = _digest(_source_budget_neutral_projection(source_meta))
+    new_meta = copy.deepcopy(source_meta)
+    new_meta["packet_id"] = f"source-budget-{expected_mission_id[-12:]}-cp12"
+    new_meta["created_at"] = str(source_state.get("updated_at") or util.utc_now_iso())
+    new_meta.setdefault("mission_budget", {})["segment_max_diff_lines"] = segment_max_diff_lines
+    new_meta["mission_budget"]["mission_max_diff_lines"] = mission_max_diff_lines
+    new_meta["mission_budget"]["max_segments"] = max_segments
+    new_meta["risk_budget"]["max_diff_lines"] = segment_max_diff_lines
+    new_meta.setdefault("checkpoint_graph", {}).setdefault("global_source_ceilings", {})[
+        "max_baseline_to_final_diff_lines"
+    ] = mission_max_diff_lines
+    new_meta.setdefault("mission_budget", {})["source_budget_continuation"] = {
+        "schema": SOURCE_BUDGET_CONTINUATION_REF_SCHEMA,
+        "authority_sha256": "0" * 64,
+        "predecessor_mission_id": expected_mission_id,
+        "predecessor_run_id": source_run_id,
+        "approved_checkpoint_id": approved_cp,
+        "approved_candidate_sha": approved_sha,
+        "crossing_candidate_sha": expected_crossing_candidate_sha,
+    }
+    if _digest(_source_budget_neutral_projection(new_meta)) != source_neutral_sha:
+        raise MissionAuthorityError("source-budget adjustment changed non-source packet authority")
+    packet_errors = packet.validate_packet_for_approval(new_meta)
+    if packet_errors:
+        raise MissionAuthorityError("typed source-budget packet is invalid: " + "; ".join(packet_errors[:12]))
 
     job = _parent_job_snapshot(repo, source_run_id, db_path=db_path)
     if (
@@ -4683,16 +4922,46 @@ def continue_blocked_source_budget(
     )
     installed_generation = str(supervisor_runtime.runtime_generation() or "")
     predecessor_runtime_generation = str(source_runtime.get("runtime_generation") or "")
-    active_source_runtime, _active_source_runtime_sha, _active_source_sequence = _active_mission_runtime(
+    active_source_runtime, _active_source_runtime_sha, active_source_sequence = _active_mission_runtime(
         repo, source_mission,
+    )
+    pending_runtime_migration = None
+    continuation_path = _source_budget_continuation_path(repo, new_mission_id)
+    if (
+        active_source_sequence > 0
+        and not _mission_runtime_binding_path(
+            repo, expected_mission_id, active_source_sequence,
+        ).is_file()
+        and not continuation_path.is_file()
+    ):
+        pending_runtime_migration = _pending_source_budget_runtime_migration(
+            repo, source_mission,
+            source_segment=source_segment,
+            source_run_id=source_run_id,
+            source_packet_sha256=source_packet_sha,
+            source_state_sha256=source_state_sha,
+            source_event_chain_sha256=source_event_sha,
+            approved_checkpoint_id=approved_cp,
+            approved_candidate_sha=approved_sha,
+            crossing_candidate_sha=expected_crossing_candidate_sha,
+            continuation_mission_id=new_mission_id,
+        )
+        if pending_runtime_migration is None:
+            raise MissionAuthorityError("unbound runtime migration is not eligible for source-budget replay")
+    pending_generation = (
+        str(pending_runtime_migration[0].get("runtime_generation") or "")
+        if pending_runtime_migration is not None else ""
     )
     if (
         not installed_generation
         or not predecessor_runtime_generation
         or job.get("runtime_generation") != predecessor_runtime_generation
-        or active_source_runtime.get("runtime_generation") not in {
-            predecessor_runtime_generation, installed_generation,
-        }
+        or (
+            active_source_runtime.get("runtime_generation") not in {
+                predecessor_runtime_generation, installed_generation,
+            }
+            and active_source_runtime.get("runtime_generation") != pending_generation
+        )
         or predecessor_operational_budget.get("runner") != job.get("runner")
         or not isinstance(source_runtime.get("capabilities"), list)
         or sorted(str(value) for value in source_runtime.get("capabilities") or [])
@@ -4725,6 +4994,19 @@ def continue_blocked_source_budget(
         target_runtime_generation=installed_generation,
     )
 
+    if pending_runtime_migration is not None:
+        migration, migration_sha, previous_identity, _previous_sha = pending_runtime_migration
+        _complete_pending_source_budget_runtime_binding(
+            repo, source_mission,
+            sequence=int(migration.get("sequence") or 0),
+            migration=migration,
+            migration_sha=migration_sha,
+            previous_identity=previous_identity,
+            source_run_id=source_run_id,
+            source_run_binding=run_binding,
+            runner_profile=runner_profile,
+        )
+
     runtime_migration = None
     if predecessor_runtime_generation != installed_generation:
         # The migration is append-only and tied to this exact blocked source
@@ -4748,42 +5030,25 @@ def continue_blocked_source_budget(
                 repo, expected_mission_id, int(runtime_migration["sequence"]),
             ),
         )
+        previous_migration_identity, previous_migration_sha, previous_migration_sequence = (
+            _active_mission_runtime(
+                repo, source_mission,
+                through_sequence=int(runtime_migration["sequence"]) - 1,
+            )
+        )
         if (
             migration_sha != runtime_migration.get("sha256")
-            or migration.get("previous_runtime_identity_sha256") != source_runtime_sha
-            or migration.get("previous_runtime_generation") != predecessor_runtime_generation
+            or previous_migration_sequence != int(runtime_migration["sequence"]) - 1
+            or migration.get("previous_runtime_identity_sha256") != previous_migration_sha
+            or migration.get("previous_runtime_generation")
+                != previous_migration_identity.get("runtime_generation")
             or migration.get("runtime_generation") != installed_generation
         ):
-            raise MissionAuthorityError("runtime migration does not continue the exact predecessor identity")
+            raise MissionAuthorityError("runtime migration does not continue the exact bound authority chain")
     elif active_source_runtime.get("runtime_generation") != installed_generation:
         raise MissionAuthorityError("predecessor active runtime differs from its sealed segment identity")
 
-    source_neutral_sha = _digest(_source_budget_neutral_projection(source_meta))
-    new_meta = copy.deepcopy(source_meta)
-    new_meta["packet_id"] = f"source-budget-{expected_mission_id[-12:]}-cp12"
-    new_meta["created_at"] = str(source_state.get("updated_at") or util.utc_now_iso())
-    new_meta.setdefault("mission_budget", {})["segment_max_diff_lines"] = segment_max_diff_lines
-    new_meta["mission_budget"]["mission_max_diff_lines"] = mission_max_diff_lines
-    new_meta["mission_budget"]["max_segments"] = max_segments
-    new_meta["risk_budget"]["max_diff_lines"] = segment_max_diff_lines
-    new_meta.setdefault("checkpoint_graph", {}).setdefault("global_source_ceilings", {})[
-        "max_baseline_to_final_diff_lines"
-    ] = mission_max_diff_lines
-    if _digest(_source_budget_neutral_projection(new_meta)) != source_neutral_sha:
-        raise MissionAuthorityError("source-budget adjustment changed non-source packet authority")
-
     source_program_allocations = copy.deepcopy(source_program.get("semantic_budget_allocations") or [])
-    new_mission_id_seed = {
-        "predecessor_mission_id": expected_mission_id,
-        "predecessor_run_id": source_run_id,
-        "predecessor_segment_authority_sha256": source_segment_sha,
-        "predecessor_packet_sha256": source_packet_sha,
-        "predecessor_state_sha256": source_state_sha,
-        "approved_checkpoint_id": approved_cp,
-        "approved_candidate_sha": approved_sha,
-        "crossing_candidate_sha": expected_crossing_candidate_sha,
-    }
-    new_mission_id = "mission-" + hashlib.sha256(_canonical_bytes(new_mission_id_seed)).hexdigest()[:24]
     new_policy_sha = program.semantic_budget_policy_sha256(new_meta)
     imported_allocations: list[dict[str, Any]] = []
     for allocation in source_program_allocations:

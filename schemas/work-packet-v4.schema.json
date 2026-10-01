@@ -284,7 +284,7 @@
             "max_baseline_to_final_diff_lines": {
               "type": "integer",
               "minimum": 1,
-              "maximum": 30000
+              "maximum": 100000
             }
           }
         }
@@ -544,7 +544,7 @@
         "max_diff_lines": {
           "type": "integer",
           "minimum": 1,
-          "maximum": 30000
+          "maximum": 100000
         },
         "max_files_changed": {
           "type": "integer",
@@ -677,5 +677,65 @@
       "pattern": "^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$",
       "description": "Optional trusted runner-profile name. Packets cannot inject runner CLI flags; the core/operator registry resolves model/effort."
     }
-  }
+  },
+  "anyOf": [
+    {
+      "properties": {
+        "mission_budget": {
+          "properties": {
+            "segment_max_diff_lines": { "maximum": 30000 },
+            "source_budget_continuation": { "type": "null" }
+          }
+        },
+        "risk_budget": {
+          "properties": {
+            "max_diff_lines": { "maximum": 30000 }
+          }
+        },
+        "checkpoint_graph": {
+          "properties": {
+            "global_source_ceilings": {
+              "properties": {
+                "max_baseline_to_final_diff_lines": { "maximum": 30000 }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "properties": {
+        "mission_budget": {
+          "required": ["source_budget_continuation"],
+          "properties": {
+            "segment_max_diff_lines": { "maximum": 100000 },
+            "mission_max_diff_lines": { "maximum": 100000 },
+            "source_budget_continuation": {
+              "type": "object",
+              "required": ["schema"],
+              "properties": {
+                "schema": {
+                  "const": "ownframework-loop-source-budget-continuation-ref/v1"
+                }
+              }
+            }
+          }
+        },
+        "risk_budget": {
+          "properties": {
+            "max_diff_lines": { "maximum": 100000 }
+          }
+        },
+        "checkpoint_graph": {
+          "properties": {
+            "global_source_ceilings": {
+              "properties": {
+                "max_baseline_to_final_diff_lines": { "maximum": 100000 }
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
 }
