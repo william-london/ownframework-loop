@@ -105,23 +105,57 @@ def _verified_capability_migration_reference(
     return record
 
 def _runtime_only_capability_transition(record: dict[str, Any]) -> bool:
-    """Require a runner-runtime refresh to leave all other capability authority fixed."""
+    """Allow refreshed proof identities while keeping requested authority fixed."""
     previous = record.get("previous_binding") or {}
     new = record.get("new_binding") or {}
     old_projection = previous.get("projection")
     new_projection = new.get("projection")
     if not isinstance(old_projection, dict) or not isinstance(new_projection, dict):
         return False
-    old_stable = dict(old_projection)
-    new_stable = dict(new_projection)
-    old_fingerprint = old_stable.pop("semantic_runtime_fingerprint", None)
-    new_fingerprint = new_stable.pop("semantic_runtime_fingerprint", None)
+
+    def authority_projection(projection: dict[str, Any]) -> dict[str, Any] | None:
+        stable = copy.deepcopy(projection)
+        stable.pop("semantic_runtime_fingerprint", None)
+        resolved = stable.get("capabilities")
+        requested_profile = stable.get("requested_runner_profile")
+        if not isinstance(resolved, list) or not isinstance(requested_profile, dict):
+            return None
+        # Capability commissioning evidence is bound by the immutable old/new
+        # snapshots in the migration record. Its digest may legitimately
+        # change when a stale proof is refreshed, but the capability itself
+        # (including executable, scope, network, and asset identity) may not.
+        for item in resolved:
+            if not isinstance(item, dict):
+                return None
+            item.pop("commissioning_evidence_sha256", None)
+            browser = item.get("browser")
+            if browser is not None:
+                if not isinstance(browser, dict):
+                    return None
+                browser.pop("browser_proof_sha256", None)
+        # Attestation digest/fingerprint are runtime-bound evidence. Retain
+        # the evidence kind, schema, and profile identity so a refresh cannot
+        # change the requested profile's proof type or identity.
+        attestation = requested_profile.get("effort_attestation")
+        if attestation is not None:
+            if not isinstance(attestation, dict):
+                return None
+            attestation.pop("attestation_sha256", None)
+            attestation.pop("semantic_runtime_fingerprint", None)
+        return stable
+
+    old_fingerprint = old_projection.get("semantic_runtime_fingerprint")
+    new_fingerprint = new_projection.get("semantic_runtime_fingerprint")
+    old_stable = authority_projection(old_projection)
+    new_stable = authority_projection(new_projection)
     return (
         isinstance(old_fingerprint, str)
         and bool(old_fingerprint)
         and isinstance(new_fingerprint, str)
         and bool(new_fingerprint)
         and old_fingerprint != new_fingerprint
+        and old_stable is not None
+        and new_stable is not None
         and old_stable == new_stable
     )
 
@@ -283,14 +317,23 @@ def _verify_runtime_migration_source(repo: Path, migration: dict[str, Any]) -> N
                 != migration.get("previous_runtime_generation")
                 or previous_identity.get("capabilities") != migration_identity.get("capabilities")
                 or previous_identity.get("runner_profile") != migration_identity.get("runner_profile")
-                or previous_identity.get("effort_attestation_sha256")
-                != migration_identity.get("effort_attestation_sha256")
+                or (
+                    capability_migration is None
+                    and previous_identity.get("effort_attestation_sha256")
+                    != migration_identity.get("effort_attestation_sha256")
+                )
             ):
                 raise MissionAuthorityError("same-segment runtime identity predecessor is invalid")
             if capability_migration is not None:
                 previous_projection = capability_migration.get("previous_binding", {}).get(
                     "projection",
                 ) or {}
+                previous_profile = previous_projection.get("requested_runner_profile") or {}
+                previous_attestation = previous_profile.get("effort_attestation")
+                previous_attestation_sha = (
+                    str(previous_attestation.get("attestation_sha256") or "")
+                    if isinstance(previous_attestation, dict) else None
+                )
                 if (
                     previous_identity.get("capability_binding_sha256")
                     != capability_migration.get("previous_binding_sha256")
@@ -302,6 +345,8 @@ def _verify_runtime_migration_source(repo: Path, migration: dict[str, Any]) -> N
                     )
                     or previous_identity.get("capability_projection_sha256")
                     != _digest(previous_projection)
+                    or previous_identity.get("effort_attestation_sha256")
+                    != previous_attestation_sha
                 ):
                     raise MissionAuthorityError("runtime identity does not bind the capability migration edge")
             elif (
@@ -992,8 +1037,12 @@ def prepare_runtime_generation_resume(
         ).is_file())
     ):
         raise MissionAuthorityError("prior mission runtime identity is not durably bound")
+    previous_profile = dict(profile)
+    previous_projection = previous_binding.get("projection") or {}
+    previous_requested_profile = previous_projection.get("requested_runner_profile") or {}
+    previous_profile["effort_attestation"] = previous_requested_profile.get("effort_attestation")
     verified_previous = verify_runtime_identity(
-        repo, mission_id, run_binding=previous_binding, runner_profile=profile,
+        repo, mission_id, run_binding=previous_binding, runner_profile=previous_profile,
         runtime_generation=previous_generation,
         segment_number=int(segment.get("segment_number") or 0),
     )

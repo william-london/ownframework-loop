@@ -1105,10 +1105,11 @@ finally:
 print("NORMAL_SEGMENT_RUNTIME_MIGRATION_IS_WORKERLESS_AND_CONTINUATION_INDEPENDENT=PASS")
 
 # A normalized semantic runner can change the capability-bound host runtime
-# fingerprint without changing Loop's own installed payload generation. The
-# capability rebind and mission runtime identity must advance together before
-# the quarantined job is made claimable; returning QUEUED with the create-once
-# mission identity still bound to the old fingerprint is not a safe migration.
+# fingerprint while Loop's installed payload generation also changes. Fresh
+# commissioning digests and an effort attestation may be rebound, but the
+# requested capabilities/profile must remain fixed. The capability rebind and
+# mission runtime identity must advance together before the quarantined job is
+# made claimable.
 capability_previous_db_path = db_path
 capability_previous_xdg_state_home = os.environ["XDG_STATE_HOME"]
 os.environ["XDG_STATE_HOME"] = str(root / "state-capability-runtime")
@@ -1124,10 +1125,74 @@ capability_runtime_meta = v4_packet(
 )
 capability_runtime_meta["capabilities"] = []
 capability_runtime_run = "run-20260930T000000Z-v127capruntime"
-capability_runtime_fixture = start_v4(
-    capability_runtime_repo, capability_runtime_baseline, capability_runtime_run,
-    meta=capability_runtime_meta,
-)
+original_profile_resolver_for_capability_fixture = runner_profiles.resolve_profile
+initial_semantic_fingerprint = capabilities.semantic_runtime_fingerprint()
+def resolve_profile_with_initial_attestation(name: str, *, provider: str | None = None) -> dict:
+    profile = original_profile_resolver_for_capability_fixture(name, provider=provider)
+    if provider == MissionFixtureRunner.runner_id:
+        profile = dict(profile)
+        profile["effort_attestation"] = {
+            "attestation_sha256": "3" * 64,
+            "evidence_kind": "operator_assertion",
+            "profile_identity_sha256": profile["identity_sha256"],
+            "schema": "ownframework-loop-runner-effort-operator-assertion/v3",
+            "semantic_runtime_fingerprint": initial_semantic_fingerprint,
+        }
+    return profile
+runner_profiles.resolve_profile = resolve_profile_with_initial_attestation
+try:
+    capability_runtime_fixture = start_v4(
+        capability_runtime_repo, capability_runtime_baseline, capability_runtime_run,
+        meta=capability_runtime_meta,
+    )
+finally:
+    runner_profiles.resolve_profile = original_profile_resolver_for_capability_fixture
+# A capability migration may refresh evidence digests, but must reject any
+# change to the underlying requested capability, environment, or profile.
+old_projection = copy.deepcopy(capability_runtime_fixture["binding"]["projection"])
+old_projection["capabilities"] = [{
+    "kind": "browser", "name": "browser.playwright.chromium",
+    "provider": "builtin", "privileged": False,
+    "network_domains": ["cdn.playwright.dev"],
+    "commissioning_evidence_sha256": "a" * 64,
+    "browser": {
+        "browser_asset_merkle_sha256": "b" * 64,
+        "browser_proof_sha256": "c" * 64,
+        "browser_version": "153.0.8010.12",
+    },
+}]
+old_projection["requested"] = ["browser.playwright.chromium"]
+old_projection["requested_runner_profile"]["effort_attestation"] = {
+    "attestation_sha256": "d" * 64,
+    "profile_identity_sha256": capability_runtime_fixture["profile"]["identity_sha256"],
+    "semantic_runtime_fingerprint": old_projection["semantic_runtime_fingerprint"],
+}
+new_projection = copy.deepcopy(old_projection)
+new_projection["semantic_runtime_fingerprint"] = "e" * 64
+new_projection["capabilities"][0]["commissioning_evidence_sha256"] = "f" * 64
+new_projection["capabilities"][0]["browser"]["browser_proof_sha256"] = "1" * 64
+new_projection["requested_runner_profile"]["effort_attestation"] = {
+    "attestation_sha256": "2" * 64,
+    "profile_identity_sha256": capability_runtime_fixture["profile"]["identity_sha256"],
+    "semantic_runtime_fingerprint": "e" * 64,
+}
+assert program_mission_runtime._runtime_only_capability_transition({
+    "previous_binding": {"projection": old_projection},
+    "new_binding": {"projection": new_projection},
+})
+for forbidden_change in ("requested_runner_profile", "capabilities", "network_domains"):
+    invalid_projection = copy.deepcopy(new_projection)
+    if forbidden_change == "requested_runner_profile":
+        invalid_projection[forbidden_change]["model"] = "unauthorized-model"
+    elif forbidden_change == "capabilities":
+        invalid_projection[forbidden_change][0]["browser"]["browser_asset_merkle_sha256"] = "3" * 64
+    else:
+        invalid_projection[forbidden_change] = ["unapproved.example"]
+    assert not program_mission_runtime._runtime_only_capability_transition({
+        "previous_binding": {"projection": old_projection},
+        "new_binding": {"projection": invalid_projection},
+    }), forbidden_change
+print("RUNTIME_MIGRATION_ALLOWS_PROOF_REFRESH_ONLY=PASS")
 capability_runtime_segment, _, capability_runtime_mission, _ = program_mission.load_segment(
     capability_runtime_repo, capability_runtime_run,
 )
@@ -1157,6 +1222,7 @@ capability_runtime_before = {
 original_runtime_generation_fn = supervisor_runtime.runtime_generation
 original_current_runtime_generation_fn = supervisor._current_runtime_generation
 original_fingerprint_fn = capabilities.semantic_runtime_fingerprint
+original_effort_attestation_fn = runner_profiles.verify_effort_attestation
 try:
     supervisor_runtime.runtime_generation = lambda: capability_runtime_fixture["runtime_generation"] + ".quarantine-trigger"
     supervisor._current_runtime_generation = lambda: capability_runtime_fixture["runtime_generation"] + ".quarantine-trigger"
@@ -1170,15 +1236,28 @@ try:
     assert quarantined_job["status"] == "QUARANTINED", quarantined_job
     quarantined_snapshot = dict(quarantined_job)
 
-    # Model the new canonical Claude executable by changing only its
-    # runtime fingerprint. Capabilities and requested profile remain frozen.
-    supervisor_runtime.runtime_generation = original_runtime_generation_fn
-    supervisor._current_runtime_generation = original_current_runtime_generation_fn
+    # Model a new commissioned Loop payload and normalized Claude runtime.
+    # Only runtime-bound proof identities change; requested authority stays
+    # fixed and the fresh attestation is bound to the same named profile.
+    target_generation = (
+        capability_runtime_fixture["runtime_generation"].split("@payload-", 1)[0]
+        + "@payload-" + "9" * 64
+    )
+    supervisor_runtime.runtime_generation = lambda: target_generation
+    supervisor._current_runtime_generation = lambda: target_generation
     old_fingerprint = str(capability_runtime_fixture["binding"]["projection"].get(
         "semantic_runtime_fingerprint") or "")
     new_fingerprint = "f" * 64
     assert old_fingerprint != new_fingerprint
     capabilities.semantic_runtime_fingerprint = lambda: new_fingerprint
+    new_attestation = {
+        "attestation_sha256": "4" * 64,
+        "evidence_kind": "operator_assertion",
+        "profile_identity_sha256": capability_runtime_fixture["profile"]["identity_sha256"],
+        "schema": "ownframework-loop-runner-effort-operator-assertion/v3",
+        "semantic_runtime_fingerprint": new_fingerprint,
+    }
+    runner_profiles.verify_effort_attestation = lambda _profile: new_attestation
     implicit_resume = supervisor.resume(
         canonical_repo=capability_runtime_repo,
         run_id=capability_runtime_run,
@@ -1186,7 +1265,6 @@ try:
     )
     assert implicit_resume.get("resumed") is False, implicit_resume
     assert implicit_resume.get("reason") == "runtime_generation_rebind_refused", implicit_resume
-    assert "explicit capability migration" in str(implicit_resume.get("error") or "")
     assert capability_binding._read(
         capability_binding.binding_path(capability_runtime_repo, capability_runtime_run),
     )["binding_sha256"] == capability_runtime_before["binding"]
@@ -1206,10 +1284,10 @@ try:
     ).get("status") == "COMPLETE", resumed
     runtime_migration = resumed.get("runtime_migration")
     assert isinstance(runtime_migration, dict), (
-        "same Loop generation capability rebind must append mission runtime identity evidence",
+        "combined generation/capability rebind must append mission runtime identity evidence",
         resumed,
     )
-    assert runtime_migration["runtime_generation"] == capability_runtime_fixture["runtime_generation"]
+    assert runtime_migration["runtime_generation"] == target_generation
     assert runtime_migration["sequence"] == 1
     assert resumed["status"] == "QUEUED"
     cap_migration = resumed.get("capability_migration")
@@ -1232,7 +1310,7 @@ try:
         capability_runtime_repo,
         capability_runtime_run,
         job_snapshot=quarantined_snapshot,
-        target_runtime_generation=capability_runtime_fixture["runtime_generation"],
+        target_runtime_generation=target_generation,
         capability_migration=cap_migration,
         db_path=capability_runtime_db_path,
     )
@@ -1243,12 +1321,13 @@ try:
     )
     assert migrated_binding["binding_sha256"] != capability_runtime_before["binding"]
     assert migrated_binding["projection"]["semantic_runtime_fingerprint"] == new_fingerprint
+    migrated_profile = dict(capability_runtime_fixture["profile"], effort_attestation=new_attestation)
     migrated_identity = program_mission_runtime.bind_runtime_identity(
         capability_runtime_repo,
         capability_runtime_run,
         run_binding=migrated_binding,
-        runner_profile=capability_runtime_fixture["profile"],
-        runtime_generation=capability_runtime_fixture["runtime_generation"],
+        runner_profile=migrated_profile,
+        runtime_generation=target_generation,
     )
     assert migrated_identity["runtime_migration_sequence"] == 1
     assert migrated_identity["capability_binding_sha256"] == migrated_binding["binding_sha256"]
@@ -1256,8 +1335,8 @@ try:
         capability_runtime_repo,
         capability_runtime_mission_id,
         run_binding=migrated_binding,
-        runner_profile=capability_runtime_fixture["profile"],
-        runtime_generation=capability_runtime_fixture["runtime_generation"],
+        runner_profile=migrated_profile,
+        runtime_generation=target_generation,
         segment_number=1,
     )
     assert verified["semantic_runtime_fingerprint"] == new_fingerprint
@@ -1281,11 +1360,12 @@ try:
             (int(resumed["id"]),),
         ).fetchone()[0]
     assert int(attempts) == 0
-    print("SAME_GENERATION_CAPABILITY_RUNTIME_IDENTITY_MIGRATION=PASS")
+    print("COMBINED_RUNTIME_AND_CAPABILITY_REFRESH_MIGRATION=PASS")
 finally:
     supervisor_runtime.runtime_generation = original_runtime_generation_fn
     supervisor._current_runtime_generation = original_current_runtime_generation_fn
     capabilities.semantic_runtime_fingerprint = original_fingerprint_fn
+    runner_profiles.verify_effort_attestation = original_effort_attestation_fn
     db_path = capability_previous_db_path
     os.environ["XDG_STATE_HOME"] = capability_previous_xdg_state_home
 
