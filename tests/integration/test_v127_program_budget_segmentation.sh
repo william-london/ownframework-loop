@@ -1104,6 +1104,191 @@ finally:
     os.environ["XDG_STATE_HOME"] = previous_xdg_state_home
 print("NORMAL_SEGMENT_RUNTIME_MIGRATION_IS_WORKERLESS_AND_CONTINUATION_INDEPENDENT=PASS")
 
+# A normalized semantic runner can change the capability-bound host runtime
+# fingerprint without changing Loop's own installed payload generation. The
+# capability rebind and mission runtime identity must advance together before
+# the quarantined job is made claimable; returning QUEUED with the create-once
+# mission identity still bound to the old fingerprint is not a safe migration.
+capability_previous_db_path = db_path
+capability_previous_xdg_state_home = os.environ["XDG_STATE_HOME"]
+os.environ["XDG_STATE_HOME"] = str(root / "state-capability-runtime")
+capability_runtime_db_path = supervisor_db.default_db_path()
+with supervisor_db._managed_connect(capability_runtime_db_path):
+    pass
+db_path = capability_runtime_db_path
+capability_runtime_repo, capability_runtime_baseline = make_repo(
+    "v127-capability-runtime-migration",
+)
+capability_runtime_meta = v4_packet(
+    capability_runtime_repo, capability_runtime_baseline,
+)
+capability_runtime_meta["capabilities"] = []
+capability_runtime_run = "run-20260930T000000Z-v127capruntime"
+capability_runtime_fixture = start_v4(
+    capability_runtime_repo, capability_runtime_baseline, capability_runtime_run,
+    meta=capability_runtime_meta,
+)
+capability_runtime_segment, _, capability_runtime_mission, _ = program_mission.load_segment(
+    capability_runtime_repo, capability_runtime_run,
+)
+capability_runtime_mission_id = str(capability_runtime_segment["mission_id"])
+capability_runtime_packet = state.run_dir(
+    capability_runtime_repo, capability_runtime_run,
+) / "WORK_PACKET.md"
+capability_runtime_approval = approval.approval_path(
+    capability_runtime_repo, capability_runtime_run,
+)
+capability_runtime_state = state.state_path(
+    capability_runtime_repo, capability_runtime_run,
+)
+capability_runtime_events = state.events_path(
+    capability_runtime_repo, capability_runtime_run,
+)
+capability_runtime_before = {
+    "packet": util.sha256_file(capability_runtime_packet),
+    "approval": util.sha256_file(capability_runtime_approval),
+    "state": util.sha256_file(capability_runtime_state),
+    "events": integrity.compute_event_chain_hash(capability_runtime_events),
+    "binding": capability_runtime_fixture["binding"]["binding_sha256"],
+    "runtime": util.sha256_file(program_mission._mission_runtime_path(
+        capability_runtime_repo, capability_runtime_mission_id,
+    )),
+}
+original_runtime_generation_fn = supervisor_runtime.runtime_generation
+original_current_runtime_generation_fn = supervisor._current_runtime_generation
+original_fingerprint_fn = capabilities.semantic_runtime_fingerprint
+try:
+    supervisor_runtime.runtime_generation = lambda: capability_runtime_fixture["runtime_generation"] + ".quarantine-trigger"
+    supervisor._current_runtime_generation = lambda: capability_runtime_fixture["runtime_generation"] + ".quarantine-trigger"
+    quarantined = supervisor.run_one(db_path=capability_runtime_db_path)
+    assert quarantined.get("action") == "QUARANTINED", quarantined
+    quarantined_job = supervisor.status(
+        canonical_repo=capability_runtime_repo,
+        run_id=capability_runtime_run,
+        db_path=capability_runtime_db_path,
+    )
+    assert quarantined_job["status"] == "QUARANTINED", quarantined_job
+    quarantined_snapshot = dict(quarantined_job)
+
+    # Model the new canonical Claude executable by changing only its
+    # runtime fingerprint. Capabilities and requested profile remain frozen.
+    supervisor_runtime.runtime_generation = original_runtime_generation_fn
+    supervisor._current_runtime_generation = original_current_runtime_generation_fn
+    old_fingerprint = str(capability_runtime_fixture["binding"]["projection"].get(
+        "semantic_runtime_fingerprint") or "")
+    new_fingerprint = "f" * 64
+    assert old_fingerprint != new_fingerprint
+    capabilities.semantic_runtime_fingerprint = lambda: new_fingerprint
+    implicit_resume = supervisor.resume(
+        canonical_repo=capability_runtime_repo,
+        run_id=capability_runtime_run,
+        db_path=capability_runtime_db_path,
+    )
+    assert implicit_resume.get("resumed") is False, implicit_resume
+    assert implicit_resume.get("reason") == "runtime_generation_rebind_refused", implicit_resume
+    assert "explicit capability migration" in str(implicit_resume.get("error") or "")
+    assert capability_binding._read(
+        capability_binding.binding_path(capability_runtime_repo, capability_runtime_run),
+    )["binding_sha256"] == capability_runtime_before["binding"]
+    assert capability_binding._migration_records(
+        capability_runtime_repo, capability_runtime_run,
+    ) == []
+    resumed = supervisor.resume(
+        canonical_repo=capability_runtime_repo,
+        run_id=capability_runtime_run,
+        db_path=capability_runtime_db_path,
+        rebind_capabilities=True,
+        capability_migration_reason="v127 exact semantic runtime normalization fixture",
+    )
+    assert resumed.get("resumed") is True, resumed
+    assert resumed.get("capability_migration_completed") is not True or resumed.get(
+        "capability_migration", {}
+    ).get("status") == "COMPLETE", resumed
+    runtime_migration = resumed.get("runtime_migration")
+    assert isinstance(runtime_migration, dict), (
+        "same Loop generation capability rebind must append mission runtime identity evidence",
+        resumed,
+    )
+    assert runtime_migration["runtime_generation"] == capability_runtime_fixture["runtime_generation"]
+    assert runtime_migration["sequence"] == 1
+    assert resumed["status"] == "QUEUED"
+    cap_migration = resumed.get("capability_migration")
+    assert isinstance(cap_migration, dict) and cap_migration["status"] == "COMPLETE", resumed
+    migration_path = program_mission._mission_runtime_migration_path(
+        capability_runtime_repo.resolve(), capability_runtime_mission_id, 1,
+    )
+    assert migration_path.is_file(), (str(migration_path), list(migration_path.parent.iterdir()), resumed)
+    migration_doc, migration_sha = program_mission_runtime._read_runtime_migration_record(
+        migration_path,
+    )
+    assert migration_sha == runtime_migration["sha256"]
+    assert migration_doc["capability_migration_ref"] == {
+        "sequence": cap_migration["migration_sequence"],
+        "record_sha256": cap_migration["migration_record_sha256"],
+        "previous_binding_sha256": cap_migration["previous_binding_sha256"],
+        "new_binding_sha256": cap_migration["new_binding_sha256"],
+    }
+    replayed_runtime_migration = program_mission_runtime.prepare_runtime_generation_resume(
+        capability_runtime_repo,
+        capability_runtime_run,
+        job_snapshot=quarantined_snapshot,
+        target_runtime_generation=capability_runtime_fixture["runtime_generation"],
+        capability_migration=cap_migration,
+        db_path=capability_runtime_db_path,
+    )
+    assert replayed_runtime_migration == runtime_migration
+
+    migrated_binding = capability_binding._read(
+        capability_binding.binding_path(capability_runtime_repo, capability_runtime_run),
+    )
+    assert migrated_binding["binding_sha256"] != capability_runtime_before["binding"]
+    assert migrated_binding["projection"]["semantic_runtime_fingerprint"] == new_fingerprint
+    migrated_identity = program_mission_runtime.bind_runtime_identity(
+        capability_runtime_repo,
+        capability_runtime_run,
+        run_binding=migrated_binding,
+        runner_profile=capability_runtime_fixture["profile"],
+        runtime_generation=capability_runtime_fixture["runtime_generation"],
+    )
+    assert migrated_identity["runtime_migration_sequence"] == 1
+    assert migrated_identity["capability_binding_sha256"] == migrated_binding["binding_sha256"]
+    verified = program_mission_runtime.verify_runtime_identity(
+        capability_runtime_repo,
+        capability_runtime_mission_id,
+        run_binding=migrated_binding,
+        runner_profile=capability_runtime_fixture["profile"],
+        runtime_generation=capability_runtime_fixture["runtime_generation"],
+        segment_number=1,
+    )
+    assert verified["semantic_runtime_fingerprint"] == new_fingerprint
+    assert verified["capability_binding_sha256"] == migrated_binding["binding_sha256"]
+    binding_receipt_path = program_mission._mission_runtime_binding_path(
+        capability_runtime_repo.resolve(), capability_runtime_mission_id, 1,
+    )
+    receipt_doc, _ = program_mission_runtime._read_record(
+        binding_receipt_path,
+        expected_schema=program_mission_runtime.MISSION_RUNTIME_BINDING_SCHEMA,
+    )
+    assert receipt_doc["migration_sha256"] == runtime_migration["sha256"]
+    assert receipt_doc["runtime_identity"] == migration_doc["runtime_identity"]
+    assert util.sha256_file(capability_runtime_packet) == capability_runtime_before["packet"]
+    assert util.sha256_file(capability_runtime_approval) == capability_runtime_before["approval"]
+    assert util.sha256_file(capability_runtime_state) == capability_runtime_before["state"]
+    assert integrity.compute_event_chain_hash(capability_runtime_events) == capability_runtime_before["events"]
+    with supervisor_db._managed_connect_readonly(capability_runtime_db_path) as conn:
+        attempts = conn.execute(
+            "SELECT COUNT(*) FROM semantic_attempts WHERE job_id=?",
+            (int(resumed["id"]),),
+        ).fetchone()[0]
+    assert int(attempts) == 0
+    print("SAME_GENERATION_CAPABILITY_RUNTIME_IDENTITY_MIGRATION=PASS")
+finally:
+    supervisor_runtime.runtime_generation = original_runtime_generation_fn
+    supervisor._current_runtime_generation = original_current_runtime_generation_fn
+    capabilities.semantic_runtime_fingerprint = original_fingerprint_fn
+    db_path = capability_previous_db_path
+    os.environ["XDG_STATE_HOME"] = capability_previous_xdg_state_home
+
 print("PROGRAM_BUDGET_SEGMENTATION=PASS")
 PY
 

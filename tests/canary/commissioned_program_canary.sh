@@ -237,12 +237,12 @@ try:
     assert (cps["CP-1"]["build_pass_count"],cps["CP-1"]["review_pass_count"],cps["CP-1"]["repair_round_count"])==(2,2,1), cps["CP-1"]
     assert (cps["CP-2"]["build_pass_count"],cps["CP-2"]["review_pass_count"],cps["CP-2"]["repair_round_count"])==(1,1,0), cps["CP-2"]
     cc=prog["cumulative_counters"]
-    assert (cc["build_pass_count"],cc["review_pass_count"],cc["repair_round_count"])==(3,3,1), cc
-    assert (state["build_pass_count"],state["review_pass_count"],state["repair_round"])==(3,3,1), state
+    assert (cc["build_pass_count"],cc["review_pass_count"],cc["repair_round_count"])==(3,4,1), cc
+    assert (state["build_pass_count"],state["review_pass_count"],state["repair_round"])==(3,4,1), state
 
     events=integrity.read_event_chain(rd/"EVENTS.log")
     assert integrity.compute_event_chain_hash(rd/"EVENTS.log")==integrity.get_event_chain_hash(rd/"EVENTS.log")
-    last_build=None; wrong=0; review_count=0
+    last_build=None; wrong=0; review_count=0; program_final_events=[]
     for ev in events:
         if ev.get("event_type")=="build_finalized":
             last_build=ev.get("commit_sha")
@@ -250,7 +250,12 @@ try:
             review_count += 1
             if not last_build or ev.get("commit_sha") != last_build:
                 wrong += 1
-    assert review_count==3 and wrong==0, (review_count,wrong)
+        elif ev.get("event_type")=="program_finalized":
+            program_final_events.append(ev)
+    assert review_count==4 and wrong==0, (review_count,wrong)
+    assert len(program_final_events)==1, program_final_events
+    assert program_final_events[0].get("commit_sha")==last_build, program_final_events[0]
+    assert program_final_events[0].get("new_state")=="APPROVED", program_final_events[0]
 
     conn=sqlite3.connect(f"file:{Path(c['db']).resolve()}?mode=ro",uri=True)
     conn.row_factory=sqlite3.Row
@@ -259,11 +264,15 @@ try:
     assert job["runtime_generation"]==c["runtime_generation_started"], dict(job)
     attempts=conn.execute("SELECT * FROM semantic_attempts WHERE job_id=? ORDER BY started_at",(job["id"],)).fetchall()
     conn.close()
-    assert len(attempts)==6, [dict(x) for x in attempts]
-    assert [x["role"] for x in attempts]==["builder","reviewer","builder","reviewer","builder","reviewer"]
+    assert len(attempts)==7, [dict(x) for x in attempts]
+    assert [x["role"] for x in attempts]==[
+        "builder","reviewer","builder","reviewer","builder","reviewer","reviewer"
+    ]
     nonterminal={"STARTED","RUNNING","CLAIMED"}
     assert not [x for x in attempts if x["status"] in nonterminal], [dict(x) for x in attempts]
-    assert len({x["attempt_id"] for x in attempts})==6
+    assert len({x["attempt_id"] for x in attempts})==len(attempts)
+    assert all(x["status"]=="COMPLETED" and x["semantic_accepted"]==1 for x in attempts), [dict(x) for x in attempts]
+    assert attempts[-1]["role"]=="reviewer" and attempts[-1]["accepted_candidate_sha"]==last_build, dict(attempts[-1])
 
     restart=json.loads(restart_path.read_text())
     assert restart["schema"]=="ownframework-loop-commissioned-canary-restart-proof/v1"

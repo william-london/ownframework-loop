@@ -72,6 +72,95 @@ def _runtime_migration_ref(segment: dict[str, Any]) -> dict[str, Any] | None:
         raise MissionAuthorityError("segment runtime migration reference is malformed")
     return value
 
+def _verified_capability_migration_reference(
+    repo: Path,
+    run_id: str,
+    reference: dict[str, Any],
+) -> dict[str, Any]:
+    """Resolve one completed capability migration by its immutable exact ref."""
+    if not isinstance(reference, dict):
+        raise MissionAuthorityError("runtime migration capability reference is malformed")
+    sequence = reference.get("sequence")
+    if not isinstance(sequence, int) or isinstance(sequence, bool) or sequence < 1:
+        raise MissionAuthorityError("runtime migration capability sequence is invalid")
+    try:
+        from . import capability_binding
+
+        records = capability_binding._migration_records(repo, run_id)
+    except Exception as exc:
+        raise MissionAuthorityError("runtime migration capability history is invalid") from exc
+    matches = [item for item in records if item.get("migration_sequence") == sequence]
+    if len(matches) != 1:
+        raise MissionAuthorityError("runtime migration capability reference is not unique")
+    record = matches[0]
+    if (
+        record.get("status") != "COMPLETE"
+        or record.get("migration_record_sha256") != reference.get("record_sha256")
+        or record.get("previous_binding_sha256") != reference.get("previous_binding_sha256")
+        or record.get("new_binding_sha256") != reference.get("new_binding_sha256")
+        or not isinstance(record.get("previous_binding"), dict)
+        or not isinstance(record.get("new_binding"), dict)
+    ):
+        raise MissionAuthorityError("runtime migration capability reference contradicts durable history")
+    return record
+
+def _runtime_only_capability_transition(record: dict[str, Any]) -> bool:
+    """Require a runner-runtime refresh to leave all other capability authority fixed."""
+    previous = record.get("previous_binding") or {}
+    new = record.get("new_binding") or {}
+    old_projection = previous.get("projection")
+    new_projection = new.get("projection")
+    if not isinstance(old_projection, dict) or not isinstance(new_projection, dict):
+        return False
+    old_stable = dict(old_projection)
+    new_stable = dict(new_projection)
+    old_fingerprint = old_stable.pop("semantic_runtime_fingerprint", None)
+    new_fingerprint = new_stable.pop("semantic_runtime_fingerprint", None)
+    return (
+        isinstance(old_fingerprint, str)
+        and bool(old_fingerprint)
+        and isinstance(new_fingerprint, str)
+        and bool(new_fingerprint)
+        and old_fingerprint != new_fingerprint
+        and old_stable == new_stable
+    )
+
+def _migration_target_identity_matches(
+    migration: dict[str, Any],
+    identity: dict[str, Any],
+    capability_migration: dict[str, Any] | None,
+) -> bool:
+    if (
+        identity.get("mission_id") != migration.get("mission_id")
+        or identity.get("runtime_generation") != migration.get("runtime_generation")
+        or identity.get("capabilities") != migration.get("capabilities")
+        or identity.get("runner_profile") != migration.get("runner_profile")
+    ):
+        return False
+    if capability_migration is None:
+        return True
+    binding = capability_migration.get("new_binding") or {}
+    projection = binding.get("projection") or {}
+    requested_profile = projection.get("requested_runner_profile") or {}
+    attestation = requested_profile.get("effort_attestation")
+    attestation_sha = (
+        str(attestation.get("attestation_sha256") or "")
+        if isinstance(attestation, dict) else None
+    )
+    return (
+        identity.get("capability_binding_sha256") == binding.get("binding_sha256")
+        and identity.get("semantic_runtime_fingerprint")
+        == projection.get("semantic_runtime_fingerprint")
+        and identity.get("capability_projection_sha256") == _digest(projection)
+        and identity.get("capabilities")
+        == sorted(str(value) for value in (projection.get("requested") or []))
+        and identity.get("runner_profile") == {
+            key: requested_profile.get(key)
+            for key in ("name", "provider", "model", "effort", "identity_sha256")
+        }
+        and identity.get("effort_attestation_sha256") == attestation_sha
+    )
+
 def _verify_runtime_migration_source(repo: Path, migration: dict[str, Any]) -> None:
     """Re-prove immutable source evidence for a typed runtime-generation move."""
     source = migration.get("source_authority")
@@ -86,14 +175,34 @@ def _verify_runtime_migration_source(repo: Path, migration: dict[str, Any]) -> N
     events_file = state.events_path(repo, run_id)
     if migration.get("schema") == MISSION_RUNTIME_MIGRATION_V2_SCHEMA:
         segment_number = source.get("segment_number")
+        capability_reference = migration.get("capability_migration_ref")
+        same_generation = (
+            migration.get("runtime_generation")
+            == migration.get("previous_runtime_generation")
+        )
         if (
             migration.get("migration_kind") != "active_segment_resume"
             or source.get("schema") != "ownframework-loop-active-segment-runtime-source/v1"
             or not isinstance(segment_number, int) or isinstance(segment_number, bool)
             or not 1 <= segment_number <= 16
-            or migration.get("runtime_generation") == migration.get("previous_runtime_generation")
+            or (same_generation and not isinstance(capability_reference, dict))
         ):
             raise MissionAuthorityError("same-segment runtime migration source is malformed")
+        capability_migration = (
+            _verified_capability_migration_reference(repo, run_id, capability_reference)
+            if isinstance(capability_reference, dict) else None
+        )
+        if capability_migration is not None and not _runtime_only_capability_transition(
+            capability_migration,
+        ):
+            raise MissionAuthorityError(
+                "runtime identity migration changed capability authority beyond semantic runtime identity"
+            )
+        migration_identity = migration.get("runtime_identity")
+        if isinstance(migration_identity, dict) and not _migration_target_identity_matches(
+            migration, migration_identity, capability_migration,
+        ):
+            raise MissionAuthorityError("same-segment migration target identity is invalid")
         segment, segment_sha = _read_record(
             _segment_path(repo, str(migration.get("mission_id") or ""), segment_number),
             expected_schema=SEGMENT_SCHEMA,
@@ -154,6 +263,58 @@ def _verify_runtime_migration_source(repo: Path, migration: dict[str, Any]) -> N
         approval_doc = approval.load_approval(repo, run_id)
         if approval.approval_artifact_sha256(approval_doc or {}) != source.get("approval_sha256"):
             raise MissionAuthorityError("same-segment runtime migration approval evidence drifted")
+        if same_generation and not isinstance(migration_identity, dict):
+            raise MissionAuthorityError("same-generation runtime identity migration lacks its target identity")
+        if isinstance(migration_identity, dict):
+            mission_doc, _ = _read_record(
+                _manifest_path(repo, str(migration.get("mission_id") or "")),
+                expected_schema=MISSION_SCHEMA,
+            )
+            sequence = migration.get("sequence")
+            if not isinstance(sequence, int) or isinstance(sequence, bool) or sequence < 1:
+                raise MissionAuthorityError("same-segment runtime migration sequence is invalid")
+            previous_identity, previous_identity_sha, previous_sequence = _active_mission_runtime(
+                repo, mission_doc, through_sequence=sequence - 1,
+            )
+            if (
+                previous_sequence != sequence - 1
+                or previous_identity_sha != migration.get("previous_runtime_identity_sha256")
+                or previous_identity.get("runtime_generation")
+                != migration.get("previous_runtime_generation")
+                or previous_identity.get("capabilities") != migration_identity.get("capabilities")
+                or previous_identity.get("runner_profile") != migration_identity.get("runner_profile")
+                or previous_identity.get("effort_attestation_sha256")
+                != migration_identity.get("effort_attestation_sha256")
+            ):
+                raise MissionAuthorityError("same-segment runtime identity predecessor is invalid")
+            if capability_migration is not None:
+                previous_projection = capability_migration.get("previous_binding", {}).get(
+                    "projection",
+                ) or {}
+                if (
+                    previous_identity.get("capability_binding_sha256")
+                    != capability_migration.get("previous_binding_sha256")
+                    or migration_identity.get("capability_binding_sha256")
+                    != capability_migration.get("new_binding_sha256")
+                    or previous_identity.get("semantic_runtime_fingerprint")
+                    != previous_projection.get(
+                        "semantic_runtime_fingerprint"
+                    )
+                    or previous_identity.get("capability_projection_sha256")
+                    != _digest(previous_projection)
+                ):
+                    raise MissionAuthorityError("runtime identity does not bind the capability migration edge")
+            elif (
+                migration_identity.get("capability_binding_sha256")
+                != previous_identity.get("capability_binding_sha256")
+                or migration_identity.get("capability_projection_sha256")
+                != previous_identity.get("capability_projection_sha256")
+                or migration_identity.get("semantic_runtime_fingerprint")
+                != previous_identity.get("semantic_runtime_fingerprint")
+                or migration_identity.get("effort_attestation_sha256")
+                != previous_identity.get("effort_attestation_sha256")
+            ):
+                raise MissionAuthorityError("runtime migration changed capability identity without evidence")
         return
 
     if migration.get("schema") != MISSION_RUNTIME_MIGRATION_SCHEMA:
@@ -197,7 +358,20 @@ def _runtime_identity_from_migration(
             or identity.get("runner_profile") != migration.get("runner_profile")
         ):
             raise MissionAuthorityError("runtime-generation binding receipt contradicts migration")
+        authorized_identity = migration.get("runtime_identity")
+        if isinstance(authorized_identity, dict) and identity != authorized_identity:
+            raise MissionAuthorityError("runtime-generation receipt differs from migration identity")
         return {**identity, "runtime_migration_sequence": sequence}, receipt_sha
+    authorized_identity = migration.get("runtime_identity")
+    if isinstance(authorized_identity, dict):
+        if (
+            authorized_identity.get("mission_id") != mission_id
+            or authorized_identity.get("runtime_generation") != migration.get("runtime_generation")
+            or authorized_identity.get("capabilities") != migration.get("capabilities")
+            or authorized_identity.get("runner_profile") != migration.get("runner_profile")
+        ):
+            raise MissionAuthorityError("runtime migration identity contradicts migration authority")
+        return {**authorized_identity, "runtime_migration_sequence": sequence}, migration_sha
     return {
         "mission_id": mission_id,
         "runtime_generation": str(migration["runtime_generation"]),
@@ -333,13 +507,10 @@ def _active_mission_runtime(
         _verify_runtime_migration_source(repo, migration)
         binding_path = _mission_runtime_binding_path(repo, mission_id, next_sequence)
         if not binding_path.exists():
-            return {
-                "mission_id": mission_id,
-                "runtime_generation": migration["runtime_generation"],
-                "capabilities": copy.deepcopy(migration["capabilities"]),
-                "runner_profile": copy.deepcopy(migration["runner_profile"]),
-                "effort_attestation_sha256": None,
-            }, migration_sha, next_sequence
+            identity, pending_sha = _runtime_identity_from_migration(
+                repo, mission_id, migration, migration_sha, next_sequence,
+            )
+            return identity, pending_sha, next_sequence
         receipt, identity_sha = _read_record(
             binding_path, expected_schema=MISSION_RUNTIME_BINDING_SCHEMA,
         )
@@ -359,6 +530,59 @@ def _active_mission_runtime(
             raise MissionAuthorityError("mission runtime binding differs from migration authority")
         sequence = next_sequence
     return identity, identity_sha, sequence
+
+def _runtime_identity_payload(
+    repo: Path,
+    run_id: str,
+    *,
+    mission_id: str,
+    run_binding: dict[str, Any],
+    runner_profile: dict[str, Any],
+    runtime_generation: str,
+) -> dict[str, Any]:
+    """Build the exact mission identity represented by one verified run binding."""
+    from . import capability_binding
+
+    try:
+        verified_binding = capability_binding._validate_document(run_binding, run_id=run_id)
+    except Exception as exc:
+        raise MissionAuthorityError("mission runtime capability binding is invalid") from exc
+    projection = verified_binding.get("projection")
+    if not isinstance(projection, dict):
+        raise MissionAuthorityError("mission runtime capability projection is missing")
+    meta, _ = packet.parse_packet_file(state.run_dir(repo, run_id) / "WORK_PACKET.md")
+    requested = meta.get("capabilities") or []
+    if not isinstance(requested, list) or sorted(str(value) for value in projection.get("requested") or []) != sorted(
+        str(value) for value in requested
+    ):
+        raise MissionAuthorityError("mission runtime capability request differs from frozen packet")
+    requested_profile = projection.get("requested_runner_profile")
+    expected_profile = {
+        key: runner_profile.get(key)
+        for key in ("name", "provider", "model", "effort", "identity_sha256")
+    }
+    if not isinstance(requested_profile, dict) or any(
+        requested_profile.get(key) != value for key, value in expected_profile.items()
+    ):
+        raise MissionAuthorityError("mission runtime profile differs from exact run binding")
+    attestation = runner_profile.get("effort_attestation")
+    if requested_profile.get("effort_attestation") != attestation:
+        raise MissionAuthorityError("mission runtime effort attestation differs from run binding")
+    effort_attestation_sha = (
+        str(attestation.get("attestation_sha256") or "")
+        if isinstance(attestation, dict) else None
+    )
+    return {
+        "schema": MISSION_RUNTIME_SCHEMA,
+        "mission_id": mission_id,
+        "runtime_generation": runtime_generation,
+        "semantic_runtime_fingerprint": projection.get("semantic_runtime_fingerprint"),
+        "capability_binding_sha256": str(verified_binding.get("binding_sha256") or ""),
+        "capability_projection_sha256": _digest(projection),
+        "capabilities": sorted(str(value) for value in (projection.get("requested") or [])),
+        "runner_profile": expected_profile,
+        "effort_attestation_sha256": effort_attestation_sha,
+    }
 
 def bind_runtime_identity(
     canonical_repo: Path,
@@ -380,47 +604,11 @@ def bind_runtime_identity(
     if loaded is None:
         return None
     segment, _, mission_doc, _ = loaded
-    try:
-        from . import capability_binding
-
-        verified_binding = capability_binding._validate_document(run_binding, run_id=run_id)
-    except Exception as exc:
-        raise MissionAuthorityError("mission runtime capability binding is invalid") from exc
-    projection = verified_binding.get("projection")
-    if not isinstance(projection, dict):
-        raise MissionAuthorityError("mission runtime capability projection is missing")
-    meta, _ = packet.parse_packet_file(state.run_dir(repo, run_id) / "WORK_PACKET.md")
-    if sorted(str(value) for value in (projection.get("requested") or [])) != sorted(
-        str(value) for value in (meta.get("capabilities") or [])
-    ):
-        raise MissionAuthorityError("mission runtime capability request differs from frozen packet")
-    requested_profile = projection.get("requested_runner_profile")
-    expected_profile = {
-        key: runner_profile.get(key)
-        for key in ("name", "provider", "model", "effort", "identity_sha256")
-    }
-    if not isinstance(requested_profile, dict) or any(
-        requested_profile.get(key) != value for key, value in expected_profile.items()
-    ):
-        raise MissionAuthorityError("mission runtime profile differs from exact run binding")
-    attestation = runner_profile.get("effort_attestation")
-    effort_attestation_sha = (
-        str(attestation.get("attestation_sha256") or "")
-        if isinstance(attestation, dict) else None
+    identity = _runtime_identity_payload(
+        repo, run_id, mission_id=str(segment["mission_id"]),
+        run_binding=run_binding, runner_profile=runner_profile,
+        runtime_generation=runtime_generation,
     )
-    if requested_profile.get("effort_attestation") != attestation:
-        raise MissionAuthorityError("mission runtime effort attestation differs from run binding")
-    identity = {
-        "schema": MISSION_RUNTIME_SCHEMA,
-        "mission_id": str(segment["mission_id"]),
-        "runtime_generation": runtime_generation,
-        "semantic_runtime_fingerprint": projection.get("semantic_runtime_fingerprint"),
-        "capability_binding_sha256": str(verified_binding.get("binding_sha256") or ""),
-        "capability_projection_sha256": _digest(projection),
-        "capabilities": sorted(str(value) for value in (projection.get("requested") or [])),
-        "runner_profile": expected_profile,
-        "effort_attestation_sha256": effort_attestation_sha,
-    }
     expected, _expected_sha = _runtime_identity_for_segment(
         repo, str(segment["mission_id"]), segment,
     )
@@ -449,6 +637,11 @@ def bind_runtime_identity(
     ):
         raise MissionAuthorityError(
             "semantic worker runtime/profile/capability request differs from typed migration"
+        )
+    authorized_identity = migration.get("runtime_identity")
+    if isinstance(authorized_identity, dict) and authorized_identity != identity:
+        raise MissionAuthorityError(
+            "semantic worker identity differs from exact runtime migration receipt"
         )
     receipt = {
         "schema": MISSION_RUNTIME_BINDING_SCHEMA,
@@ -555,6 +748,7 @@ def prepare_runtime_generation_resume(
     *,
     job_snapshot: dict[str, Any],
     target_runtime_generation: str,
+    capability_migration: dict[str, Any] | None = None,
     db_path: Path | None = None,
 ) -> dict[str, Any] | None:
     """Append an exact runtime migration at a workerless resume boundary.
@@ -577,7 +771,16 @@ def prepare_runtime_generation_resume(
         raise MissionAuthorityError("resume runtime differs from the commissioned mission runtime")
     if not previous_generation or not target_generation:
         raise MissionAuthorityError("runtime migration requires proven previous and installed generations")
-    if previous_generation == target_generation:
+    if previous_generation == target_generation and capability_migration is None:
+        active_identity, _identity_sha, _sequence = _active_mission_runtime(repo, mission_doc)
+        from . import capabilities
+
+        current_fingerprint = capabilities.semantic_runtime_fingerprint()
+        bound_fingerprint = str(active_identity.get("semantic_runtime_fingerprint") or "")
+        if bound_fingerprint and bound_fingerprint != current_fingerprint:
+            raise MissionAuthorityError(
+                "semantic runtime fingerprint drift requires explicit capability migration"
+            )
         return None
     if (
         job_snapshot.get("repo") != str(repo)
@@ -701,12 +904,62 @@ def prepare_runtime_generation_resume(
         "semantic_attempt_ledger_sha256": attempt_ledger_sha,
     }
 
-    # A crash after authority publication but before the SQLite resume is
-    # replayed only when the entire original boundary is still byte-identical.
-    active_runtime, active_identity_sha, active_sequence = _active_mission_runtime(repo, mission_doc)
-    if str(active_runtime.get("runtime_generation") or "") == target_generation:
-        if active_sequence <= 0:
-            raise MissionAuthorityError("runtime target lacks an append-only migration record")
+    # Capability refresh and installed Loop-generation changes share one
+    # append-only mission runtime chain. Any capability migration included in
+    # this transition must change only the semantic runtime fingerprint.
+    from . import capability_binding, capabilities
+
+    capability_reference = None
+    capability_record = None
+    if capability_migration is not None:
+        capability_reference = {
+            "sequence": capability_migration.get("migration_sequence"),
+            "record_sha256": capability_migration.get("migration_record_sha256"),
+            "previous_binding_sha256": capability_migration.get("previous_binding_sha256"),
+            "new_binding_sha256": capability_migration.get("new_binding_sha256"),
+        }
+        capability_record = _verified_capability_migration_reference(
+            repo, run_id, capability_reference,
+        )
+        if not _runtime_only_capability_transition(capability_record):
+            raise MissionAuthorityError(
+                "runtime identity migration permits only a semantic runtime fingerprint refresh"
+            )
+        previous_binding = capability_record["previous_binding"]
+        binding = capability_record["new_binding"]
+        active_binding = capability_binding._read(capability_binding.binding_path(repo, run_id))
+        if active_binding.get("binding_sha256") != binding.get("binding_sha256"):
+            raise MissionAuthorityError("active capability binding is not the completed migration target")
+    else:
+        binding_path = capability_binding.binding_path(repo, run_id)
+        if not binding_path.is_file() or binding_path.is_symlink():
+            raise MissionAuthorityError("runtime migration requires an existing run capability binding")
+        binding = capability_binding._read(binding_path)
+        previous_binding = binding
+
+    runner = str((mission_doc.get("operational_budget") or {}).get("runner") or "")
+    if runner != str(job_snapshot.get("runner") or ""):
+        raise MissionAuthorityError("runtime migration runner differs from frozen mission identity")
+    profile = runner_profiles.resolve_profile(
+        str(meta.get("runner_profile") or "default"), provider=runner,
+    )
+    runner_profiles.verify_profile_integrity(profile)
+    attestation = runner_profiles.verify_effort_attestation(profile)
+    if attestation is not None:
+        profile = dict(profile)
+        profile["effort_attestation"] = attestation
+
+    active_runtime, _active_identity_sha, active_sequence = _active_mission_runtime(repo, mission_doc)
+    target_identity = _runtime_identity_payload(
+        repo, run_id, mission_id=mission_id, run_binding=binding,
+        runner_profile=profile, runtime_generation=target_generation,
+    )
+    if target_identity.get("semantic_runtime_fingerprint") != capabilities.semantic_runtime_fingerprint():
+        raise MissionAuthorityError("target capability binding does not identify the current semantic runtime")
+
+    # A crash after authority publication but before the SQLite resume replays
+    # only the byte-identical state boundary and exact migration references.
+    if str(active_runtime.get("runtime_generation") or "") == target_generation and active_sequence > 0:
         existing, existing_sha = _read_runtime_migration_record(
             _mission_runtime_migration_path(repo, mission_id, active_sequence),
         )
@@ -716,6 +969,8 @@ def prepare_runtime_generation_resume(
             or existing.get("runtime_generation") != target_generation
             or existing.get("previous_runtime_generation") != previous_generation
             or existing.get("source_authority") != source_authority
+            or existing.get("capability_migration_ref") != capability_reference
+            or existing.get("runtime_identity") != target_identity
             or existing.get("previous_runtime_identity_sha256")
             != _runtime_identity_before_active_migration(repo, mission_id, active_sequence)
         ):
@@ -729,31 +984,6 @@ def prepare_runtime_generation_resume(
     if str(active_runtime.get("runtime_generation") or "") != previous_generation:
         raise MissionAuthorityError("active mission runtime differs from the quarantined job generation")
 
-    # Runtime migration may reuse only an existing run capability identity.
-    # It never creates or refreshes capability evidence as a side effect.
-    from . import capability_binding
-
-    runner = str((mission_doc.get("operational_budget") or {}).get("runner") or "")
-    if runner != str(job_snapshot.get("runner") or ""):
-        raise MissionAuthorityError("runtime migration runner differs from frozen mission identity")
-    profile = runner_profiles.resolve_profile(
-        str(meta.get("runner_profile") or "default"), provider=runner,
-    )
-    runner_profiles.verify_profile_integrity(profile)
-    attestation = runner_profiles.verify_effort_attestation(profile)
-    if attestation is not None:
-        profile = dict(profile)
-        profile["effort_attestation"] = attestation
-    binding_path = capability_binding.binding_path(repo, run_id)
-    if not binding_path.is_file() or binding_path.is_symlink():
-        raise MissionAuthorityError("runtime migration requires an existing run capability binding")
-    binding = capability_binding._read(binding_path)
-    bound_identity = bind_runtime_identity(
-        repo, run_id, run_binding=binding, runner_profile=profile,
-        runtime_generation=previous_generation,
-    )
-    if not isinstance(bound_identity, dict) or bound_identity.get("runtime_generation") != previous_generation:
-        raise MissionAuthorityError("prior runtime binding could not be proven before migration")
     previous, previous_sha, previous_sequence = _active_mission_runtime(repo, mission_doc)
     if (
         previous.get("runtime_generation") != previous_generation
@@ -762,6 +992,26 @@ def prepare_runtime_generation_resume(
         ).is_file())
     ):
         raise MissionAuthorityError("prior mission runtime identity is not durably bound")
+    verified_previous = verify_runtime_identity(
+        repo, mission_id, run_binding=previous_binding, runner_profile=profile,
+        runtime_generation=previous_generation,
+        segment_number=int(segment.get("segment_number") or 0),
+    )
+    if (
+        verified_previous.get("runtime_generation") != previous_generation
+        or verified_previous.get("capabilities") != previous.get("capabilities")
+        or verified_previous.get("runner_profile") != previous.get("runner_profile")
+    ):
+        raise MissionAuthorityError("prior runtime binding could not be proven before migration")
+    if capability_record is None and target_identity.get("capability_binding_sha256") != previous.get(
+        "capability_binding_sha256"
+    ):
+        raise MissionAuthorityError("runtime migration cannot change capability identity implicitly")
+    if capability_record is not None and (
+        target_identity.get("capabilities") != previous.get("capabilities")
+        or target_identity.get("runner_profile") != previous.get("runner_profile")
+    ):
+        raise MissionAuthorityError("capability migration changed frozen runner or capability authority")
 
     _verified_mission_spend(
         repo, mission_doc, current_run_id=run_id, db_path=db,
@@ -781,8 +1031,10 @@ def prepare_runtime_generation_resume(
         "runner": runner,
         "capabilities": copy.deepcopy(previous.get("capabilities") or []),
         "runner_profile": copy.deepcopy(previous.get("runner_profile") or {}),
+        "runtime_identity": target_identity,
+        "capability_migration_ref": capability_reference,
         "source_authority": source_authority,
-        "reason": "supported workerless runtime-generation maintenance",
+        "reason": "supported workerless semantic runtime identity maintenance",
         "created_at": util.utc_now_iso(),
     }
     digest = _write_once(

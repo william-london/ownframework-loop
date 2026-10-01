@@ -182,14 +182,17 @@ bound runs fail closed on the generation mismatch at serve time, and
 new generation (previous binding reported).
 
 At a supported workerless/quarantined v4 resume boundary, the orthogonal
-mission-runtime authority owner may append a runtime-generation migration
-before the supervisor changes the row. It is independent of segmentation or
-continuation type. The record binds the exact segment, packet, approval, state
-and event prefix, candidate, workerless job snapshot, and terminal
-attempt/accounting ledger. A live worker or nonterminal attempt refuses
-migration. A crash before the ledger transition reuses that exact record; it
-never edits the sealed segment or engineering state. Capability projection and
-runner/profile/model/effort must remain identical.
+mission-runtime authority owner may append a runtime-identity migration before
+the supervisor changes the row. It is independent of segmentation or
+continuation type. A Loop payload update records the new generation. A
+same-generation semantic-runner fingerprint refresh additionally requires an
+exact completed capability migration and may change no other capability or
+runner/profile authority. The record binds the exact segment, packet, approval,
+state and event prefix, candidate, workerless job snapshot, terminal
+attempt/accounting ledger, and (when applicable) capability migration. A live
+worker or nonterminal attempt refuses migration. A crash before the ledger
+transition reuses those exact records; it never edits the sealed segment or
+engineering state.
 
 Operational budget ceilings (cost/token/wall) are disabled by default for
 fresh/missing schema fields. Existing rows are never silently reinterpreted:

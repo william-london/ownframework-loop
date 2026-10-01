@@ -456,10 +456,16 @@ PROV7="$SANDBOX/xdg7/ownframework-loop/runtime-provenance.json"
 [[ -f "$PROV7" ]] || { fail "T7: provenance not written. out=$(cat /tmp/t7.out)"; }
 if [[ -f "$PROV7" ]]; then
   PROV_HEAD=$(python3 -c "import json; print(json.load(open('$PROV7'))['source_head'])" 2>/dev/null || echo MISSING)
-  EXPECTED_HEAD=$(git -C "$ROOT" rev-parse HEAD)
-  [[ "$PROV_HEAD" == "$EXPECTED_HEAD" ]] \
-    && pass "T7: provenance.source_head = $EXPECTED_HEAD" \
-    || fail "T7: provenance.source_head=$PROV_HEAD"
+  if git -C "$ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    EXPECTED_HEAD=$(git -C "$ROOT" rev-parse HEAD)
+    [[ "$PROV_HEAD" == "$EXPECTED_HEAD" ]] \
+      && pass "T7: provenance.source_head = $EXPECTED_HEAD" \
+      || fail "T7: provenance.source_head=$PROV_HEAD"
+  else
+    [[ "$PROV_HEAD" == "None" ]] \
+      && pass "T7: provenance.source_head is null without source Git metadata" \
+      || fail "T7: provenance.source_head=$PROV_HEAD (expected null outside a source checkout)"
+  fi
   PROV_VERSION=$(python3 -c "import json; print(json.load(open('$PROV7'))['ofloop_version'])" 2>/dev/null || echo MISSING)
   [[ "$PROV_VERSION" == "$EXPECTED_VERSION" ]] \
     && pass "T7: provenance.ofloop_version = $EXPECTED_VERSION" \

@@ -2988,17 +2988,19 @@ def resume(
     ``--reset-execution-clock``) — normally together with a widened
     ``max_wall_seconds``.
 
-    Runtime-generation migration: resume is an explicit operator act, so
-    it also REBINDS the job to the resuming runtime's generation. This is
-    the clean migration path after a deliberate runtime replacement: the
-    run was quarantined on the generation mismatch, the operator inspects
-    and resumes, and the run continues under the new generation with the
-    rebinding recorded. The previous binding is reported in the result.
+    Runtime identity migration: explicit resume may append a mission-runtime
+    record when the Loop payload generation changes. With
+    ``rebind_capabilities=True``, it may also record a semantic-runner
+    fingerprint refresh at the same Loop generation, but only when the
+    completed capability migration changes that fingerprint and no other
+    capability/profile authority. The mission-runtime record references that
+    exact capability migration; previous runtime identity remains immutable.
 
-    Capability migration is separate and opt-in through
+    Capability migration remains opt-in through
     ``rebind_capabilities=True``. It validates and records the new trusted
     capability authority before this operational resume transaction; ordinary
-    resume never silently changes capability binding.
+    resume never silently changes capability binding or semantic-runner
+    identity.
 
     Returns the updated job dict (or NOT_ENQUEUED).
     """
@@ -3088,6 +3090,7 @@ def resume(
             run_id,
             job_snapshot=dict(existing),
             target_runtime_generation=target_generation,
+            capability_migration=migration,
             db_path=db,
         )
     except Exception as exc:

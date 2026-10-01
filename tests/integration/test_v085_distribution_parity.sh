@@ -11,7 +11,7 @@ python3 -B - "$ROOT_DIR" "$A" "$B" <<'PY'
 import shutil,sys
 from pathlib import Path
 root,a,b=map(Path,sys.argv[1:])
-ignore=shutil.ignore_patterns(".git","__pycache__",".ownframework-loop","logs","*.pyc")
+ignore=shutil.ignore_patterns(".git","__pycache__",".ruff_cache",".pytest_cache",".mypy_cache",".ownframework-loop","logs","*.pyc")
 shutil.copytree(root,a,ignore=ignore)
 shutil.copytree(root,b,ignore=ignore)
 with (b/"adapters"/"README.md").open("a",encoding="utf-8") as fh:
@@ -42,7 +42,23 @@ PY
 # Dirty Git checkout: managed core comes from immutable HEAD, and Claude adapter
 # registration must use that CORE_ROOT rather than dirty checkout bytes.
 SRC="$TMP/dirty-git"
-git clone -q "$ROOT_DIR" "$SRC"
+if git -C "$ROOT_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  git clone -q "$ROOT_DIR" "$SRC"
+else
+  # The installed distribution has no repository metadata. Build a disposable
+  # Git fixture from its payload to retain the immutable-HEAD vs dirty-tree test.
+  python3 -B - "$A" "$SRC" <<'PY'
+import shutil, sys
+from pathlib import Path
+
+shutil.copytree(Path(sys.argv[1]), Path(sys.argv[2]), symlinks=True)
+PY
+  git -C "$SRC" init -q -b master
+  git -C "$SRC" config user.email test@example.invalid
+  git -C "$SRC" config user.name "OwnFramework Test"
+  git -C "$SRC" add -A
+  git -C "$SRC" commit -q -m "installed payload fixture"
+fi
 python3 -B - "$SRC/.claude-plugin/plugin.json" <<'PY'
 import json,sys
 p=sys.argv[1]

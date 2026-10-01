@@ -216,15 +216,18 @@ binding is replaced only after durable old-to-new evidence is published.
 This migration consumes no build, review, repair, cost, or token entitlement
 and does not alter candidate or engineering truth. Historical semantic attempt
 receipts continue to identify the binding under which they ran; future provider
-executions use the migrated binding. Runtime-generation migration is separate
-and remains governed by `resume`. At a workerless/quarantined v4 boundary, the
-runtime authority owner may append a create-once migration bound to the
-unchanged segment, packet, approval, state/event prefix, candidate, job, and
-completed attempt/accounting snapshot. It is independent of segment or
-continuation type; active workers, nonterminal attempts, capability drift, or
-runner/profile/model/effort drift refuse it. Replaying a crash before the
-ledger transition reuses only that record. Omitting `--rebind-capabilities`
-preserves the normal fail-closed capability-drift behavior.
+executions use the migrated binding. At a workerless/quarantined v4 boundary,
+the same resume transaction appends a create-once mission-runtime identity
+record. A Loop payload change records the new generation. A Claude/runtime
+fingerprint change at the same Loop generation additionally requires
+`--rebind-capabilities`; its mission-runtime record references the exact
+completed capability migration and refuses changes to any other capability or
+runner/profile authority. Both forms bind the unchanged segment, packet,
+approval, state/event prefix, candidate, job, and completed attempt/accounting
+snapshot. Active workers and nonterminal attempts refuse migration. Replaying a
+crash before the ledger transition reuses only the exact durable records.
+Omitting `--rebind-capabilities` preserves fail-closed capability-drift
+behavior.
 
 The migration and the supervisor lifecycle transition share a private per-run
 lock. This prevents ordinary resume, retirement, re-enqueue, or PROGRAM

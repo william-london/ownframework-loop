@@ -172,7 +172,11 @@ without the explicit flag remains strict and never silently rebinds capability
 authority. The supported operator lifecycle is serialized per run while this
 operation is in flight: ordinary resume, explicit capability rebind, retirement,
 enqueue, and PROGRAM continuation cannot race a stale QUARANTINED eligibility
-snapshot. Runtime-generation migration remains a separate supervisor concern.
+snapshot. A semantic-runner fingerprint refresh must also append an exact
+mission-runtime identity migration under the same supported resume operation;
+that migration refuses any change to requested capabilities or
+runner/profile/model/effort authority. Loop payload-generation migration is
+recorded by the same orthogonal mission-runtime owner.
 
 Migration history is crash-recoverable from the directory/snapshot publication
 prefix through the PREPARED and COMPLETE record states. A retry validates every

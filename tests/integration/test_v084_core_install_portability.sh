@@ -66,8 +66,23 @@ rm -f "$OFLOOP_BIN_DIR/ofloop"
 
 # Source-release install must work without .git metadata.
 SRC="$TMP/source-release"
-mkdir -p "$SRC"
-git -C "$ROOT_DIR" archive HEAD | tar -x -C "$SRC"
+if git -C "$ROOT_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  mkdir -p "$SRC"
+  git -C "$ROOT_DIR" archive HEAD | tar -x -C "$SRC"
+else
+  # Installed payloads intentionally omit .git. Re-stage the payload itself
+  # as a source-release tree so this portability path remains testable there.
+  python3 -B - "$ROOT_DIR" "$SRC" <<'PY'
+import shutil, sys
+from pathlib import Path
+
+source, target = map(Path, sys.argv[1:])
+ignore = shutil.ignore_patterns(
+    ".git", ".worktrees", "__pycache__", "*.pyc", ".ownframework-loop", "logs"
+)
+shutil.copytree(source, target, symlinks=True, ignore=ignore)
+PY
+fi
 export XDG_DATA_HOME="$TMP/release-data"
 export OFLOOP_BIN_DIR="$TMP/release-bin"
 bash "$SRC/install.sh" | tee "$TMP/release.out"
