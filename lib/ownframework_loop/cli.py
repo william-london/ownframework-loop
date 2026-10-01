@@ -461,6 +461,40 @@ def cmd_program_continue_blocked_semantic_budget(args: argparse.Namespace) -> No
     _emit(result)
 
 
+def cmd_program_continue_blocked_source_budget(args: argparse.Namespace) -> None:
+    """Create a new immutable mission from an approved source-budget boundary."""
+    from . import program_mission
+
+    repo = _repo_path(args.repo)
+    remaining = [part.strip() for part in args.remaining_checkpoints.split(",") if part.strip()]
+    try:
+        result = program_mission.continue_blocked_source_budget(
+            repo,
+            args.source_run_id,
+            expected_mission_id=args.expected_mission_id,
+            expected_mission_authority_sha256=args.expected_mission_authority_sha256,
+            expected_packet_sha256=args.expected_packet_sha256,
+            expected_original_baseline_sha=args.expected_original_baseline_sha,
+            expected_crossing_candidate_sha=args.expected_crossing_candidate_sha,
+            expected_checkpoint_id=args.expected_checkpoint_id,
+            expected_approved_checkpoint_id=args.expected_approved_checkpoint_id,
+            expected_approved_candidate_sha=args.expected_approved_candidate_sha,
+            expected_remaining_checkpoints=remaining,
+            segment_max_diff_lines=args.segment_max_diff_lines,
+            mission_max_diff_lines=args.mission_max_diff_lines,
+            max_segments=args.max_segments,
+            confirmation=args.confirm,
+            db_path=Path(args.db).expanduser().resolve(strict=False) if args.db else None,
+        )
+    except (program_mission.MissionAuthorityError, RuntimeError, ValueError) as exc:
+        _emit_error(
+            str(exc),
+            exit_code=4,
+            classification="OF_LOOP_SOURCE_BUDGET_CONTINUATION_REFUSED",
+        )
+    _emit(result)
+
+
 def cmd_spec_rollover_program(args: argparse.Namespace) -> None:
     """Create one immutable child linked to an exhausted blocked PROGRAM."""
     from . import program_rollover as program_rollover_mod
@@ -1705,6 +1739,29 @@ def _build_parser() -> argparse.ArgumentParser:
                                    help="type CONTINUE-BLOCKED-SEMANTIC-BUDGET:<mission-id>")
     p_budget_continue.add_argument("--db", default=None)
     p_budget_continue.set_defaults(func=cmd_program_continue_blocked_semantic_budget)
+    p_source_budget_continue = program_sub.add_parser(
+        "continue-blocked-source-budget",
+        help="create a new typed mission from an exact approved checkpoint after source-envelope exhaustion",
+    )
+    p_source_budget_continue.add_argument("repo")
+    p_source_budget_continue.add_argument("source_run_id")
+    p_source_budget_continue.add_argument("--expected-mission-id", required=True)
+    p_source_budget_continue.add_argument("--expected-mission-authority-sha256", required=True)
+    p_source_budget_continue.add_argument("--expected-packet-sha256", required=True)
+    p_source_budget_continue.add_argument("--expected-original-baseline-sha", required=True)
+    p_source_budget_continue.add_argument("--expected-crossing-candidate-sha", required=True)
+    p_source_budget_continue.add_argument("--expected-checkpoint-id", required=True)
+    p_source_budget_continue.add_argument("--expected-approved-checkpoint-id", required=True)
+    p_source_budget_continue.add_argument("--expected-approved-candidate-sha", required=True)
+    p_source_budget_continue.add_argument("--remaining-checkpoints", required=True,
+                                          help="comma-separated exact frozen graph suffix")
+    p_source_budget_continue.add_argument("--segment-max-diff-lines", type=int, required=True)
+    p_source_budget_continue.add_argument("--mission-max-diff-lines", type=int, required=True)
+    p_source_budget_continue.add_argument("--max-segments", type=int, required=True)
+    p_source_budget_continue.add_argument("--confirm", required=True,
+                                          help="type CONTINUE-BLOCKED-SOURCE-BUDGET:<predecessor-mission-id>")
+    p_source_budget_continue.add_argument("--db", default=None)
+    p_source_budget_continue.set_defaults(func=cmd_program_continue_blocked_source_budget)
     p_rollover_review = program_sub.add_parser(
         "prepare-rollover-review",
         help="freshly validate an inherited rollover candidate and admit it to REVIEW",

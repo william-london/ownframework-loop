@@ -313,7 +313,7 @@
       "properties": {
         "schema": { "const": "ownframework-loop-mission-budget/v1" },
         "auto_segment": { "type": "boolean" },
-        "segment_max_diff_lines": { "type": "integer", "minimum": 1, "maximum": 30000 },
+        "segment_max_diff_lines": { "type": "integer", "minimum": 1, "maximum": 100000 },
         "mission_max_diff_lines": { "type": "integer", "minimum": 1, "maximum": 480000 },
         "max_segments": { "type": "integer", "minimum": 1, "maximum": 16 },
         "segment_boundary_policy": { "const": "last_approved_checkpoint" },
@@ -335,9 +335,47 @@
             { "properties": { "use_cumulative_slack": { "const": true } } }
           ],
           "description": "Optional, explicitly sealed mission policy for deterministic one-claim-at-a-time reallocation within unchanged cumulative semantic ceilings. Absent preserves hard checkpoint-local caps."
+        },
+        "source_budget_continuation": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "schema",
+            "authority_sha256",
+            "predecessor_mission_id",
+            "predecessor_run_id",
+            "approved_checkpoint_id",
+            "approved_candidate_sha",
+            "crossing_candidate_sha"
+          ],
+          "properties": {
+            "schema": { "const": "ownframework-loop-source-budget-continuation-ref/v1" },
+            "authority_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+            "predecessor_mission_id": { "type": "string", "pattern": "^mission-[a-f0-9]{24}$" },
+            "predecessor_run_id": { "type": "string", "minLength": 1 },
+            "approved_checkpoint_id": { "type": "string", "pattern": "^CP-[0-9]+$" },
+            "approved_candidate_sha": { "type": "string", "pattern": "^[a-f0-9]{40}$" },
+            "crossing_candidate_sha": { "type": "string", "pattern": "^[a-f0-9]{40}$" }
+          },
+          "description": "Core-issued create-once authority reference for a new source-budget mission derived from an exact approved checkpoint. It cannot be used for ordinary first-segment admission."
         }
       },
-      "description": "Mission source authority. segment_max_diff_lines remains bounded by the v3 per-run ceiling; mission_max_diff_lines is measured from the mission original baseline across all segments."
+      "anyOf": [
+        {
+          "properties": {
+            "source_budget_continuation": { "type": "null" },
+            "segment_max_diff_lines": { "maximum": 30000 }
+          }
+        },
+        {
+          "required": ["source_budget_continuation"],
+          "properties": {
+            "segment_max_diff_lines": { "maximum": 100000 },
+            "mission_max_diff_lines": { "maximum": 100000 }
+          }
+        }
+      ],
+      "description": "Mission source authority. Ordinary packets retain the 30000-line segment ceiling; typed source-budget continuations are additionally capped at 100000 by deterministic packet validation. mission_max_diff_lines is measured from the mission original baseline across all segments."
     },
     "acceptance_criteria": {
       "type": "array",

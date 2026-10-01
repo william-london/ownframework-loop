@@ -101,6 +101,7 @@ tests/integration/test_v13y_adaptive_semantic_budget.sh
 tests/integration/test_v13z_semantic_budget_claim_crash_idempotency.sh
 tests/integration/test_v13aa_segment_allocation_import_prefix.sh
 tests/integration/test_v13ab_blocked_semantic_budget_continuation_e2e.sh
+tests/integration/test_v13ac_blocked_source_budget_continuation_e2e.sh
 
 # Capability and terminal authority
 tests/integration/test_v091_capability_runtime.sh

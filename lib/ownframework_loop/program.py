@@ -480,9 +480,22 @@ def validate_checkpoint_graph(packet: dict[str, Any]) -> list[str]:
 
     sc = cg.get("global_source_ceilings", {})
     if isinstance(sc, dict):
+        from . import packet as packet_module
+
+        mission_budget = packet.get("mission_budget") or {}
+        source_ref = (
+            mission_budget.get("source_budget_continuation")
+            if isinstance(mission_budget, dict) else None
+        )
+        source_line_ceiling = (
+            packet_module.MAX_TYPED_SOURCE_BUDGET_CONTINUATION_LINES
+            if isinstance(source_ref, dict)
+            and packet_module._valid_source_budget_continuation_ref(source_ref)
+            else GLOBAL_MAX_BASELINE_TO_FINAL_DIFF_LINES
+        )
         for k, mx in (
             ("max_unique_changed_files", GLOBAL_MAX_UNIQUE_CHANGED_FILES),
-            ("max_baseline_to_final_diff_lines", GLOBAL_MAX_BASELINE_TO_FINAL_DIFF_LINES),
+            ("max_baseline_to_final_diff_lines", source_line_ceiling),
         ):
             v = sc.get(k)
             if v is None:

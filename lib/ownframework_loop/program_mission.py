@@ -44,6 +44,9 @@ MISSION_RUNTIME_MIGRATION_SCHEMA = "ownframework-loop-program-mission-runtime-mi
 MISSION_RUNTIME_MIGRATION_V2_SCHEMA = "ownframework-loop-program-mission-runtime-migration/v2"
 MISSION_RUNTIME_BINDING_SCHEMA = "ownframework-loop-program-mission-runtime-binding/v1"
 LEGACY_ADMISSION_SCHEMA = "ownframework-loop-legacy-continuation-admission/v1"
+SOURCE_BUDGET_CONTINUATION_SCHEMA = "ownframework-loop-source-budget-continuation/v1"
+SOURCE_BUDGET_CONTINUATION_REF_SCHEMA = "ownframework-loop-source-budget-continuation-ref/v1"
+MAX_TYPED_SOURCE_BUDGET_CONTINUATION_LINES = 100_000
 _FULL_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
@@ -86,6 +89,10 @@ def _mission_runtime_binding_path(repo: Path, mission_id: str, sequence: int) ->
     if not isinstance(sequence, int) or isinstance(sequence, bool) or not 1 <= sequence <= 16:
         raise MissionAuthorityError("mission runtime binding sequence is outside the envelope")
     return _mission_dir(repo, mission_id) / f"MISSION-RUNTIME-BINDING-{sequence:02d}.json"
+
+
+def _source_budget_continuation_path(repo: Path, mission_id: str) -> Path:
+    return _mission_dir(repo, mission_id) / "SOURCE-BUDGET-CONTINUATION.json"
 
 
 def _canonical_bytes(value: Any) -> bytes:
@@ -551,6 +558,27 @@ def _authority_projection(meta: dict[str, Any]) -> dict[str, Any]:
     return projected
 
 
+def _source_budget_neutral_projection(meta: dict[str, Any]) -> dict[str, Any]:
+    """Remove exactly the source envelope fields a typed successor may replace."""
+    projected = _authority_projection(meta)
+    mission_budget = projected.get("mission_budget")
+    if isinstance(mission_budget, dict):
+        for key in (
+            "segment_max_diff_lines", "mission_max_diff_lines", "max_segments",
+            "source_budget_continuation",
+        ):
+            mission_budget.pop(key, None)
+    risk_budget = projected.get("risk_budget")
+    if isinstance(risk_budget, dict):
+        risk_budget.pop("max_diff_lines", None)
+    source_ceilings = (
+        (projected.get("checkpoint_graph") or {}).get("global_source_ceilings")
+    )
+    if isinstance(source_ceilings, dict):
+        source_ceilings.pop("max_baseline_to_final_diff_lines", None)
+    return projected
+
+
 def _segment_authority_projection(
     meta: dict[str, Any], source_admission: dict[str, Any],
 ) -> dict[str, Any]:
@@ -741,6 +769,10 @@ def ensure_initial_segment(
     repo = Path(canonical_repo).resolve(strict=False)
     if meta.get("schema") != packet.MISSION_PROGRAM_SCHEMA_VERSION:
         return {"ok": True, "mission": False}
+    if (meta.get("mission_budget") or {}).get("source_budget_continuation") is not None:
+        raise MissionAuthorityError(
+            "source-budget continuation packets require their typed core-derived segment authority"
+        )
     errors = packet.validate_packet_for_approval(meta)
     if errors:
         raise MissionAuthorityError("v4 packet failed admission validation: " + "; ".join(errors[:10]))
@@ -923,6 +955,299 @@ def _markdown_tail(path: Path) -> str:
     return text[match.end():]
 
 
+def _verify_source_budget_continuation(
+    repo: Path,
+    *,
+    meta: dict[str, Any],
+    mission: dict[str, Any],
+    segment: dict[str, Any],
+    program_state: dict[str, Any],
+) -> None:
+    """Re-prove the create-once authority behind a widened source envelope."""
+    mission_id = str(mission.get("mission_id") or "")
+    record, record_sha = _read_record(
+        _source_budget_continuation_path(repo, mission_id),
+        expected_schema=SOURCE_BUDGET_CONTINUATION_SCHEMA,
+    )
+    source_ref = (meta.get("mission_budget") or {}).get("source_budget_continuation")
+    expected_ref = {
+        "schema": SOURCE_BUDGET_CONTINUATION_REF_SCHEMA,
+        "authority_sha256": record_sha,
+        "predecessor_mission_id": record.get("predecessor_mission_id"),
+        "predecessor_run_id": record.get("predecessor_run_id"),
+        "approved_checkpoint_id": record.get("approved_checkpoint_id"),
+        "approved_candidate_sha": record.get("approved_candidate_sha"),
+        "crossing_candidate_sha": record.get("crossing_candidate_sha"),
+    }
+    expected_keys = {
+        "schema", "continuation_mission_id", "predecessor_mission_id",
+        "predecessor_mission_authority_sha256", "predecessor_run_id",
+        "predecessor_segment_authority_sha256", "predecessor_packet_sha256",
+        "predecessor_approval_file_sha256", "predecessor_approval_sha256",
+        "predecessor_state_sha256", "predecessor_event_chain_sha256",
+        "predecessor_build_receipt_sha256", "original_baseline_sha",
+        "approved_checkpoint_id", "approved_candidate_sha",
+        "approved_verdict_sha256", "approved_prefix_sha256",
+        "crossing_candidate_sha", "candidate_branch", "remaining_checkpoints",
+        "approved_source_lines", "crossing_segment_lines",
+        "crossing_mission_lines", "segment_source_ceiling",
+        "mission_source_ceiling", "max_segments",
+        "source_neutral_authority_sha256", "semantic_allocation_source_sha256",
+        "semantic_budget_allocation_import_sha256", "semantic_budget_import_count",
+        "predecessor_active_runtime_identity_sha256", "predecessor_runtime_generation",
+        "runtime_migration", "runtime_generation",
+        "runner_profile_identity", "capabilities", "predecessor_operational_budget",
+        "successor_operational_budget", "operational_source_run_ids",
+        "operational_source_runtime_generations", "preserved_cumulative_counters",
+        "created_at", "reason",
+    }
+    if (
+        set(record) != expected_keys
+        or record.get("continuation_mission_id") != mission_id
+        or mission.get("source_budget_continuation_sha256") != record_sha
+        or source_ref != expected_ref
+        or int(mission.get("segment_max_diff_lines") or 0)
+            != record.get("segment_source_ceiling")
+        or int(mission.get("mission_max_diff_lines") or 0)
+            != record.get("mission_source_ceiling")
+        or int(mission.get("max_segments") or 0) != record.get("max_segments")
+        or mission.get("mission_original_baseline_sha")
+            != record.get("original_baseline_sha")
+        or mission.get("operational_budget") != record.get("successor_operational_budget")
+        or mission.get("operational_source_run_ids")
+            != record.get("operational_source_run_ids")
+        or mission.get("operational_source_runtime_generations")
+            != record.get("operational_source_runtime_generations")
+        or (record.get("successor_operational_budget") or {}).get("runtime_generation")
+            != record.get("runtime_generation")
+        or _digest(_source_budget_neutral_projection(meta))
+            != record.get("source_neutral_authority_sha256")
+        or not isinstance(record.get("remaining_checkpoints"), list)
+        or not record.get("remaining_checkpoints")
+    ):
+        raise MissionAuthorityError("typed source-budget continuation authority does not match packet/mission")
+
+    admission = segment.get("source_admission") or {}
+    if int(segment.get("segment_number") or 0) == 1 and (
+        admission.get("kind") != "blocked_source_budget_continuation"
+        or admission.get("source_budget_continuation_sha256") != record_sha
+        or admission.get("predecessor_run_id") != record.get("predecessor_run_id")
+        or admission.get("source_authority_sha256") != record_sha
+        or admission.get("crossing_candidate_sha") != record.get("crossing_candidate_sha")
+        or admission.get("crossing_candidate_not_adopted") is not True
+        or segment.get("baseline_sha") != record.get("approved_candidate_sha")
+        or admission.get("approved_prefix")
+            != _read_source_budget_approved_prefix(repo, record)
+    ):
+        raise MissionAuthorityError("first source-budget segment does not bind its exact approved predecessor")
+
+    source_run_id = str(record.get("predecessor_run_id") or "")
+    source_root = state.run_dir(repo, source_run_id)
+    packet_path = source_root / "WORK_PACKET.md"
+    state_path = state.state_path(repo, source_run_id)
+    events_path = state.events_path(repo, source_run_id)
+    if (
+        not source_run_id
+        or not packet_path.is_file()
+        or not state_path.is_file()
+        or not events_path.is_file()
+        or util.sha256_file(packet_path) != record.get("predecessor_packet_sha256")
+        or util.sha256_file(state_path) != record.get("predecessor_state_sha256")
+        or integrity.compute_event_chain_hash(events_path)
+            != record.get("predecessor_event_chain_sha256")
+        or integrity.get_event_chain_hash(events_path)
+            != record.get("predecessor_event_chain_sha256")
+        or util.sha256_file(source_root / "BUILD_RECEIPT.json")
+            != record.get("predecessor_build_receipt_sha256")
+        or util.sha256_file(approval.approval_path(repo, source_run_id))
+            != record.get("predecessor_approval_file_sha256")
+    ):
+        raise MissionAuthorityError("source-budget predecessor packet/state/event/receipt evidence changed")
+    intact, problems = integrity.assert_artifacts_intact(repo, source_run_id)
+    if not intact:
+        raise MissionAuthorityError(
+            "source-budget predecessor artifact chain is invalid: " + "; ".join(problems[:8])
+        )
+    source_segment_result = load_segment(repo, source_run_id)
+    if source_segment_result is None:
+        raise MissionAuthorityError("source-budget predecessor lost its sealed segment authority")
+    source_segment, source_segment_sha, source_mission, source_mission_sha = source_segment_result
+    source_meta, _ = packet.parse_packet_file(packet_path)
+    source_state = state.load_verified(repo, source_run_id)
+    source_program = (source_state or {}).get("program") or {}
+    source_events = integrity.read_event_chain(events_path)
+    source_approved_prefix = _capture_approved_prefix(
+        repo, source_meta=source_meta, source_program=source_program,
+        source_events=source_events, source_segment=source_segment,
+    )
+    approved_sha, approved_cp, verdict_sha = _verify_approved_prefix(
+        source_meta, source_program, source_events,
+        canonical_repo=repo, segment_doc=source_segment,
+    )
+    from . import receipts
+
+    receipt = receipts.load_receipt(repo, source_run_id)
+    source_runtime_identity, source_runtime_sha = _runtime_identity_for_segment(
+        repo, str(source_mission.get("mission_id") or ""), source_segment,
+    )
+    crossing_accounting = _prove_source_ceiling_only_receipt(
+        repo, receipt=receipt, source_meta=source_meta,
+        source_mission=source_mission, source_segment=source_segment,
+        source_run_id=source_run_id,
+        expected_mission_id=str(record.get("predecessor_mission_id") or ""),
+        expected_candidate_sha=str(record.get("crossing_candidate_sha") or ""),
+        expected_packet_sha256=str(record.get("predecessor_packet_sha256") or ""),
+        expected_approval_sha256=str(record.get("predecessor_approval_sha256") or ""),
+    )
+    actual_crossing_segment = crossing_accounting["segment_lines"]
+    actual_crossing_mission = crossing_accounting["mission_lines"]
+    job = _parent_job_snapshot(repo, source_run_id)
+    current_ids = list(source_program.get("current_checkpoints") or [])
+    source_order = [
+        str(value) for value in (source_meta.get("checkpoint_graph") or {}).get("execution_order") or []
+    ]
+    cp_index = source_order.index(str(record.get("approved_checkpoint_id"))) + 1
+    source_remaining = source_order[cp_index:]
+    if (
+        source_mission.get("mission_id") != record.get("predecessor_mission_id")
+        or source_mission_sha != record.get("predecessor_mission_authority_sha256")
+        or source_segment_sha != record.get("predecessor_segment_authority_sha256")
+        or source_segment.get("run_id") != source_run_id
+        or util.sha256_file(approval.approval_path(repo, source_run_id))
+            != record.get("predecessor_approval_file_sha256")
+        or approval.approval_artifact_sha256(approval.load_approval(repo, source_run_id) or {})
+            != record.get("predecessor_approval_sha256")
+        or source_state.get("state") != "BLOCKED"
+        or source_state.get("last_candidate_sha") != record.get("crossing_candidate_sha")
+        or current_ids != [source_order[cp_index]]
+        or source_remaining != record.get("remaining_checkpoints")
+        or approved_sha != record.get("approved_candidate_sha")
+        or approved_cp != record.get("approved_checkpoint_id")
+        or verdict_sha != record.get("approved_verdict_sha256")
+        or _digest(source_approved_prefix) != record.get("approved_prefix_sha256")
+        or record.get("original_baseline_sha")
+            != source_mission.get("mission_original_baseline_sha")
+        or record.get("approved_source_lines")
+            != _line_count(repo, str(record.get("original_baseline_sha") or ""), approved_sha)
+        or source_meta.get("target", {}).get("expected_baseline_sha")
+            != source_segment.get("baseline_sha")
+        or source_meta.get("capabilities") != meta.get("capabilities")
+        or source_meta.get("runner_profile") != meta.get("runner_profile")
+        or _digest(_source_budget_neutral_projection(source_meta))
+            != record.get("source_neutral_authority_sha256")
+        or source_state.get("state") != "BLOCKED"
+        or job.get("status") != "DONE"
+        or any(job.get(key) is not None for key in (
+            "worker_pid", "worker_pgid", "worker_attempt_id", "worker_role",
+        ))
+        or job.get("candidate_branch") != record.get("candidate_branch")
+        or git_checks.branch_head(repo, str(record.get("candidate_branch") or ""))
+            != record.get("crossing_candidate_sha")
+        or actual_crossing_segment != record.get("crossing_segment_lines")
+        or actual_crossing_mission != record.get("crossing_mission_lines")
+        or _digest(source_program.get("semantic_budget_allocations") or [])
+            != record.get("semantic_allocation_source_sha256")
+        or source_runtime_sha
+            != record.get("predecessor_active_runtime_identity_sha256")
+        or source_runtime_identity.get("runtime_generation")
+            != record.get("predecessor_runtime_generation")
+        or source_runtime_identity.get("capabilities") != record.get("capabilities")
+        or source_runtime_identity.get("runner_profile") != record.get("runner_profile_identity")
+        or (source_program.get("cumulative_counters") or {})
+            != record.get("preserved_cumulative_counters")
+        or source_mission.get("operational_budget")
+            != record.get("predecessor_operational_budget")
+        or job.get("runtime_generation") != record.get("predecessor_runtime_generation")
+        or job.get("runner") != (record.get("successor_operational_budget") or {}).get("runner")
+    ):
+        raise MissionAuthorityError("source-budget continuation no longer matches its blocked source evidence")
+
+    predecessor_runtime_generation = str(record.get("predecessor_runtime_generation") or "")
+    successor_runtime_generation = str(record.get("runtime_generation") or "")
+    runtime_migration = record.get("runtime_migration")
+    active_runtime, _active_runtime_sha, active_sequence = _active_mission_runtime(
+        repo, source_mission,
+    )
+    if predecessor_runtime_generation == successor_runtime_generation:
+        if runtime_migration is not None or active_runtime.get("runtime_generation") != successor_runtime_generation:
+            raise MissionAuthorityError("source-budget runtime identity has an unnecessary or conflicting migration")
+    else:
+        if (
+            not isinstance(runtime_migration, dict)
+            or set(runtime_migration) != {"sequence", "sha256", "runtime_generation"}
+            or isinstance(runtime_migration.get("sequence"), bool)
+            or not isinstance(runtime_migration.get("sequence"), int)
+            or not 1 <= int(runtime_migration.get("sequence") or 0) <= 16
+            or not _SHA256_RE.fullmatch(str(runtime_migration.get("sha256") or ""))
+            or runtime_migration.get("runtime_generation") != successor_runtime_generation
+            or active_runtime.get("runtime_generation") != successor_runtime_generation
+            or active_sequence != runtime_migration.get("sequence")
+        ):
+            raise MissionAuthorityError("source-budget runtime migration is absent or not the active predecessor identity")
+        migration, migration_sha = _read_runtime_migration_record(
+            _mission_runtime_migration_path(
+                repo, str(record.get("predecessor_mission_id") or ""),
+                int(runtime_migration["sequence"]),
+            ),
+        )
+        migration_source = migration.get("source_authority") or {}
+        if (
+            migration_sha != runtime_migration.get("sha256")
+            or migration.get("mission_id") != record.get("predecessor_mission_id")
+            or migration.get("sequence") != runtime_migration.get("sequence")
+            or migration.get("previous_runtime_identity_sha256")
+                != record.get("predecessor_active_runtime_identity_sha256")
+            or migration.get("previous_runtime_generation") != predecessor_runtime_generation
+            or migration.get("runtime_generation") != successor_runtime_generation
+            or migration.get("runner") != (record.get("predecessor_operational_budget") or {}).get("runner")
+            or migration.get("capabilities") != record.get("capabilities")
+            or migration.get("runner_profile") != record.get("runner_profile_identity")
+            or migration_source != {
+                "run_id": source_run_id,
+                "packet_sha256": record.get("predecessor_packet_sha256"),
+                "state_sha256": record.get("predecessor_state_sha256"),
+                "event_chain_sha256": record.get("predecessor_event_chain_sha256"),
+                "approved_checkpoint_id": record.get("approved_checkpoint_id"),
+                "approved_candidate_sha": record.get("approved_candidate_sha"),
+                "crossing_candidate_sha": record.get("crossing_candidate_sha"),
+            }
+        ):
+            raise MissionAuthorityError("source-budget runtime migration does not bind the exact predecessor boundary")
+    if active_runtime.get("runner_profile") not in (None, record.get("runner_profile_identity")) or (
+        active_runtime.get("capabilities") not in (None, record.get("capabilities"))
+    ):
+        raise MissionAuthorityError("source-budget runtime migration changed frozen profile or capabilities")
+
+    imported = (program_state.get("semantic_budget_allocations") or [])
+    imported_count = int(record.get("semantic_budget_import_count") or 0)
+    if (
+        imported_count != len(source_program.get("semantic_budget_allocations") or [])
+        or len(imported) < imported_count
+        or hashlib.sha256(
+            integrity.canonical_json_dumps(imported[:imported_count]).encode("utf-8")
+        ).hexdigest() != record.get("semantic_budget_allocation_import_sha256")
+    ):
+        raise MissionAuthorityError("source-budget successor semantic allocation import prefix changed")
+
+
+def _read_source_budget_approved_prefix(repo: Path, record: dict[str, Any]) -> list[dict[str, Any]]:
+    source_run_id = str(record.get("predecessor_run_id") or "")
+    source_root = state.run_dir(repo, source_run_id)
+    source_meta, _ = packet.parse_packet_file(source_root / "WORK_PACKET.md")
+    source_state = state.load_verified(repo, source_run_id)
+    source_segment_result = load_segment(repo, source_run_id)
+    if source_segment_result is None:
+        raise MissionAuthorityError("source-budget prefix source is not a sealed segment")
+    source_segment = source_segment_result[0]
+    return _capture_approved_prefix(
+        repo,
+        source_meta=source_meta,
+        source_program=(source_state or {}).get("program") or {},
+        source_events=integrity.read_event_chain(state.events_path(repo, source_run_id)),
+        source_segment=source_segment,
+    )
+
+
 def load_segment(
     repo: Path,
     run_id: str,
@@ -968,6 +1293,15 @@ def load_segment(
     graph_ok, graph_reason = program.verify_frozen_graph(meta, program_state)
     if not graph_ok:
         raise MissionAuthorityError("v4 segment frozen PROGRAM authority is invalid: " + graph_reason)
+    has_source_budget_ref = (
+        (meta.get("mission_budget") or {}).get("source_budget_continuation") is not None
+    )
+    if has_source_budget_ref or mission.get("source_budget_continuation_sha256") is not None:
+        if not has_source_budget_ref or mission.get("source_budget_continuation_sha256") is None:
+            raise MissionAuthorityError("source-budget continuation packet/mission binding is incomplete")
+        _verify_source_budget_continuation(
+            repo, meta=meta, mission=mission, segment=segment, program_state=program_state,
+        )
     migration_ref = _runtime_migration_ref(segment)
     if migration_ref is not None:
         migrated_runtime, _ = _runtime_identity_for_segment(repo, mission_id, segment)
@@ -1808,7 +2142,7 @@ def _publish_runtime_migration(
         "capabilities": sorted(str(value) for value in capabilities),
         "runner_profile": actual_profile,
         "source_authority": source_authority,
-        "reason": "typed blocked semantic-budget successor after exact runtime commissioning",
+        "reason": "typed blocked mission successor after exact runtime commissioning",
         "created_at": str(source_state.get("updated_at") or ""),
     }
     if not payload["created_at"] or not _FULL_SHA_RE.fullmatch(approved_candidate_sha):
@@ -2038,6 +2372,149 @@ def _line_count(repo: Path, baseline: str, candidate: str) -> int:
         canonical_repo=repo, baseline_sha=baseline, candidate_sha=candidate,
     )
     return int(stats["diff_lines"])
+
+
+def _prove_source_ceiling_only_receipt(
+    repo: Path,
+    *,
+    receipt: Any,
+    source_meta: dict[str, Any],
+    source_mission: dict[str, Any],
+    source_segment: dict[str, Any],
+    source_run_id: str,
+    expected_mission_id: str,
+    expected_candidate_sha: str,
+    expected_packet_sha256: str,
+    expected_approval_sha256: str,
+) -> dict[str, int]:
+    """Recompute that a terminal BUILD failed only its sealed source lines."""
+    from . import schema_validate
+
+    if not isinstance(receipt, dict) or schema_validate.validate_receipt(receipt):
+        raise MissionAuthorityError("source-ceiling crossing BUILD_RECEIPT is missing or invalid")
+    segment_baseline = str(source_segment.get("baseline_sha") or "")
+    original_baseline = str(source_mission.get("mission_original_baseline_sha") or "")
+    candidate_branch = str(source_segment.get("candidate_branch") or "")
+    segment_stats = program.source_tree_accounting(
+        canonical_repo=repo, baseline_sha=segment_baseline,
+        candidate_sha=expected_candidate_sha,
+    )
+    mission_stats = program.source_tree_accounting(
+        canonical_repo=repo, baseline_sha=original_baseline,
+        candidate_sha=expected_candidate_sha,
+    )
+    segment_lines = int(segment_stats["diff_lines"])
+    segment_files = int(segment_stats["files_changed_unique"])
+    mission_lines = int(mission_stats["diff_lines"])
+    mission_files = int(mission_stats["files_changed_unique"])
+    segment_cap = int(source_mission.get("segment_max_diff_lines") or 0)
+    mission_cap = int(source_mission.get("mission_max_diff_lines") or 0)
+    mission_file_cap = int(source_mission.get("mission_max_unique_changed_files") or 0)
+    risk = source_meta.get("risk_budget") or {}
+    global_source = (source_meta.get("checkpoint_graph") or {}).get("global_source_ceilings") or {}
+    top_file_cap = int(risk.get("max_files_changed") or 0)
+    top_line_cap = int(risk.get("max_diff_lines") or 0)
+    program_file_cap = int(global_source.get("max_unique_changed_files") or 0)
+    program_line_cap = int(global_source.get("max_baseline_to_final_diff_lines") or 0)
+    effective_file_cap = build_finalize._strict_ceiling(top_file_cap, program_file_cap)
+    effective_line_cap = build_finalize._strict_ceiling(
+        build_finalize._strict_ceiling(top_line_cap, program_line_cap), segment_cap,
+    )
+    source_check = receipt.get("program_source_ceiling_check") or {}
+    breach_parts: list[str] = []
+    if segment_files > program_file_cap:
+        breach_parts.append(f"global file cap reached: {segment_files}/{program_file_cap}")
+    if segment_lines > program_line_cap:
+        breach_parts.append(f"global diff-lines cap reached: {segment_lines}/{program_line_cap}")
+    if segment_files > top_file_cap:
+        breach_parts.append(
+            f"files_changed={segment_files} exceeds top-level risk_budget max_files_changed={top_file_cap}"
+        )
+    if segment_lines > top_line_cap:
+        breach_parts.append(
+            f"diff_lines={segment_lines} exceeds top-level risk_budget max_diff_lines={top_line_cap}"
+        )
+    if segment_files > effective_file_cap:
+        breach_parts.append(f"effective file cap exceeded: {segment_files}/{effective_file_cap}")
+    if segment_lines > effective_line_cap:
+        breach_parts.append(f"effective diff-lines cap exceeded: {segment_lines}/{effective_line_cap}")
+    mission_result, mission_failures = build_finalize._mission_budget_status({
+        "mission_source_lines_total": mission_lines,
+        "mission_max_diff_lines": mission_cap,
+        "mission_unique_files_total": mission_files,
+        "mission_max_unique_changed_files": mission_file_cap,
+    })
+    breach_parts.extend(mission_failures)
+    expected_breach = "; ".join(breach_parts)
+    source_only = (
+        source_segment.get("run_id") == source_run_id
+        and source_mission.get("mission_id") == expected_mission_id
+        and segment_cap > 0
+        and mission_cap > 0
+        and segment_cap == top_line_cap == program_line_cap
+        and mission_file_cap > 0
+        and top_file_cap > 0
+        and program_file_cap > 0
+        and segment_lines > segment_cap
+        and mission_lines > mission_cap
+        and segment_files <= effective_file_cap
+        and mission_files <= mission_file_cap
+        and bool(expected_breach)
+        and not any("file cap" in item or "files_changed=" in item for item in breach_parts)
+        and receipt.get("candidate_sha") == expected_candidate_sha
+        and receipt.get("baseline_sha") == segment_baseline
+        and receipt.get("candidate_branch") == candidate_branch
+        and receipt.get("packet_sha256") == expected_packet_sha256
+        and receipt.get("approval_sha256") == expected_approval_sha256
+        and receipt.get("next_state") == "BLOCKED"
+        and receipt.get("validation_status") == "PASS"
+        and bool(receipt.get("validation"))
+        and all(item.get("passed") is True for item in receipt.get("validation") or [])
+        and (receipt.get("scope_check") or {}).get("result") == "pass"
+        and not (receipt.get("scope_check") or {}).get("findings")
+        and (receipt.get("protected_path_check") or {}).get("result") == "pass"
+        and not (receipt.get("protected_path_check") or {}).get("offending_paths")
+        and (receipt.get("secret_scan_check") or {}).get("result") == "pass"
+        and not any(
+            item.get("severity") == "hard"
+            for item in (receipt.get("secret_scan_check") or {}).get("findings") or []
+        )
+        and (receipt.get("candidate_identity_reproof") or {}).get("result") == "pass"
+        and (receipt.get("infra_failure") or {}).get("result") == "pass"
+        and int((receipt.get("infra_failure") or {}).get("count") or 0) == 0
+        and (receipt.get("candidate_environment_invalid") or {}).get("result") == "pass"
+        and int((receipt.get("candidate_environment_invalid") or {}).get("count") or 0) == 0
+        and source_check.get("result") == "fail"
+        and source_check.get("accounting") == "absolute_baseline_to_candidate"
+        and source_check.get("mission_budget_result") == mission_result == "fail"
+        and source_check.get("mission_id") == expected_mission_id
+        and int(source_check.get("segment_number") or 0)
+            == int(source_segment.get("segment_number") or 0)
+        and int(source_check.get("files_changed_unique") or -1) == segment_files
+        and int(source_check.get("diff_lines_total") or -1) == segment_lines
+        and int(source_check.get("top_level_risk_max_files_changed") or -1) == top_file_cap
+        and int(source_check.get("top_level_risk_max_diff_lines") or -1) == top_line_cap
+        and int(source_check.get("program_max_unique_changed_files") or -1) == program_file_cap
+        and int(source_check.get("program_max_baseline_to_final_diff_lines") or -1) == program_line_cap
+        and int(source_check.get("effective_max_files_changed") or -1) == effective_file_cap
+        and int(source_check.get("effective_max_diff_lines") or -1) == effective_line_cap
+        and int(source_check.get("segment_source_ceiling") or -1) == segment_cap
+        and int(source_check.get("mission_source_ceiling") or -1) == mission_cap
+        and int(source_check.get("mission_source_lines_total") or -1) == mission_lines
+        and int(source_check.get("mission_unique_files_total") or -1) == mission_files
+        and int(source_check.get("mission_unique_files_ceiling") or -1) == mission_file_cap
+        and source_check.get("breach") == expected_breach
+    )
+    if not source_only:
+        raise MissionAuthorityError(
+            "blocked candidate is not proven to fail solely its sealed source line ceilings"
+        )
+    return {
+        "segment_lines": segment_lines,
+        "mission_lines": mission_lines,
+        "segment_files": segment_files,
+        "mission_files": mission_files,
+    }
 
 
 def source_budget_for_candidate(
@@ -2608,7 +3085,7 @@ def _create_child_segment(
     source_admission["predecessor_run_id"] = predecessor_run_id
     if source_admission.get("kind") in {
         "automatic_segment_successor", "explicit_legacy_continuation",
-        "blocked_semantic_budget_continuation",
+        "blocked_semantic_budget_continuation", "blocked_source_budget_continuation",
     }:
         crossing_sha = str(source_admission.get("crossing_candidate_sha") or "")
         if not _FULL_SHA_RE.fullmatch(crossing_sha) or crossing_sha == baseline_sha:
@@ -3119,7 +3596,9 @@ def _verified_mission_spend(
         if not (
             current_run_id in run_ids
             and int((current_segment or {}).get("segment_number") or 0) == 1
-            and source_admission.get("kind") == "explicit_legacy_continuation"
+            and source_admission.get("kind") in {
+                "explicit_legacy_continuation", "blocked_source_budget_continuation",
+            }
             and predecessor in external_ids
             and external_rows
         ):
@@ -3985,6 +4464,496 @@ def continue_blocked_semantic_budget(
         "historical_repair_claims_reconciled": history["total_claims"],
         "historical_reconciliation_allocations": [item["allocation_id"] for item in allocations],
         "runtime_migration": runtime_migration,
+    })
+    return result
+
+
+def continue_blocked_source_budget(
+    canonical_repo: Path,
+    source_run_id: str,
+    *,
+    expected_mission_id: str,
+    expected_mission_authority_sha256: str,
+    expected_packet_sha256: str,
+    expected_original_baseline_sha: str,
+    expected_crossing_candidate_sha: str,
+    expected_checkpoint_id: str,
+    expected_approved_checkpoint_id: str,
+    expected_approved_candidate_sha: str,
+    expected_remaining_checkpoints: list[str],
+    segment_max_diff_lines: int,
+    mission_max_diff_lines: int,
+    max_segments: int,
+    confirmation: str,
+    db_path: Path | None = None,
+) -> dict[str, Any]:
+    """Create a new source-budget mission from an exact approved predecessor.
+
+    The blocked run remains terminal and untouched. The child imports only the
+    verified approved prefix and its exact semantic accounting; the crossing
+    candidate is sealed as non-adopted evidence.
+    """
+    from . import capability_binding, receipts
+
+    repo = Path(canonical_repo).resolve(strict=False)
+    if confirmation != f"CONTINUE-BLOCKED-SOURCE-BUDGET:{expected_mission_id}":
+        raise MissionAuthorityError("source-budget continuation confirmation does not match predecessor mission")
+    if (
+        not re.fullmatch(r"mission-[a-f0-9]{24}", expected_mission_id)
+        or not _SHA256_RE.fullmatch(expected_mission_authority_sha256)
+        or not _SHA256_RE.fullmatch(expected_packet_sha256)
+        or not _FULL_SHA_RE.fullmatch(expected_original_baseline_sha)
+        or not _FULL_SHA_RE.fullmatch(expected_crossing_candidate_sha)
+        or not _FULL_SHA_RE.fullmatch(expected_approved_candidate_sha)
+        or not isinstance(expected_checkpoint_id, str)
+        or not isinstance(expected_approved_checkpoint_id, str)
+        or not isinstance(expected_remaining_checkpoints, list)
+        or not expected_remaining_checkpoints
+        or len(expected_remaining_checkpoints) != len(set(expected_remaining_checkpoints))
+        or expected_remaining_checkpoints[0] != expected_checkpoint_id
+        or isinstance(segment_max_diff_lines, bool)
+        or not isinstance(segment_max_diff_lines, int)
+        or isinstance(mission_max_diff_lines, bool)
+        or not isinstance(mission_max_diff_lines, int)
+        or isinstance(max_segments, bool)
+        or not isinstance(max_segments, int)
+        or not 1 <= segment_max_diff_lines <= MAX_TYPED_SOURCE_BUDGET_CONTINUATION_LINES
+        or not segment_max_diff_lines <= mission_max_diff_lines <= MAX_TYPED_SOURCE_BUDGET_CONTINUATION_LINES
+        or not 1 <= max_segments <= 16
+        or max_segments < len(expected_remaining_checkpoints)
+    ):
+        raise MissionAuthorityError("source-budget continuation identity or envelope is outside its typed bounds")
+
+    source_loaded = load_segment(repo, source_run_id)
+    if source_loaded is None:
+        raise MissionAuthorityError("source-budget predecessor is not a sealed v4 mission segment")
+    source_segment, source_segment_sha, source_mission, source_mission_sha = source_loaded
+    if (
+        source_mission.get("mission_id") != expected_mission_id
+        or source_mission_sha != expected_mission_authority_sha256
+        or source_segment.get("run_id") != source_run_id
+    ):
+        raise MissionAuthorityError("source-budget predecessor mission/segment identity differs")
+
+    source_root = state.run_dir(repo, source_run_id)
+    if (source_root / "STATE_TXN.json").exists():
+        raise MissionAuthorityError("source-budget predecessor has an unfinished state transaction")
+    intact, problems = integrity.assert_artifacts_intact(repo, source_run_id)
+    if not intact:
+        raise MissionAuthorityError("source-budget predecessor artifact chain is invalid: " + "; ".join(problems[:8]))
+    source_state = state.load_verified(repo, source_run_id)
+    if not isinstance(source_state, dict) or source_state.get("state") != "BLOCKED":
+        raise MissionAuthorityError("source-budget continuation requires the exact terminal BLOCKED predecessor")
+    if state.is_stop_requested(repo, source_run_id):
+        raise MissionAuthorityError("STOPPED/stop-requested authority is absorbing")
+    source_packet_path = source_root / "WORK_PACKET.md"
+    source_packet_sha = util.sha256_file(source_packet_path)
+    if source_packet_sha != expected_packet_sha256 or source_segment.get("packet_sha256") != source_packet_sha:
+        raise MissionAuthorityError("source-budget predecessor packet differs from its sealed identity")
+    source_meta, _ = packet.parse_packet_file(source_packet_path)
+    packet_errors = packet.validate_packet_for_approval(source_meta)
+    if packet_errors:
+        raise MissionAuthorityError("source-budget predecessor packet is invalid: " + "; ".join(packet_errors[:8]))
+    if (
+        source_meta.get("schema") != packet.MISSION_PROGRAM_SCHEMA_VERSION
+        or source_meta.get("target", {}).get("repo") != str(repo)
+        or expected_original_baseline_sha != source_mission.get("mission_original_baseline_sha")
+    ):
+        raise MissionAuthorityError("source-budget predecessor baseline or PROGRAM authority differs")
+    source_seal = approval.load_approval(repo, source_run_id)
+    seal_ok, seal_reason = approval.validate_approval_binding(
+        canonical_repo=repo, run_id=source_run_id, approval=source_seal,
+        packet=source_meta, packet_path=source_packet_path,
+    )
+    if not seal_ok:
+        raise MissionAuthorityError("source-budget predecessor approval binding is invalid: " + seal_reason)
+
+    source_program = source_state.get("program") or {}
+    graph_ok, graph_reason = program.verify_frozen_graph(source_meta, source_program)
+    if not graph_ok:
+        raise MissionAuthorityError("source-budget predecessor frozen graph is invalid: " + graph_reason)
+    source_events_path = state.events_path(repo, source_run_id)
+    source_events = integrity.read_event_chain(source_events_path)
+    source_event_sha = integrity.compute_event_chain_hash(source_events_path)
+    if source_event_sha != integrity.get_event_chain_hash(source_events_path):
+        raise MissionAuthorityError("source-budget predecessor event chain is invalid")
+    approved_sha, approved_cp, approved_verdict_sha = _verify_approved_prefix(
+        source_meta, source_program, source_events,
+        canonical_repo=repo, segment_doc=source_segment,
+    )
+    order = [
+        str(value) for value in (source_meta.get("checkpoint_graph") or {}).get("execution_order") or []
+    ]
+    if expected_approved_checkpoint_id not in order:
+        raise MissionAuthorityError("approved checkpoint is absent from the frozen graph")
+    approved_index = order.index(expected_approved_checkpoint_id)
+    remaining = order[approved_index + 1:]
+    current_ids = list(source_program.get("current_checkpoints") or [])
+    if (
+        approved_sha != expected_approved_candidate_sha
+        or approved_cp != expected_approved_checkpoint_id
+        or remaining != expected_remaining_checkpoints
+        or current_ids != [expected_checkpoint_id]
+        or expected_checkpoint_id != (remaining[0] if remaining else None)
+        or expected_checkpoint_id in {
+            str(item.get("id") or "") for item in source_program.get("finalized_checkpoints") or []
+        }
+        or source_state.get("last_candidate_sha") != expected_crossing_candidate_sha
+    ):
+        raise MissionAuthorityError("source-budget continuation does not follow the exact approved prefix")
+    if not _FULL_SHA_RE.fullmatch(str(source_segment.get("baseline_sha") or "")):
+        raise MissionAuthorityError("blocked segment baseline identity is invalid")
+    if not build_finalize._ancestor_of(repo, expected_crossing_candidate_sha, approved_sha):
+        raise MissionAuthorityError("blocked crossing candidate is not descended from last approved CP candidate")
+    candidate_exists = util.run_subprocess(
+        ["git", "-C", str(repo), "cat-file", "-e", f"{expected_crossing_candidate_sha}^{{commit}}"],
+        timeout=10,
+    )
+    if candidate_exists.returncode != 0:
+        raise MissionAuthorityError("source-budget crossing candidate is absent from Git")
+    candidate_branch = str(source_segment.get("candidate_branch") or "")
+    if (
+        git_checks.branch_head(repo, candidate_branch) != expected_crossing_candidate_sha
+        or not build_finalize._candidate_branch_contains(repo, candidate_branch, expected_crossing_candidate_sha)
+    ):
+        raise MissionAuthorityError("source-budget crossing candidate is not the exact sealed branch head")
+
+    receipt = receipts.load_receipt(repo, source_run_id)
+    crossing_accounting = _prove_source_ceiling_only_receipt(
+        repo, receipt=receipt, source_meta=source_meta,
+        source_mission=source_mission, source_segment=source_segment,
+        source_run_id=source_run_id, expected_mission_id=expected_mission_id,
+        expected_candidate_sha=expected_crossing_candidate_sha,
+        expected_packet_sha256=source_packet_sha,
+        expected_approval_sha256=approval.approval_artifact_sha256(source_seal or {}),
+    )
+    actual_segment_lines = crossing_accounting["segment_lines"]
+    actual_mission_lines = crossing_accounting["mission_lines"]
+    actual_approved_lines = _line_count(repo, expected_original_baseline_sha, approved_sha)
+    # Reject an undersized source envelope before any append-only runtime
+    # migration authority is published. The checked values come from the
+    # independently verified crossing receipt and approved candidate.
+    if segment_max_diff_lines <= actual_segment_lines:
+        raise MissionAuthorityError(
+            "new segment source ceiling must exceed the verified legitimate crossing candidate delta"
+        )
+    if mission_max_diff_lines <= actual_approved_lines:
+        raise MissionAuthorityError("new mission source ceiling leaves no authority after the approved CP-12 baseline")
+    source_state_path = state.state_path(repo, source_run_id)
+    source_state_sha = util.sha256_file(source_state_path)
+    source_approval_file_sha = util.sha256_file(approval.approval_path(repo, source_run_id))
+    source_approval_sha = approval.approval_artifact_sha256(source_seal or {})
+    approved_prefix = _capture_approved_prefix(
+        repo, source_meta=source_meta, source_program=source_program,
+        source_events=source_events, source_segment=source_segment,
+    )
+
+    job = _parent_job_snapshot(repo, source_run_id, db_path=db_path)
+    if (
+        job.get("status") != "DONE"
+        or any(job.get(key) is not None for key in (
+            "worker_pid", "worker_pgid", "worker_attempt_id", "worker_role",
+            "worker_started_at", "worker_deadline_at", "worker_start_identity",
+        ))
+        or job.get("candidate_branch") != candidate_branch
+    ):
+        raise MissionAuthorityError("source-budget predecessor supervisor row is not terminal and unowned")
+    predecessor_operational_budget = copy.deepcopy(source_mission.get("operational_budget") or {})
+    operational_run_ids, _old_external = _mission_job_ids(repo, source_mission)
+    runtime_generations: dict[str, str] = {}
+    for run_id in operational_run_ids:
+        row = _job_snapshot_if_present(repo, run_id, db_path=db_path)
+        if (
+            row is None
+            or row.get("status") not in {"DONE", "RETIRED"}
+            or any(row.get(key) is not None for key in (
+                "worker_pid", "worker_pgid", "worker_attempt_id", "worker_role",
+            ))
+        ):
+            raise MissionAuthorityError("source-budget predecessor history contains a live/nonterminal job")
+        runtime_generations[run_id] = str(row.get("runtime_generation") or "")
+    if (
+        source_run_id not in operational_run_ids
+        or any(not value for value in runtime_generations.values())
+    ):
+        raise MissionAuthorityError("source-budget predecessor operational lineage is incomplete")
+
+    source_runtime, source_runtime_sha = _runtime_identity_for_segment(
+        repo, expected_mission_id, source_segment,
+    )
+    installed_generation = str(supervisor_runtime.runtime_generation() or "")
+    predecessor_runtime_generation = str(source_runtime.get("runtime_generation") or "")
+    active_source_runtime, _active_source_runtime_sha, _active_source_sequence = _active_mission_runtime(
+        repo, source_mission,
+    )
+    if (
+        not installed_generation
+        or not predecessor_runtime_generation
+        or job.get("runtime_generation") != predecessor_runtime_generation
+        or active_source_runtime.get("runtime_generation") not in {
+            predecessor_runtime_generation, installed_generation,
+        }
+        or predecessor_operational_budget.get("runner") != job.get("runner")
+        or not isinstance(source_runtime.get("capabilities"), list)
+        or sorted(str(value) for value in source_runtime.get("capabilities") or [])
+            != sorted(str(value) for value in source_meta.get("capabilities") or [])
+    ):
+        raise MissionAuthorityError("source-budget continuation runtime/capability authority is not current and coherent")
+    runner = str(predecessor_operational_budget.get("runner") or "")
+    runner_profile = runner_profiles.resolve_profile(
+        str(source_meta.get("runner_profile") or "default"), provider=runner,
+    )
+    runner_profiles.verify_profile_integrity(runner_profile)
+    attestation = runner_profiles.verify_effort_attestation(runner_profile)
+    if attestation is not None:
+        runner_profile = dict(runner_profile)
+        runner_profile["effort_attestation"] = attestation
+    expected_profile_identity = {
+        key: runner_profile.get(key)
+        for key in ("name", "provider", "model", "effort", "identity_sha256")
+    }
+    if source_runtime.get("runner_profile") != expected_profile_identity:
+        raise MissionAuthorityError("source-budget continuation runner profile differs from sealed runtime authority")
+    run_binding = capability_binding._read(capability_binding.binding_path(repo, source_run_id))
+    verify_runtime_identity(
+        repo, expected_mission_id, run_binding=run_binding,
+        runner_profile=runner_profile, runtime_generation=predecessor_runtime_generation,
+        segment_number=int(source_segment.get("segment_number") or 0),
+    )
+    _verified_mission_spend(
+        repo, source_mission, current_run_id=source_run_id, db_path=db_path,
+        target_runtime_generation=installed_generation,
+    )
+
+    runtime_migration = None
+    if predecessor_runtime_generation != installed_generation:
+        # The migration is append-only and tied to this exact blocked source
+        # boundary. If a prior invocation crashed after publishing it, the
+        # supported publisher reuses the same immutable record on replay.
+        runtime_migration = _publish_runtime_migration(
+            repo,
+            mission_doc=source_mission,
+            source_segment=source_segment,
+            source_state=source_state,
+            source_packet_sha256=source_packet_sha,
+            source_event_chain_sha256=source_event_sha,
+            approved_checkpoint_id=approved_cp,
+            approved_candidate_sha=approved_sha,
+            crossing_candidate_sha=expected_crossing_candidate_sha,
+        )
+        if runtime_migration is None:
+            raise MissionAuthorityError("runtime generation changed without a durable migration authority")
+        migration, migration_sha = _read_runtime_migration_record(
+            _mission_runtime_migration_path(
+                repo, expected_mission_id, int(runtime_migration["sequence"]),
+            ),
+        )
+        if (
+            migration_sha != runtime_migration.get("sha256")
+            or migration.get("previous_runtime_identity_sha256") != source_runtime_sha
+            or migration.get("previous_runtime_generation") != predecessor_runtime_generation
+            or migration.get("runtime_generation") != installed_generation
+        ):
+            raise MissionAuthorityError("runtime migration does not continue the exact predecessor identity")
+    elif active_source_runtime.get("runtime_generation") != installed_generation:
+        raise MissionAuthorityError("predecessor active runtime differs from its sealed segment identity")
+
+    source_neutral_sha = _digest(_source_budget_neutral_projection(source_meta))
+    new_meta = copy.deepcopy(source_meta)
+    new_meta["packet_id"] = f"source-budget-{expected_mission_id[-12:]}-cp12"
+    new_meta["created_at"] = str(source_state.get("updated_at") or util.utc_now_iso())
+    new_meta.setdefault("mission_budget", {})["segment_max_diff_lines"] = segment_max_diff_lines
+    new_meta["mission_budget"]["mission_max_diff_lines"] = mission_max_diff_lines
+    new_meta["mission_budget"]["max_segments"] = max_segments
+    new_meta["risk_budget"]["max_diff_lines"] = segment_max_diff_lines
+    new_meta.setdefault("checkpoint_graph", {}).setdefault("global_source_ceilings", {})[
+        "max_baseline_to_final_diff_lines"
+    ] = mission_max_diff_lines
+    if _digest(_source_budget_neutral_projection(new_meta)) != source_neutral_sha:
+        raise MissionAuthorityError("source-budget adjustment changed non-source packet authority")
+
+    source_program_allocations = copy.deepcopy(source_program.get("semantic_budget_allocations") or [])
+    new_mission_id_seed = {
+        "predecessor_mission_id": expected_mission_id,
+        "predecessor_run_id": source_run_id,
+        "predecessor_segment_authority_sha256": source_segment_sha,
+        "predecessor_packet_sha256": source_packet_sha,
+        "predecessor_state_sha256": source_state_sha,
+        "approved_checkpoint_id": approved_cp,
+        "approved_candidate_sha": approved_sha,
+        "crossing_candidate_sha": expected_crossing_candidate_sha,
+    }
+    new_mission_id = "mission-" + hashlib.sha256(_canonical_bytes(new_mission_id_seed)).hexdigest()[:24]
+    new_policy_sha = program.semantic_budget_policy_sha256(new_meta)
+    imported_allocations: list[dict[str, Any]] = []
+    for allocation in source_program_allocations:
+        if not isinstance(allocation, dict):
+            raise MissionAuthorityError("source semantic allocation ledger is malformed")
+        body = dict(allocation)
+        old_id = str(body.pop("allocation_id", ""))
+        if old_id != program.sha256_text(program.canonical_json_dumps(body)):
+            raise MissionAuthorityError("source semantic allocation digest is invalid")
+        if body.get("mission_id") != expected_mission_id:
+            raise MissionAuthorityError("source semantic allocation is not bound to the predecessor mission")
+        if body.get("source_authority_sha256") != program.semantic_budget_policy_sha256(source_meta):
+            raise MissionAuthorityError("source semantic allocation policy identity differs from predecessor packet")
+        body["mission_id"] = new_mission_id
+        body["source_authority_sha256"] = new_policy_sha
+        body["allocation_id"] = program.sha256_text(program.canonical_json_dumps(body))
+        imported_allocations.append(body)
+    imported_sha = hashlib.sha256(
+        integrity.canonical_json_dumps(imported_allocations).encode("utf-8")
+    ).hexdigest()
+    source_allocations_sha = _digest(source_program_allocations)
+    source_runtime_profile = copy.deepcopy(source_runtime.get("runner_profile") or {})
+    successor_operational_budget = copy.deepcopy(predecessor_operational_budget)
+    successor_operational_budget["runtime_generation"] = installed_generation
+
+    source_authority_payload: dict[str, Any] = {
+        "schema": SOURCE_BUDGET_CONTINUATION_SCHEMA,
+        "continuation_mission_id": new_mission_id,
+        "predecessor_mission_id": expected_mission_id,
+        "predecessor_mission_authority_sha256": source_mission_sha,
+        "predecessor_run_id": source_run_id,
+        "predecessor_segment_authority_sha256": source_segment_sha,
+        "predecessor_packet_sha256": source_packet_sha,
+        "predecessor_approval_file_sha256": source_approval_file_sha,
+        "predecessor_approval_sha256": source_approval_sha,
+        "predecessor_state_sha256": source_state_sha,
+        "predecessor_event_chain_sha256": source_event_sha,
+        "predecessor_build_receipt_sha256": util.sha256_file(source_root / "BUILD_RECEIPT.json"),
+        "original_baseline_sha": expected_original_baseline_sha,
+        "approved_checkpoint_id": approved_cp,
+        "approved_candidate_sha": approved_sha,
+        "approved_verdict_sha256": approved_verdict_sha,
+        "approved_prefix_sha256": _digest(approved_prefix),
+        "crossing_candidate_sha": expected_crossing_candidate_sha,
+        "candidate_branch": candidate_branch,
+        "remaining_checkpoints": remaining,
+        "approved_source_lines": actual_approved_lines,
+        "crossing_segment_lines": actual_segment_lines,
+        "crossing_mission_lines": actual_mission_lines,
+        "segment_source_ceiling": segment_max_diff_lines,
+        "mission_source_ceiling": mission_max_diff_lines,
+        "max_segments": max_segments,
+        "source_neutral_authority_sha256": source_neutral_sha,
+        "semantic_allocation_source_sha256": source_allocations_sha,
+        "semantic_budget_allocation_import_sha256": imported_sha,
+        "semantic_budget_import_count": len(imported_allocations),
+        "predecessor_active_runtime_identity_sha256": source_runtime_sha,
+        "predecessor_runtime_generation": predecessor_runtime_generation,
+        "runtime_migration": copy.deepcopy(runtime_migration),
+        "runtime_generation": installed_generation,
+        "runner_profile_identity": source_runtime_profile,
+        "capabilities": sorted(str(value) for value in source_runtime.get("capabilities") or []),
+        "predecessor_operational_budget": predecessor_operational_budget,
+        "successor_operational_budget": successor_operational_budget,
+        "operational_source_run_ids": operational_run_ids,
+        "operational_source_runtime_generations": runtime_generations,
+        "preserved_cumulative_counters": copy.deepcopy(source_program.get("cumulative_counters") or {}),
+        "created_at": str(source_state.get("updated_at") or ""),
+        "reason": "human-authorized source-budget continuation from exact last-approved checkpoint",
+    }
+    authority_envelope, authority_sha = _envelope(source_authority_payload)
+    new_meta.setdefault("mission_budget", {})["source_budget_continuation"] = {
+        "schema": SOURCE_BUDGET_CONTINUATION_REF_SCHEMA,
+        "authority_sha256": authority_sha,
+        "predecessor_mission_id": expected_mission_id,
+        "predecessor_run_id": source_run_id,
+        "approved_checkpoint_id": approved_cp,
+        "approved_candidate_sha": approved_sha,
+        "crossing_candidate_sha": expected_crossing_candidate_sha,
+    }
+    packet_errors = packet.validate_packet_for_approval(new_meta)
+    if packet_errors:
+        raise MissionAuthorityError("typed source-budget packet is invalid: " + "; ".join(packet_errors[:12]))
+    if authority_envelope.get("sha256") != authority_sha:
+        raise MissionAuthorityError("source-budget continuation authority digest is inconsistent")
+
+    new_program_probe = copy.deepcopy(source_program)
+    new_program_probe["mission_segment"] = {"mission_id": new_mission_id}
+    new_program_probe["checkpoint_graph_sha256"] = program.checkpoint_graph_sha256(new_meta)
+    new_program_probe["semantic_budget_policy_sha256"] = new_policy_sha
+    new_program_probe["semantic_budget_allocations"] = imported_allocations
+    graph_ok, graph_reason = program.verify_frozen_graph(new_meta, new_program_probe)
+    if not graph_ok:
+        raise MissionAuthorityError("imported semantic authority does not fit the source successor: " + graph_reason)
+
+    source_record_sha = _write_once(
+        _source_budget_continuation_path(repo, new_mission_id), source_authority_payload,
+    )
+    if source_record_sha != authority_sha:
+        raise MissionAuthorityError("published source-budget authority differs from packet binding")
+    projection_sha = _digest(_authority_projection(new_meta))
+    new_mission_doc = {
+        "schema": MISSION_SCHEMA,
+        "mission_id": new_mission_id,
+        "source_run_id": source_run_id,
+        "source_packet_sha256": source_packet_sha,
+        "source_approval_sha256": source_mission.get("source_approval_sha256"),
+        "mission_original_baseline_sha": expected_original_baseline_sha,
+        "mission_max_diff_lines": mission_max_diff_lines,
+        "mission_max_unique_changed_files": int(source_mission.get("mission_max_unique_changed_files") or 0),
+        "segment_max_diff_lines": segment_max_diff_lines,
+        "auto_segment": bool(source_mission.get("auto_segment")),
+        "max_segments": max_segments,
+        "segment_boundary_policy": source_mission.get("segment_boundary_policy"),
+        "operational_budget": successor_operational_budget,
+        "operational_source_run_ids": operational_run_ids,
+        "operational_source_runtime_generations": runtime_generations,
+        "source_budget_continuation_sha256": source_record_sha,
+        "authority_projection_sha256": projection_sha,
+        "template_meta": copy.deepcopy(new_meta),
+        "template_markdown_tail": _markdown_tail(source_packet_path),
+    }
+    mission_sha = _write_once(_manifest_path(repo, new_mission_id), new_mission_doc)
+    if mission_sha != _digest(new_mission_doc):
+        raise MissionAuthorityError("source-budget successor mission manifest digest is inconsistent")
+
+    source_admission = {
+        "kind": "blocked_source_budget_continuation",
+        "mission_original_baseline_sha": expected_original_baseline_sha,
+        "parent_run_id": source_run_id,
+        "predecessor_run_id": source_run_id,
+        "source_budget_continuation_sha256": source_record_sha,
+        "source_authority_sha256": source_record_sha,
+        "parent_segment_authority_sha256": source_segment_sha,
+        "source_packet_sha256": source_packet_sha,
+        "source_state_sha256": source_state_sha,
+        "source_event_chain_sha256": source_event_sha,
+        "approved_prefix": approved_prefix,
+        "last_approved_checkpoint_id": approved_cp,
+        "last_approved_candidate_sha": approved_sha,
+        "last_approved_verdict_sha256": approved_verdict_sha,
+        "crossing_candidate_sha": expected_crossing_candidate_sha,
+        "crossing_candidate_not_adopted": True,
+    }
+    result = _create_child_segment(
+        repo,
+        mission_doc=new_mission_doc,
+        mission_sha=mission_sha,
+        segment_number=1,
+        predecessor_run_id=source_run_id,
+        baseline_sha=approved_sha,
+        source_program=new_program_probe,
+        source_state=source_state,
+        source_admission=source_admission,
+        db_path=db_path,
+    )
+    result.update({
+        "predecessor_mission_id": expected_mission_id,
+        "predecessor_mission_authority_sha256": expected_mission_authority_sha256,
+        "predecessor_run_id": source_run_id,
+        "predecessor_run_unchanged": True,
+        "approved_checkpoint_id": approved_cp,
+        "approved_candidate_sha": approved_sha,
+        "crossing_candidate_sha": expected_crossing_candidate_sha,
+        "crossing_candidate_not_adopted": True,
+        "source_budget_continuation_sha256": source_record_sha,
+        "preserved_cumulative_counters": copy.deepcopy(source_program.get("cumulative_counters") or {}),
+        "semantic_allocation_import_count": len(imported_allocations),
+        "runtime_generation": installed_generation,
+        "runtime_migration": copy.deepcopy(runtime_migration),
     })
     return result
 
