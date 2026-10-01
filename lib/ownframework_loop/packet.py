@@ -27,10 +27,8 @@ LEGACY_SCHEMA_VERSION = "ownframework-work-packet/v1"
 PROGRAM_SCHEMA_VERSION = "ownframework-work-packet/v3"
 MISSION_PROGRAM_SCHEMA_VERSION = "ownframework-work-packet/v4"
 PROGRAM_SCHEMA_VERSIONS = (PROGRAM_SCHEMA_VERSION, MISSION_PROGRAM_SCHEMA_VERSION)
-SOURCE_BUDGET_CONTINUATION_REF_SCHEMA = (
-    "ownframework-loop-source-budget-continuation-ref/v1"
-)
-MAX_TYPED_SOURCE_BUDGET_CONTINUATION_LINES = 100_000
+MAX_V4_SEGMENT_DIFF_LINES = 100_000
+MAX_V4_MISSION_DIFF_LINES = 480_000
 SUPPORTED_SCHEMA_VERSIONS = (
     LEGACY_SCHEMA_VERSION, SCHEMA_VERSION, *PROGRAM_SCHEMA_VERSIONS,
 )
@@ -129,23 +127,10 @@ def _validate_risk_budget_envelope(meta: dict[str, Any]) -> list[str]:
     # multi-checkpoint programs (28 days whole-run, 8h per pass). The v2
     # single-run pass ceiling stays below the historical 3600s fallback fuse
     # only insofar as packets narrow; it no longer caps BELOW the fallback.
-    mission_budget = meta.get("mission_budget")
-    source_budget_ref = (
-        mission_budget.get("source_budget_continuation")
-        if isinstance(mission_budget, dict) else None
-    )
-    typed_source_continuation = (
-        meta.get("schema") == MISSION_PROGRAM_SCHEMA_VERSION
-        and isinstance(source_budget_ref, dict)
-        and source_budget_ref.get("schema") == SOURCE_BUDGET_CONTINUATION_REF_SCHEMA
-        and _valid_source_budget_continuation_ref(source_budget_ref)
-    )
+    is_v4 = meta.get("schema") == MISSION_PROGRAM_SCHEMA_VERSION
     maxima = {
         "max_files_changed": 500,
-        "max_diff_lines": (
-            MAX_TYPED_SOURCE_BUDGET_CONTINUATION_LINES
-            if typed_source_continuation else 30000
-        ),
+        "max_diff_lines": MAX_V4_SEGMENT_DIFF_LINES if is_v4 else 30000,
         "max_repair_rounds": 128 if v3 else 32,
         "max_build_passes": 128 if v3 else 32,
         "max_review_passes": 128 if v3 else 32,
@@ -418,10 +403,10 @@ def validate_packet_self_consistency(meta: dict[str, Any]) -> list[str]:
 def validate_mission_budget(meta: dict[str, Any]) -> list[str]:
     """Validate the explicit v4 mission/segment source-budget contract.
 
-    This does not reinterpret v3. Ordinary v4 PROGRAMs bind the global source
-    ceiling to the per-run segment cap. A typed source-budget continuation
-    instead binds that global baseline-to-final ceiling to the mission cap,
-    while risk_budget remains the per-segment limit.
+    This does not reinterpret v1-v3. New v4 PROGRAMs bind their
+    baseline-to-final source ceiling to the mission-total cap. Previously
+    sealed v4 packets may bind it to the segment cap; accepting that exact
+    declared value preserves their original authority rather than widening it.
     """
     errors: list[str] = []
     if meta.get("schema") != MISSION_PROGRAM_SCHEMA_VERSION:
@@ -451,29 +436,15 @@ def validate_mission_budget(meta: dict[str, Any]) -> list[str]:
     segment = values.get("segment_max_diff_lines")
     mission = values.get("mission_max_diff_lines")
     max_segments = values.get("max_segments")
-    source_ref = raw.get("source_budget_continuation")
-    typed_source_continuation = (
-        isinstance(source_ref, dict)
-        and source_ref.get("schema") == SOURCE_BUDGET_CONTINUATION_REF_SCHEMA
-        and _valid_source_budget_continuation_ref(source_ref)
-    )
-    if source_ref is not None and not typed_source_continuation:
+    if segment is not None and segment > MAX_V4_SEGMENT_DIFF_LINES:
         errors.append(
-            "mission_budget.source_budget_continuation must contain exactly "
-            "valid typed authority and predecessor identities"
+            "mission_budget.segment_max_diff_lines exceeds the v4 platform "
+            f"segment maximum {MAX_V4_SEGMENT_DIFF_LINES}"
         )
-    if segment is not None and segment > (
-        MAX_TYPED_SOURCE_BUDGET_CONTINUATION_LINES
-        if typed_source_continuation else 30000
-    ):
+    if mission is not None and mission > MAX_V4_MISSION_DIFF_LINES:
         errors.append(
-            "mission_budget.segment_max_diff_lines exceeds the per-run ceiling "
-            f"{MAX_TYPED_SOURCE_BUDGET_CONTINUATION_LINES if typed_source_continuation else 30000}"
-        )
-    if typed_source_continuation and mission is not None and mission > MAX_TYPED_SOURCE_BUDGET_CONTINUATION_LINES:
-        errors.append(
-            "mission_budget.mission_max_diff_lines exceeds the typed source-budget ceiling "
-            f"{MAX_TYPED_SOURCE_BUDGET_CONTINUATION_LINES}"
+            "mission_budget.mission_max_diff_lines exceeds the v4 mission "
+            f"source maximum {MAX_V4_MISSION_DIFF_LINES}"
         )
     if segment is not None and mission is not None and mission < segment:
         errors.append("mission_budget.mission_max_diff_lines must be >= segment_max_diff_lines")
@@ -488,15 +459,11 @@ def validate_mission_budget(meta: dict[str, Any]) -> list[str]:
         )
     graph_ceiling = (((meta.get("checkpoint_graph") or {}).get("global_source_ceilings") or {})
                      .get("max_baseline_to_final_diff_lines"))
-    expected_graph_ceiling = mission if typed_source_continuation else segment
-    if expected_graph_ceiling is not None and graph_ceiling != expected_graph_ceiling:
+    allowed_graph_ceilings = {value for value in (segment, mission) if value is not None}
+    if graph_ceiling is not None and graph_ceiling not in allowed_graph_ceilings:
         errors.append(
             "checkpoint_graph.global_source_ceilings.max_baseline_to_final_diff_lines "
-            + (
-                "must equal mission_budget.mission_max_diff_lines for a typed source-budget continuation"
-                if typed_source_continuation else
-                "must equal mission_budget.segment_max_diff_lines"
-            )
+            + "must equal the sealed mission or segment source limit"
         )
     if "mission_id" in raw or "current_segment" in raw:
         errors.append("mission_budget contains core-owned derived identity fields")
@@ -543,25 +510,6 @@ def validate_mission_budget(meta: dict[str, Any]) -> list[str]:
                     "sealed reallocation source"
                 )
     return errors
-
-
-def _valid_source_budget_continuation_ref(value: dict[str, Any]) -> bool:
-    return bool(
-        set(value) == {
-            "schema", "authority_sha256", "predecessor_mission_id",
-            "predecessor_run_id", "approved_checkpoint_id",
-            "approved_candidate_sha", "crossing_candidate_sha",
-        }
-        and value.get("schema") == SOURCE_BUDGET_CONTINUATION_REF_SCHEMA
-        and re.fullmatch(r"[a-f0-9]{64}", str(value.get("authority_sha256") or ""))
-        and re.fullmatch(r"mission-[a-f0-9]{24}", str(value.get("predecessor_mission_id") or ""))
-        and isinstance(value.get("predecessor_run_id"), str)
-        and bool(value.get("predecessor_run_id"))
-        and re.fullmatch(r"CP-[0-9]+", str(value.get("approved_checkpoint_id") or ""))
-        and re.fullmatch(r"[a-f0-9]{40}", str(value.get("approved_candidate_sha") or ""))
-        and re.fullmatch(r"[a-f0-9]{40}", str(value.get("crossing_candidate_sha") or ""))
-        and value.get("approved_candidate_sha") != value.get("crossing_candidate_sha")
-    )
 
 
 _PYTHON_VALIDATION_RE = re.compile(r"(?<![\w-])python(?:3(?:\.\d+)?)?(?=\s|$)")

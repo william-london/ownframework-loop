@@ -3081,7 +3081,9 @@ def resume(
     try:
         from . import program_mission as _mission_mod
 
-        runtime_migration = _mission_mod.prepare_runtime_generation_resume(
+        from . import program_mission_runtime as _mission_runtime_mod
+
+        runtime_migration = _mission_runtime_mod.prepare_runtime_generation_resume(
             canonical_repo,
             run_id,
             job_snapshot=dict(existing),

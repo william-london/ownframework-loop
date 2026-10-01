@@ -403,9 +403,9 @@ class ClaudeCodeRunner:
         # identity. The first real supervised preflight publishes it before
         # provider launch; every later segment must reproduce that exact
         # stable binding rather than silently inheriting changed host policy.
-        from . import program_mission, supervisor_runtime
+        from . import program_mission_runtime, supervisor_runtime
 
-        program_mission.bind_runtime_identity(
+        program_mission_runtime.bind_runtime_identity(
             canonical_repo,
             str(work_order.get("run_id") or ""),
             run_binding=run_binding,

@@ -567,7 +567,8 @@
         },
         "program_max_baseline_to_final_diff_lines": {
           "type": "integer",
-          "minimum": 0
+          "minimum": 0,
+          "maximum": 480000
         },
         "effective_max_files_changed": {
           "type": "integer",
@@ -575,7 +576,8 @@
         },
         "effective_max_diff_lines": {
           "type": "integer",
-          "minimum": 0
+          "minimum": 0,
+          "maximum": 100000
         },
         "mission_budget_result": {
           "type": "string",
@@ -587,7 +589,8 @@
         },
         "mission_source_ceiling": {
           "type": "integer",
-          "minimum": 1
+          "minimum": 1,
+          "maximum": 480000
         },
         "mission_unique_files_total": {
           "type": "integer",
@@ -600,7 +603,7 @@
         "segment_source_ceiling": {
           "type": "integer",
           "minimum": 1,
-          "maximum": 30000
+          "maximum": 100000
         },
         "mission_id": {
           "type": "string",
@@ -632,9 +635,9 @@
         "last_approved_verdict_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
         "mission_source_lines_at_last_approval": { "type": "integer", "minimum": 0 },
         "segment_source_lines": { "type": "integer", "minimum": 0 },
-        "segment_source_ceiling": { "type": "integer", "minimum": 1, "maximum": 30000 },
+        "segment_source_ceiling": { "type": "integer", "minimum": 1, "maximum": 100000 },
         "mission_source_lines_total": { "type": "integer", "minimum": 0 },
-        "mission_source_ceiling": { "type": "integer", "minimum": 1 },
+        "mission_source_ceiling": { "type": "integer", "minimum": 1, "maximum": 480000 },
         "mission_unique_files_total": { "type": "integer", "minimum": 0 },
         "mission_unique_files_ceiling": { "type": "integer", "minimum": 1 },
         "reexecute_checkpoint": { "type": "string", "pattern": "^CP-[0-9]+$" },

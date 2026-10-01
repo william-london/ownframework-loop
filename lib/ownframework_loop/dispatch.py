@@ -998,7 +998,7 @@ def _format_validation_repair_instruction(
     """Bounded-validation-repair instruction.
 
     The model must NOT widen the packet or weaken acceptance: keep the
-    absolute candidate inside the frozen 30,000-line / 500-file envelope,
+    absolute candidate inside the frozen effective source/file envelope,
     preserve checkpoint acceptance, repair only the named formatting
     failures referenced in the receipts.
     """

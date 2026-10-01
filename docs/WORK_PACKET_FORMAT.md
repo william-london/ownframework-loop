@@ -153,15 +153,34 @@ execution. For v3, source-size ceilings are currently 500 changed files and
 30,000 diff lines. Packet-wide cumulative build/review/repair envelopes may be
 up to 128; checkpoint-local pass caps remain at most 32.
 
+For v4 PROGRAMs, `mission_budget.segment_max_diff_lines` and
+`risk_budget.max_diff_lines` bind the selected per-segment source limit. The
+single v4 platform maximum is 100,000 diff lines per segment. The separately
+sealed `mission_budget.mission_max_diff_lines` and
+`checkpoint_graph.global_source_ceilings.max_baseline_to_final_diff_lines`
+bind total source change from the original mission baseline, up to the finite
+480,000-line v4 mission maximum. `max_segments` is finite (at most 16).
+SPEC chooses appropriate packet values from the expected whole graph and
+largest checkpoint; automatic segmentation never enlarges any of them.
+Previously sealed v4 packets whose PROGRAM global source ceiling equals the
+segment limit keep that exact narrower authority; new SPEC authoring binds it
+to the mission-total envelope.
+
+New v4 packets seal adaptive semantic-budget policy explicitly. It permits
+one-claim redistribution within cumulative BUILD/REVIEW/REPAIR ceilings while
+preserving future-checkpoint and final-review reserves. An absent policy on an
+already-sealed v4 packet retains its original local-cap meaning.
+
 Top-level max_build_passes, max_review_passes, and max_repair_rounds are
 cumulative PROGRAM envelopes. They are not per-checkpoint defaults. A declared
 global repair allowance is invalid if the global build/review caps cannot
 execute one initial pass per checkpoint plus those repairs.
 
-For a long unattended PROGRAM, the normal high-autonomy choice is to set the
-global pass/repair envelopes to the sums of the checkpoint-local envelopes
-(subject to the v3 absolute ceiling), unless the operator intentionally wants
-a tighter whole-program throttle.
+For a new unattended v4 PROGRAM, SPEC should choose generous but finite
+cumulative pass/repair ceilings for substantive autonomous work; checkpoint
+values are initial allocations under the explicitly sealed adaptive policy.
+Routine operators do not tune these semantic budgets. v1-v3 and already-sealed
+v4 packets keep their historical semantics.
 
 risk_budget.max_pass_runtime_seconds is enforced for each semantic worker.
 A positive supervisor --timeout-seconds is only a narrowing override.

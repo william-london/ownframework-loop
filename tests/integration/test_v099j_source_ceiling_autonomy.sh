@@ -233,6 +233,6 @@ ps = dispatch._blocked_evidence_is_repairable(receipt_blocked)
 print("ps_blocked_no_continuation", ps is not None)
 PYEOF
 )"
-assert_in "$D_OUT" "ps_blocked_no_continuation True" "TEST D: BLOCKED source-budget evidence is still recognized (for legacy continuation path)"
+assert_in "$D_OUT" "ps_blocked_no_continuation True" "TEST D: BLOCKED source-budget evidence is recognized for bounded repair adjudication"
 
 exit 0

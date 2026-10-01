@@ -32,20 +32,23 @@ historical evidence. The successor starts from the exact last APPROVED
 candidate, not the unreviewed crossing candidate, and receives no authority
 beyond the frozen mission. Whole-product final acceptance remains mandatory.
 
-An opted-in v4 semantic-budget policy may reallocate existing mission BUILD,
-REVIEW, or REPAIR authority one claim at a time after a checkpoint's initial
-allocation is exhausted. It can draw only from unused APPROVED-checkpoint
-capacity or explicitly sealed cumulative slack; cumulative ceilings never
-increase. Durable allocation evidence, future-checkpoint reservations,
-no-progress fuses, and a minimum final-review repair lane (one BUILD, one
-REPAIR, and two REVIEW claims) bound the redistribution. v1–v3 and v4 packets
-without that explicit policy retain hard checkpoint-local caps. A distinct
-`ofloop program continue-blocked-semantic-budget` operation can create a typed
-successor from an exactly verified last-approved candidate after local
-semantic-budget exhaustion; it preserves the blocked segment and does not
-adopt its unreviewed crossing candidate. Only this explicit continuation may
-carry a typed append-only runtime-generation migration; automatic segmentation
-keeps the mission's runtime and capability identity frozen.
+New v4 packets seal adaptive semantic redistribution up front. BUILD, REVIEW,
+and REPAIR checkpoint values are initial allocations; one-claim borrowing may
+draw only from unused approved-checkpoint capacity or sealed cumulative slack.
+Cumulative ceilings never increase. Durable allocation evidence,
+future-checkpoint reservations, no-progress fuses, and a minimum final-review
+reserve (one BUILD, one REPAIR, two REVIEW) bound redistribution. Existing v4
+packets without that policy and all v1–v3 packets retain their historical
+local-cap semantics.
+
+v4 also distinguishes a platform segment maximum from each packet's sealed
+segment source limit and finite mission-total source envelope. The platform
+maximum is 100,000 diff lines per segment and the mission maximum is 480,000;
+SPEC chooses packet limits from the expected repository and checkpoint graph.
+Ordinary segmentation inherits the same mission authority and runtime identity.
+Exhausting the sealed mission total is a SPEC boundary, not a PROGRAM runtime
+continuation. Previously sealed v4 packets retain any stricter graph ceiling
+they originally bound to the segment limit.
 
 The deterministic core owns packet authority, source identity, worktrees,
 state, exact candidate SHA, evidence, retry/repair budgets, runtime-generation

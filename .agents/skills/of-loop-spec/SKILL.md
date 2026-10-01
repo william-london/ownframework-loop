@@ -170,9 +170,14 @@ Before a v3 or v4 PROGRAM is considered ready:
   current runtime-bound operator attestation. Profile identity is run-bound and
   may select semantic model/effort only, never sandbox/tool/MCP/session authority;
 - validate packet budgets against executable ceilings before first execution;
-- treat top-level build/review/repair values as cumulative PROGRAM envelopes;
-- unless intentionally throttling the whole PROGRAM, fund those global
-  envelopes from the sums of checkpoint-local budgets;
+- treat top-level build/review/repair values as cumulative PROGRAM ceilings,
+  choose generous but finite values for substantive autonomous engineering,
+  and do not ask the operator to tune routine pass budgets;
+- for every new v4 packet, seal the canonical adaptive semantic policy with
+  both `reclaim_approved_checkpoint_capacity=true` and
+  `use_cumulative_slack=true`. Checkpoint-local values are initial allocations;
+  the cumulative mission ceilings remain hard limits, and adaptive claims must
+  preserve the future-checkpoint and final-review reserves;
 - ensure a global repair allowance is realizable by the global build/review
   allowance;
 - for PROGRAM validation, top-level `required_validation` is a global gate and
@@ -204,16 +209,18 @@ Before a v3 or v4 PROGRAM is considered ready:
   treat this structural check as an inference engine for undeclared paths;
   SPEC must still inspect the complete mission and grant complete ordinary
   repository scope before sealing.
-- v4 `mission_budget` distinguishes the bounded source ceiling for one run
-  segment from the total source ceiling measured from the mission's original
-  baseline. Keep `risk_budget.max_diff_lines` and the PROGRAM global source
-  ceiling equal to `segment_max_diff_lines`; do not raise the per-run 30,000
-  line ceiling to represent a larger mission. Automatic successors are
-  allowed only when the sealed mission explicitly sets `auto_segment=true`,
-  and can project only already-approved authority. The mission source limit
-  is an upper bound, not a promise that all of it is consumable in the
-  configured number of segments. Segment and mission exhaustion both remain
-  fail-closed authority boundaries.
+- v4 has one platform maximum of 100,000 diff lines per segment. SPEC chooses
+  and seals a segment limit no larger than that maximum from the largest
+  substantive checkpoint, repository/product size, versioned QA/test assets,
+  and bounded repair headroom. Keep `risk_budget.max_diff_lines` equal to
+  `mission_budget.segment_max_diff_lines`; the PROGRAM global source ceiling
+  equals the finite mission-total `mission_max_diff_lines` (platform maximum
+  480,000), measured from the original baseline. Choose a finite mission total
+  for the whole expected graph and a finite `max_segments` (at most 16), not
+  equal per-checkpoint chunks. Automatic successors require `auto_segment=true`
+  and may project only already-approved authority; they never increase any
+  sealed source limit. Exhausting the mission total remains a genuine SPEC
+  boundary; do not author a source-budget continuation.
 - choose `max_pass_runtime_seconds` for the complexity of one semantic pass
   (up to 28800 per pass; the undeclared fallback fuse is 3600, so any pass
   that legitimately needs longer than one hour must declare its budget). For

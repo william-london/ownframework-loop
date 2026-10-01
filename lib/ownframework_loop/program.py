@@ -482,15 +482,9 @@ def validate_checkpoint_graph(packet: dict[str, Any]) -> list[str]:
     if isinstance(sc, dict):
         from . import packet as packet_module
 
-        mission_budget = packet.get("mission_budget") or {}
-        source_ref = (
-            mission_budget.get("source_budget_continuation")
-            if isinstance(mission_budget, dict) else None
-        )
         source_line_ceiling = (
-            packet_module.MAX_TYPED_SOURCE_BUDGET_CONTINUATION_LINES
-            if isinstance(source_ref, dict)
-            and packet_module._valid_source_budget_continuation_ref(source_ref)
+            packet_module.MAX_V4_MISSION_DIFF_LINES
+            if packet.get("schema") == packet_module.MISSION_PROGRAM_SCHEMA_VERSION
             else GLOBAL_MAX_BASELINE_TO_FINAL_DIFF_LINES
         )
         for k, mx in (

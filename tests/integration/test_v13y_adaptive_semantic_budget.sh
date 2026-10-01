@@ -81,7 +81,7 @@ meta = packet()
 meta["execution_mode"] = "program"
 meta["risk_budget"]["max_diff_lines"] = 10
 meta["checkpoint_graph"]["global_source_ceilings"] = {
-    "max_baseline_to_final_diff_lines": 10,
+    "max_baseline_to_final_diff_lines": 100,
 }
 assert packet_module.validate_mission_budget(meta) == []
 invalid_policy = copy.deepcopy(meta)

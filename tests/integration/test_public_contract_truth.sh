@@ -161,6 +161,8 @@ PY
 
 require_pair_phrase "skills/spec/SKILL.md" ".agents/skills/of-loop-spec/SKILL.md" "ofloop supervisor enqueue <repo> <run-id>"
 require_pair_phrase "skills/spec/SKILL.md" ".agents/skills/of-loop-spec/SKILL.md" "Never add push, merge, deploy, publish"
+require_pair_phrase "skills/spec/SKILL.md" ".agents/skills/of-loop-spec/SKILL.md" "use_cumulative_slack=true"
+require_pair_phrase "skills/spec/SKILL.md" ".agents/skills/of-loop-spec/SKILL.md" "platform maximum of 100,000 diff lines per segment"
 
 require_pair_phrase "skills/build/SKILL.md" ".agents/skills/of-loop-build/SKILL.md" "ofloop supervisor enqueue <repo> <run-id>"
 require_pair_phrase "skills/build/SKILL.md" ".agents/skills/of-loop-build/SKILL.md" "No raw worktree/branch creation or removal"

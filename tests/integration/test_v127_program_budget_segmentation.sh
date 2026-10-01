@@ -12,7 +12,7 @@ python3 -B - "$TMP" "$ROOT_DIR" <<'PY'
 from __future__ import annotations
 
 import copy
-import hashlib
+import argparse
 import json
 import os
 import subprocess
@@ -154,8 +154,8 @@ def v4_packet(repo: Path, baseline: str, *, auto_segment: bool = True,
             "execution_order": order,
             "checkpoints": checkpoints,
             "global_source_ceilings": {
-                "max_unique_changed_files": 10,
-                "max_baseline_to_final_diff_lines": segment_lines,
+            "max_unique_changed_files": 10,
+            "max_baseline_to_final_diff_lines": mission_lines,
             },
         },
         "mission_budget": {
@@ -391,7 +391,7 @@ print("V1_V3_SEMANTICS_UNCHANGED=PASS")
 # Required output paths must be covered by the sealed allowed path envelope.
 covered = v4_packet(repo_probe, baseline_probe)
 covered["checkpoint_graph"]["checkpoints"][0]["required_paths"] = ["src/needed.py"]
-assert packet.validate_packet_for_approval(covered) == []
+assert packet.validate_packet_for_approval(covered) == [], packet.validate_packet_for_approval(covered)
 uncovered = copy.deepcopy(covered)
 uncovered["checkpoint_graph"]["checkpoints"][0]["required_paths"] = ["docs/needed.md"]
 assert any("not covered by packet allowed_paths" in error for error in packet.validate_packet_for_approval(uncovered))
@@ -817,146 +817,292 @@ assert supervisor.status(canonical_repo=exhaust_repo, run_id=exhaust_run, db_pat
 assert exhaust_mission["mission_max_diff_lines"] == 12
 print("MISSION_SOURCE_EXHAUSTION_BLOCKS_WITHOUT_SUCCESSOR=PASS")
 
-# Typed legacy admission is exercised with a synthetic v3 source authority. The
-# legacy verifier is replaced only in this disposable unit fixture; source
-# artifacts, source packet bytes, and source ledger row remain outside the
-# successor mutation and are hash-checked before/after.
-legacy_repo, legacy_baseline = make_repo("v127-legacy-admission")
-legacy_id = "run-20260929T000000Z-v127legacy"
-legacy_branch = "factory/candidate/v127-legacy-source"
-git(legacy_repo, "switch", "-qc", legacy_branch)
-(legacy_repo / "src").mkdir()
-(legacy_repo / "src" / "base.py").write_text("BASE = 1\n", encoding="utf-8")
-git(legacy_repo, "add", "src/base.py"); git(legacy_repo, "commit", "-qm", "legacy approved candidate")
-approved_legacy = git(legacy_repo, "rev-parse", "HEAD")
-(legacy_repo / "src" / "base.py").write_text("BASE = 2\n", encoding="utf-8")
-(legacy_repo / "docs" / "governance").mkdir(parents=True)
-(legacy_repo / "docs" / "governance" / "RESEARCH_PROVENANCE.md").write_text("authorized path\n", encoding="utf-8")
-git(legacy_repo, "add", "src/base.py", "docs/governance/RESEARCH_PROVENANCE.md")
-git(legacy_repo, "commit", "-qm", "legacy crossing candidate")
-crossing_legacy = git(legacy_repo, "rev-parse", "HEAD")
-git(legacy_repo, "switch", "-q", "master")
+assert not hasattr(program_mission, "admit_legacy_continuation")
+assert not hasattr(program_mission, "continue_blocked_semantic_budget")
+assert not hasattr(program_mission, "continue_blocked_source_budget")
+print("NORMAL_V4_HAS_NO_INCIDENT_CONTINUATION_CREATION_SURFACES=PASS")
 
-legacy_order = ["CP-00", "CP-01"]
-legacy_checkpoints = [
-    {"id": "CP-00", "title": "approved", "scope": "src/", "depends_on": [],
-     "acceptance_criterion_ids": ["AC-00"], "risk_budget": {"max_build_passes": 2, "max_review_passes": 2, "max_repair_rounds": 1}},
-    {"id": "CP-01", "title": "remaining", "scope": "src/", "depends_on": ["CP-00"],
-     "acceptance_criterion_ids": ["AC-01"], "risk_budget": {"max_build_passes": 3, "max_review_passes": 3, "max_repair_rounds": 1}},
-]
-legacy_meta = {
-    "schema": "ownframework-work-packet/v3", "packet_id": "v127-legacy", "created_at": "2026-09-29T00:00:00Z",
-    "work_class": "FEATURE", "risk_class": "medium", "title": "typed legacy admission fixture",
-    "runner_profile": "default", "target": {"repo": str(legacy_repo.resolve()), "branch": "master", "classification": "local_only", "candidate_branch_prefix": legacy_branch},
-    "execution_mode": "program", "checkpoint_graph": {"execution_order": legacy_order, "checkpoints": legacy_checkpoints,
-        "global_source_ceilings": {"max_unique_changed_files": 20, "max_baseline_to_final_diff_lines": 30000}},
-    "promotion_policy": "human_gate", "acceptance_criteria": [{"id": "AC-00", "text": "approved"}, {"id": "AC-01", "text": "remaining"}],
-    "non_goals": [], "required_validation": [{"name": "fixture", "command": "true", "kind": "fast"}],
-    "allowed_paths": ["src/"], "protected_paths": [".ownframework-loop/"],
-    "work_units": [{"id": "UNIT-00", "title": "approved unit", "scope": "src/"}],
-    "merge_authority": "human_only", "deploy_authority": "human_only", "push_authority": "human_only", "external_action_authority": "none",
-    "risk_budget": {"max_build_passes": 5, "max_review_passes": 6, "max_repair_rounds": 2, "max_files_changed": 20, "max_diff_lines": 30000},
-}
-assert packet.validate_packet_for_approval(legacy_meta) == []
-legacy_root = state.run_dir(legacy_repo, legacy_id); legacy_root.mkdir(parents=True)
-legacy_packet_bytes = ("```json\n" + json.dumps(legacy_meta, sort_keys=True, indent=2) + "\n```\nlegacy fixture\n").encode()
-(legacy_root / "WORK_PACKET.md").write_bytes(legacy_packet_bytes)
-state.save(legacy_repo, legacy_id, state.initial_state(legacy_id))
-state.append_event(legacy_repo, legacy_id, event_type="run_created", old_state=None, new_state="AWAITING_APPROVAL", actor="test", reason="legacy source")
-legacy_enqueue = supervisor.enqueue(
-    canonical_repo=legacy_repo, run_id=legacy_id, runner=MissionFixtureRunner.runner_id,
-    db_path=db_path, max_total_cost_usd=50.0, max_total_tokens=100000, max_wall_seconds=0,
-    runtime_generation=supervisor_runtime.runtime_generation(),
+# New v4 has one source-authority model: a packet-selected segment cap bounded
+# by one platform maximum and a separate finite mission total. Historical v3
+# keeps its original source ceiling.
+authority_repo, authority_baseline = make_repo("v127-authority-model")
+authority_packet = v4_packet(
+    authority_repo, authority_baseline, segment_lines=100000,
+    mission_lines=480000, max_segments=16, checkpoint_count=1,
 )
-assert legacy_enqueue.get("ok") is True, legacy_enqueue
-with supervisor_db._managed_connect(db_path) as conn:
-    conn.execute("UPDATE jobs SET status='DONE' WHERE repo=? AND run_id=?", (str(legacy_repo.resolve()), legacy_id))
+authority_packet["risk_budget"]["max_diff_lines"] = 100000
+authority_packet["checkpoint_graph"]["global_source_ceilings"][
+    "max_baseline_to_final_diff_lines"
+] = 480000
+assert packet.validate_packet_for_approval(authority_packet) == []
+too_large_segment = copy.deepcopy(authority_packet)
+too_large_segment["mission_budget"]["segment_max_diff_lines"] = 100001
+too_large_segment["risk_budget"]["max_diff_lines"] = 100001
+assert packet.validate_packet_for_approval(too_large_segment)
+too_large_mission = copy.deepcopy(authority_packet)
+too_large_mission["mission_budget"]["mission_max_diff_lines"] = 480001
+too_large_mission["checkpoint_graph"]["global_source_ceilings"][
+    "max_baseline_to_final_diff_lines"
+] = 480001
+assert packet.validate_packet_for_approval(too_large_mission)
+# Previously sealed v4 packets bound the graph ceiling to their segment cap.
+# They remain valid with exactly that original cumulative limit; the new
+# normal authoring form may instead bind it to the mission-total envelope.
+legacy_v4_packet = v4_packet(
+    authority_repo, authority_baseline, segment_lines=30000,
+    mission_lines=100000, max_segments=2, checkpoint_count=1,
+)
+legacy_v4_packet["checkpoint_graph"]["global_source_ceilings"][
+    "max_baseline_to_final_diff_lines"
+] = 30000
+assert packet.validate_packet_for_approval(legacy_v4_packet) == []
+assert program.validate_checkpoint_graph(legacy_v4_packet) == []
+legacy_v4_state = program.materialise_initial_program_state(
+    legacy_v4_packet, baseline_sha=authority_baseline,
+    candidate_branch="factory/candidate/v127-legacy-v4",
+)
+assert legacy_v4_state["cumulative_ceilings"][
+    "max_baseline_to_final_diff_lines"
+] == 30000
+print("SEALED_V4_SEGMENT_CEILING_PRESERVED=PASS")
+assert packet._validate_risk_budget_envelope({
+    "schema": "ownframework-work-packet/v3", "risk_budget": {"max_diff_lines": 30000},
+}) == []
+assert packet._validate_risk_budget_envelope({
+    "schema": "ownframework-work-packet/v3", "risk_budget": {"max_diff_lines": 30001},
+})
+obsolete_authority = copy.deepcopy(authority_packet)
+obsolete_authority["mission_budget"]["source_budget_continuation"] = {}
+assert packet.validate_packet_for_approval(obsolete_authority)
+receipt_schema = json.loads(
+    (source_root / "schemas" / "build-receipt.schema.json").read_text()
+)
+receipt_properties = receipt_schema["properties"]
+source_check = receipt_properties["program_source_ceiling_check"]["properties"]
+boundary_properties = receipt_properties["segment_boundary"]["properties"]
+assert source_check["program_max_baseline_to_final_diff_lines"]["maximum"] == 480000
+assert source_check["effective_max_diff_lines"]["maximum"] == 100000
+assert source_check["segment_source_ceiling"]["maximum"] == 100000
+assert source_check["mission_source_ceiling"]["maximum"] == 480000
+assert boundary_properties["mission_source_ceiling"]["maximum"] == 480000
+print("V4_SOURCE_BUDGET_SCHEMA_MAXIMA_MATCH_RUNTIME=PASS")
+print("V4_SEGMENT_AND_MISSION_SOURCE_AUTHORITY_LIMITS=PASS")
+print("V1_V3_SOURCE_LIMIT_REMAINS_30000=PASS")
 
-source_program = program.materialise_initial_program_state(
-    legacy_meta, baseline_sha=legacy_baseline, candidate_branch=legacy_branch,
+from ownframework_loop import cli
+
+root_parser = cli._build_parser()
+root_subparsers = next(
+    action for action in root_parser._actions
+    if isinstance(action, argparse._SubParsersAction)
 )
-cp0 = next(item for item in source_program["checkpoints"] if item["id"] == "CP-00")
-cp0.update({"build_pass_count": 1, "review_pass_count": 1, "candidate_sha": approved_legacy})
-source_program["cumulative_counters"]["build_pass_count"] = 1
-source_program["cumulative_counters"]["review_pass_count"] = 1
-source_program = program.finalize_checkpoint(
-    program_state=source_program, cp_id="CP-00", terminal_state="APPROVED",
-    evidence_manifest={"_packet": legacy_meta, "candidate_sha": approved_legacy, "verdict_sha256": "a" * 64},
+root_commands = root_subparsers.choices
+program_parser = root_commands["program"]
+program_subparsers = next(
+    action for action in program_parser._actions
+    if isinstance(action, argparse._SubParsersAction)
 )
-source_program = program.advance_to_next(source_program, legacy_meta)
-next_cp = next(item for item in source_program["checkpoints"] if item["id"] == "CP-01")
-next_cp["checkpoint_entry_candidate_sha"] = approved_legacy
-synthetic_prefix = [{
-    "checkpoint_id": "CP-00", "terminal_state": "APPROVED", "candidate_sha": approved_legacy,
-    "verdict_sha256": "a" * 64, "next_checkpoints": ["CP-01"], "source_event_sha256": "b" * 64,
-}]
-legacy_source_state = {
-    "run_id": legacy_id, "state": "BLOCKED", "last_candidate_sha": crossing_legacy,
-    "build_pass_count": 4, "review_pass_count": 2, "repair_round": 1,
-    "no_progress_streak": 0, "program": source_program,
+program_commands = program_subparsers.choices
+assert not {
+    "continue-blocked-source-budget", "continue-blocked-semantic-budget",
+    "admit-legacy-continuation",
+}.intersection(program_commands)
+assert hasattr(program_mission, "load_segment")
+assert hasattr(program_mission, "verify_segment_approval")
+print("INCIDENT_CONTINUATION_CREATION_ABSENT_FROM_PUBLIC_CLI=PASS")
+
+# Runtime-generation maintenance is independent of a continuation type. A
+# normal sealed v4 segment quarantined on an installed-generation mismatch can
+# publish one exact workerless migration, replay it idempotently, and resume
+# without changing product authority or semantic accounting.
+from ownframework_loop import program_mission_runtime
+
+runtime_repo, runtime_baseline = make_repo("v127-runtime-migration")
+runtime_run = "run-20260930T000000Z-v127runtime"
+runtime_meta = v4_packet(
+    runtime_repo, runtime_baseline, segment_lines=100,
+    mission_lines=200, max_segments=2, checkpoint_count=2,
+)
+# Isolate scheduler selection from the other PROGRAM fixtures in this test.
+previous_db_path = db_path
+previous_xdg_state_home = os.environ["XDG_STATE_HOME"]
+os.environ["XDG_STATE_HOME"] = str(root / "state-runtime")
+runtime_db_path = supervisor_db.default_db_path()
+with supervisor_db._managed_connect(runtime_db_path):
+    pass
+db_path = runtime_db_path
+runtime_fixture = start_v4(
+    runtime_repo, runtime_baseline, runtime_run, meta=runtime_meta,
+)
+runtime_segment, _, runtime_mission, _ = program_mission.load_segment(
+    runtime_repo, runtime_run,
+)
+runtime_mission_id = str(runtime_segment["mission_id"])
+runtime_packet_path = state.run_dir(runtime_repo, runtime_run) / "WORK_PACKET.md"
+runtime_approval_path = approval.approval_path(runtime_repo, runtime_run)
+runtime_state_path = state.state_path(runtime_repo, runtime_run)
+runtime_events_path = state.events_path(runtime_repo, runtime_run)
+runtime_manifest_path = program_mission._manifest_path(runtime_repo, runtime_mission_id)
+runtime_identity_path = program_mission._mission_runtime_path(runtime_repo, runtime_mission_id)
+authority_before = {
+    "packet": util.sha256_file(runtime_packet_path),
+    "approval": util.sha256_file(runtime_approval_path),
+    "state": util.sha256_file(runtime_state_path),
+    "events": integrity.compute_event_chain_hash(runtime_events_path),
+    "mission": util.sha256_file(runtime_manifest_path),
+    "runtime": util.sha256_file(runtime_identity_path),
+    "binding": runtime_fixture["binding"]["binding_sha256"],
 }
-source_program["cumulative_counters"].update({"build_pass_count": 4, "review_pass_count": 2, "repair_round_count": 1})
-legacy_source_state["program"] = source_program
-legacy_source_state_sha = util.sha256_file(legacy_root / "STATE.json")
-legacy_events_sha = integrity.compute_event_chain_hash(legacy_root / "EVENTS.log")
-legacy_packet_sha = hashlib.sha256(legacy_packet_bytes).hexdigest()
-with supervisor_db._managed_connect_readonly(db_path) as conn:
-    legacy_job = dict(conn.execute("SELECT * FROM jobs WHERE repo=? AND run_id=?", (str(legacy_repo.resolve()), legacy_id)).fetchone())
-validated_source = {
-    "state": legacy_source_state, "packet_meta": legacy_meta, "packet_sha256": legacy_packet_sha,
-    "approval": {}, "approval_file_sha256": "c" * 64, "approval_sha256": "d" * 64,
-    "baseline_sha": legacy_baseline, "baseline_branch": "master", "candidate_branch": legacy_branch,
-    "program": source_program, "events": [], "approved_prefix": synthetic_prefix,
-    "event_chain_sha256": legacy_events_sha, "state_sha256": legacy_source_state_sha,
-    "review_verdict_sha256": "e" * 64, "build_receipt_sha256": "f" * 64,
-    "approved_verdict_sha256": "a" * 64, "approved_source_lines": program_mission._line_count(legacy_repo, legacy_baseline, approved_legacy),
-    "changed_paths": ["src/base.py", "docs/governance/RESEARCH_PROVENANCE.md"],
-    "scope_paths": ["docs/governance/RESEARCH_PROVENANCE.md"], "job": legacy_job,
-    "attempts": [], "accounting": {},
-}
-real_validator = program_mission._validate_legacy_source
-program_mission._validate_legacy_source = lambda *args, **kwargs: copy.deepcopy(validated_source)
-legacy_args = dict(
-    expected_packet_sha256=legacy_packet_sha, expected_baseline_sha=legacy_baseline,
-    approved_checkpoint_id="CP-00", approved_candidate_sha=approved_legacy,
-    crossing_candidate_sha=crossing_legacy, expected_remaining_checkpoints=["CP-01"],
-    authorized_scope_paths=["docs/governance/RESEARCH_PROVENANCE.md"],
-    segment_max_diff_lines=18000, mission_max_diff_lines=48000, max_segments=2,
-    expected_approved_source_lines=None, confirmation=f"LEGACY-CONTINUE:{legacy_id}", db_path=db_path,
-)
+generation_before = runtime_fixture["runtime_generation"]
+generation_after = generation_before + ".maintenance-test"
+real_generation = supervisor_runtime.runtime_generation
+real_supervisor_generation = supervisor._current_runtime_generation
+supervisor_runtime.runtime_generation = lambda: generation_after
+supervisor._current_runtime_generation = lambda: generation_after
 try:
-    legacy_admission = program_mission.admit_legacy_continuation(legacy_repo, legacy_id, **legacy_args)
-    replayed_admission = program_mission.admit_legacy_continuation(legacy_repo, legacy_id, **legacy_args)
+    quarantined = supervisor.run_one(db_path=runtime_db_path)
+    assert quarantined.get("action") == "QUARANTINED", quarantined
+    job_snapshot = supervisor.status(
+        canonical_repo=runtime_repo, run_id=runtime_run, db_path=runtime_db_path,
+    )
+    assert job_snapshot["status"] == "QUARANTINED", job_snapshot
+    assert all(job_snapshot.get(key) is None for key in (
+        "worker_pid", "worker_pgid", "worker_attempt_id", "worker_role",
+    ))
+    with supervisor_db._managed_connect_readonly(runtime_db_path) as conn:
+        runtime_attempt_count = int(conn.execute(
+            "SELECT COUNT(*) FROM semantic_attempts WHERE job_id=?",
+            (int(job_snapshot["id"]),),
+        ).fetchone()[0])
+    runtime_candidate = str(
+        state.load_verified(runtime_repo, runtime_run).get("last_candidate_sha") or runtime_baseline
+    )
+    runtime_branch = str(job_snapshot["candidate_branch"])
+    assert program_mission_runtime._runtime_migration_candidate_lineage_valid(
+        runtime_repo, runtime_candidate, runtime_baseline, runtime_branch,
+        semantic_attempt_count=runtime_attempt_count,
+    ), {
+        "candidate": runtime_candidate, "baseline": runtime_baseline,
+        "branch": runtime_branch,
+        "branch_head": git_checks.branch_head(runtime_repo, runtime_branch),
+        "attempt_count": runtime_attempt_count,
+    }
+    migration_path = program_mission._mission_runtime_migration_path(
+        runtime_repo, runtime_mission_id, 1,
+    )
+    active_worker_snapshot = dict(job_snapshot)
+    active_worker_snapshot.update({
+        "worker_pid": 43210, "worker_pgid": 43210,
+        "worker_attempt_id": "active-worker-must-block-migration",
+        "worker_role": "builder", "worker_started_at": "2026-09-30T00:00:00Z",
+    })
     try:
-        program_mission.admit_legacy_continuation(
-            legacy_repo, legacy_id, **{**legacy_args, "mission_max_diff_lines": 48001},
+        program_mission_runtime.prepare_runtime_generation_resume(
+            runtime_repo, runtime_run, job_snapshot=active_worker_snapshot,
+            target_runtime_generation=generation_after, db_path=runtime_db_path,
         )
     except program_mission.MissionAuthorityError:
         pass
     else:
-        raise AssertionError("contradictory replayed legacy authority was accepted")
+        raise AssertionError("runtime migration proceeded beneath an active worker")
+    assert not migration_path.exists()
+    print("ACTIVE_WORKER_PREVENTS_RUNTIME_MIGRATION=PASS")
+
+    first_migration = program_mission_runtime.prepare_runtime_generation_resume(
+        runtime_repo, runtime_run, job_snapshot=job_snapshot,
+        target_runtime_generation=generation_after, db_path=runtime_db_path,
+    )
+    replayed_migration = program_mission_runtime.prepare_runtime_generation_resume(
+        runtime_repo, runtime_run, job_snapshot=job_snapshot,
+        target_runtime_generation=generation_after, db_path=runtime_db_path,
+    )
+    assert first_migration == replayed_migration
+    assert first_migration["sequence"] == 1
+    resumed = supervisor.resume(
+        canonical_repo=runtime_repo, run_id=runtime_run, db_path=runtime_db_path,
+    )
+    assert resumed.get("resumed") is True, resumed
+    assert resumed.get("runtime_migration") == first_migration, resumed
+    assert resumed["status"] == "QUEUED"
+    new_binding = program_mission_runtime.bind_runtime_identity(
+        runtime_repo, runtime_run, run_binding=runtime_fixture["binding"],
+        runner_profile=runtime_fixture["profile"],
+        runtime_generation=generation_after,
+    )
+    assert new_binding["runtime_migration_sequence"] == 1
+    binding_receipt_path = program_mission._mission_runtime_binding_path(
+        runtime_repo, runtime_mission_id, 1,
+    )
+    binding_receipt_before = binding_receipt_path.read_bytes()
+    wrong_generation_refused = False
+    try:
+        program_mission_runtime.bind_runtime_identity(
+            runtime_repo, runtime_run, run_binding=runtime_fixture["binding"],
+            runner_profile=runtime_fixture["profile"],
+            runtime_generation=generation_before,
+        )
+    except program_mission.MissionAuthorityError:
+        wrong_generation_refused = True
+    assert wrong_generation_refused
+    drifted_profile = dict(runtime_fixture["profile"], model="unauthorized-model")
+    profile_drift_refused = False
+    try:
+        program_mission_runtime.verify_runtime_identity(
+            runtime_repo, runtime_mission_id,
+            run_binding=runtime_fixture["binding"], runner_profile=drifted_profile,
+            runtime_generation=generation_after, segment_number=1,
+        )
+    except program_mission.MissionAuthorityError:
+        profile_drift_refused = True
+    assert profile_drift_refused
+    capability_drift = copy.deepcopy(runtime_fixture["binding"])
+    capability_drift["projection"]["requested"] = ["toolchain.git", "research.public"]
+    capability_drift_refused = False
+    try:
+        program_mission_runtime.verify_runtime_identity(
+            runtime_repo, runtime_mission_id,
+            run_binding=capability_drift, runner_profile=runtime_fixture["profile"],
+            runtime_generation=generation_after, segment_number=1,
+        )
+    except program_mission.MissionAuthorityError:
+        capability_drift_refused = True
+    assert capability_drift_refused
+    assert binding_receipt_path.read_bytes() == binding_receipt_before
+    print("MIGRATED_RUNTIME_CAPABILITY_AND_PROFILE_DRIFT_REFUSED=PASS")
+
+    replayed_binding = program_mission_runtime.bind_runtime_identity(
+        runtime_repo, runtime_run, run_binding=runtime_fixture["binding"],
+        runner_profile=runtime_fixture["profile"],
+        runtime_generation=generation_after,
+    )
+    assert replayed_binding == new_binding
+    assert binding_receipt_path.read_bytes() == binding_receipt_before
+    print("RUNTIME_BINDING_RECEIPT_CREATE_ONCE_REPLAY=PASS")
+
+    verified_identity = program_mission_runtime.verify_runtime_identity(
+        runtime_repo, runtime_mission_id, run_binding=runtime_fixture["binding"],
+        runner_profile=runtime_fixture["profile"],
+        runtime_generation=generation_after, segment_number=1,
+    )
+    assert verified_identity["runtime_generation"] == generation_after
+    assert verified_identity["capability_binding_sha256"] == authority_before["binding"]
+    assert util.sha256_file(runtime_packet_path) == authority_before["packet"]
+    assert util.sha256_file(runtime_approval_path) == authority_before["approval"]
+    assert util.sha256_file(runtime_state_path) == authority_before["state"]
+    assert integrity.compute_event_chain_hash(runtime_events_path) == authority_before["events"]
+    assert util.sha256_file(runtime_manifest_path) == authority_before["mission"]
+    assert util.sha256_file(runtime_identity_path) == authority_before["runtime"]
+    current_program = state.load_verified(runtime_repo, runtime_run)["program"]
+    assert current_program["cumulative_counters"] == {
+        "build_pass_count": 0, "review_pass_count": 0, "repair_round_count": 0,
+        "files_changed_unique": 0, "diff_lines_total": 0,
+    }
 finally:
-    program_mission._validate_legacy_source = real_validator
-assert legacy_admission["run_id"] == replayed_admission["run_id"]
-assert legacy_admission["baseline_sha"] == approved_legacy
-assert legacy_admission["current_checkpoints"] == ["CP-01"]
-assert legacy_admission["source_crossing_candidate_preserved"] == crossing_legacy
-assert legacy_admission["source_run_unchanged"] is True
-assert legacy_admission["source_build_pass_count"] == 4
-legacy_child_packet, _ = packet.parse_packet_file(state.run_dir(legacy_repo, legacy_admission["run_id"]) / "WORK_PACKET.md")
-assert legacy_child_packet["schema"] == packet.MISSION_PROGRAM_SCHEMA_VERSION
-assert legacy_child_packet["mission_budget"]["segment_max_diff_lines"] == 18000
-assert legacy_child_packet["mission_budget"]["mission_max_diff_lines"] == 48000
-assert "docs/governance/RESEARCH_PROVENANCE.md" in legacy_child_packet["allowed_paths"]
-assert legacy_child_packet["checkpoint_graph"]["checkpoints"][1]["required_paths"] == ["docs/governance/RESEARCH_PROVENANCE.md"]
-assert state.load_verified(legacy_repo, legacy_admission["run_id"])["state"] == "READY_TO_BUILD"
-assert supervisor.status(canonical_repo=legacy_repo, run_id=legacy_admission["run_id"], db_path=db_path)["status"] == "QUEUED"
-assert util.sha256_file(legacy_root / "WORK_PACKET.md") == legacy_packet_sha
-assert util.sha256_file(legacy_root / "STATE.json") == legacy_source_state_sha
-assert integrity.compute_event_chain_hash(legacy_root / "EVENTS.log") == legacy_events_sha
-with supervisor_db._managed_connect_readonly(db_path) as conn:
-    assert conn.execute("SELECT COUNT(*) FROM jobs WHERE repo=? AND run_id=?", (str(legacy_repo.resolve()), legacy_admission["run_id"])).fetchone()[0] == 1
-print("TYPED_LEGACY_ADMISSION_SCOPE_BASELINE_REPLAY_AND_IMMUTABILITY=PASS")
+    supervisor_runtime.runtime_generation = real_generation
+    supervisor._current_runtime_generation = real_supervisor_generation
+    db_path = previous_db_path
+    os.environ["XDG_STATE_HOME"] = previous_xdg_state_home
+print("NORMAL_SEGMENT_RUNTIME_MIGRATION_IS_WORKERLESS_AND_CONTINUATION_INDEPENDENT=PASS")
 
 print("PROGRAM_BUDGET_SEGMENTATION=PASS")
 PY

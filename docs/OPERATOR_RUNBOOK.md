@@ -217,13 +217,14 @@ This migration consumes no build, review, repair, cost, or token entitlement
 and does not alter candidate or engineering truth. Historical semantic attempt
 receipts continue to identify the binding under which they ran; future provider
 executions use the migrated binding. Runtime-generation migration is separate
-and remains governed by `resume`. For a workerless successor admitted by the
-explicit blocked semantic-budget continuation, a cross-generation resume may
-first append a create-once migration bound to the unchanged segment, packet,
-approval, state/event prefix, candidate, and workerless attempt/accounting
-snapshot. Ordinary automatic segmentation does not authorize this migration.
-Replaying a crash before the ledger transition reuses only that record. Omitting
-`--rebind-capabilities` preserves the normal fail-closed drift behavior.
+and remains governed by `resume`. At a workerless/quarantined v4 boundary, the
+runtime authority owner may append a create-once migration bound to the
+unchanged segment, packet, approval, state/event prefix, candidate, job, and
+completed attempt/accounting snapshot. It is independent of segment or
+continuation type; active workers, nonterminal attempts, capability drift, or
+runner/profile/model/effort drift refuse it. Replaying a crash before the
+ledger transition reuses only that record. Omitting `--rebind-capabilities`
+preserves the normal fail-closed capability-drift behavior.
 
 The migration and the supervisor lifecycle transition share a private per-run
 lock. This prevents ordinary resume, retirement, re-enqueue, or PROGRAM

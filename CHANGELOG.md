@@ -11,7 +11,25 @@ immutable historical baseline of the previous published line.
 The complete historical changelog through 0.5.2 is preserved at
 [`docs/history/CHANGELOG-through-0.5.2.md`](docs/history/CHANGELOG-through-0.5.2.md).
 
-## Unreleased - Adaptive semantic budgets and typed continuation (2026-09-30)
+## Unreleased - Consolidated v4 PROGRAM authority (2026-09-30)
+
+- Future v4 packets use one source model: a packet-selected segment ceiling up
+  to the 100,000-line platform maximum and a separate finite mission-total
+  envelope up to 480,000 lines. SPEC sizes both and automatic segmentation
+  cannot enlarge either.
+- New v4 SPEC authoring seals adaptive semantic redistribution by default and
+  selects generous finite cumulative semantic budgets without routine operator
+  tuning. Existing sealed packet semantics are unchanged.
+- Retired source-budget, blocked-semantic-budget, and legacy admission creation
+  workflows from normal authoring/execution. Historical evidence verification
+  remains where persisted authority requires it. Runtime-generation identity
+  and workerless migration now have an orthogonal authority owner.
+
+## Unreleased - Intermediate adaptive semantic-budget continuation (superseded before publication)
+
+This intermediate creation workflow was retired by the consolidated v4
+authority model above. Its historical records remain verifiable; it is not a
+normal workflow for new missions.
 
 - Opted-in v4 missions may redistribute only already-sealed cumulative
   BUILD/REVIEW/REPAIR authority one claim at a time, with durable allocation
