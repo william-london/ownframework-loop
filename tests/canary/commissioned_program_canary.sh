@@ -103,7 +103,10 @@ PY
   local rid
   rid="$(ls -1t "$repo/.ownframework-loop" | head -n1)"
   local packet="$repo/.ownframework-loop/$rid/WORK_PACKET.md"
-  python3 "$PACKET_RENDERER" "$repo" "$packet"
+  # A commissioned canary must exercise the configured production profile,
+  # including its explicit model and effort attestation, rather than Claude's
+  # ambient interactive defaults.
+  python3 "$PACKET_RENDERER" "$repo" "$packet" "${OFLOOP_CANARY_RUNNER_PROFILE:-primary}"
 
   PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$INSTALL_ROOT/lib" python3 -B - "$packet" <<'PY'
 import sys

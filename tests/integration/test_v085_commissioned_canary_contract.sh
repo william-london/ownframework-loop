@@ -20,7 +20,7 @@ TMP="$(mktemp -d -t ofloop_canary_contract.XXXXXX)"
 trap 'rm -rf "$TMP"' EXIT
 mkdir -p "$TMP/repo/.ownframework-loop/run-test"
 OUT="$TMP/repo/.ownframework-loop/run-test/WORK_PACKET.md"
-python3 "$RENDER" "$TMP/repo" "$OUT"
+python3 "$RENDER" "$TMP/repo" "$OUT" primary
 
 python3 -B - "$OUT" <<'PY'
 import sys
@@ -29,6 +29,7 @@ from ownframework_loop import packet,schema_validate
 p=Path(sys.argv[1]); meta,_=packet.parse_packet_file(p)
 assert meta["schema"]=="ownframework-work-packet/v3"
 assert meta["execution_mode"]=="program"
+assert meta["runner_profile"]=="primary"
 assert meta["checkpoint_graph"]["execution_order"]==["CP-1","CP-2"]
 cps=meta["checkpoint_graph"]["checkpoints"]
 assert cps[1]["depends_on"]==["CP-1"]
