@@ -11,7 +11,19 @@ immutable historical baseline of the previous published line.
 The complete historical changelog through 0.5.2 is preserved at
 [`docs/history/CHANGELOG-through-0.5.2.md`](docs/history/CHANGELOG-through-0.5.2.md).
 
-## Unreleased - Consolidated v4 PROGRAM authority (2026-09-30)
+## 1.1.0 - Stable Autonomous Engineering Runtime (2026-10-02)
+
+OwnFramework Loop 1.1.0 stabilizes the post-v1 runtime: sealed v4 PROGRAM
+authority, bounded autonomous checkpoint execution and segmentation, adaptive
+semantic allocation within fixed cumulative limits, governed public research,
+candidate-bound deterministic validation, and workerless runtime-generation
+migration. Human promotion remains a separate authority boundary. Production
+installation and commissioning remain host-specific proofs.
+
+The sections below record the development and certification work included in
+this release, including superseded experiments retained as historical context.
+
+### Consolidated v4 PROGRAM authority (2026-09-30)
 
 - Future v4 packets use one source model: a packet-selected segment ceiling up
   to the 100,000-line platform maximum and a separate finite mission-total
@@ -25,7 +37,7 @@ The complete historical changelog through 0.5.2 is preserved at
   remains where persisted authority requires it. Runtime-generation identity
   and workerless migration now have an orthogonal authority owner.
 
-## Unreleased - Intermediate adaptive semantic-budget continuation (superseded before publication)
+### Intermediate adaptive semantic-budget continuation (superseded before publication)
 
 This intermediate creation workflow was retired by the consolidated v4
 authority model above. Its historical records remain verifiable; it is not a
@@ -46,7 +58,7 @@ normal workflow for new missions.
   migration on resume is restricted to the explicit blocked-budget successor;
   ordinary automatic segmentation keeps its runtime identity frozen.
 
-## Unreleased - v4 PROGRAM segmentation and recovery closure (2026-09-29)
+### v4 PROGRAM segmentation and recovery closure (2026-09-29)
 
 - Recovery authority: failed/unaccepted ready semantic artifacts are reseeded
   idempotently without replacing accepted evidence; research capability
@@ -61,15 +73,17 @@ normal workflow for new missions.
   boundary is refused before successor creation when either the checkpoint or
   cumulative PROGRAM BUILD ceiling cannot fund the required re-execution.
 
-## 1.1.0.dev0 - Post-v1 Bounded Closure (2026-09-21)
+### Post-v1 Bounded Closure (2026-09-21)
 
-Post-v1 development on master. The published **v1.0.0** Git tag at
+Post-v1 development initially used source identity `1.1.0.dev0`. The published
+**v1.0.0** Git tag at
 `f4b1188c80c66327011754a71c166572ee94963b` is FROZEN and untouched; the
 canonical install root for v1.0.0 (`~/.local/share/ownframework-loop/1.0.0/`)
-is preserved. New dev installs land under the 1.1.0 identity
-(`~/.local/share/ownframework-loop/1.1.0.dev0/`).
+is preserved. During development, dev installs landed under
+`~/.local/share/ownframework-loop/1.1.0.dev0/`; this release uses the stable
+`1.1.0` identity.
 
-## Unreleased - Research and PROGRAM recovery closure (2026-09-28)
+### Research and PROGRAM recovery closure (2026-09-28)
 
 - Research posture: `bing-rss` is the default general public-web discovery
   backend; `wikipedia` remains the narrow alternate; `GENERAL_WEB_DISCOVERY`
@@ -94,7 +108,7 @@ is preserved. New dev installs land under the 1.1.0 identity
   research path, and Loop-owned control-plane files do not count as product
   checkout dirt.
 
-## Unreleased - Post-v1 Candidate-Bound Validation Environment Parity (2026-09-22)
+### Post-v1 Candidate-Bound Validation Environment Parity (2026-09-22)
 
 - New: `lib/ownframework_loop/validation_environment.py` — deterministic
   candidate-bound project environment. The validator owns one
@@ -166,7 +180,7 @@ is preserved. New dev installs land under the 1.1.0 identity
     `INFRA_FAILURE` and route to terminal `BLOCKED` without
     burning a repair round.
 
-## Unreleased - Post-v1 Mac Production Commissioning Hardening (2026-09-20)
+### Post-v1 Mac Production Commissioning Hardening (2026-09-20)
 
 - New: `progress_watchdog` detects the "Claude alive but zero observable
   progress" failure mode that the wallclock deadline alone cannot. Each
@@ -207,7 +221,7 @@ is preserved. New dev installs land under the 1.1.0 identity
   `status = 'RUNNING'` guard for the same reason: the dispatcher's exit
   handler can mark the attempt row before the watchdog acquires the lock.
 
-## Unreleased - Post-v1 Deep Sweep + Final Production Hardening (2026-09-21)
+### Post-v1 Deep Sweep + Final Production Hardening (2026-09-21)
 
 - Fix: `Signature.from_row` in `progress_watchdog` used unprefixed column
   names that did not match the production tick SELECT, latent-crashing any
@@ -262,7 +276,7 @@ is preserved. New dev installs land under the 1.1.0 identity
   reasonable lead time over the wallclock deadline while tolerating
   realistic long-thinking pauses.
 
-## Unreleased - Governed Public Research Authority (2026-09-21)
+### Governed Public Research Authority (2026-09-21)
 
 Adds a tightly bounded public-research capability so autonomous
 engineering PROGRAMs can research the public world when a mission
