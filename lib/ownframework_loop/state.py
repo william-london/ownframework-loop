@@ -10,7 +10,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from .locking import flock_exclusive
+from .locking import flock_exclusive, flock_exclusive_existing_parent
 from . import transitions
 from .util import (
     atomic_write_json, read_json, run_dir, utc_now_iso, ensure_mode,
@@ -477,13 +477,16 @@ def load_verified(canonical_repo: Path, run_id: str) -> dict[str, Any]:
     under the operator's canonical project root. A read may never manufacture
     the run it reads.
 
-    A run directory that DOES exist keeps the ordinary creating lock: a
-    legitimate run established without a per-run lock must still be readable,
-    and creating a lock inside an existing run directory establishes nothing
-    new. A proven pending write-ahead transaction is completed first. The event
-    chain and the final STATE SHA binding are then verified while the same
-    flock is held, eliminating the verify-then-read race for authority-bearing
-    callers.
+    A run directory that DOES exist is locked with
+    ``flock_exclusive_existing_parent``, which creates the lock FILE inside it
+    but never its parent. A legitimate run established without a per-run lock
+    therefore stays readable, while a run whose directory disappears
+    concurrently with this call yields ``FileNotFoundError`` instead of being
+    recreated. Mutation owners keep the creating flock, because establishing
+    new run state is theirs to do. A proven pending write-ahead transaction is
+    completed first. The event chain and the final STATE SHA binding are then
+    verified while the same flock is held, eliminating the verify-then-read
+    race for authority-bearing callers.
     """
     sp = state_path(canonical_repo, run_id)
     ep = events_path(canonical_repo, run_id)
@@ -491,42 +494,55 @@ def load_verified(canonical_repo: Path, run_id: str) -> dict[str, Any]:
         # This run does not exist, so it has no durable state to verify and no
         # lock to take. Return without creating the repository or the run.
         return {}
-    with flock_exclusive(lock_path(canonical_repo, run_id)):
-        _recover_pending_state_txn_locked(canonical_repo, run_id)
-        events: list[dict[str, Any]] = []
-        if ep.exists():
-            events = integrity.read_event_chain(ep)
-            if events:
-                recorded = integrity.get_event_chain_hash(ep)
-                actual = integrity.compute_event_chain_hash(ep)
-                if not recorded or recorded != actual:
-                    raise integrity.TamperingDetected(
-                        "event chain integrity mismatch while loading authoritative state"
-                    )
-        ok, msg = integrity.verify_state_sha(sp, ep)
-        if not ok:
-            # v0.10.0-dev f007: unreadable STATE bytes are torn; a
-            # parseable SHA mismatch is tampering. A valid pending journal may
-            # recover only the former; otherwise unreadable bytes are StateTorn.
-            current_bytes = read_json(sp, default=None)
-            if current_bytes is None:
-                # STATE.json is unreadable / truncated / malformed. Try to
-                # recover from the pending journal one more time under the
-                # same flock. If still torn, raise StateTorn.
-                _recover_pending_state_txn_locked(canonical_repo, run_id)
-                recovered = read_json(sp, default=None)
-                if recovered is None:
-                    raise integrity.StateTorn(
-                        "STATE.json is unreadable/torn; "
-                        f"pending journal did not produce a recoverable state: {msg}"
-                    )
-                recovered_events = integrity.read_event_chain(ep) if ep.exists() else []
-                _verify_semantic_budget_allocation_bindings(recovered, recovered_events)
-                return recovered
-            raise integrity.TamperingDetected(msg)
-        payload = read_json(sp, default={}) or {}
-        _verify_semantic_budget_allocation_bindings(payload, events if ep.exists() else [])
-        return payload
+    try:
+        with flock_exclusive_existing_parent(lock_path(canonical_repo, run_id)):
+            return _load_verified_locked(canonical_repo, run_id, sp, ep)
+    except FileNotFoundError:
+        # The run directory was removed between the existence test and lock
+        # acquisition. A verified read must never recreate it, so the run is
+        # simply absent and yields the same empty result as above.
+        return {}
+
+
+def _load_verified_locked(
+    canonical_repo: Path, run_id: str, sp: Path, ep: Path,
+) -> dict[str, Any]:
+    """Verify and return one authoritative snapshot under the held run lock."""
+    _recover_pending_state_txn_locked(canonical_repo, run_id)
+    events: list[dict[str, Any]] = []
+    if ep.exists():
+        events = integrity.read_event_chain(ep)
+        if events:
+            recorded = integrity.get_event_chain_hash(ep)
+            actual = integrity.compute_event_chain_hash(ep)
+            if not recorded or recorded != actual:
+                raise integrity.TamperingDetected(
+                    "event chain integrity mismatch while loading authoritative state"
+                )
+    ok, msg = integrity.verify_state_sha(sp, ep)
+    if not ok:
+        # v0.10.0-dev f007: unreadable STATE bytes are torn; a
+        # parseable SHA mismatch is tampering. A valid pending journal may
+        # recover only the former; otherwise unreadable bytes are StateTorn.
+        current_bytes = read_json(sp, default=None)
+        if current_bytes is None:
+            # STATE.json is unreadable / truncated / malformed. Try to
+            # recover from the pending journal one more time under the
+            # same flock. If still torn, raise StateTorn.
+            _recover_pending_state_txn_locked(canonical_repo, run_id)
+            recovered = read_json(sp, default=None)
+            if recovered is None:
+                raise integrity.StateTorn(
+                    "STATE.json is unreadable/torn; "
+                    f"pending journal did not produce a recoverable state: {msg}"
+                )
+            recovered_events = integrity.read_event_chain(ep) if ep.exists() else []
+            _verify_semantic_budget_allocation_bindings(recovered, recovered_events)
+            return recovered
+        raise integrity.TamperingDetected(msg)
+    payload = read_json(sp, default={}) or {}
+    _verify_semantic_budget_allocation_bindings(payload, events if ep.exists() else [])
+    return payload
 
 
 def _verify_semantic_budget_allocation_bindings(

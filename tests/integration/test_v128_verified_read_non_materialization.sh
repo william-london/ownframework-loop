@@ -12,14 +12,18 @@
 # `.ownframework-loop/<run_id>/` skeleton (repo + run dir + 0600 LOCK) on every
 # dispatch tick. The read manufactured the state it was reading.
 #
-# Native fix: locking.flock_exclusive_existing() (a non-materializing read
-# lock) is used by load_verified(), which now fails closed on an absent
-# run/repository without creating anything. Mutation owners keep the creating
-# flock, because they legitimately establish new run state.
+# Native fix: locking.flock_exclusive_existing_parent() creates the lock FILE
+# inside an already-existing run directory but never mkdirs the parent, and
+# load_verified() uses it. A run whose directory disappears concurrently yields
+# FileNotFoundError instead of being recreated, so the read contract is
+# structural rather than a pre-flight existence test. Mutation owners keep
+# locking.flock_exclusive(), which does create, because establishing new run
+# state is theirs to do.
 #
 # Required invariants proven here:
-#   READ_OF_MISSING_REPO => NO FILESYSTEM CREATION
-#   READ_OF_MISSING_RUN  => NO FILESYSTEM CREATION
+#   READ_OF_MISSING_REPO   => NO FILESYSTEM CREATION
+#   READ_OF_MISSING_RUN    => NO FILESYSTEM CREATION
+#   READ_RACE_WITH_REMOVAL => NO DIRECTORY_RECREATION
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 . "$HERE/../_helpers.sh"
@@ -34,6 +38,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -44,8 +49,9 @@ source_root = Path(sys.argv[2])
 os.environ["XDG_STATE_HOME"] = str(root / "state")
 
 from ownframework_loop import (
-    integrity, program_mission, state, supervisor, supervisor_db, util,
+    integrity, locking, program_mission, state, supervisor, supervisor_db, util,
 )
+
 
 
 class ReadFixtureRunner:
@@ -132,6 +138,108 @@ assert not (live_repo / ".ownframework-loop").exists(), \
     "READ_OF_MISSING_RUN created the run directory"
 assert not (live_repo / ".ownframework-loop" / "run-20260101T000000Z-v128absent" / "LOCK").exists()
 print("READ_OF_MISSING_RUN_NO_CREATION=PASS")
+
+# The race: the run directory is removed between load_verified's existence test
+# and its lock acquisition. The read must NOT resurrect the directory chain.
+#
+# This is proven against the two lock primitives directly, because that is the
+# exact boundary that decides it. A hook on os.open cannot distinguish them:
+# flock_exclusive mkdirs BEFORE opening, so a post-mkdir removal is invisible.
+# Removing the run directory immediately before each lock attempt is the
+# meaningful comparison.
+race_repo = projects_root / "ofloop-cert-race-probe"
+race_run = "run-20260101T000000Z-v128race"
+race_root = state.run_dir(race_repo, race_run)
+race_root.mkdir(parents=True)
+race_root.joinpath("STATE.json").write_text(
+    json.dumps({"state": "BUILDING", "label": "race"}), encoding="utf-8",
+)
+
+# The creating primitive (mutation owners) DOES resurrect the parent. This is
+# the behaviour load_verified must not inherit, and pinning it here proves the
+# next assertion is not vacuous.
+shutil.rmtree(race_root)
+assert not race_root.exists()
+with locking.flock_exclusive(race_root / "LOCK"):
+    pass
+assert race_root.exists() and (race_root / "LOCK").is_file(), \
+    "the creating lock must still create its parent for mutation owners"
+print("CREATING_LOCK_STILL_ESTABLISHES_STATE=PASS")
+
+# The read primitive must NOT. Same starting state, same removed parent.
+shutil.rmtree(race_root)
+assert not race_root.exists()
+try:
+    with locking.flock_exclusive_existing_parent(race_root / "LOCK"):
+        raise AssertionError("a removed run directory must not be acquirable")
+except FileNotFoundError:
+    pass
+assert not race_root.exists(), \
+    "READ_RACE_WITH_REMOVAL recreated the run directory"
+assert not race_repo.joinpath(".ownframework-loop").exists() or \
+    not list(race_repo.joinpath(".ownframework-loop").iterdir()), \
+    "READ_RACE_WITH_REMOVAL recreated the directory chain"
+print("READ_RACE_WITH_REMOVAL_NO_RECREATION=PASS")
+
+# And end-to-end through load_verified: a run directory that exists is still
+# read and integrity-checked, never rebuilt.
+race_root.mkdir(parents=True)
+race_root.joinpath("STATE.json").write_text(
+    json.dumps({"state": "BUILDING", "label": "race"}), encoding="utf-8",
+)
+assert state.load_verified(race_repo, race_run) == \
+    {"state": "BUILDING", "label": "race"}
+print("READ_RACE_EXISTING_RUN_STILL_VERIFIED=PASS")
+
+# The primitive must still create the lock file inside an EXISTING parent.
+prim_parent = projects_root / "ofloop-cert-primitive2"
+prim_parent.mkdir()
+with locking.flock_exclusive_existing_parent(prim_parent / "LOCK"):
+    pass
+assert (prim_parent / "LOCK").is_file(), \
+    "the primitive must still create the lock inside an existing parent"
+print("READ_LOCK_PRIMITIVE_PARENT_SEMANTICS=PASS")
+
+# load_verified must actually ACQUIRE through the non-materializing primitive.
+# The primitives differing is not enough: this pins which one the read path
+# binds, so regressing load_verified back to the creating flock fails here.
+spy_repo = projects_root / "ofloop-cert-spy"
+spy_run = "run-20260101T000000Z-v128spy"
+spy_root = state.run_dir(spy_repo, spy_run)
+spy_root.mkdir(parents=True)
+spy_root.joinpath("STATE.json").write_text(
+    json.dumps({"state": "BUILDING", "label": "spy"}), encoding="utf-8",
+)
+from ownframework_loop import state as state_mod
+acquired = []
+_real_non_materializing = state_mod.flock_exclusive_existing_parent
+_real_creating = state_mod.flock_exclusive
+
+
+def _spy_non_materializing(path, **kwargs):
+    acquired.append("non_materializing")
+    return _real_non_materializing(path, **kwargs)
+
+
+def _spy_creating(path, **kwargs):
+    acquired.append("creating")
+    # Recreate what the creating lock would do, so a regression is visible in
+    # the directory assertions below as well as in `acquired`.
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    return _real_creating(path, **kwargs)
+
+
+state_mod.flock_exclusive_existing_parent = _spy_non_materializing
+state_mod.flock_exclusive = _spy_creating
+try:
+    spy_result = state.load_verified(spy_repo, spy_run)
+finally:
+    state_mod.flock_exclusive_existing_parent = _real_non_materializing
+    state_mod.flock_exclusive = _real_creating
+assert acquired == ["non_materializing"], \
+    f"verified read must use the non-materializing lock, used={acquired}"
+assert spy_result == {"state": "BUILDING", "label": "spy"}
+print("VERIFIED_READ_USES_NON_MATERIALIZING_LOCK=PASS")
 
 # A run directory that EXISTS but was established without a per-run lock is a
 # legitimate run and must remain readable: the creating lock is retained

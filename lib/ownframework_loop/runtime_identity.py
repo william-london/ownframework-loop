@@ -15,7 +15,13 @@ from pathlib import Path
 
 from . import process_runner
 
-IGNORED_DIR_NAMES = {".git", "logs", ".ownframework-loop", "__pycache__"}
+# Directories that are never part of runtime payload identity. `.ruff_cache`
+# is the linter cache several canonical tests regenerate on every run; it is
+# gitignored, and a gitignored tool cache must not change payload identity or
+# report INSTALL_PARITY=MISMATCH for an otherwise identical source tree.
+IGNORED_DIR_NAMES = {
+    ".git", "logs", ".ownframework-loop", "__pycache__", ".ruff_cache",
+}
 IGNORED_FILE_NAMES = {
     ".payload.manifest", ".payload.manifest.tmp", ".ownframework-loop-managed", ".install.provenance",
     ".install.log", ".uninstall.log", ".supervisor-refresh.log", ".DS_Store",
