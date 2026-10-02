@@ -19,6 +19,12 @@ The build receipt and review verdict carry:
 - `escalation_recommended` (boolean)
 - `escalation_reason` (string)
 
+For a review assessment, `recommended_verdict: "HUMAN_REVIEW_REQUIRED"` is
+valid only when `escalation_recommended` is `true` and `escalation_reason` is a
+specific non-empty string. A contradictory or unexplained human-review
+recommendation is malformed semantic output; it is not authoritative evidence
+that new human authority is needed.
+
 The finalizer sets these from the model-supplied agent result / assessment
 (or, if absent, `false` / `None`). The model cannot influence the
 finalizer's verdict on any of the deterministic checks; it can only

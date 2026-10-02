@@ -185,6 +185,15 @@ def validate_assessment_contract(assessment: Any) -> list[str]:
     escalation_reason = assessment.get("escalation_reason")
     if escalation_reason is not None and not isinstance(escalation_reason, str):
         errors.append("escalation_reason must be a string or null")
+    if assessment.get("recommended_verdict") == "HUMAN_REVIEW_REQUIRED":
+        if assessment.get("escalation_recommended") is not True:
+            errors.append(
+                "HUMAN_REVIEW_REQUIRED requires escalation_recommended=true"
+            )
+        if not isinstance(escalation_reason, str) or not escalation_reason.strip():
+            errors.append(
+                "HUMAN_REVIEW_REQUIRED requires a non-empty escalation_reason"
+            )
     if (
         "validation_results" in assessment
         and not isinstance(assessment.get("validation_results"), list)

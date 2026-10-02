@@ -95,6 +95,48 @@ python3 - "$RSEM" <<'PY'
 import json,sys
 from pathlib import Path
 p=Path(sys.argv[1]); d=json.loads(p.read_text())
+d["acceptance_results"]=[{"id":"AC-1","result":"pass","evidence":"contract reviewed"}]
+d["validation_results"]=[]
+d["recommended_verdict"]="HUMAN_REVIEW_REQUIRED"
+d["escalation_recommended"]=False
+d["escalation_reason"]=None
+p.write_text(json.dumps(d,indent=2,sort_keys=True)+"\n")
+PY
+HR_BAD_READY="$(RORDER_JSON="$RORDER" python3 - <<'PY'
+import json,os
+from ownframework_loop import dispatch
+work_order=json.loads(os.environ["RORDER_JSON"])
+ready,reason=dispatch.semantic_result_ready(work_order)
+assert reason in dispatch._RETRYABLE_SEMANTIC_RESULT_REASONS, reason
+print(f"{ready}|{reason}")
+PY
+)"
+assert_eq "$HR_BAD_READY" "False|review_semantic_shape_invalid" "unsubstantiated human-review verdict is retryable malformed semantic output"
+assert_eq "$(jq -r '.review_pass_count' "$SINGLE/.ownframework-loop/$RID/STATE.json")" "$REVIEW_PASS_BEFORE_BAD" "malformed human-review output preserves same pass"
+assert_eq "$(jq -r '.repair_round' "$SINGLE/.ownframework-loop/$RID/STATE.json")" "$REPAIR_BEFORE_BAD" "malformed human-review output does not fund repair"
+[[ ! -e "$SINGLE/.ownframework-loop/$RID/REVIEW_VERDICT.json" ]] || fail "malformed human-review output must not create authoritative verdict"
+
+python3 - "$RSEM" <<'PY'
+import json,sys
+from pathlib import Path
+p=Path(sys.argv[1]); d=json.loads(p.read_text())
+d["escalation_recommended"]=True
+d["escalation_reason"]="synthetic unresolved authority boundary"
+p.write_text(json.dumps(d,indent=2,sort_keys=True)+"\n")
+PY
+HR_VALID_READY="$(RORDER_JSON="$RORDER" python3 - <<'PY'
+import json,os
+from ownframework_loop import dispatch
+ready,reason=dispatch.semantic_result_ready(json.loads(os.environ["RORDER_JSON"]))
+print(f"{ready}|{reason}")
+PY
+)"
+assert_eq "$HR_VALID_READY" "True|ready" "explicitly reasoned human-review recommendation remains valid"
+
+python3 - "$RSEM" <<'PY'
+import json,sys
+from pathlib import Path
+p=Path(sys.argv[1]); d=json.loads(p.read_text())
 d["acceptance_results"]=[{"id":"AC-1","result":"PASS","evidence":"exact-SHA synthetic contract proof"}]
 d["validation_results"]=[]
 p.write_text(json.dumps(d,indent=2,sort_keys=True)+"\n")
@@ -384,6 +426,16 @@ review={
     "recommended_verdict":"APPROVED",
 }
 assert assessment.validate_assessment_contract(review) == []
+human_review={**review,"recommended_verdict":"HUMAN_REVIEW_REQUIRED"}
+assert any(
+    "requires escalation_recommended=true" in error
+    for error in assessment.validate_assessment_contract(human_review)
+), "human review without an explicit escalation must be invalid"
+human_review.update(
+    escalation_recommended=True,
+    escalation_reason="synthetic unresolved authority boundary",
+)
+assert assessment.validate_assessment_contract(human_review) == []
 review_bad=dict(review); review_bad["validation_results"]={"wrong":"type"}
 errors=assessment.validate_assessment_contract(review_bad)
 assert any("validation_results must be a list" in e for e in errors), errors

@@ -41,6 +41,13 @@ exact-SHA review.
 5. Run ofloop review finalize <repo> <run-id> <assessment-path>.
 6. Emit ofloop review marker <repo> <run-id>.
 
+`HUMAN_REVIEW_REQUIRED` is reserved for a genuine unresolved authority or
+judgment boundary that cannot be resolved from the sealed contract. It must be
+paired with `escalation_recommended: true` and a specific, non-empty
+`escalation_reason`. If that explanation is absent or contradictory, the
+semantic result is malformed and Loop will retry the same review pass; it must
+not be treated as an authoritative human hold.
+
 ## Prohibitions
 
 No raw worktree creation or removal; no direct state/receipt/verdict writes;

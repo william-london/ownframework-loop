@@ -4,6 +4,7 @@
   "_non_goal_result_enum": "Every non_goal_results[].result must be exactly: preserved | violated | inconclusive. SATISFIED is not a protocol value.",
   "_finding_contract": "Each finding must contain finding_id(F-...), severity(critical|high|medium|low|info), classification(must_fix|advisory), title, description; optional file string and line integer >= 1 only.",
   "_boolean_contract": "escalation_recommended must be a JSON boolean, never a quoted string.",
+  "_human_review_required_contract": "HUMAN_REVIEW_REQUIRED is valid only with escalation_recommended=true and a non-empty escalation_reason. Use it only for a genuine unresolved authority/judgment boundary; otherwise choose the applicable verdict.",
 
   "schema": "ownframework-loop-review-agent-assessment/v1",
   "run_id": "<fill: run-...Z-...>",
