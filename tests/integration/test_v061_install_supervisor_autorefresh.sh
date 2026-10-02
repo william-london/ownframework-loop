@@ -12,10 +12,32 @@ HOME_FRESH="$TMP/home-fresh"
 FAKEBIN="$TMP/fakebin"
 mkdir -p "$HOME_EXISTING" "$HOME_FRESH" "$FAKEBIN"
 
-git clone -q "$ROOT_DIR" "$SRC"
+SOURCE_HAS_GIT=0
+if git -C "$ROOT_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  git clone -q "$ROOT_DIR" "$SRC"
+  SOURCE_HAS_GIT=1
+else
+  # Installed payloads intentionally omit .git.  Preserve the test's source
+  # tree input without inventing Git provenance; refresh must record a null
+  # source_head when the supplied source has no repository metadata.
+  python3 -B - "$ROOT_DIR" "$SRC" <<'PY'
+import shutil, sys
+from pathlib import Path
+
+shutil.copytree(
+    Path(sys.argv[1]),
+    Path(sys.argv[2]),
+    symlinks=True,
+    ignore=shutil.ignore_patterns(".git", "__pycache__", "*.pyc"),
+)
+PY
+fi
 mkdir -p "$CORE"
 cp -R "$SRC"/. "$CORE"/
-HEAD_EXPECTED="$(git -C "$SRC" rev-parse HEAD)"
+HEAD_EXPECTED=""
+if [[ "$SOURCE_HAS_GIT" == "1" ]]; then
+  HEAD_EXPECTED="$(git -C "$SRC" rev-parse HEAD)"
+fi
 VERSION_EXPECTED="$(PYTHONPATH="$SRC/lib" python3 - <<'PY'
 from ownframework_loop import __version__
 print(__version__)
@@ -95,10 +117,10 @@ PLIST="$HOME_EXISTING/Library/LaunchAgents/com.ownframework.loop-supervisor.plis
 PROV="$HOME_EXISTING/.local/state/ownframework-loop/runtime-provenance.json"
 [[ -f "$PROV" ]] || fail "runtime provenance missing after refresh"
 
-python3 - "$PLIST" "$PROV" "$CORE/bin/ofloop" "$SRC" "$HEAD_EXPECTED" "$VERSION_EXPECTED" <<'PY'
+python3 - "$PLIST" "$PROV" "$CORE/bin/ofloop" "$SRC" "$HEAD_EXPECTED" "$VERSION_EXPECTED" "$SOURCE_HAS_GIT" <<'PY'
 import json, plistlib, sys
 from pathlib import Path
-plist_path, prov_path, ofloop, source, head, version = sys.argv[1:]
+plist_path, prov_path, ofloop, source, head, version, source_has_git = sys.argv[1:]
 with open(plist_path, 'rb') as f:
     plist = plistlib.load(f)
 with open(prov_path) as f:
@@ -113,7 +135,10 @@ assert args[args.index('--ofloop') + 1] == expected_ofloop, args
 assert args[args.index('--db') + 1].endswith('/ownframework-loop/supervisor.sqlite3'), args
 assert prov['ofloop_bin'] == expected_ofloop, prov
 assert prov['source_root'] == expected_source, prov
-assert prov['source_head'] == head, prov
+if source_has_git == "1":
+    assert prov['source_head'] == head, prov
+else:
+    assert prov['source_head'] is None, prov
 assert prov['ofloop_version'] == version, prov
 PY
 
