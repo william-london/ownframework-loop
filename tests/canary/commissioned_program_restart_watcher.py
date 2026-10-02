@@ -388,7 +388,7 @@ def arm(root: Path, helper: Path) -> int:
     return 1
 
 
-def db_probe(c: dict[str, Any]) -> dict[str, Any]:
+def db_probe(c: dict[str, Any], *, cp1_finalized_at: float) -> dict[str, Any]:
     result = {"job": None, "attempt_count": 0, "active_worker": False, "cp2_attempted": False}
     db = Path(c["db"])
     if not db.is_file():
@@ -403,20 +403,39 @@ def db_probe(c: dict[str, Any]) -> dict[str, Any]:
             result["job"] = row[0]
             result["active_worker"] = bool(row[1] or row[2] or row[3])
             attempts = conn.execute(
-                "select attempt_id,role,status from semantic_attempts where job_id=? order by started_at",
+                "select attempt_id,role,status,started_at from semantic_attempts where job_id=? order by started_at",
                 (row[0],),
             ).fetchall()
             result["attempt_count"] = len(attempts)
-            cp2_attempts = attempts[4:]
-            result["cp2_attempted"] = bool(cp2_attempts)
+            # Attempts are not a fixed-size sequence: a legitimate retry can
+            # add any number of rows while CP-1 is still active.  Attribute
+            # post-boundary work by its durable start time, not by an assumed
+            # attempt ordinal.
+            cp2_attempt_ids: set[str] = set()
+            unknown_attempt_time = False
+            for attempt_id, _role, _status, started_at in attempts:
+                try:
+                    if float(started_at) > cp1_finalized_at:
+                        cp2_attempt_ids.add(str(attempt_id))
+                except (TypeError, ValueError):
+                    unknown_attempt_time = True
+            result["cp2_attempted"] = bool(cp2_attempt_ids) or unknown_attempt_time
             # The CP-1 finalizer can still be unwinding when it publishes the
             # authoritative CP-2 boundary.  That worker is not a CP-2
-            # semantic worker and must not make the boundary look missed.
+            # semantic worker and must not make the boundary look missed. An
+            # unknown active attempt remains fail-closed rather than being
+            # mistaken for that known CP-1 finalizer.
             active_attempt_id = row[3]
+            has_worker_owner = bool(row[1] or row[2] or row[3])
+            known_attempt_ids = {str(attempt[0]) for attempt in attempts}
             result["active_worker"] = bool(
-                (row[1] or row[2] or row[3])
-                and active_attempt_id
-                and any(a[0] == active_attempt_id for a in cp2_attempts)
+                has_worker_owner
+                and (
+                    not active_attempt_id
+                    or str(active_attempt_id) not in known_attempt_ids
+                    or str(active_attempt_id) in cp2_attempt_ids
+                    or unknown_attempt_time
+                )
             )
         conn.close()
     except sqlite3.Error:
@@ -456,13 +475,26 @@ def boundary_probe(c: dict[str, Any]) -> str:
     finalized = {x.get("id"): x.get("terminal_state") for x in program.get("finalized_checkpoints", [])}
     checkpoints = {x.get("id"): x for x in program.get("checkpoints", [])}
     cp2 = checkpoints.get("CP-2") or {}
-    db = db_probe(c)
     if state.get("state") in {"BLOCKED", "STOPPED"}:
         return "TERMINAL_FAIL"
     if finalized.get("CP-1") != "APPROVED":
         return "WAIT"
     if (program.get("current_checkpoints") or []) != ["CP-2"]:
         return "WAIT"
+    cp1_terminal = next(
+        (x for x in program.get("finalized_checkpoints", []) if x.get("id") == "CP-1"),
+        None,
+    )
+    finalized_at = cp1_terminal.get("finalized_at") if isinstance(cp1_terminal, dict) else None
+    try:
+        if not isinstance(finalized_at, str) or not finalized_at:
+            raise ValueError("missing_cp1_finalized_at")
+        cp1_finalized_at = dt.datetime.fromisoformat(
+            finalized_at.replace("Z", "+00:00")
+        ).timestamp()
+    except (TypeError, ValueError, OverflowError):
+        return "BOUNDARY_MISSED"
+    db = db_probe(c, cp1_finalized_at=cp1_finalized_at)
     if state.get("state") != "READY_TO_BUILD":
         if cp2.get("build_pass_count", 0) or cp2.get("review_pass_count", 0) or db["active_worker"]:
             return "BOUNDARY_MISSED"
