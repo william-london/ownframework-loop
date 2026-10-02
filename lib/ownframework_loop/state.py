@@ -465,13 +465,32 @@ def load(canonical_repo: Path, run_id: str) -> dict[str, Any] | None:
 def load_verified(canonical_repo: Path, run_id: str) -> dict[str, Any]:
     """Load one authoritative state snapshot under the run lock.
 
-    A proven pending write-ahead transaction is completed first. The event
+    This is an authoritative READ, so it must never create a run that does not
+    exist. Reading a repository or run that holds no run directory returns the
+    same empty result the integrity check already yields for "no state or event
+    chain yet", WITHOUT materializing the repository or the run directory.
+
+    Historically this acquired the creating flock unconditionally, so a caller
+    that merely OBSERVED a retired historical run (``supervisor``'s
+    program-boundary reconciliation replays every ``DONE`` enrollment)
+    resurrected that run's entire ``.ownframework-loop/<run_id>/`` skeleton
+    under the operator's canonical project root. A read may never manufacture
+    the run it reads.
+
+    A run directory that DOES exist keeps the ordinary creating lock: a
+    legitimate run established without a per-run lock must still be readable,
+    and creating a lock inside an existing run directory establishes nothing
+    new. A proven pending write-ahead transaction is completed first. The event
     chain and the final STATE SHA binding are then verified while the same
     flock is held, eliminating the verify-then-read race for authority-bearing
     callers.
     """
     sp = state_path(canonical_repo, run_id)
     ep = events_path(canonical_repo, run_id)
+    if not run_dir(canonical_repo, run_id).is_dir():
+        # This run does not exist, so it has no durable state to verify and no
+        # lock to take. Return without creating the repository or the run.
+        return {}
     with flock_exclusive(lock_path(canonical_repo, run_id)):
         _recover_pending_state_txn_locked(canonical_repo, run_id)
         events: list[dict[str, Any]] = []
