@@ -218,10 +218,11 @@ PY
 )"
     die "$reason"
   fi
-  PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$INSTALL_ROOT/lib" python3 -B -     "$CONTROL" "$1/restart-proof.json" <<'PY'
+  PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$INSTALL_ROOT/lib:$HERE" python3 -B -     "$CONTROL" "$1/restart-proof.json" <<'PY'
 import json,sqlite3,sys
 from pathlib import Path
 from ownframework_loop import integrity,state as state_mod,packet as packet_mod
+from commissioned_program_attempt_audit import audit_semantic_attempts
 
 control_path=Path(sys.argv[1]); restart_path=Path(sys.argv[2])
 c=json.loads(control_path.read_text()); repo=Path(c["repo"]); rid=c["run_id"]
@@ -259,20 +260,28 @@ try:
 
     conn=sqlite3.connect(f"file:{Path(c['db']).resolve()}?mode=ro",uri=True)
     conn.row_factory=sqlite3.Row
-    job=conn.execute("SELECT * FROM jobs WHERE repo=? AND run_id=?",(str(repo.resolve()),rid)).fetchone()
-    assert job is not None and job["status"]=="DONE", dict(job) if job else None
+    job_row=conn.execute("SELECT * FROM jobs WHERE repo=? AND run_id=?",(str(repo.resolve()),rid)).fetchone()
+    assert job_row is not None and job_row["status"]=="DONE", dict(job_row) if job_row else None
+    job=dict(job_row)
+    assert not any(job.get(key) for key in ("worker_pid", "worker_pgid", "worker_role", "worker_attempt_id")), job
     assert job["runtime_generation"]==c["runtime_generation_started"], dict(job)
     attempts=conn.execute("SELECT * FROM semantic_attempts WHERE job_id=? ORDER BY started_at",(job["id"],)).fetchall()
     conn.close()
-    assert len(attempts)==7, [dict(x) for x in attempts]
-    assert [x["role"] for x in attempts]==[
-        "builder","reviewer","builder","reviewer","builder","reviewer","reviewer"
-    ]
-    nonterminal={"STARTED","RUNNING","CLAIMED"}
-    assert not [x for x in attempts if x["status"] in nonterminal], [dict(x) for x in attempts]
-    assert len({x["attempt_id"] for x in attempts})==len(attempts)
-    assert all(x["status"]=="COMPLETED" and x["semantic_accepted"]==1 for x in attempts), [dict(x) for x in attempts]
-    assert attempts[-1]["role"]=="reviewer" and attempts[-1]["accepted_candidate_sha"]==last_build, dict(attempts[-1])
+    attempt_audit=audit_semantic_attempts(
+        attempts,
+        expected_accepted_roles=[
+            "builder","reviewer","builder","reviewer","builder","reviewer","reviewer"
+        ],
+        final_candidate_sha=last_build,
+        job_totals=job,
+    )
+    candidate_branch=str(job.get("candidate_branch") or "")
+    assert candidate_branch, "supervisor job lacks its candidate branch identity"
+    branch_head=__import__("subprocess").check_output(
+        ["git","-C",str(repo),"rev-parse","--verify",f"refs/heads/{candidate_branch}^{{commit}}"],
+        text=True,
+    ).strip()
+    assert branch_head==last_build, (candidate_branch,branch_head,last_build)
 
     restart=json.loads(restart_path.read_text())
     assert restart["schema"]=="ownframework-loop-commissioned-canary-restart-proof/v1"
@@ -335,6 +344,10 @@ print("CHECKPOINT_ACCOUNTING=EXACT")
 print("RUNTIME_GENERATION_STABLE=yes")
 print("STATE_EVENT_CHAIN_VALID=yes")
 print("ATTEMPT_LEDGER_COHERENT=yes")
+print("SEMANTIC_ATTEMPTS="+str(attempt_audit["attempt_count"]))
+print("ACCEPTED_SEMANTIC_ATTEMPTS="+str(attempt_audit["accepted_attempt_count"]))
+print("AUTHORIZED_FAILED_RETRIES="+str(attempt_audit["failed_retry_count"]))
+print("ATTEMPT_COST_AND_TOKEN_TOTALS_RECONCILE=yes")
 print("UNAUTHORIZED_EXTERNAL_EFFECTS=0")
 print("HUMAN_SEMANTIC_INTERVENTION_DURING_RUN=0")
 print("PLUGIN_HOOK_RUNTIME_FIRING=PROVEN")
