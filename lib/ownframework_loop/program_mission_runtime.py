@@ -128,6 +128,31 @@ def _runtime_only_capability_transition(record: dict[str, Any]) -> bool:
             if not isinstance(item, dict):
                 return None
             item.pop("commissioning_evidence_sha256", None)
+            # A builtin, unprivileged package capability's reported version is
+            # part of the semantic runtime fingerprint, not an expansion of
+            # capability authority. A workerless runtime migration may refresh
+            # that version only while the exact executable path and digest,
+            # capability name, provider, privilege, and network scope remain
+            # bound by the old/new migration snapshots. Other capability
+            # versions (notably browser/asset identity) remain authority-bound.
+            if (
+                item.get("kind") == "package"
+                and item.get("provider") == "builtin"
+                and item.get("privileged") is False
+            ):
+                executable = item.get("executable")
+                executable_sha256 = item.get("executable_sha256")
+                version = item.get("version")
+                if (
+                    not isinstance(executable, str)
+                    or not executable
+                    or not isinstance(executable_sha256, str)
+                    or not _SHA256_RE.fullmatch(executable_sha256)
+                    or not isinstance(version, str)
+                    or not version
+                ):
+                    return None
+                item.pop("version", None)
             browser = item.get("browser")
             if browser is not None:
                 if not isinstance(browser, dict):

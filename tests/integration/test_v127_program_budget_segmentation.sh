@@ -1180,6 +1180,58 @@ assert program_mission_runtime._runtime_only_capability_transition({
     "previous_binding": {"projection": old_projection},
     "new_binding": {"projection": new_projection},
 })
+
+# A builtin, unprivileged package-manager version is semantic runtime identity,
+# not new capability authority, provided its exact executable and scope remain
+# unchanged. This is the package version emitted by the installed capability
+# probe; the complete old/new projections remain bound in migration evidence.
+package_old = copy.deepcopy(old_projection)
+package_old["semantic_runtime_fingerprint"] = "4" * 64
+package_old["capabilities"] = [{
+    "kind": "package",
+    "name": "package.npm",
+    "provider": "builtin",
+    "privileged": False,
+    "executable": "/opt/homebrew/lib/node_modules/npm/bin/npm-cli.js",
+    "executable_sha256": "5" * 64,
+    "network_domains": ["registry.npmjs.org"],
+    "commissioning_evidence_sha256": "6" * 64,
+    "version": "12.0.2",
+}]
+package_old["requested"] = ["package.npm"]
+package_old["requested_runner_profile"]["effort_attestation"] = {
+    "attestation_sha256": "7" * 64,
+    "profile_identity_sha256": capability_runtime_fixture["profile"]["identity_sha256"],
+    "semantic_runtime_fingerprint": "4" * 64,
+}
+package_new = copy.deepcopy(package_old)
+package_new["semantic_runtime_fingerprint"] = "8" * 64
+package_new["capabilities"][0]["version"] = "12.2.0"
+package_new["capabilities"][0]["commissioning_evidence_sha256"] = "9" * 64
+package_new["requested_runner_profile"]["effort_attestation"] = {
+    "attestation_sha256": "a" * 64,
+    "profile_identity_sha256": capability_runtime_fixture["profile"]["identity_sha256"],
+    "semantic_runtime_fingerprint": "8" * 64,
+}
+assert program_mission_runtime._runtime_only_capability_transition({
+    "previous_binding": {"projection": package_old},
+    "new_binding": {"projection": package_new},
+}), "same executable/scope package version refresh must be runtime-migratable"
+for package_drift in ("executable", "executable_sha256", "network_domains", "privileged"):
+    invalid_package = copy.deepcopy(package_new)
+    if package_drift == "network_domains":
+        invalid_package["capabilities"][0][package_drift] = ["unapproved.example"]
+    elif package_drift == "privileged":
+        invalid_package["capabilities"][0][package_drift] = True
+    elif package_drift == "executable_sha256":
+        invalid_package["capabilities"][0][package_drift] = "b" * 64
+    else:
+        invalid_package["capabilities"][0][package_drift] = "/tmp/unapproved-npm"
+    assert not program_mission_runtime._runtime_only_capability_transition({
+        "previous_binding": {"projection": package_old},
+        "new_binding": {"projection": invalid_package},
+    }), package_drift
+
 for forbidden_change in ("requested_runner_profile", "capabilities", "network_domains"):
     invalid_projection = copy.deepcopy(new_projection)
     if forbidden_change == "requested_runner_profile":
@@ -1192,7 +1244,7 @@ for forbidden_change in ("requested_runner_profile", "capabilities", "network_do
         "previous_binding": {"projection": old_projection},
         "new_binding": {"projection": invalid_projection},
     }), forbidden_change
-print("RUNTIME_MIGRATION_ALLOWS_PROOF_REFRESH_ONLY=PASS")
+print("RUNTIME_MIGRATION_ALLOWS_PROOF_AND_EXACT_PACKAGE_VERSION_REFRESH=PASS")
 capability_runtime_segment, _, capability_runtime_mission, _ = program_mission.load_segment(
     capability_runtime_repo, capability_runtime_run,
 )
