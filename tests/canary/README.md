@@ -26,6 +26,12 @@ refuses source-checkout runtimes and requires an installed managed core,
 runtime-provenance record, supervisor ledger, and active launchd/systemd-user
 service.
 
+The commissioned PROGRAM packet explicitly selects the `primary` runner profile
+by default, so the canary proves the production model and effort attestation
+rather than inheriting interactive Claude settings. Set
+`OFLOOP_CANARY_RUNNER_PROFILE` only when intentionally certifying another
+commissioned profile.
+
 Its `prepare` command is **PREPARE-ONLY**: it does not enqueue work and does
 not call a model. It creates a local-only v3 PROGRAM with two checkpoints and
 an empty network allowlist.

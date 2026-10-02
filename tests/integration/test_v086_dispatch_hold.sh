@@ -9,7 +9,7 @@ trap 'rm -rf "$TMP"' EXIT
 TMP_ROOT="$TMP" ROOT_DIR="$ROOT_DIR" OFLOOP_BIN="$OFLOOP_BIN" \
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$(cd "$HERE/.." && pwd):$LIB_DIR" \
 python3 -B - <<'PY'
-import json, os, sqlite3, subprocess, sys, time
+import datetime as dt, json, os, sqlite3, subprocess, sys, time
 from pathlib import Path
 from ownframework_loop import state as state_mod, supervisor
 import sys as _sys_h
@@ -51,7 +51,11 @@ def make_boundary(repo, rid):
     doc["state"] = "READY_TO_BUILD"
     prog = doc["program"]
     prog["current_checkpoints"] = ["CP-2"]
-    prog["finalized_checkpoints"] = [{"id": "CP-1", "terminal_state": "APPROVED"}]
+    prog["finalized_checkpoints"] = [{
+        "id": "CP-1",
+        "terminal_state": "APPROVED",
+        "finalized_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+    }]
     previous_cp = {x["id"]: x for x in prog["checkpoints"]}["CP-1"]
     previous_cp["terminal"] = "APPROVED"
     next_cp = {x["id"]: x for x in prog["checkpoints"]}["CP-2"]

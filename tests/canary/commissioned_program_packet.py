@@ -5,8 +5,8 @@ import json
 import sys
 from pathlib import Path
 
-def packet_for(repo: Path) -> dict:
-    return {
+def packet_for(repo: Path, runner_profile: str | None = None) -> dict:
+    packet = {
         "schema": "ownframework-work-packet/v3",
         "packet_id": "commissioned-program-canary",
         "created_at": "2026-08-30T00:00:00Z",
@@ -121,14 +121,17 @@ def packet_for(repo: Path) -> dict:
             "max_pass_runtime_seconds": 3600,
         },
     }
+    if runner_profile:
+        packet["runner_profile"] = runner_profile
+    return packet
 
 def main() -> int:
-    if len(sys.argv) != 3:
-        print("usage: commissioned_program_packet.py <repo> <WORK_PACKET.md>", file=sys.stderr)
+    if len(sys.argv) not in (3, 4):
+        print("usage: commissioned_program_packet.py <repo> <WORK_PACKET.md> [runner-profile]", file=sys.stderr)
         return 2
     repo=Path(sys.argv[1]).expanduser().resolve()
     out=Path(sys.argv[2])
-    packet=packet_for(repo)
+    packet=packet_for(repo, sys.argv[3] if len(sys.argv) == 4 else None)
     fence = chr(96) * 3
     out.write_text(fence+"json\n"+json.dumps(packet, indent=2, sort_keys=True)+"\n"+fence+"\n", encoding="utf-8")
     return 0

@@ -59,7 +59,8 @@ def fixture(name, missed=False, cp1_active=False):
         ("builder-1", "builder", "DONE"),
         ("reviewer-1", "reviewer", "DONE"),
         ("builder-2", "builder", "DONE"),
-        ("reviewer-2", "reviewer", "DONE"),
+        ("reviewer-2-failed", "reviewer", "FAILED"),
+        ("reviewer-2-retry", "reviewer", "DONE"),
     ]
     if missed:
         attempts.append(("builder-3", "builder", "RUNNING"))
@@ -78,7 +79,7 @@ def fixture(name, missed=False, cp1_active=False):
     )
     active_pid = 101 if (missed or cp1_active) else None
     active_role = "builder" if missed else ("reviewer" if cp1_active else None)
-    active_attempt = "builder-3" if missed else ("reviewer-2" if cp1_active else None)
+    active_attempt = "builder-3" if missed else ("reviewer-2-retry" if cp1_active else None)
     conn.execute(
         "INSERT INTO jobs(id, repo, run_id, worker_pid, worker_role, worker_attempt_id) VALUES(1, ?, ?, ?, ?, ?)",
         (str(repo.resolve()), run, active_pid, active_role, active_attempt),
@@ -94,7 +95,11 @@ def fixture(name, missed=False, cp1_active=False):
         "state": "READY_TO_BUILD",
         "program": {
             "current_checkpoints": ["CP-2"],
-            "finalized_checkpoints": [{"id": "CP-1", "terminal_state": "APPROVED"}],
+            "finalized_checkpoints": [{
+                "id": "CP-1",
+                "terminal_state": "APPROVED",
+                "finalized_at": "1970-01-01T00:00:04.500000Z",
+            }],
             "checkpoints": [
                 {"id": "CP-1", "terminal": "APPROVED", "build_pass_count": 2, "review_pass_count": 2, "repair_round_count": 1},
                 {"id": "CP-2", "terminal": None, "build_pass_count": 1 if missed else 0, "review_pass_count": 0, "repair_round_count": 0},
@@ -216,6 +221,23 @@ assert "CANARY_RESTART_WATCH=ALREADY_COMPLETE" in duplicate.stdout
 assert count.read_text().strip() == "1"
 subprocess.run(["bash", str(harness), "destroy", str(root)], env=e, check=True, stdout=subprocess.DEVNULL)
 print("CANARY_RESTART_WATCHER_EXACTLY_ONCE=PASS")
+
+# A legitimate failed-and-accounted CP-1 reviewer attempt followed by a retry
+# must not be mistaken for the first CP-2 attempt. The boundary is determined
+# from durable checkpoint finalization time, not a magic attempt ordinal.
+root, run, state, count, active = fixture("cp1-review-retry")
+e = env(count, active)
+subprocess.run(["bash", str(harness), "arm-restart", str(root)], env=e, check=True, stdout=subprocess.DEVNULL)
+run_state = root / "repo" / ".ownframework-loop" / run / "STATE.json"
+write(run_state, state)
+wait_for(lambda: (root / "restart-proof.json").is_file(), timeout=5)
+proof = json.loads((root / "restart-proof.json").read_text())
+assert proof["observed_cp1_terminal"] == "APPROVED"
+assert proof["no_active_cp2_worker"] is True
+assert count.read_text().strip() == "1"
+wait_for(lambda: control(root).get("watcher_status") == "PROOF_WRITTEN", timeout=5)
+subprocess.run(["bash", str(harness), "destroy", str(root)], env=e, check=True, stdout=subprocess.DEVNULL)
+print("CANARY_RESTART_WATCHER_IGNORES_CP1_RETRY=PASS")
 
 # A CP-1 reviewer may still be unwinding while it publishes the authoritative
 # CP-1 -> CP-2 boundary.  It is not a CP-2 worker and must not make the watcher
