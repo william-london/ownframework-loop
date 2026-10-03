@@ -151,8 +151,12 @@ REQUEST_SCHEMA = "ownframework-loop-research-request/v1"
 RESPONSE_SCHEMA = "ownframework-loop-research-response/v1"
 
 # Strict canonical-id validators. Used for every path-bearing field.
+# The accepted grammar is exactly the set of identities the scheduler itself
+# places in jobs.run_id: ordinary run IDs, rollover run IDs, and PROGRAM
+# segment run IDs as minted by program_mission._segment_run_id().
 _RUN_ID_RE = _re.compile(
-    r"^(?:run-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}|roll-[0-9a-f]{24})$"
+    r"^(?:run-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}|roll-[0-9a-f]{24}"
+    r"|seg-[0-9a-f]{20}-s[0-9]{2})$"
 )
 _ATTEMPT_ID_RE = _re.compile(r"^[A-Za-z0-9._:-]{1,64}$")
 _REQUEST_ID_RE = _re.compile(

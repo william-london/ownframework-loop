@@ -11,6 +11,48 @@ immutable historical baseline of the previous published line.
 The complete historical changelog through 0.5.2 is preserved at
 [`docs/history/CHANGELOG-through-0.5.2.md`](docs/history/CHANGELOG-through-0.5.2.md).
 
+## 1.1.1 - PROGRAM Segment Research Identity (2026-10-02)
+
+OwnFramework Loop 1.1.1 is a narrow patch release that closes one
+independently proven A-class correctness/authority defect in the governed
+public research transport.
+
+OwnFramework Loop mints its own PROGRAM segment job identities through
+`program_mission._segment_run_id()`:
+
+```python
+f"seg-{mission_id.removeprefix('mission-')[:20]}-s{number:02d}"
+```
+
+and stores those values in `jobs.run_id`. The research identity boundary in
+`supervisor_research`, `ofloop-research-broker` and `ofloop-research-call`
+accepted only ordinary run IDs and rollover run IDs, so a PROGRAM segment job
+was rejected by `research.public` at the first identity assertion in
+`process_research_queue()` — before capability admission — for the entire
+non-terminal lifetime of that job. The commissioned capability was healthy but
+unreachable for every PROGRAM-segment run.
+
+The accepted grammar is now exactly the set of identities the scheduler itself
+places in `jobs.run_id`:
+
+```text
+run-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}
+roll-[0-9a-f]{24}
+seg-[0-9a-f]{20}-s[0-9]{2}
+```
+
+The segment stem alphabet is derived from the authoritative mission-identity
+generator (`mission-[a-f0-9]{24}`), not assumed. The validator remains strict
+and anchored: traversal, wrong widths, non-hex, uppercase, arbitrary prefixes
+and trailing whitespace are still refused, and the resolved evidence path
+cannot escape the operator-owned research root. All three transport boundaries
+carry an identical grammar, and the regression binds producer and consumer by
+deriving the identity with the real `_segment_run_id()`.
+
+This mirrors the earlier `roll-*` repair, which closed the identical class for
+rollover identities. No architecture changed. Historical releases, including
+v1.1.0, are unchanged.
+
 ## 1.1.0 - Stable Autonomous Engineering Runtime (2026-10-02)
 
 OwnFramework Loop 1.1.0 stabilizes the post-v1 runtime: sealed v4 PROGRAM

@@ -11,5 +11,5 @@ from __future__ import annotations
 #   - Publication authority is the immutable Git tag + GitHub Release.
 #     This string is source-identity only; the runtime_generation hash
 #     of the installed payload is what verifies identity at runtime.
-__version__ = "1.1.0"
+__version__ = "1.1.1"
 __all__ = ["__version__"]

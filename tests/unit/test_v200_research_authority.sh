@@ -713,6 +713,100 @@ for malformed_rollover_id in ("roll-short", "roll-" + "g" * 24,
         pass
 print("research bridge rejects malformed rollover run IDs: OK")
 
+# 4b) PROGRAM segment run identities. OwnFramework Loop mints these itself in
+# program_mission._segment_run_id() and stores them in jobs.run_id, so the
+# research identity boundary must accept exactly that produced shape.
+# Bind producer and consumer in one regression: derive the id with the real
+# producer, then assert the research boundary accepts it.
+from ownframework_loop import program_mission as pm
+
+segment_run = pm._segment_run_id("mission-2a0b90904bd52a0dc6d6a2a9", 1)
+assert segment_run == "seg-2a0b90904bd52a0dc6d6-s01", segment_run
+
+# The exact entry point used on every supervisor research tick. Without the
+# segment form in the allowlist this raises before checking capability or
+# looking for requests.
+tick = sr.process_research_queue(
+    db_path=ev_root / "unused-supervisor.sqlite3",
+    canonical_repo=ev_root,
+    run_id=segment_run,
+)
+assert tick.get("consumed") == 0 and tick.get("deferred") is None, tick
+print(f"research bridge accepts a canonical PROGRAM segment run ID: OK ({segment_run})")
+
+# A segment identity must resolve beneath the operator-owned evidence root
+# and must not be able to escape it.
+segment_dir = sr._run_evidence_dir(segment_run)
+ev_root_resolved = Path(os.environ["OFLOOP_RESEARCH_EVIDENCE_ROOT"]).resolve()
+assert segment_dir.resolve() == ev_root_resolved / segment_run, segment_dir
+assert segment_dir.resolve().is_relative_to(ev_root_resolved), segment_dir
+print(f"PROGRAM segment evidence dir stays under the research root: OK ({segment_dir})")
+
+# Only the exact produced shape is accepted: 20 lowercase-hex stem, "-s", and
+# exactly two digits. Uppercase, wrong width, non-hex, traversal, arbitrary
+# prefixes, and trailing whitespace all stay refused.
+SEGMENT_STEM = "2a0b90904bd52a0dc6d6"
+for malformed_segment_id in (
+    "seg-short",
+    "seg-" + "a" * 19 + "-s01",
+    "seg-" + "a" * 21 + "-s01",
+    "seg-" + "g" * 20 + "-s01",
+    "seg-" + "A" * 20 + "-s01",
+    "seg-" + SEGMENT_STEM.upper() + "-s01",
+    "seg-" + "a" * 20 + "-s1",
+    "seg-" + "a" * 20 + "-s001",
+    "seg-" + "a" * 20 + "-sAA",
+    "seg-../../etc/passwd",
+    "seg-" + SEGMENT_STEM + "-s01/../x",
+    "xseg-" + SEGMENT_STEM + "-s01",
+    "SEG-" + SEGMENT_STEM + "-s01",
+    "seg-" + SEGMENT_STEM + "-s01 ",
+):
+    try:
+        sr._assert_canonical_run_id(malformed_segment_id)
+        raise AssertionError(
+            f"accepted malformed PROGRAM segment ID: {malformed_segment_id!r}"
+        )
+    except sr._ValidationError:
+        pass
+print("research bridge rejects malformed PROGRAM segment run IDs: OK")
+
+# The three transport boundaries must agree on the accepted grammar.
+import importlib.util as _ilu
+import importlib.machinery as _ilm
+
+REPO_ROOT_PATH = Path(os.environ.get("REPO_ROOT", ".")).resolve()
+
+
+def _load_sibling_regex(relative_path, attr):
+    # These transports ship without a .py suffix, so name the source loader
+    # explicitly instead of relying on extension-based inference.
+    loader = _ilm.SourceFileLoader(
+        "ofloop_transport_probe_" + attr.lower().lstrip("_"),
+        str(REPO_ROOT_PATH / relative_path),
+    )
+    spec = _ilu.spec_from_loader(loader.name, loader)
+    mod = _ilu.module_from_spec(spec)
+    loader.exec_module(mod)
+    return getattr(mod, attr)
+
+
+broker_re = _load_sibling_regex("bin/ofloop-research-broker", "_RUN_ID_RE")
+helper_re = _load_sibling_regex("bin/ofloop-research-call", "RUN_ID_RE")
+assert broker_re.pattern == sr._RUN_ID_RE.pattern, (
+    broker_re.pattern, sr._RUN_ID_RE.pattern)
+assert helper_re.pattern == sr._RUN_ID_RE.pattern, (
+    helper_re.pattern, sr._RUN_ID_RE.pattern)
+for probe in (segment_run, "run-20260921T180000Z-aabbccdd",
+              "roll-c24c98493e1a98ca91e2acb3"):
+    for boundary in (broker_re, helper_re, sr._RUN_ID_RE):
+        assert boundary.match(probe), (probe, boundary.pattern)
+for probe in ("seg-short", "seg-" + "a" * 20 + "-sAA",
+              "seg-" + SEGMENT_STEM + "-s01/../x"):
+    for boundary in (broker_re, helper_re, sr._RUN_ID_RE):
+        assert not boundary.match(probe), (probe, boundary.pattern)
+print("broker / helper / supervisor research run-id grammars are identical: OK")
+
 # 5) The supervisor rejects requests whose run_id does not match the
 #    worker-run inbox being serviced. The worker has no write authority
 #    over any other run's requests/ dir (capability resolver scopes
