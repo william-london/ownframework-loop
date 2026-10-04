@@ -150,6 +150,48 @@ for spec_path in spec_capability_doctrine:
         f"missing={missing_capability}"
     )
 print("SPEC_DOCTRINE_PARITY=PASS")
+
+# v1.1.2 reviewer/builder network-authority documentation accuracy (post-HVAC
+# audit). Both shipped role contracts asserted `allowedDomains: []` as an
+# unconditional property of the worker sandbox. That is wrong whenever the
+# packet freezes a `network_read_allowlist` or a resolved capability
+# contributes narrow domains (package registries, browser provisioning
+# hosts): the effective set is their union, computed in
+# supervisor_runner._semantic_worker_settings. The architecture ADR
+# (docs/architecture/RESEARCH_AUTHORITY.md) already stated the union rule
+# correctly; the role contracts were the outliers, and they understate the
+# reviewer's own authority.
+#
+# Pin the corrected invariant to the SOURCE, so the prose cannot drift from
+# the code again: strictAllowlist is hardcoded true, and the effective set is
+# the union of the packet list with resolved capability domains. The role
+# contracts must state that rule and must not re-assert the empty-allowlist
+# claim as unconditional. research.public must still be described as
+# contributing no Bash network authority (capabilities.py declares an empty
+# domain set for it).
+runner_src = (root / "lib" / "ownframework_loop" / "supervisor_runner.py").read_text()
+assert '"strictAllowlist": True' in runner_src, \
+    "supervisor_runner no longer hardcodes strictAllowlist=True; role docs must be revisited"
+assert "set(network_read_allowlist or [])" in runner_src and \
+    "capability_resolution.get(\"network_domains\")" in runner_src, \
+    "effective allowlist is no longer the documented packet/capability union"
+cap_src = (root / "lib" / "ownframework_loop" / "capabilities.py").read_text()
+assert '"research.public", "read-only-network"' in cap_src, \
+    "research.public capability definition moved; role docs must be revisited"
+
+for role_path in (root / "agents" / "of-reviewer.md", root / "agents" / "of-builder.md"):
+    role_text = " ".join(role_path.read_text(encoding="utf-8").split())
+    assert "`allowedDomains: []`" not in role_text, (
+        f"{role_path}: re-asserted the unconditional empty-allowlist claim; "
+        "the effective set is the packet/capability union"
+    )
+    assert "network_read_allowlist" in role_text, \
+        f"{role_path}: must name the packet network_read_allowlist as an allowlist source"
+    assert "strictAllowlist" in role_text, \
+        f"{role_path}: must keep stating that strictAllowlist always holds"
+    assert "no Bash network authority" in role_text, \
+        f"{role_path}: must state that research.public adds no Bash network authority"
+print("ROLE_NETWORK_AUTHORITY_DOC=PASS")
 PY
 
 if grep -RInE '^\s*(from|import)\s+(anthropic|claude|openai|codex)(\.|\s|$)' lib/ownframework_loop --include='*.py'; then

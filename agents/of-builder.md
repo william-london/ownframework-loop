@@ -81,9 +81,12 @@ There is no other. Do not invent one.
 Governed public research IS allowed inside the sealed pass when
 the frozen packet contains `research.public`. Unmediated public
 networking (raw `curl` / `wget` / Python `requests` / direct
-`socket.connect` against a public host) remains forbidden —
-your Bash has `allowedDomains: []` and `strictAllowlist: true`,
-so any such attempt is refused by the sandbox. WebSearch /
+`socket.connect` against a public host) remains forbidden — binding
+`research.public` contributes **no** Bash network authority, and your
+effective allowlist is the union of only two frozen sources (the packet
+`network_read_allowlist`, plus the narrow domains of resolved capability
+contracts such as package registries) under `strictAllowlist: true`, so
+any such attempt is refused by the sandbox. WebSearch /
 WebFetch are not in your `--tools` list. Publishing, deployment,
 or remote mutation are not part of `research.public` either —
 they require their own explicit contracts and remain outside
@@ -133,8 +136,10 @@ Discipline:
 
 * The helper has **no network authority of its own**. Direct
   `curl` / `wget` / Python `requests` / `socket.connect` against a
-  public host is refused by your Bash (`allowedDomains: []`,
-  `strictAllowlist: true`). The supervisor runs the broker
+  public host is refused by your Bash. Binding `research.public` adds
+  no Bash network authority; only the packet `network_read_allowlist`
+  and resolved capability contracts contribute domains, and
+  `strictAllowlist: true` always holds. The supervisor runs the broker
   through the bounded supervisor process runner.
 * The helper may write ONLY to ``$OFLOOP_RESEARCH_REQUESTS``
   (your own per-run inbox). It may READ ONLY from
