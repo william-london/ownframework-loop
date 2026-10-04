@@ -165,3 +165,4 @@ tests/integration/test_v128_verified_read_non_materialization.sh
 tests/integration/test_v129_payload_identity_cache_exclusion.sh
 tests/integration/test_v130_acceptance_verification_projection.sh
 tests/integration/test_v131_semantic_coverage_fail_closed.sh
+tests/integration/test_v132_cross_role_worktree_isolation.sh

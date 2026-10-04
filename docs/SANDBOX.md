@@ -45,6 +45,26 @@ Bash denies reads of the operator home directory and the Loop supervisor state r
 
 The supervisor sets `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1`, and sandbox credential rules deny common GitHub/npm/PyPI/container tokens. Model authentication remains available to the Claude process itself, not to its Bash children.
 
+### Cross-role worktree isolation
+
+A semantic worker never treats the **other** role's worktree as an independent
+evidence authority. `denyRead` names the sibling role's worktree explicitly, so
+the invariant holds wherever the candidate repository lives. The role's own
+worktree remains in `allowRead`, and a more-specific `allowRead` entry still
+wins over this deny.
+
+This matters because the broad `$HOME` deny alone only covers a repository
+checked out under the operator's home directory. Before the sibling was denied
+explicitly, a candidate repository outside `$HOME` left the sibling worktree on
+unlisted ground, where the disposition belongs to the external Claude sandbox
+rather than to Loop. The rule can only remove potential authority; it widens
+nothing. `tests/integration/test_v132_cross_role_worktree_isolation.sh` pins it,
+including the broad-parent-`allowRead` and path-traversal spellings.
+
+The shared Git common directory stays readable by both roles by design: it
+carries only repository metadata, and the candidate branch tip it exposes is
+already authoritative in `STATE.json`.
+
 ## Network
 
 Semantic BUILD/REVIEW passes have no broad internet. Sandboxed Bash may reach only exact hostnames frozen in the packet's `network_read_allowlist`; omission/empty means zero egress. This is intended for dependency/download reads, not search, browsing, publishing, deployment, or remote mutation. The SPEC author derives the smallest required list from the declared toolchain before sealing.

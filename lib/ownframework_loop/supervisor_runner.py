@@ -202,9 +202,28 @@ def _semantic_worker_settings(
         str(home / ".docker" / "run" / "docker.sock"),
         str(home / ".local" / "share" / "containers" / "podman" / "podman.sock"),
     }
-    deny_read = sorted({str(home), str(state_root), *raw_container_sockets})
+    deny_read = {str(home), str(state_root), *raw_container_sockets}
+    # v1.1.2: cross-role worktree isolation made structural. A semantic worker
+    # must never treat the OTHER role's worktree as an independent evidence
+    # authority. That was previously true only incidentally, because a
+    # candidate repository living under the operator's home directory is
+    # already covered by the broad denyRead above. A candidate checked out
+    # outside $HOME would have left the sibling worktree on unlisted ground,
+    # whose disposition belongs to the external sandbox rather than to Loop.
+    # Deny the sibling explicitly so the invariant holds wherever the
+    # repository lives. This can only remove potential authority: the role's
+    # OWN worktree stays in allowRead, and a more-specific allowRead entry wins
+    # over this deny regardless of ordering.
+    from . import util as _util_mod
+
+    sibling_worktree = (
+        _util_mod.reviewer_worktree(canonical_repo, run_id)
+        if role == "builder"
+        else _util_mod.builder_worktree(canonical_repo, run_id)
+    )
+    deny_read.add(str(sibling_worktree.resolve(strict=False)))
     filesystem: dict[str, Any] = {
-        "denyRead": deny_read,
+        "denyRead": sorted(deny_read),
         "allowRead": allow_read,
         "allowWrite": allow_write,
     }
