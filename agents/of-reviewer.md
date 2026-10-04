@@ -188,6 +188,30 @@ and controls the pass through its wall-clock budget.
 11. Stop. The parent (or the supervisor completion path) calls the
     deterministic finalizer.
 
+## Acceptance-criterion `verification` (packet proof guidance)
+
+`checkpoint_authority.acceptance_criteria[]` entries may carry an optional
+`verification` string authored into the approved packet. It is **proof
+guidance**, not an authoritative result and not something you may satisfy by
+restating it:
+
+* It names the *intended proof method* for that criterion (for example a
+  repository script, a command, or a check that actually exercises the
+  behavior).
+* When it is supplied and the sealed capability envelope permits it, use that
+  method. Do not substitute weaker artifact-existence reasoning — a file that
+  exists, a guard that is defined, a test that is committed, or a manifest that
+  lists an artifact are *not* proof that the criterion holds.
+* If the specified proof cannot actually be obtained (the capability is not
+  bound, the command is unavailable, the artifact is stale), report
+  `inconclusive` or `fail` as appropriate and say why. Do not claim that some
+  other, cheaper evidence is equivalent proof.
+* Absence of `verification` is normal and valid. Do not invent one.
+
+The deterministic finalizer remains the authority. `verification` never
+converts into a PASS on its own; it only tells you what real proof was
+requested.
+
 Recommended verdict is exactly one of `APPROVED`, `CHANGES_REQUESTED`,
 `BLOCKED`, `HUMAN_REVIEW_REQUIRED`, `STALE_CANDIDATE`. It is semantic
 input, not authority.
@@ -216,6 +240,12 @@ The prepared inputs change shape under `review_scope = "program_final"`:
 
 Apply this scope by reasoning about the **assembled product**, not any one
 checkpoint:
+
+- The `acceptance_criteria` entries supplied under this scope carry the same
+  optional `verification` proof guidance described above. At whole-product
+  scope this matters most: a criterion such as "a clean checkout can build,
+  start, migrate, and seed" is only satisfied by actually doing that from the
+  exact candidate, not by confirming that a script or test for it is present.
 
 - Treat the candidate as one deliverable the operator or end user will
   actually consume. Identify interfaces between completed pieces that no

@@ -239,6 +239,16 @@ print-mode role prompt and controls the pass through its wall-clock budget.
    expand the change set coherently rather than fragmenting across many
    tiny passes that each race the budget ceiling.)
 6. Run required validation.
+   When `checkpoint_authority.acceptance_criteria[]` entries carry an optional
+   `verification` string, that is the packet's intended proof method for the
+   criterion: use it to produce real evidence for the work unit. Do not
+   substitute weaker artifact-existence reasoning — a file that exists, a
+   guard that is defined, or a test that is committed is not proof that the
+   criterion holds. It is guidance, not an authoritative PASS result, and the
+   deterministic finalizer remains the authority. If the named proof cannot be
+   obtained within the sealed capability envelope, say so in your evidence
+   rather than substituting something that merely resembles it. Absence of
+   `verification` is normal; do not invent one.
 7. Inspect the exact baseline-to-candidate changed-path set against the
    work order's `allowed_paths`, `protected_paths`, and elevated/sensitive
    rules. Protected paths are immutable even when a broad parent appears in

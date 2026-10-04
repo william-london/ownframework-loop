@@ -1298,11 +1298,26 @@ def _checkpoint_authority_context(
         ac_ids = list((cp or {}).get("acceptance_criterion_ids") or [])
         if not ac_ids:
             ac_ids = program_mod.packet_acceptance_criterion_ids(packet)
-    ac_by_id = {
-        str(item.get("id")): str(item.get("text") or "")
-        for item in packet.get("acceptance_criteria") or []
-        if isinstance(item, dict) and item.get("id")
-    }
+    # v1.1.2: ``acceptance_criteria[].verification`` is packet authority when
+    # the SPEC author supplies it. It was accepted by the work-packet schema
+    # and then silently dropped by this projection, so a semantic role could
+    # never see the proof method the author bound to the criterion. Carry the
+    # exact authored value through unchanged. Never derive or invent one, and
+    # never treat it as an authoritative PASS result: it is proof guidance for
+    # the semantic role, subject to the sealed capability envelope. Absence
+    # stays valid so pre-v1.1.2 packets project exactly as before.
+    ac_by_id: dict[str, dict[str, Any]] = {}
+    for item in packet.get("acceptance_criteria") or []:
+        if not isinstance(item, dict) or not item.get("id"):
+            continue
+        row: dict[str, Any] = {
+            "id": str(item.get("id")),
+            "text": str(item.get("text") or ""),
+        }
+        verification = item.get("verification")
+        if isinstance(verification, str) and verification.strip():
+            row["verification"] = verification
+        ac_by_id[str(item["id"])] = row
     return {
         "checkpoint_id": checkpoint_id,
         "work_unit_id": work_unit_id,
@@ -1317,7 +1332,7 @@ def _checkpoint_authority_context(
         ),
         "acceptance_criterion_ids": ac_ids,
         "acceptance_criteria": [
-            {"id": item, "text": ac_by_id.get(str(item), "")}
+            dict(ac_by_id.get(str(item), {"id": str(item), "text": ""}))
             for item in ac_ids
         ],
         "allowed_paths": list(packet.get("allowed_paths") or []),
