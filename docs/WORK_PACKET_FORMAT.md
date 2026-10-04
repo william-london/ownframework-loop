@@ -102,6 +102,72 @@ and capture exact exit status.
 A packet must never use required-validation as a disguised external-action,
 promotion, deployment, or remote-mutation channel.
 
+### Bounded end-to-end validation (local service, container, browser)
+
+A packet that needs to prove a *running* product — a real containerized build,
+a live local HTTP service, a browser journey — can express that today, but the
+contract is a **foreground** one and the schema is deliberately minimal:
+
+- `command` is the only field. There is no `cwd`, `env`, `network`, `setup`,
+  `teardown`, or `service` field, and `additionalProperties: false` means none
+  can be added without a packet-schema version bump. The command runs under
+  `/bin/sh -c` in the prepared worktree, so relative paths, `cd`, and `VAR=value`
+  prefixes are the levers.
+- The timeout is **packet-level and shared**: `required_runtime_proof.max_runtime_seconds`
+  (default 600s, ceiling 1800s) applies identically to every validation row. A
+  fast unit suite and a full image-build-plus-journey draw from the same budget.
+  Size it for the heaviest row.
+
+Four constraints shape the supported pattern:
+
+1. **Foreground ownership.** Required validation is a foreground contract.
+   Each command is bounded in a fresh process group, and shell-level detachment
+   primitives — `setsid`, `nohup`, `daemonize`, `disown`, `systemd-run`, and
+   `launchctl bootstrap|kickstart|start|submit` — are refused outright.
+2. **No escaped service ownership.** A direct child that exits 0 while
+   descendants survive in its process group is scored `rc=125` and carries the
+   `OFLOOP_PROCESS_GROUP_LEAK=refused` marker, so a validation cannot appear
+   finished while work it started is still running. Keep the orchestrator
+   attached so teardown happens inside the bounded lifecycle: prefer an
+   **attached** `docker compose up` in the foreground process group over
+   `up -d`, then run the journey, then `docker compose down` in the same
+   command.
+3. **The uv/local-bind interaction.** Loopback bind, inbound, and outbound are
+   allowed for an ordinary validation. But when a command is classified as
+   uv-mediated, a package proxy is engaged and the network profile is reduced
+   to outbound-to-proxy only — **no** `network-bind`, **no** `network-inbound`.
+   A uv-classified validation therefore cannot start or reach a local HTTP
+   server. Drive the local server from a non-uv command, or provision
+   dependencies in a separate validation row.
+4. **Everything must already exist locally.** Validation egress is denied
+   outside loopback, so a validation cannot `npm install` or
+   `playwright install`. `browser.playwright.chromium` supplies browser
+   *binaries* via the commissioned shared asset root for operator-side
+   provisioning; it does not install a test runner. Every byte the journey
+   needs must already be in the candidate repository or the frozen asset root.
+
+Because of these, the recommended pattern is to keep the complexity in a
+**tracked repository script** and have `required_validation` invoke it:
+
+```json
+{ "name": "clean_startup", "command": "bash scripts/verify_clean_checkout.sh",
+  "kind": "full", "expected_exit_code": 0,
+  "expected_marker": "CLEAN_CHECKOUT=PASS" }
+```
+
+The script owns the compose lifecycle, the health wait, the browser journey, and
+deterministic teardown, with failures surfacing as a non-zero exit. A single
+row then stays reviewable, the `expected_marker` gives the finalizer a positive
+proof signal rather than exit-status-only, and the script is ordinary tracked
+product source the builder can maintain and the reviewer can read. Do not embed
+a large shell pipeline directly in `WORK_PACKET.md`.
+
+The final whole-product review re-executes the effective validation contract in
+a clean reviewer worktree at the exact candidate SHA, and at `program_final`
+that contract is the union of the top-level list with every finalized
+checkpoint's own `required_validation`. A startup proof belongs in the
+top-level list when it must hold from the first checkpoint onward.
+
 ## Stable IDs
 
 Use stable IDs across repair rounds:
