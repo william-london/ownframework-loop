@@ -11,6 +11,107 @@ immutable historical baseline of the previous published line.
 The complete historical changelog through 0.5.2 is preserved at
 [`docs/history/CHANGELOG-through-0.5.2.md`](docs/history/CHANGELOG-through-0.5.2.md).
 
+## 1.1.2 - Contract and Audit Closure (2026-10-03)
+
+OwnFramework Loop 1.1.2 is a narrow maintenance release that closes the
+concrete correctness, contract, regression, documentation, and host-state
+defects proven by a read-only architectural audit of the runtime after a
+PROGRAM was certified complete and later found defective on human inspection.
+
+**No product-acceptance architecture changed.** The audit's adjudication was
+that the framework was already sufficient and that the observed failures were
+attributable to a weak semantic model that did not exercise machinery already
+provisioned for it — not to a missing authority or evidence path. This release
+therefore adds no product-type or target-user schema, no required-surface
+manifest, no visual-review machinery, no screenshot manifest, no new
+PROGRAM_FINAL harness, no client/branding subsystem, no new PROGRAM state, no
+mandatory container behavior in the deterministic core, and no additional
+browser, computer-use, network, or MCP authority. `PROGRAM_FINAL` routing, the
+deterministic review finalizer, the review/repair loop, exact-candidate-SHA
+binding, and the capability plane are untouched.
+
+### Acceptance-criterion `verification` is functional packet authority
+
+Every work-packet generation accepts an optional `verification` string on each
+acceptance criterion, and the shipped example packet populates it. The single
+canonical projection feeding both the builder and the reviewer work order
+rebuilt each criterion as `{id, text}` only, so the field was accepted as
+packet authority and then silently discarded before either semantic role could
+see it — making the public packet schema misleading.
+
+The exact authored value is now carried through for SINGLE, PROGRAM
+checkpoint, and PROGRAM_FINAL scopes and for both roles. Absence stays absent
+for backward compatibility, a blank value is omitted, nothing is derived or
+invented, and the field remains proof guidance rather than an authoritative
+PASS result. Both role contracts now state the semantics: use the named proof
+method rather than substituting weaker artifact-existence reasoning, and route
+unobtainable proof to `inconclusive`/`fail` (reviewer) or honest evidence
+(builder). No packet-schema generation was added.
+
+### Semantic acceptance/non-goal coverage is regression-proven
+
+`review_finalize`'s `semantic_coverage_incomplete` branch — the guard that
+prevents a review from being approved for *under-reporting* coverage — occurred
+exactly once in the source and nowhere in the test suite: every canonical
+fixture supplied a complete AC/NG set, so the branch had never executed. New
+coverage drives the real finalizer across missing, duplicate, and unexpected
+AC rows, a missing non-goal, complete coverage still approving, checkpoint
+scope rejecting future-checkpoint ACs, and both the complete and incomplete
+cases at PROGRAM_FINAL. Coverage only; no verdict semantics changed.
+
+### Cross-role worktree isolation is structural, not incidental
+
+A semantic worker never treats the other role's worktree as an independent
+evidence authority. That was true only incidentally, because a candidate
+repository under the operator's home directory is already covered by the broad
+`$HOME` deny; a repository checked out outside `$HOME` left the sibling
+worktree on unlisted ground, where the disposition belongs to the external
+sandbox rather than to Loop. The deterministic path-policy owner now denies
+the sibling worktree explicitly, so the invariant holds wherever the repository
+lives. The rule can only remove potential authority — the role's own worktree
+stays readable, and a more-specific allow entry still wins. Regression coverage
+spans both roles, both repository locations, the broad-parent-allow and
+path-traversal spellings, and per-role runtime-cache separation.
+
+### One SPEC doctrine, and accurate network-authority documentation
+
+The Claude SPEC adapter and the portable host-neutral mirror had drifted on
+normative doctrine: the portable copy had lost the local-service/container
+inference rule, the rendered-artifact and generated-document rules, the
+prohibition on automatically adding a browser capability and on encoding
+product-type rules into deterministic Python, the fail-honestly-before-launch
+rule, and the whole-lifetime capability-sizing rule. An operator on a non-Claude
+host was authoring packets from materially weaker doctrine.
+`skills/spec/SKILL.md` is now the declared canonical owner, the mirror is
+synchronized, and adapter conformance asserts the shared normative fragments
+in both copies — targeting doctrine, not bytes, so host-integration wording
+still differs freely while a regression fails deterministic validation.
+
+Both shipped role contracts also asserted `allowedDomains: []` as an
+unconditional property of the worker sandbox. The effective set is the union of
+the packet's frozen `network_read_allowlist` with the narrow domains of
+resolved capability contracts, under `strictAllowlist: true`. The architecture
+ADR already stated this correctly; the role contracts were the outliers and
+understated the reviewer's own authority. Both now state the real invariant,
+and the conformance test pins the prose to the source so it cannot drift again.
+The stronger `research.public` rule is retained: binding it contributes no Bash
+network authority at all.
+
+### Bounded end-to-end validation pattern documented
+
+`required_validation` can prove a real containerized, local-service, or browser
+product today, but the contract is a foreground one and the schema is
+deliberately minimal. `docs/WORK_PACKET_FORMAT.md` now documents the supported
+pattern and the four constraints that shape it: the process-group leak
+detector, the refused detachment primitives, the uv-mediated network profile
+that drops local bind/inbound and therefore cannot drive a local server, and
+the packet-level shared timeout ceiling. The recommendation is to keep the
+complexity in a tracked repository script that `required_validation` invokes.
+No schema was expanded, no setup/teardown field was added, and no lifecycle
+protection was relaxed.
+
+Historical releases, including v1.1.1 and v1.1.0, are unchanged.
+
 ## 1.1.1 - PROGRAM Segment Research Identity (2026-10-02)
 
 OwnFramework Loop 1.1.1 is a narrow patch release that closes one
