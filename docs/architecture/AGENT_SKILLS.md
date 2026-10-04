@@ -17,6 +17,36 @@ worktree, state, candidate, or promotion authority.
 Claude skills may use Claude-specific metadata because they live in the Claude
 adapter surface. Portable skills must not assume Claude plugin commands.
 
+## Duplicated SPEC doctrine: canonical owner
+
+`skills/spec/SKILL.md` is the **canonical owner** of the SPEC-authoring
+contract. `.agents/skills/of-loop-spec/SKILL.md` is a portable host-neutral
+**mirror** of that contract.
+
+There is no code generation between them; the mirror is maintained in the
+same commit as any doctrine change. The mirror may differ from the canonical
+file **only** in host-integration wording — which runner is named, whether
+Claude-specific foreground debug commands are offered, and provider-dependent
+behavior such as budget narrowing. It must never independently drift on:
+
+- capability inference;
+- PROGRAM-lifetime authority;
+- execution vs draft-only intent;
+- packet authoring doctrine;
+- approval / launch flow;
+- browser / container / local-service / research inference;
+- authority boundaries.
+
+`tests/test_run_adapter_conformance.sh` enforces this by asserting the shared
+normative fragments are present in **both** copies. The assertion targets
+doctrine, not bytes, so legitimate host wording stays free to differ while a
+doctrine regression in either adapter fails deterministic validation. This
+test is what closed the v1.1.2 drift in which the portable mirror had lost
+the local-service/container inference rule, the rendered-artifact and
+generated-document rules, the prohibition on automatically adding a browser
+capability, the fail-honestly-before-launch rule, and the whole-lifetime
+sizing rule.
+
 
 ## Capability-aware specification
 

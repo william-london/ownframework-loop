@@ -98,6 +98,58 @@ for spec_path in spec_contracts:
     assert not missing, (
         f"{spec_path}: PROGRAM validation-scope contract drift: missing={missing}"
     )
+
+# v1.1.2 SPEC doctrine parity (post-HVAC audit). The two shipped SPEC adapters
+# (the Claude adapter and the portable host-neutral mirror) had drifted on
+# normative capability-inference and PROGRAM-lifetime authority: the portable
+# copy had dropped the local-service/container inference rule, the
+# "rendered or generated artifacts" and "generated documents / reports" rules,
+# the explicit prohibition on automatically adding a browser/Docker capability,
+# the fail-honestly-before-launch rule, and the whole-lifetime sizing rule.
+# Two divergent copies of one contract is a latent correctness hazard: an
+# operator on a non-Claude host was authoring packets from weaker doctrine.
+#
+# `skills/spec/SKILL.md` is the CANONICAL SPEC doctrine owner (see
+# docs/architecture/AGENT_SKILLS.md). The portable mirror
+# `.agents/skills/of-loop-spec/SKILL.md` may differ ONLY in host-integration
+# wording (which runner is named, which foreground debug commands exist).
+# These fragments are deliberately chosen from the shared normative core, so
+# host wording stays free to differ while doctrine cannot drift apart.
+spec_capability_doctrine = (
+    root / "skills/spec/SKILL.md",
+    root / ".agents/skills/of-loop-spec/SKILL.md",
+)
+for spec_path in spec_capability_doctrine:
+    normalized_text = " ".join(spec_path.read_text(encoding="utf-8").split())
+    required_capability = (
+        # PROGRAM lifetime authority
+        "Whole-program lifetime includes the final whole-product review",
+        "The capability envelope must be sized for the complete lifecycle",
+        "reason about what the final reviewer will materially need to prove",
+        # per-deliverable inference rules
+        "CLI / package / library work",
+        "rendered or generated artifacts",
+        "generated documents / reports",
+        "local-service topology",
+        "a company or product's current public presence",
+        "`browser.playwright.chromium`",
+        "`local.http-service`",
+        # the prohibition that keeps product-type rules out of the core
+        "Do NOT automatically add a browser",
+        "it must not encode product-type rules into deterministic Python",
+        # irreversible-binding consequences
+        "the SPEC adapter must fail honestly before launch",
+        "sized across the whole PROGRAM lifetime (every checkpoint + `PROGRAM_FINAL`)",
+    )
+    missing_capability = [
+        fragment for fragment in required_capability
+        if " ".join(fragment.split()) not in normalized_text
+    ]
+    assert not missing_capability, (
+        f"{spec_path}: SPEC capability-inference doctrine drift: "
+        f"missing={missing_capability}"
+    )
+print("SPEC_DOCTRINE_PARITY=PASS")
 PY
 
 if grep -RInE '^\s*(from|import)\s+(anthropic|claude|openai|codex)(\.|\s|$)' lib/ownframework_loop --include='*.py'; then

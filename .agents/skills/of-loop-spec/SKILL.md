@@ -240,37 +240,65 @@ Before a v3 or v4 PROGRAM is considered ready:
   it, no wall-clock ceiling applies and the run is bounded only by its
   semantic pass/repair/no-progress protections.
 
-### Capabilities across the whole PROGRAM lifetime
+### Whole-program lifetime includes the final whole-product review
 
-When inferring or declaring capabilities, reason across the complete
-mission lifecycle — every checkpoint **and** the final `PROGRAM_FINAL`
-whole-product review — because the capability binding cannot be
-silently widened after the first execution seal.
+PROGRAM lifetime is ordinary checkpoints **plus** the mandatory final
+whole-product review that runs after the last checkpoint finalizes.
+The capability envelope must be sized for the complete lifecycle,
+not merely the first checkpoint. When the SPEC adapter infers
+capabilities from the repository/deliverable, the inference must
+reason about what the final reviewer will materially need to prove
+on the assembled product, in addition to per-checkpoint work:
 
-Specific inference doctrine for the commissioned research surface:
+- CLI / package / library work — the existing toolchain capability
+  the ordinary checkpoint lifecycle already requires;
+- rendered or generated artifacts — only when the repository's
+  intended deliverable makes materially inspecting them a lawful
+  part of the final review (no automatic browser / container
+  capability inference);
+- generated documents / reports — a renderer / toolchain
+  capability only when materially required and safely supported by
+  existing trusted commissioning;
+- local-service topology — a supported local-service / container
+  capability only when the final reviewer would materially inspect
+  the running service to prove the assembled product;
+- **public-web discovery** — `research.public` (the
+  `ofloop-research-call` → supervisor → commissioned broker
+  surface, with `bing-rss` as the general default and `wikipedia`
+  as the narrow alternate) is inferred when completing the
+  mission materially requires current public facts unavailable
+  from local repository evidence: vendor / API / framework
+  documentation, a company or product's current public presence,
+  external references or examples, public source material needed
+  to verify a claim, legitimate public product assets, or any
+  public URL not knowable at packet-authoring time. The final
+  whole-product review also needs it when the assembled product
+  must be checked against current public truth.
+  Do **not** infer `research.public` merely because internet
+  access might be nice, for purely repository-local
+  implementation, for deterministic local validation, for
+  package installation already covered by package capabilities,
+  or for work whose complete evidence is already local. The
+  capability is added by the SPEC adapter only when the mission
+  materially requires it, and sized across the whole PROGRAM
+  lifetime (every checkpoint + `PROGRAM_FINAL`) so the binding
+  cannot be silently widened later.
+- **rendered web deliverable** — `browser.playwright.chromium`
+  is inferred when the actual rendered deliverable materially
+  needs browser inspection (NOT because `research.public`
+  exists).
+- **local HTTP service under review** — `local.http-service`
+  is inferred when the reviewer materially needs to exercise a
+  running local web service (NOT because `research.public` exists).
 
-- **`research.public`** (governed via `ofloop-research-call` →
-  supervisor admission → commissioned broker; `bing-rss` is the
-  default general public-web discovery backend; `wikipedia` is the
-  narrow alternate) is inferred when the mission materially requires
-  current public facts unavailable from local repository evidence:
-  vendor / API / framework documentation, a company or product's
-  current public presence, external references or examples, public
-  source material needed to verify a claim, legitimate public
-  product assets, or any public URL not knowable at packet-authoring
-  time. The final whole-product review also needs it when the
-  assembled product must be checked against current public truth.
-  Do **not** infer it merely because internet access might be nice,
-  for purely repository-local implementation, for deterministic
-  local validation, for package installation already covered by
-  package capabilities, or for work whose complete evidence is
-  already local.
-- **`browser.playwright.chromium`** is inferred when the actual
-  rendered deliverable materially needs browser inspection (NOT
-  because `research.public` exists).
-- **`local.http-service`** is inferred when the reviewer materially
-  needs to exercise a running local web service (NOT because
-  `research.public` exists).
+Do NOT automatically add a browser, container, or web surface
+capability. The semantic inference belongs to the SPEC adapter;
+it must not encode product-type rules into deterministic Python.
+
+If proving a material final-review requirement would need
+unsupported authority or unavailable credentials, the SPEC
+adapter must fail honestly before launch — the sealed
+capability binding cannot be widened after the first execution.
 
 A packet that can only discover an impossible deterministic ceiling after a
 model has already done work is a spec defect and must not be startable.
