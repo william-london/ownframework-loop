@@ -6,11 +6,11 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/block_dangerous_bash.sh"
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/block_dangerous_bash.sh\""
           },
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/external_action_guard.sh"
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/external_action_guard.sh\""
           }
         ]
       },
@@ -19,7 +19,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/external_action_guard.sh"
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/external_action_guard.sh\""
           }
         ]
       },
@@ -28,7 +28,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/external_action_guard.sh"
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/external_action_guard.sh\""
           }
         ]
       },
@@ -37,7 +37,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/block_protected_paths.sh"
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/block_protected_paths.sh\""
           }
         ]
       }
@@ -48,7 +48,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/post_bash_secret_scan.sh"
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/post_bash_secret_scan.sh\""
           }
         ]
       }
