@@ -17,6 +17,7 @@ tests/unit/test_v200_research_authority.sh
 tests/unit/test_v210_research_helper_micro_bindings.sh
 tests/unit/test_v220_research_discovery_closure.sh
 tests/unit/test_v230_research_conn_lifecycle.sh
+tests/unit/test_v240_installer_python_path.sh
 
 # Core integration and portability
 tests/integration/test_v032_bytecode_boundary.sh

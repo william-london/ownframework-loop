@@ -62,7 +62,20 @@ mkdir -p "$HOME"
 # Fake python3 / ofloop / claude executables. Each is symlinked to the
 # real system binary so the installer's python3 invocation actually
 # works; non-executable and idle-only cases use distinct fixtures.
-REAL_PY="$(command -v python3)"
+#
+# Commission a SUPPORTED interpreter (the CI matrix minors). The installer
+# refuses an unsupported one, and `command -v python3` is not a valid
+# fixture: a package manager may re-point it at any installed version.
+select_supported_python() {
+    local m c
+    for m in 3.13 3.12; do
+        for c in "/opt/homebrew/opt/python@$m/bin/python$m" "/opt/homebrew/bin/python$m"; do
+            [[ -x "$c" ]] && { printf '%s' "$c"; return 0; }
+        done
+    done
+    command -v python3
+}
+REAL_PY="$(select_supported_python)"
 REAL_OFLOOP="$ROOT/bin/ofloop"
 # ALWAYS provide a fake claude binary in the fakebin dir so the
 # installer cannot fall back to a system-installed claude via PATH
@@ -495,7 +508,12 @@ if [[ -f "$PLIST8" ]]; then
     && pass "T8: ThrottleInterval = 5" \
     || fail "T8: ThrottleInterval missing"
   EXPECTED_OFLOOP="$(python3 -c "from pathlib import Path; print(str(Path('$OFLOOP_FAKE').resolve(strict=False)))")"
-  EXPECTED_PY="$(python3 -c "from pathlib import Path; print(str(Path('$PYTHON_FAKE').resolve(strict=False)))")"
+  # The installer persists a STABLE interpreter path and honours an explicitly
+# commissioned one verbatim. It must NOT canonicalise it down into a Homebrew
+# Cellar version path: a keg path is removed by the next interpreter upgrade,
+# which is exactly how this wiring broke before. PYTHON_FAKE lives in the
+# sandbox (never under Cellar), so it is stable and is persisted as given.
+EXPECTED_PY="$PYTHON_FAKE"
   EXPECTED_HELPER="$(python3 -c "from pathlib import Path; print(str(Path('$ROOT/scripts/launch-commissioned-supervisor.py').resolve(strict=False)))")"
   EXPECTED_PROBE="$(python3 -c "from pathlib import Path; print(str(Path('$ROOT/scripts/probe-supervisor-runtime-dependencies.py').resolve(strict=False)))")"
   EXPECTED_DB="$SANDBOX/xdg8/ownframework-loop/supervisor.sqlite3"
@@ -517,8 +535,24 @@ expected_marker = sys.argv[5]
 expected_probe = sys.argv[6]
 expected_ofloop = sys.argv[7]
 with open(plist, "rb") as fh:
-    argv = plistlib.load(fh).get("ProgramArguments", [])
-assert argv[0] == expected_py, argv[0]
+    _plist = plistlib.load(fh)
+    argv = _plist.get("ProgramArguments", [])
+    _env = _plist.get("EnvironmentVariables", {}) or {}
+    argv0 = argv[0]
+assert argv0 == expected_py, argv0
+# A version-specific keg path does not survive an interpreter upgrade.
+assert "/Cellar/" not in argv0, f"interpreter path is version-specific: {argv0}"
+# The commissioned interpreter must be one the project supports.
+import subprocess
+_p = subprocess.run(
+    [argv0, "-c", "import sys; print('%d.%d' % sys.version_info[:2])"],
+    capture_output=True, text=True)
+assert _p.returncode == 0, f"commissioned interpreter not executable: {argv0}"
+assert _p.stdout.strip() in ("3.12", "3.13"), (
+    f"commissioned interpreter {_p.stdout.strip()} is outside the CI matrix")
+# ProgramArguments[0] and PYTHON_BIN must name the SAME interpreter.
+assert _env.get("PYTHON_BIN") == argv0, (
+    f"PYTHON_BIN {_env.get('PYTHON_BIN')!r} != argv[0] {argv0!r}")
 assert argv[1] == "-B"
 assert argv[2] == expected_helper
 assert "--db" in argv, argv

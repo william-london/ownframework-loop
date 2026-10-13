@@ -57,11 +57,91 @@ if [[ -z "$PYTHON_BIN_RAW" ]]; then
   echo "SUPERVISOR_INSTALL=REFUSED reason=python3_missing" >&2
   exit 2
 fi
-PYTHON_BIN="$(canon_path "$PYTHON_BIN_RAW" "${PYTHON_BIN_RAW}")"
-if [[ ! -x "$PYTHON_BIN" ]]; then
-  echo "SUPERVISOR_INSTALL=REFUSED reason=python3_not_executable path=$PYTHON_BIN" >&2
+
+# Interpreter policy.
+#
+# The supported minors mirror the canonical CI matrix in
+# .github/workflows/ci.yml. An interpreter outside that set is not the runtime
+# the gates are exercised against, so it is never silently adopted.
+#
+# `command -v python3` is NOT trusted on its own: a package manager may
+# re-point it at whatever version it just installed, which silently changes
+# the runtime a service was attested against. The interpreter is therefore
+# SELECTED, not merely discovered.
+SUPPORTED_PYTHON_MINORS=(3.13 3.12)   # preference order, highest first
+BREW_PREFIX="${OFLOOP_BREW_PREFIX:-/opt/homebrew}"
+
+python_minor() {
+  "$1" -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null || true
+}
+
+python_supported() {
+  local want="$1" m
+  for m in "${SUPPORTED_PYTHON_MINORS[@]}"; do
+    [[ "$want" == "$m" ]] && return 0
+  done
+  return 1
+}
+
+# Rewrite a resolved Homebrew Cellar path back onto the stable opt/ symlink.
+# Homebrew re-points opt/<formula> on every upgrade, so a service holding the
+# stable path survives an interpreter upgrade; a path into
+# Cellar/<formula>/<version> names a keg the next upgrade removes.
+stable_python_path() {
+  local p="$1"
+  if [[ "$p" == "$BREW_PREFIX/Cellar/"* ]]; then
+    local rest="${p#"$BREW_PREFIX/Cellar/"}"
+    local formula="${rest%%/*}"
+    rest="${rest#*/}"
+    rest="${rest#*/}"          # drop the keg version segment
+    local cand="$BREW_PREFIX/opt/$formula/$rest"
+    [[ -x "$cand" ]] && { printf '%s' "$cand"; return 0; }
+  fi
+  printf '%s' "$p"
+}
+
+# Resolve the interpreter. An explicit PYTHON_BIN is the operator's preference
+# and wins when it is supported; otherwise the highest supported minor that is
+# actually installed is selected, preferring the stable Homebrew opt/ layout.
+PYTHON_BIN=""
+PYTHON_SELECTED_REASON=""
+select_python() {
+  local cand minor m
+  if [[ -n "$PYTHON_BIN_RAW" ]]; then
+    cand="$(stable_python_path "$PYTHON_BIN_RAW")"
+    if [[ -x "$cand" ]]; then
+      minor="$(python_minor "$cand")"
+      if [[ -n "$minor" ]] && python_supported "$minor"; then
+        PYTHON_BIN="$cand"
+        PYTHON_SELECTED_REASON="explicit"
+        return 0
+      fi
+    fi
+  fi
+  for m in "${SUPPORTED_PYTHON_MINORS[@]}"; do
+    for cand in "$BREW_PREFIX/opt/python@$m/bin/python$m" "$BREW_PREFIX/bin/python$m"; do
+      [[ -x "$cand" ]] || continue
+      [[ "$(python_minor "$cand")" == "$m" ]] || continue
+      PYTHON_BIN="$cand"
+      PYTHON_SELECTED_REASON="policy"
+      return 0
+    done
+  done
+  return 1
+}
+
+if ! select_python; then
+  echo "SUPERVISOR_INSTALL=REFUSED reason=python_unsupported supported=${SUPPORTED_PYTHON_MINORS[*]} discovered=${PYTHON_BIN_RAW:-none}" >&2
+  echo "hint: install a supported interpreter, or set PYTHON_BIN explicitly" >&2
   exit 2
 fi
+# Fail closed rather than persist a Cellar path: a keg path does not survive an
+# interpreter upgrade, which is how this wiring broke before.
+if [[ "$PYTHON_BIN" == "$BREW_PREFIX/Cellar/"* ]]; then
+  echo "SUPERVISOR_INSTALL=REFUSED reason=python_path_not_stable path=$PYTHON_BIN" >&2
+  exit 2
+fi
+echo "SUPERVISOR_PYTHON_SELECTED=${PYTHON_SELECTED_REASON} minor=$(python_minor "$PYTHON_BIN") path=$PYTHON_BIN"
 
 OFLOOP_BIN="$(canon_path "$OFLOOP_BIN_RAW" "$PYTHON_BIN")"
 if [[ ! -x "$OFLOOP_BIN" ]]; then
